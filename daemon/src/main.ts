@@ -2,7 +2,10 @@
 // `session-event`'s is the one static import: it runs two or three times a turn
 // in every Claude session on the machine (the session-events mod, in every
 // exclave), and a static `cli.ts` would load the MCP SDK and zod into each of
-// those runs — 47 ms against 11. Every other command imports what it needs once picked.
+// those runs — 47 ms against 11. `inbox` is the second: the inbox mod starts one per session and it lives for the
+// session's life, so loading the MCP SDK and zod into every session's listener would be pure cost. Every other
+// command imports what it needs once picked.
+import { cmdInbox } from "./inbox-cli.ts";
 import { cmdSessionEvent } from "./session-event-cli.ts";
 
 const USAGE = `seanced — séance daemon
@@ -41,6 +44,7 @@ usage: seanced [command]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
   session-event  read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)
+  inbox       hold this session's inbox listener open on the local daemon and print each message as a JSON line (the inbox mod's child; silent)
   raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
   help        this text
 `;
@@ -168,6 +172,9 @@ try {
   switch (command) {
     case "session-event":
       await cmdSessionEvent();
+      break;
+    case "inbox":
+      await cmdInbox();
       break;
     case undefined:
       await runForeground();

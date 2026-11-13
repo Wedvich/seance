@@ -5,6 +5,10 @@ import { z } from "zod";
 import {
   accountNameIn,
   CAPABILITIES,
+  MESSAGE_KINDS,
+  MESSAGE_MAX,
+  MESSAGE_PUSH_MAX,
+  MESSAGE_RATE,
   fleetTraits,
   traitHealthByMachine,
   AUTONOMY_LEVELS,
@@ -108,6 +112,7 @@ import {
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
+import { sendMessage } from "./send-message.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -217,6 +222,7 @@ interface ToolResult {
 
 const HAND_OFF_TOOL = "hand_off_task";
 const PASS_SELF_TOOL = "pass_to_successor";
+const SEND_MESSAGE_TOOL = "send_message";
 
 /**
  * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
@@ -953,6 +959,7 @@ export function buildMcpServer(
   handOffTask: typeof handOff = handOff,
   passOwnTask: typeof passToSuccessor = passToSuccessor,
   passPoll: PassPoll = PASS_POLL,
+  sendMsg: typeof sendMessage = sendMessage,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1710,6 +1717,29 @@ export function buildMcpServer(
           `the branch is pushed but no successor was recorded yet; the leader may still confirm, or may have refused (for example the PR's head is another branch). ${END_THE_TURN}`,
         );
       });
+    },
+  );
+
+  server.registerTool(
+    SEND_MESSAGE_TOOL,
+    {
+      title: "Message another séance session's task on this machine",
+      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them). It goes to this machine's own daemon, bound to this session's pane, and never leaves the machine: today only tasks running on this machine can be reached, and any other answers \`unknown\`. The receiver is told your task id, title and machine. Kinds: \`note\` is information, delivered when the receiver's next turn starts and never waking it; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`.`,
+      inputSchema: z.strictObject({
+        to: z.string().describe("the receiving task's id (get_queue lists them)"),
+        kind: z
+          .enum(MESSAGE_KINDS)
+          .describe(
+            "note: information, read at the receiver's next turn; question: wakes it, may be answered; request: wakes it, asks it to act",
+          ),
+        text: z.string().min(1).describe("the message"),
+        inReplyTo: z.string().optional().describe("the message id you are answering"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ to, kind, text, inReplyTo }) => {
+      const result = await sendMsg({ to, kind, text, ...(inReplyTo === undefined ? {} : { inReplyTo }) });
+      return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );
 

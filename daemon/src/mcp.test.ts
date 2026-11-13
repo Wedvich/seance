@@ -37,6 +37,7 @@ import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } 
 import { brokerFleet, relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import type { handOff, passToSuccessor, reportDone } from "./report-done.ts";
+import type { sendMessage } from "./send-message.ts";
 import {
   buildMcpServer,
   decisionText,
@@ -82,6 +83,7 @@ async function connectedClient(
   handOffTask?: typeof handOff,
   passOwnTask?: typeof passToSuccessor,
   passPoll?: PassPoll,
+  sendMsg?: typeof sendMessage,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -93,7 +95,7 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll), {
+  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg), {
     transport: serverTransport,
   });
   await client.connect(clientTransport);
@@ -3040,6 +3042,82 @@ describe("report_task_done", () => {
       error: true,
     });
     expect((await call({ ok: false, text: "the local daemon is not running" })).error).toBe(true);
+  });
+});
+
+describe("send_message", () => {
+  const TO = "t-0123456789abcdef";
+
+  async function client(
+    sendMsg: typeof sendMessage,
+  ): Promise<{ readonly client: Awaited<ReturnType<typeof connectedClient>>; readonly stop: () => void }> {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const connected = await connectedClient(lazy, null, () => {}, undefined, undefined, undefined, undefined, sendMsg);
+    return { client: connected, stop: () => lazy.stop() };
+  }
+
+  test("is always offered, not read-only, and names the caps, the rate and the remote-target limit", async () => {
+    const { client: c, stop } = await client(() => Promise.resolve({ ok: true, text: "" }));
+    try {
+      const { tools } = await c.listTools();
+      const tool = tools.find((t) => t.name === "send_message");
+      expect(tool?.annotations?.readOnlyHint).toBe(false);
+      expect(tool?.description).toContain("8192");
+      expect(tool?.description).toContain("65536");
+      expect(tool?.description).toContain("unknown");
+      expect(tool?.description).toContain("never logged");
+      expect(tool?.description).toContain("20 messages a minute");
+    } finally {
+      stop();
+    }
+  });
+
+  test("passes its arguments to the sender; a delivery is a plain answer and a refusal is a tool error", async () => {
+    const seen: unknown[] = [];
+    const answers = [
+      { ok: true, text: "delivered to task" },
+      { ok: false, text: "task is not running on this machine" },
+    ];
+    const { client: c, stop } = await client((message) => {
+      seen.push(message);
+      return Promise.resolve(answers.shift() ?? { ok: false, text: "unexpected" });
+    });
+    try {
+      const sent = await c.callTool({
+        name: "send_message",
+        arguments: { to: TO, kind: "question", text: "what file are you in?", inReplyTo: "abc" },
+      });
+      expect(sent.isError).not.toBe(true);
+      expect(toolText(sent)).toBe("delivered to task");
+      const refused = await c.callTool({ name: "send_message", arguments: { to: TO, kind: "note", text: "hi" } });
+      expect(refused.isError).toBe(true);
+      expect(toolText(refused)).toBe("task is not running on this machine");
+      // `inReplyTo` is carried only when given.
+      expect(seen).toEqual([
+        { to: TO, kind: "question", text: "what file are you in?", inReplyTo: "abc" },
+        { to: TO, kind: "note", text: "hi" },
+      ]);
+    } finally {
+      stop();
+    }
+  });
+
+  test("the strict schema refuses an unknown key, an unknown kind and empty text", async () => {
+    const { client: c, stop } = await client(() => Promise.resolve({ ok: true, text: "sent" }));
+    try {
+      const extra = await c.callTool({
+        name: "send_message",
+        arguments: { to: TO, kind: "note", text: "hi", pane: "%1" },
+      });
+      expect(extra.isError).toBe(true);
+      expect(toolText(extra)).toContain("Unrecognized key");
+      const kind = await c.callTool({ name: "send_message", arguments: { to: TO, kind: "shout", text: "hi" } });
+      expect(kind.isError).toBe(true);
+      const empty = await c.callTool({ name: "send_message", arguments: { to: TO, kind: "note", text: "" } });
+      expect(empty.isError).toBe(true);
+    } finally {
+      stop();
+    }
   });
 });
 

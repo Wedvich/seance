@@ -637,6 +637,14 @@ export class EndedTasks {
   }
 
   /**
+   * When the ledger recorded the task's launch, in flight or not (it is written before the worktree is made
+   * and the window opened); undefined when it holds none. Messaging's grace for a session still starting.
+   */
+  launchedAt(taskId: string): number | undefined {
+    return this.#ledger.recordedAt(taskId);
+  }
+
+  /**
    * Where a task's worktree is, from this ledger alone — the one authority on a worktree path
    * (a frame never names one). The newest note on a path owns it: a later launch there continued
    * the same conversation and its work sits in the worktree, so only it may be continued or
@@ -807,6 +815,8 @@ export interface SessionEventDeps {
    * The `/usage` refresh's poke, which runs nothing while the cache is fresh.
    */
   readonly onActivity?: (exclave: string) => void;
+  /** A bound, tasked `ended` frame: messaging clears that pane's held messages and listener for the task. */
+  readonly onEnded?: (pane: string, taskId: string) => void;
   readonly ended: EndedTasks;
   readonly now?: () => number;
   readonly coalesceMs?: number;
@@ -1077,7 +1087,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       // prove the session ran and may leave no exit note (a clean exit closes the window); a live one is cleared
       // by the `sessions` listing once it registers, which a bare `running` frame does not show.
       if (frame.state === "ended" || frame.state === "done") void deps.ended.sessionSeen(pane.taskId);
-      if (frame.state === "ended") deps.ended.ended(pane.taskId);
+      if (frame.state === "ended") {
+        deps.ended.ended(pane.taskId);
+        deps.onEnded?.(pane.id, pane.taskId);
+      }
       // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
       let reported: NoteOutcome | null = null;
       if (frame.state === "done") {

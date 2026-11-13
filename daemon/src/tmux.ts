@@ -129,3 +129,12 @@ export async function capturePane(target: string, opts: { readonly history: bool
   const result = await tmux(["capture-pane", "-p", ...range, "-t", target]);
   return result.exitCode === 0 ? result.stdout : null;
 }
+
+/**
+ * A pane's window name, or null when tmux can't say. The task's display title, as the PWA shows it: a
+ * session can set its own, so it is display-only and sanitised before it sits in a message's wrapper.
+ */
+export async function paneWindowName(pane: string): Promise<string | null> {
+  const result = await tmux(["display-message", "-p", "-t", pane, "#{window_name}"]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}

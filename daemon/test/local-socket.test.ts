@@ -260,6 +260,75 @@ describe("the local op socket", () => {
     expect(await localSocketReachable(sockPath)).toBe(true);
   });
 
+  test("with no messages surface, a message frame is answered unsupported and an inbox frame is answered so and closed", async () => {
+    const message = { v: 1, kind: "message", to: "t-1", messageKind: "note", text: "hi" };
+    expect(JSON.parse(await raw(`${JSON.stringify(message)}\n`))).toEqual({ ok: false, code: "unsupported" });
+
+    const closed = Promise.withResolvers<void>();
+    let received = "";
+    const sock = await Bun.connect<undefined>({
+      unix: sockPath,
+      socket: {
+        open: (s): void => void s.write(`${JSON.stringify({ v: 1, kind: "inbox" })}\n`),
+        data: (_s, chunk: Buffer): void => void (received += chunk.toString()),
+        close: (): void => closed.resolve(),
+      },
+    });
+    await closed.promise;
+    expect(JSON.parse(received)).toEqual({ ok: false, code: "unsupported" });
+    sock.end();
+  });
+
+  test("a second frame on an inbox listener's connection closes it, and the message path answers what the handler does", async () => {
+    const path = join(base, "listener.sock");
+    const sinks: { gone: AbortSignal }[] = [];
+    const handle = await startLocalSocket({
+      handle: () => Promise.resolve(null),
+      path,
+      messages: {
+        listen: (_raw, _peer, sink) => {
+          sinks.push(sink);
+          sink.write(JSON.stringify({ ok: true, keep: { messages: 1, bytes: 1 } }));
+          return Promise.resolve();
+        },
+        send: () => Promise.resolve({ ok: true, id: "i", outcome: "delivered" }),
+      },
+    });
+    try {
+      const closed = Promise.withResolvers<void>();
+      let received = "";
+      const client = await Bun.connect<undefined>({
+        unix: path,
+        socket: {
+          open: (s): void => void s.write(`${JSON.stringify({ v: 1, kind: "inbox" })}\n`),
+          data: (_s, chunk: Buffer): void => void (received += chunk.toString()),
+          close: (): void => closed.resolve(),
+        },
+      });
+      await pollUntil(() => received.includes("\n"), "the listener's ack");
+      expect(JSON.parse(received)).toEqual({ ok: true, keep: { messages: 1, bytes: 1 } });
+      client.write(`${JSON.stringify({ v: 1, kind: "message", to: "t-1", messageKind: "note", text: "x" })}\n`);
+      await closed.promise;
+      await pollUntil(() => sinks[0]?.gone.aborted === true, "the listener's connection to be reported gone");
+
+      // A fresh connection's message frame is answered by the handler, as one line.
+      let answer = "";
+      const other = await Bun.connect<undefined>({
+        unix: path,
+        socket: {
+          open: (s): void =>
+            void s.write(`${JSON.stringify({ v: 1, kind: "message", to: "t-1", messageKind: "note", text: "x" })}\n`),
+          data: (_s, chunk: Buffer): void => void (answer += chunk.toString()),
+        },
+      });
+      await pollUntil(() => answer.includes("\n"), "the message reply");
+      expect(JSON.parse(answer)).toEqual({ ok: true, id: "i", outcome: "delivered" });
+      other.end();
+    } finally {
+      handle.stop();
+    }
+  });
+
   test("a session-event ingest is handed a signal that aborts when the peer goes away mid-request", async () => {
     let seen: AbortSignal | undefined;
     const reached = Promise.withResolvers<void>();

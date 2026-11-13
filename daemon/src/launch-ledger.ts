@@ -492,6 +492,12 @@ export class LaunchLedger {
     return [...this.#tasks.keys()];
   }
 
+  /** When the task's newest launch was recorded here, or undefined when the ledger holds none. */
+  recordedAt(taskId: string): number | undefined {
+    this.#evict();
+    return this.#tasks.get(taskId);
+  }
+
   /**
    * Write-ahead: resolves once the id is on disk, and throws if it cannot be
    * written — the caller must then not launch. True when the id was not already

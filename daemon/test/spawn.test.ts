@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AUTONOMY_LEVELS,
+  STANDING_INSTRUCTION,
   type AutonomyLevel,
   type RepoEntry,
   type SessionEntry,
@@ -164,6 +165,32 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       }
     }
     expect(new Set(ids).size).toBe(2);
+  });
+
+  test("only a task's session carries the standing instruction, as one constant argv word", async () => {
+    const tasked = await spawnSession(
+      { repo: "myrepo", mode: "worktree", title: "Standing", prompt: "go", taskId: "task-standing" },
+      repos,
+      WAIT,
+    );
+    try {
+      const argv = await stub.argv();
+      const at = argv.indexOf("--append-system-prompt");
+      expect(at).toBeGreaterThan(-1);
+      expect(argv[at + 1]).toBe(STANDING_INSTRUCTION);
+      expect(at).toBeLessThan(argv.indexOf("--"));
+      // Sessions are recognised by `--remote-control` in the pane's command (`sessions.ts`); the text must not carry it.
+      expect(STANDING_INSTRUCTION).not.toContain("--remote-control");
+    } finally {
+      await killWindow(tasked.window);
+    }
+    await rm(stub.argvFile, { force: true });
+    const untracked = await spawnSession({ repo: "myrepo", mode: "here", title: "No Standing" }, repos, WAIT);
+    try {
+      expect(await stub.argv()).not.toContain("--append-system-prompt");
+    } finally {
+      await killWindow(untracked.window);
+    }
   });
 
   // The one case pane liveness and session detection disagree on: a claude

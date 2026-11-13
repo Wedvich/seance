@@ -147,6 +147,20 @@ describe("LaunchLedger", () => {
   });
 });
 
+describe("LaunchLedger.recordedAt", () => {
+  test("is the record time from the ledger's clock, and undefined for an unknown or evicted id", async () => {
+    const clock = { now: 1_000 };
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    expect(ledger.recordedAt("t1")).toBeUndefined();
+    clock.now = 2_000;
+    await ledger.record("t1");
+    expect(ledger.recordedAt("t1")).toBe(2_000);
+    expect(ledger.recordedAt("t2")).toBeUndefined();
+    clock.now = 2_000 + LEDGER_MAX_AGE_MS + 1;
+    expect(ledger.recordedAt("t1")).toBeUndefined();
+  });
+});
+
 describe("LaunchLedger progress notes", () => {
   const TIP = "a".repeat(40);
 

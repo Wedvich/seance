@@ -1,6 +1,6 @@
 import type { RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
-import { daemonSink, drainAskAudit, pushAudit, reapAudit } from "./audit.ts";
+import { daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
 import type { SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
@@ -14,6 +14,7 @@ import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
+import { createMessages } from "./messages.ts";
 import { pruneLogPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
@@ -27,6 +28,7 @@ import {
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
 import type { TraitProbes } from "./trait-probes.ts";
+import { paneWindowName } from "./tmux.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
@@ -71,7 +73,7 @@ export interface WiringCtx {
 }
 
 /** A local op socket surface a capability brings; the socket starts after every capability, with all of them. */
-export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents">;
+export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages">;
 
 export interface Started {
   readonly stop: () => void;
@@ -113,11 +115,15 @@ const sessionEvents: DaemonCapability = (ctx) => {
   // Where it can, binding still rests on a field Bun leaves undocumented; a
   // failed probe means every event will be refused, and this line is why.
   if (!peerPidSupported()) {
-    log.warn("local socket: this host reports no peer pid — session events are bound by the pane they name");
+    log.warn(
+      "local socket: this host reports no peer pid — session events are bound by the pane they name, and session messages are refused",
+    );
   } else {
     void peerBindingProblem().then((problem) => {
       if (problem === null) return;
-      log.warn(`local socket: peer binding failed its probe (${problem}) — every session event will be refused`);
+      log.warn(
+        `local socket: peer binding failed its probe (${problem}) — every session event and session message will be refused`,
+      );
     });
   }
   const { despawn } = ctx.backend;
@@ -136,6 +142,15 @@ const sessionEvents: DaemonCapability = (ctx) => {
           inputShows: drainInputShows,
           audit: drainAskAudit(daemonSink),
         });
+  // Beside session events because that capability owns pane binding, the peer warnings above and the `ended` frame
+  // that clears a pane's held messages: a second capability would need a late-bound hook into it.
+  const messages = createMessages({
+    panes: listPanePids,
+    windowName: paneWindowName,
+    launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
+    machine: ctx.config.name,
+    audit: messageAudit(daemonSink),
+  });
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
@@ -190,6 +205,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
         }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
+    onEnded: messages.onEnded,
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
   });
   late.events = events;
@@ -198,8 +214,9 @@ const sessionEvents: DaemonCapability = (ctx) => {
     stop: (): void => {
       drainAsk?.stop();
       events.stop();
+      messages.stop();
     },
-    local: { sessionEvents: events.handle },
+    local: { sessionEvents: events.handle, messages },
     armPassClose: events.armPassClose,
     ...(drainAsk === undefined ? {} : { drainAsk }),
   };

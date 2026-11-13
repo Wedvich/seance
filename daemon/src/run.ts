@@ -29,6 +29,7 @@ import { log } from "./log.ts";
 import { sealMachineInfo } from "./machine-info.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import { procOomProbe } from "./oom-kill.ts";
+import { peerPidSupported } from "./peer.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
@@ -343,6 +344,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,
+        // A host that cannot name a socket's peer refuses every inbox listener, so it could not receive.
+        ...(peerPidSupported() ? [CAPABILITIES.messages] : []),
         // Only where an ask is wired (`sessionEvents` wires none without a despawn): the clients' wording and
         // "Drain now" promise an action.
         ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),
