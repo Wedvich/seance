@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import type {
   DespawnRequest,
   DespawnResponse,
@@ -369,7 +369,9 @@ const MISSING = "\0missing";
  * canonical clone and `.claude` (a re-add creates the directories, which only land inside the clone then).
  */
 async function goneSiteParentOk(clone: string, worktrees: string, path: string): Promise<boolean> {
-  if (dirname(path) !== worktrees) return false;
+  // Exactly `<worktrees>/<one plain name>`: not `..`, `.`, a trailing slash or a doubled separator, which git
+  // would normalise to somewhere else than the path the session and its trust entry are keyed by.
+  if (dirname(path) !== worktrees || path !== join(worktrees, basename(path))) return false;
   const real = (target: string): Promise<string | null> =>
     realpath(target).catch((err: unknown) =>
       err instanceof Error && "code" in err && err.code === "ENOENT" ? MISSING : null,

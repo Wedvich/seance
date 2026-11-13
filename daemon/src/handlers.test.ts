@@ -1453,6 +1453,10 @@ describe("a scheduler spawn that continues a failed task", () => {
         /not a worktree of myrepo/u,
       ));
 
+    test.each(["..", ".", "reaped/", "/reaped"])("it is gone and its leaf spells %p", (leaf) =>
+      refusedWith({ path: `${join(clone, ".claude", "worktrees")}/${leaf}`, branch: "wt-reaped" }, /not a worktree of myrepo/u),
+    );
+
     test("it is gone and its parent is reached through a symlink", async () => {
       const linked = join(clone, "linked-worktrees");
       await symlink(join(clone, ".claude", "worktrees"), linked);
