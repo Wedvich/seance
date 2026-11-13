@@ -453,22 +453,30 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // Read late: session events start after the handler context, and a `pass-close` can only arrive once they run.
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
+  // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
+  let setting: Promise<unknown> = Promise.resolve();
+  const setOpen: MachineAvailability["set"] = async (open) => {
+    const was = closedOf(state);
+    if (open ? was === null : was !== null) return { closed: was, changed: false };
+    const previous = state.closed;
+    state = open ? withoutClosed(state) : { ...state, closed: { at: now() } };
+    const written = closedOf(state);
+    try {
+      await persistState();
+    } catch (err) {
+      // Only the close field: a concurrent rescan's repos stay.
+      state = previous === undefined ? withoutClosed(state) : { ...state, closed: previous };
+      throw err;
+    }
+    status.refresh();
+    return { closed: written, changed: true };
+  };
   const availability: MachineAvailability = {
     closed: () => closedOf(state),
-    set: async (open) => {
-      const was = closedOf(state);
-      if (open ? was === null : was !== null) return { closed: was, changed: false };
-      const previous = state.closed;
-      state = open ? withoutClosed(state) : { ...state, closed: { at: now() } };
-      try {
-        await persistState();
-      } catch (err) {
-        // Only the close field: a concurrent rescan's repos stay.
-        state = previous === undefined ? withoutClosed(state) : { ...state, closed: previous };
-        throw err;
-      }
-      status.refresh();
-      return { closed: closedOf(state), changed: true };
+    set: (open) => {
+      const run = setting.then(() => setOpen(open));
+      setting = run.catch(() => {});
+      return run;
     },
   };
   const handlerCtx: HandlerContext = {
