@@ -60,6 +60,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
   daemon checks, and flag the rest. Read it before touching despawn, reap's merged check, a pane's
   tracked state, or anything that reads a live session's screen.
+- **docs/agents.md** — analysis, nothing decided: what spawning agents other than Claude Code
+  (Codex first) would touch — the agent as a task field, launch, accounts, quota, session events,
+  MCP, clients — the two risks (Codex's remote control, binding by peer pid) and a spike-first
+  order. Read it before adding a second agent or making the launch path agent-neutral.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
