@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
 import { toBase64 } from "@seance/shared";
-import { configSkeleton, loadConfig, loadPsk, type Config } from "./config.ts";
+import { configSkeleton, CUSTODIAN_DEFAULTS, loadConfig, loadPsk, type Config, type CustodianConfig } from "./config.ts";
 import { importDpapiPskValue } from "./dpapi.ts";
 import { importTpmPskValue, tpmAvailable } from "./tpmcreds.ts";
 import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
@@ -94,12 +94,52 @@ describe("loadConfig", () => {
     expect((await loadConfig(partial)).reap).toEqual({ intervalHours: 24, minAgeDays: 4 });
   });
 
+  test("custodian fields override their defaults; a bad one throws naming it", async () => {
+    const dir = await tempDir();
+    const load = async (name: string, custodian: unknown): Promise<Config> => {
+      const path = join(dir, `${name}.json`);
+      await writeFile(path, JSON.stringify({ ...VALID, custodian }));
+      return loadConfig(path);
+    };
+    const all: CustodianConfig = {
+      model: "sonnet",
+      effort: "high",
+      everyMinutes: 20,
+      closeAfterMinutes: 25,
+      roundTimeoutMinutes: 5,
+      maxNudges: 0,
+      interruptAfterMinutes: 60,
+    };
+    expect((await load("all", all)).custodian).toEqual(all);
+    expect((await load("some", { everyMinutes: 1440, maxNudges: 20 })).custodian).toEqual({
+      ...CUSTODIAN_DEFAULTS,
+      everyMinutes: 1440,
+      maxNudges: 20,
+    });
+
+    await expect(load("unknown", { speed: 1 })).rejects.toThrow('"custodian" takes only model, effort, everyMinutes');
+    for (const field of ["everyMinutes", "closeAfterMinutes", "roundTimeoutMinutes", "interruptAfterMinutes"]) {
+      for (const bad of [0, 1441, 1.5, "15"]) {
+        // oxlint-disable-next-line no-await-in-loop
+        await expect(load(`${field}-${bad}`, { [field]: bad })).rejects.toThrow(`"custodian.${field}"`);
+      }
+    }
+    for (const bad of [-1, 21, 1.5, "3"]) {
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(load(`nudges-${bad}`, { maxNudges: bad })).rejects.toThrow('"custodian.maxNudges"');
+    }
+    await expect(load("effort", { effort: "turbo" })).rejects.toThrow('"custodian.effort"');
+    await expect(load("model-empty", { model: "" })).rejects.toThrow('"custodian.model"');
+    await expect(load("model-long", { model: "m".repeat(65) })).rejects.toThrow('"custodian.model"');
+    expect((await load("model-64", { model: "m".repeat(64) })).custodian?.model).toHaveLength(64);
+  });
+
   test("a custodian key turns reap's timer on at 6h with a one-day age gate; an explicit reap field still wins", async () => {
     const dir = await tempDir();
     const bare = join(dir, "custodian.json");
     await writeFile(bare, JSON.stringify({ ...VALID, custodian: {} }));
     const loaded = await loadConfig(bare);
-    expect(loaded.custodian).toEqual({});
+    expect(loaded.custodian).toEqual(CUSTODIAN_DEFAULTS);
     expect(loaded.reap).toEqual({ intervalHours: 6, minAgeDays: 1 });
 
     const partial = join(dir, "custodian-reap.json");

@@ -1,6 +1,15 @@
 import { watch } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
-import { isRecord, isTraitName, TRAIT_LIMITS, TRAIT_NAME_PATTERN } from "@seance/shared";
+import {
+  EFFORTS,
+  isEffort,
+  isRecord,
+  isTraitName,
+  TASK_REQUEST_LIMITS,
+  TRAIT_LIMITS,
+  TRAIT_NAME_PATTERN,
+  type Effort,
+} from "@seance/shared";
 import { EXCLAVE_NAME } from "./exclaves.ts";
 import { log } from "./log.ts";
 import { configPath, expandTilde } from "./paths.ts";
@@ -236,16 +245,76 @@ export const REAP_DEFAULTS: ReapConfig = { intervalHours: 0, minAgeDays: 4 };
 /** With a custodian configured (custodian C35): old worktrees are reap's, so the timer is on and the age gate short. */
 export const CUSTODIAN_REAP_DEFAULTS: ReapConfig = { intervalHours: 6, minAgeDays: 1 };
 
-/**
- * docs/custodian.md's seat config (C2). Only the key's presence is read so far — it moves reap's defaults — so no
- * field is parsed yet; the seat's own parser fills this in.
- */
-export type CustodianConfig = Readonly<Record<string, never>>;
+/** The custodian seat's settings (docs/custodian.md C2; DESIGN.md, "The custodian's seat"). Every field is optional. */
+export interface CustodianConfig {
+  /** `--model` for a round: a cheap model, since the round reads and decides little. */
+  readonly model: string;
+  readonly effort: Effort;
+  /** A round starts when a pane has stood idle or unchanged this long, and the last round ended this long ago. */
+  readonly everyMinutes: number;
+  /** An idle session is a close candidate after this long (read by the verbs, PR 4). */
+  readonly closeAfterMinutes: number;
+  /** A round still running this long after it started is closed and counted failed. */
+  readonly roundTimeoutMinutes: number;
+  /** Nudges per session before it is flagged (PR 4). */
+  readonly maxNudges: number;
+  /** A busy session with an unchanged screen this long may be interrupted (PR 4). */
+  readonly interruptAfterMinutes: number;
+}
 
+export const CUSTODIAN_DEFAULTS: CustodianConfig = {
+  model: "haiku",
+  effort: "low",
+  everyMinutes: 15,
+  closeAfterMinutes: 15,
+  roundTimeoutMinutes: 10,
+  maxNudges: 3,
+  interruptAfterMinutes: 30,
+};
+
+export const CUSTODIAN_LIMITS = {
+  minMinutes: 1,
+  maxMinutes: 1440,
+  minNudges: 0,
+  maxNudges: 20,
+} as const;
+
+const CUSTODIAN_MINUTE_FIELDS = ["everyMinutes", "closeAfterMinutes", "roundTimeoutMinutes", "interruptAfterMinutes"] as const;
+const CUSTODIAN_KEYS = ["model", "effort", "everyMinutes", "closeAfterMinutes", "roundTimeoutMinutes", "maxNudges", "interruptAfterMinutes"];
+
+/** The key's fields are read here; an unknown key or a bad value throws, naming it. */
 function parseCustodian(raw: unknown, path: string): CustodianConfig | undefined {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new TypeError(`config at ${path}: "custodian" must be an object`);
-  return {};
+  for (const key of Object.keys(raw)) {
+    if (CUSTODIAN_KEYS.includes(key)) continue;
+    throw new TypeError(`config at ${path}: "custodian" takes only ${CUSTODIAN_KEYS.join(", ")} (got "${key}")`);
+  }
+  const at = `config at ${path}: "custodian.`;
+  const model = "model" in raw ? raw["model"] : CUSTODIAN_DEFAULTS.model;
+  if (typeof model !== "string" || model === "" || model.length > TASK_REQUEST_LIMITS.model) {
+    throw new TypeError(`${at}model" must be a non-empty string of at most ${TASK_REQUEST_LIMITS.model} characters`);
+  }
+  const effort = "effort" in raw ? raw["effort"] : CUSTODIAN_DEFAULTS.effort;
+  if (!isEffort(effort)) throw new TypeError(`${at}effort" must be one of ${EFFORTS.join(", ")}`);
+  const whole = (key: keyof CustodianConfig, min: number, max: number): number => {
+    const value = key in raw ? raw[key] : CUSTODIAN_DEFAULTS[key];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+      throw new TypeError(`${at}${key}" must be a whole number, ${min}–${max}`);
+    }
+    return value;
+  };
+  const minutes = (key: (typeof CUSTODIAN_MINUTE_FIELDS)[number]): number =>
+    whole(key, CUSTODIAN_LIMITS.minMinutes, CUSTODIAN_LIMITS.maxMinutes);
+  return {
+    model,
+    effort,
+    everyMinutes: minutes("everyMinutes"),
+    closeAfterMinutes: minutes("closeAfterMinutes"),
+    roundTimeoutMinutes: minutes("roundTimeoutMinutes"),
+    maxNudges: whole("maxNudges", CUSTODIAN_LIMITS.minNudges, CUSTODIAN_LIMITS.maxNudges),
+    interruptAfterMinutes: minutes("interruptAfterMinutes"),
+  };
 }
 
 /** Per field: a `reap` key naming only some keeps `defaults` for the rest, a custodian's included. */
