@@ -17,6 +17,7 @@ import {
   EFFORT_LABELS,
   HELD_MAX,
   MODEL_LABELS,
+  worktreeFor,
   type AccountsState,
   type HeldTask,
   type HistoryView,
@@ -182,6 +183,8 @@ export interface ViewModel {
   readonly held: readonly HeldRow[];
   /** Held tasks dropped for age, as one line naming them; null when none or dismissed. */
   readonly heldDropped: string | null;
+  /** The Fresh worktree toggle as it stands for the repo the form resolves to. */
+  readonly worktree: boolean;
   readonly worktreeHint: string;
   /** The line under the prompt card; null when there is nothing to say. */
   readonly formStatus: string | null;
@@ -930,6 +933,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
   const machine = form.machine === null ? null : (relay.machines.find((m) => m.deviceId === form.machine) ?? null);
   const repos = scopedRepos(relay.machines, form);
   const repo = resolveRepo(repos, form);
+  const worktree = worktreeFor(form, repo?.origin ?? null);
   const problem = derivePinProblem(relay, form, state.accounts.aliases);
   const availability = deriveAutoAvailability(relay);
   const known = formAccounts(relay.machines, form);
@@ -986,7 +990,8 @@ export function deriveView(state: AppState, now: number): ViewModel {
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),
     heldDropped: heldDroppedText(state.heldDropped),
-    worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
+    worktree,
+    worktreeHint: worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
     startNow: deriveRunNowAvailability(relay),

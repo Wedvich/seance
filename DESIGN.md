@@ -8179,6 +8179,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   persisted too (`seance:pending`) so a lost reply could be reconciled; every spawn is a
   queued task now, whose record is the relay's, so nothing pending is kept and
   `dropLegacyPending` clears the old key on start.
+  The Fresh worktree choice is kept per repo origin (`worktreeByRepo`, read through
+  `worktreeFor`): a repo's own last choice, else the last made anywhere. Kept on this phone
+  only, not in a relay record — a per-device habit, not fleet state — and bounded to the
+  newest `WORKTREE_REPOS_MAX` origins.
 - **Queue works with the relay unreachable: the task is held on the phone and sent
   on reconnect** (2026-10-29). Held only once this document has seen a registry
   (`canHold`): the repo and pins resolve against the machines the socket left in

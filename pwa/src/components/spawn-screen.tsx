@@ -1249,13 +1249,13 @@ export function SpawnScreen(props: {
           className="worktree card"
           onClick={actions.toggleWorktree}
           role="switch"
-          aria-checked={form.worktree}
+          aria-checked={view.worktree}
         >
           <span className="worktree-text">
             <span className="worktree-title">Fresh worktree</span>
             <span className="worktree-hint">{view.worktreeHint}</span>
           </span>
-          <span className={form.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
+          <span className={view.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
             <span className="toggle-knob" />
           </span>
         </button>

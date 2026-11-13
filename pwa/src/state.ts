@@ -152,7 +152,10 @@ export interface PersistedForm {
   /** The repo to run, by `RepoEntry.origin` — the cross-machine key, since no clone is chosen. */
   readonly repo: string | null;
   readonly prompt: string;
+  /** The last worktree choice made: what a repo with none remembered in `worktreeByRepo` starts with. */
   readonly worktree: boolean;
+  /** The worktree choice last made per repo, by origin; read through `worktreeFor`. Newest last, at most `WORKTREE_REPOS_MAX`. */
+  readonly worktreeByRepo: Readonly<Record<string, boolean>>;
   readonly model: Model;
   readonly effort: Effort;
   /** Per task: the tasks this one waits on. Cleared once a task is queued. */
@@ -277,12 +280,31 @@ export const DEFAULT_FORM: PersistedForm = {
   repo: null,
   prompt: "",
   worktree: true,
+  worktreeByRepo: {},
   model: DEFAULT_MODEL,
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
   requires: [],
 };
+
+/** Bounds a map that gains a key per repo ever toggled in; the oldest choice goes first. */
+export const WORKTREE_REPOS_MAX = 100;
+
+/** The worktree choice for `origin`: its own remembered one, else the last made anywhere. Null is no repo in scope. */
+export function worktreeFor(form: Pick<PersistedForm, "worktree" | "worktreeByRepo">, origin: string | null): boolean {
+  // Own keys only: an origin is wire data, and `constructor` would otherwise read Object's.
+  if (origin === null || !Object.hasOwn(form.worktreeByRepo, origin)) return form.worktree;
+  return form.worktreeByRepo[origin] === true;
+}
+
+/** `form` with `worktree` chosen for `origin`, which moves to the newest end of the map. */
+export function withWorktree(form: PersistedForm, origin: string | null, worktree: boolean): PersistedForm {
+  if (origin === null) return { ...form, worktree };
+  const others = Object.entries(form.worktreeByRepo).filter(([key]) => key !== origin);
+  const kept = others.slice(Math.max(0, others.length - (WORKTREE_REPOS_MAX - 1)));
+  return { ...form, worktree, worktreeByRepo: Object.fromEntries([...kept, [origin, worktree]]) };
+}
 
 export function isModel(value: unknown): value is Model {
   return typeof value === "string" && (MODELS as readonly string[]).includes(value);

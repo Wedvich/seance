@@ -38,7 +38,7 @@ const {
   writeFormFiles,
   writeHeld,
 } = await import("../src/persist.ts");
-const { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS } = await import("../src/state.ts");
+const { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, WORKTREE_REPOS_MAX } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
 
@@ -52,6 +52,7 @@ describe("form persistence", () => {
       repo: "github.com/acme/app",
       prompt: "port the pane",
       worktree: false,
+      worktreeByRepo: { "github.com/acme/app": false, "github.com/acme/ops": true },
       model: "fable",
       effort: "max",
       after: [{ task: TASK, after: "done" }],
@@ -81,6 +82,23 @@ describe("form persistence", () => {
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
     store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
     expect(readForm()).toMatchObject({ after: [], until: "merged", prompt: "old" });
+  });
+
+  test("worktreeByRepo keeps boolean entries only, the newest at most WORKTREE_REPOS_MAX, and none when malformed", () => {
+    store.set(
+      "seance:form",
+      JSON.stringify({ worktreeByRepo: { a: true, b: "yes", c: null, constructor: false, d: false } }),
+    );
+    expect(readForm().worktreeByRepo).toEqual({ a: true, constructor: false, d: false });
+    const many = Object.fromEntries(Array.from({ length: WORKTREE_REPOS_MAX + 5 }, (_, i) => [`r${i}`, i % 2 === 0]));
+    store.set("seance:form", JSON.stringify({ worktreeByRepo: many }));
+    const kept = Object.keys(readForm().worktreeByRepo);
+    expect(kept).toHaveLength(WORKTREE_REPOS_MAX);
+    expect(kept[0]).toBe("r5");
+    for (const malformed of [[true], "on", null]) {
+      store.set("seance:form", JSON.stringify({ worktreeByRepo: malformed }));
+      expect(readForm().worktreeByRepo).toEqual({});
+    }
   });
 
   test("requires is read as trait names only, once each, at most four, and as none when it is not a list", () => {
