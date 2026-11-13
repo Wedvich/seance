@@ -260,7 +260,10 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     // Draft clear: Ctrl+C alone, never a second one, never an Escape. No abort between it and the text: an
     // abort here would leave "Ctrl-C again to exit" armed for the next attempt's Ctrl+C.
     if (!(await deps.keys(pane, ["C-c"]))) {
-      log.warn(`drain ask: could not send Ctrl+C to pane ${pane} (task ${entry.taskId})`);
+      // Dropped, never retried: tmux may have delivered it anyway, and a second Ctrl+C would exit Claude Code.
+      log.warn(`drain ask: could not send Ctrl+C to pane ${pane} (task ${entry.taskId}) — dropped it`);
+      drop(pane, entry);
+      await record(entry.taskId, "skipped");
       return;
     }
     await sleep(KEY_GAP_MS);
@@ -293,7 +296,10 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     }
     if (deps.marked(pane) || !deps.askable(entry.taskId)) return;
     if (!(await deps.keys(pane, ["Enter"]))) {
-      log.warn(`drain ask: could not send Enter to pane ${pane} (task ${entry.taskId})`);
+      // Dropped, never retried: a retry starts with a Ctrl+C while exit may still be armed.
+      log.warn(`drain ask: could not send Enter to pane ${pane} (task ${entry.taskId}) — dropped it`);
+      drop(pane, entry);
+      await record(entry.taskId, "skipped");
       return;
     }
     drop(pane, entry);

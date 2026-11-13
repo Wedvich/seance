@@ -8135,23 +8135,26 @@ frame, only a mark on a frame it already takes.
   minutes (none with `now`). **The text is never typed while the pane's last frame is `needs-input`, of any
   reason**: Enter on a permission dialog can approve it, so the drain can deny a permission and never grant one.
 - **The typing.** Re-read the panes (still live, still that task, not marked, still `askable`, no frame from the
-  pane since the one that triggered this); `C-c`; one `KEY_GAP_MS`; `send-keys -l DRAIN_PROMPT`; one gap; then,
-  with no `await` between the last check and the key, re-check that this machine is still closed at the same
-  `cl`, that the pane has sent no frame since, that it is neither marked nor closing, and that **the screen's input
-  box holds exactly the prompt** (`inputBoxShows`: the text between the last two full-width `─` rules, a leading
-  `❯`, whitespace-normalised, equal to the prompt; a permission dialog, a question, the Rewind menu or the prompt
-  only in the transcript above an empty box fail it; read in memory, never returned or logged). Only then Enter.
-  There is no abort between `C-c` and the text: an abort there would leave "Ctrl-C again to exit" armed for the
-  next attempt's `C-c`. A text send that tmux refuses, a key that throws (a failed spawn) and a screen check
-  that fails for about a second of polls (seven reads, `KEY_GAP_MS` apart, a slow redraw allowed for) with no frame since drop the entry (`skipped`, audited, a log line naming pane and task, never the
-  screen): the first two for the same reason, the third because no later turn end is coming and a screen that
-  never matches would otherwise leave the entry waiting for good with the text unsent in the box (the
-  parser is checked against Claude Code 2.1.323 screens captured with `tmux capture-pane -p`, wide and wrapped,
-  a permission dialog open or dismissed, and an empty box with the prompt only in the transcript). A
-  turn-ended idle that arrives while a sequence runs is tried again once it settles; a sequence that ends without
-  Enter, or a frame, after the deadline has passed over a pane no longer at a turn end, interrupts it then, since
-  the deadline timer fires once. The graceful despawn's
-  `Escape`/`C-c` pair is not reused for the clear (above); its `KEY_GAP_MS` and pane-id check are.
+  pane since the one that triggered this); `C-c`; one `KEY_GAP_MS`; `send-keys -l DRAIN_PROMPT`; then poll the
+  screen up to seven times, `KEY_GAP_MS` apart (about a second, a slow redraw allowed for), stopping as soon as
+  **the screen's input box holds exactly the prompt** (`inputBoxShows`: the text between the last two full-width
+  `─` rules, a leading `❯`, whitespace-normalised, equal to the prompt; a permission dialog, a question, the Rewind
+  menu or the prompt only in the transcript above an empty box fail it; read in memory, never returned or logged),
+  and giving up without a key the moment the machine reads open or at another `cl` or the pane sends a frame.
+  From the last read to Enter nothing is awaited: the checks there are synchronous (still closed at the same `cl`,
+  no frame from the pane since, neither marked nor closing, still `askable`). Only then Enter. There is no abort
+  between `C-c` and the text: an abort there would leave "Ctrl-C again to exit" armed for the next attempt's
+  `C-c`. Every failure inside the sequence drops the entry and is never retried, since a retry starts with a
+  `C-c` that may land on an armed exit: a `C-c`, text or Enter send that tmux refuses, a key that throws (a failed
+  spawn) and a screen that never showed the prompt across the polls with no frame since are each `skipped`,
+  audited, with a log line naming pane and task only, never the screen. The screen case has a second reason: no
+  later turn end is coming, and a screen that never matches would otherwise leave the entry waiting for good with
+  the text unsent in the box (the parser is checked against Claude Code 2.1.323 screens captured with `tmux
+  capture-pane -p`, wide and wrapped, a permission dialog open or dismissed, and an empty box with the prompt only
+  in the transcript). A turn-ended idle that arrives while a sequence runs is tried again once it settles; a
+  sequence that ends without Enter, or a frame, after the deadline has passed over a pane no longer at a turn end,
+  interrupts it then, since the deadline timer fires once. The graceful despawn's `Escape`/`C-c` pair is not
+  reused for the clear (above); its `KEY_GAP_MS` and pane-id check are.
 - **Residual race.** The screen check is a snapshot: between it and Enter a dialog could still open (a
   background subagent finishing, a tool call that had not reported needs-input yet). The re-checks narrow the
   window to the two tmux round trips of the check and the key; they do not close it, and a frame cannot prove
@@ -8175,14 +8178,20 @@ frame, only a mark on a frame it already takes.
   refused before the successor's create (the dirty tree it read before the session committed), the session's
   runs as its own, with the commit and the record, and the drain pass stamps no refusal for it (the task would
   show stuck until the rerun lands; if that fails too, the write-ahead stamp already brings the retry round); one
-  that succeeded answers it, as before. Only the drain's pass is re-run: a session pass that joins a manual or quota
+  that succeeded answers it, as before, and a `conflict` after its create still writes `held`, joined or not, since
+  nothing re-runs past a create and a retry would make a second successor. Only the drain's pass is re-run: a session pass that joins a manual or quota
   pass is answered with its result, refusals included, as it always was.
 - **Reopen, restart.** A reopen that changes state drops every entry and timer; a prompt already typed stays
   typed, and a session that goes on to pass itself may land anywhere, this box included. Nothing is persisted:
   a restart while closed re-enumerates (`start`), one ask per pane and task per `cl` per process (a repeated close
   at the same `cl`, `--now` on an already-closed machine included, only moves the deadline of entries still
   waiting and never asks or Escapes a pane already typed into or skipped), so a pane asked and still working gets
-  one more prompt after a restart. A `now` that lands before the daemon has wired the ask (the relay client
+  one more prompt after a restart. A restart past the deadline (`cl + DRAIN_INTERRUPT_MS`) therefore Escapes
+  every enumerated pane not at a turn end at once, panes asked before the restart and still working on the ask
+  included: that Escape can cut short a commit the first prompt started. Accepted for the same reason as not
+  persisting (Rejected, below): it is bounded to one Escape and one prompt per pane per process per `cl`, the
+  interrupted session is asked again at its turn end and commits then, and the leader's outside pass is the
+  backstop either way. A `now` that lands before the daemon has wired the ask (the relay client
   starts first) is kept and replayed at the wiring while the machine is still closed. A pane reused for another task, an `ended` frame or a
   pane that is marked drops its entry.
 - **Where it sits.** `SessionEventDeps.onState` is called for every bound, tasked frame with its state,

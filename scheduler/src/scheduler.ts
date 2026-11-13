@@ -1927,9 +1927,10 @@ export class Scheduler {
     this.#log(`audit pass refused task=${quote(id)} trigger=drain outcome=${result.code}`);
     // Per attempt, not per task: an orphan from an earlier cut-off pass must not make a pre-create conflict `held`.
     const created = this.#reachedCreate.delete(id);
-    // A session's own pass joined and re-runs: a refusal stamped now would show the task stuck until it lands.
-    // If that one fails too, the write-ahead stamp is what brings the retry round.
-    if (joinedBySession()) return;
+    // A session's own pass joined and re-runs after a pre-create refusal: a refusal stamped now would show the
+    // task stuck until it lands, and if that one fails too the write-ahead stamp brings the retry round. After the
+    // create nothing re-runs, so `held` is written either way: a retry would make a second successor.
+    if (!created && joinedBySession()) return;
     const outcome = drainOutcome(result.code, created);
     if (outcome === null) return;
     await this.#update(id, (c) => stampDrainRefusal(c, cl, outcome));

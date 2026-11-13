@@ -2393,6 +2393,40 @@ describe("the drain pass", () => {
     expect(s.fleet.pushes).toHaveLength(1);
   });
 
+  test("a conflict after the create is held even when a session's pass joined: one successor", async () => {
+    const s = setup([
+      machine("a", { capabilities: [...CAPABLE, CAPABILITIES.successorSelf] }),
+      machine("b", { capabilities: CAPABLE }),
+    ]);
+    await running(s, true);
+    const gate = Promise.withResolvers<void>();
+    let creating = false;
+    const made = s.create;
+    s.create = async (task) => {
+      creating = true;
+      await gate.promise;
+      const result = await made(task);
+      // Moved under the pass between the create and its commit.
+      s.create = made;
+      await placeOn(s, "b");
+      return result;
+    };
+    close(s, "a");
+    later(s, WAIT);
+    await s.scheduler.tick();
+    await until(() => creating);
+    const session = s.scheduler.pass("old", "session", { from: "a", pushed: PUSHED, drain: true });
+    gate.resolve();
+    expect(await session).toMatchObject({ ok: false, code: "conflict" });
+    await s.scheduler.drain();
+    expect(s.creates).toHaveLength(1);
+    await placeOn(s, "a");
+    expect(s.scheduler.task("old")?.drained?.held).toBe(true);
+    later(s, 10 * RETRY);
+    await tick(s.scheduler);
+    expect(s.creates).toHaveLength(1);
+  });
+
   test("a conflict before the create is retried after the retry wait", async () => {
     const s = setup(twoMachines());
     await running(s, true);
