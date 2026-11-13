@@ -9,12 +9,26 @@ import {
   type QueueRow,
   type QueueScreenView,
 } from "../queue-view.ts";
+import { OLDER_TITLE, type OlderSheetView, type OlderView } from "../older-view.ts";
 import { centeredScrollTop } from "../scroll.ts";
+import type { OlderPick, OlderSheet } from "../state.ts";
 import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } from "./menu.tsx";
 import { RelaySettings } from "./relay-dot.tsx";
+import { Sheet, SheetItem, TileButton, useSheetExit } from "./sheet.tsx";
 import { Toast } from "./toast.tsx";
+
+/** The Older section's acts, all the store's (`OlderStore`). */
+export interface OlderActions {
+  readonly toggle: () => void;
+  readonly search: (title: string) => void;
+  readonly openSheet: (sheet: OlderSheet) => void;
+  readonly closeSheet: () => void;
+  readonly pick: (pick: OlderPick) => void;
+  readonly clear: () => void;
+  readonly loadMore: () => void;
+}
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
@@ -61,6 +75,9 @@ export function QueueScreen(props: {
   onDiscard: () => void;
   /** Desktop layout only: the queue is the rightmost column, so the settings pill moves to its header. */
   onOpenSettings?: () => void;
+  /** The archive's tasks past Finished; null while no archivist is online, and nothing of it renders (A35). */
+  older: OlderView | null;
+  olderActions: OlderActions;
 }): JSX.Element {
   const { view, relayState, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
@@ -245,6 +262,27 @@ export function QueueScreen(props: {
             </section>
           );
         })}
+        {props.older !== null && (
+          <OlderSection
+            older={props.older}
+            actions={props.olderActions}
+            renderCard={(row) => (
+              <QueueCard
+                key={row.id}
+                row={row}
+                marked={false}
+                available={view.available}
+                armed={armed}
+                onAct={act}
+                onMenuClosed={onMenuClosed}
+                onRunNow={props.onRunNow}
+                onContinue={props.onContinue}
+                onFollowUp={props.onFollowUp}
+                onReveal={reveal}
+              />
+            )}
+          />
+        )}
         {view.partial !== null && <p className="fleet-note">{view.partial}</p>}
       </div>
 
@@ -261,12 +299,97 @@ export function QueueScreen(props: {
           {view.paused ? "Resume queue" : "Pause queue"}
         </button>
       </footer>
+      <OlderFilterSheet sheet={props.older?.sheet ?? null} actions={props.olderActions} />
     </>
   );
 }
 
 /** What a pass does, under its item: the push and the end of the session are the parts a person should know first. */
 const PASS_CONFIRM = "Pushes its branch and ends this session; a new task picks it up.";
+
+/**
+ * Older (docs/archivist.md A36g–A36j): the Asleep section's toggle, closed by
+ * default and with no count, since the archive is paged; open, the title search
+ * in the rename field's style, the spawn form's tile grid, and archived cards.
+ */
+function OlderSection(props: {
+  older: OlderView;
+  actions: OlderActions;
+  renderCard: (row: OlderView["rows"][number]) => JSX.Element;
+}): JSX.Element {
+  const { older, actions } = props;
+  return (
+    <section className="queue-section">
+      <h2 className="label fleet-heading">
+        <button type="button" className="queue-section-toggle" aria-expanded={older.open} onClick={actions.toggle}>
+          <span className="disclosure-chevron" aria-hidden="true">
+            ▶
+          </span>
+          {OLDER_TITLE}
+        </button>
+      </h2>
+      {older.open && (
+        <>
+          <input
+            type="search"
+            className="rename-input"
+            value={older.search}
+            placeholder="Search titles"
+            aria-label="Search older tasks by title"
+            enterKeyHint="search"
+            autoComplete="off"
+            onInput={(event) => actions.search(event.currentTarget.value)}
+          />
+          <div className="grid">
+            {older.tiles.map(({ sheet, tile }) => (
+              <TileButton key={sheet} tile={tile} onClick={() => actions.openSheet(sheet)} />
+            ))}
+          </div>
+          {older.status !== null && <p className="fleet-note">{older.status}</p>}
+          {older.clearable && (
+            <button type="button" className="quiet" onClick={actions.clear}>
+              Clear search and filters
+            </button>
+          )}
+          {older.rows.map((row) => props.renderCard(row))}
+          {older.showing !== null && <p className="fleet-note">{older.showing}</p>}
+          {older.moreError !== null && <p className="fleet-note">{older.moreError}</p>}
+          {older.more !== null && (
+            <button type="button" className="quiet" disabled={older.more.loading} onClick={actions.loadMore}>
+              {older.more.loading ? "Loading…" : "Load older"}
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/** One of Older's filter sheets, kept mounted through its exit like the spawn form's. */
+function OlderFilterSheet(props: { sheet: OlderSheetView | null; actions: OlderActions }): JSX.Element | null {
+  const { sheet, actions } = props;
+  // The view drops the sheet as it closes; its last options stay on screen for the exit animation.
+  const last = useRef<OlderSheetView | null>(null);
+  if (sheet !== null) last.current = sheet;
+  const [kind, closing, unmount] = useSheetExit(sheet?.kind ?? null);
+  const shown = kind === null ? null : last.current;
+  if (shown === null) return null;
+  return (
+    <Sheet title={shown.title} closing={closing} onExited={unmount} onClose={actions.closeSheet}>
+      {shown.options.map((option) => (
+        <SheetItem
+          key={option.key}
+          label={option.label}
+          sub={option.sub}
+          mono={option.mono}
+          dot={option.dot}
+          selected={option.selected}
+          onClick={() => actions.pick(option.pick)}
+        />
+      ))}
+    </Sheet>
+  );
+}
 
 const INLINE_LABEL: Record<NonNullable<QueueRow["inline"]>, string> = {
   continue: "Continue",

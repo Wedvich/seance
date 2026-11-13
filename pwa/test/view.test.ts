@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, type ExclaveInfo, type Machine, type RelayState } from "@seance/shared";
-import { CLOSED_OLDER, DEFAULT_FORM, HELD_MAX, RESCAN_IDLE, type PersistedForm, type SessionsView } from "../src/state.ts";
+import {
+  CLOSED_OLDER,
+  DEFAULT_FORM,
+  HELD_MAX,
+  RESCAN_IDLE,
+  type PersistedForm,
+  type SessionsView,
+} from "../src/state.ts";
 import {
   derivePinProblem,
   deriveReportedAvailability,
