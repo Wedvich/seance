@@ -733,6 +733,27 @@ describe("peer binding probe", () => {
   test("on this runtime a self-connect yields an fd and the kernel names this process", async () => {
     expect(await peerBindingProblem()).toBeNull();
   });
+
+  // A fresh process, since the probe's success is kept for the process's life and the suite's other files share one.
+  test("a failed probe resolves to a problem instead of rejecting, is not kept, and the next reader probes again", async () => {
+    const script = `
+      const { peerBindingProblem } = await import(process.env.PROBE_MODULE);
+      const real = process.env.TMPDIR;
+      process.env.TMPDIR = "/nonexistent/seanced-probe";
+      const failed = await peerBindingProblem();
+      if (real === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = real;
+      console.log(JSON.stringify([failed, await peerBindingProblem()]));
+    `;
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      env: { ...process.env, PROBE_MODULE: join(import.meta.dir, "session-events.ts") },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(0);
+    expect(JSON.parse(out)).toEqual([expect.stringContaining("the probe socket failed"), null]);
+  });
 });
 
 describe("coalescing", () => {

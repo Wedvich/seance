@@ -762,18 +762,26 @@ const PROBE_TIMEOUT_MS = 2_000;
  * start, instead of a stream of `unbound` replies after a Bun upgrade.
  */
 export function peerBindingProblem(): Promise<string | null> {
-  // Once per process, like `peerPidSupported`: the start-up warning and the `messages` capability both read it.
-  peerProbe ??= probePeerBinding();
-  return peerProbe;
+  if (peerProbe !== undefined) return peerProbe;
+  const probe = probePeerBinding();
+  peerProbe = probe;
+  // Only a success stands for the process, like `peerPidSupported`. The probe runs at start, when the box is
+  // busiest, and a slow accept or a full tmpdir there must not withhold the `messages` capability until a restart
+  // while binding itself works: a failure is probed again by the next reader.
+  void probe.then((problem) => {
+    if (problem !== null && peerProbe === probe) peerProbe = undefined;
+  });
+  return probe;
 }
 
 let peerProbe: Promise<string | null> | undefined;
 
 async function probePeerBinding(): Promise<string | null> {
   if (!peerPidSupported()) return null;
-  const dir = await mkdtemp(join(tmpdir(), "seanced-peer-"));
-  const accepted = Promise.withResolvers<number | null>();
+  let dir: string | undefined;
   try {
+    dir = await mkdtemp(join(tmpdir(), "seanced-peer-"));
+    const accepted = Promise.withResolvers<number | null>();
     const server = Bun.listen<undefined>({
       unix: join(dir, "probe.sock"),
       socket: {
@@ -799,7 +807,8 @@ async function probePeerBinding(): Promise<string | null> {
   } catch (err) {
     return `the probe socket failed: ${String(err)}`;
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // Never rejects: this promise is awaited by every register.
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
