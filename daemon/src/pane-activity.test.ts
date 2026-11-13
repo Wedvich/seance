@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createPaneActivity, type TrackedPane } from "./pane-activity.ts";
+import { pollUntil } from "../test/fixtures.ts";
+import { createPaneActivity, normaliseScreen, type TrackedPane } from "./pane-activity.ts";
 
 const pane = (id: string, extra: Partial<TrackedPane> = {}): TrackedPane => ({
   id,
@@ -199,14 +200,88 @@ describe("the screen sampler", () => {
     expect(lists).toBe(2);
   });
 
-  test("stop forgets every entry, observes nothing more and samples nothing", async () => {
-    const { tracker, screens, captured } = setup([pane("%1")]);
+  test("a capture that throws is a failed capture: the pass still finishes and the other panes are sampled", async () => {
+    const tracker = createPaneActivity({
+      panes: () => Promise.resolve([pane("%1"), pane("%2", { pid: 101 })]),
+      capture: (id) => (id === "%1" ? Promise.reject(new Error("spawn EMFILE")) : Promise.resolve("b")),
+      now: () => 5_000,
+    });
+    await tracker.sample();
+    expect(tracker.activity("%1")).toBeNull();
+    expect(tracker.activity("%2")).toMatchObject({ screenSince: 5_000 });
+  });
+
+  test("a listed pane under a new pid (a reused id) loses the old pane's facts at once, before any capture", async () => {
+    const { tracker, screens, advance, setPanes } = setup([pane("%1")]);
+    screens.set("%1", "a");
+    tracker.observe(pane("%1"), "idle", true);
+    await tracker.sample();
+    advance(60_000);
+    setPanes([pane("%1", { pid: 200 })]);
+    screens.set("%1", null);
+    await tracker.sample();
+    expect(tracker.activity("%1")).toBeNull();
+  });
+
+  test("stop leaves the facts: the tracker outlives a reload's stop and start", async () => {
+    const { tracker, screens } = setup([pane("%1")]);
     screens.set("%1", "a");
     tracker.observe(pane("%1"), "busy", false);
     tracker.stop();
-    tracker.observe(pane("%1"), "idle", true);
+    expect(tracker.activity("%1")).toMatchObject({ state: "busy" });
+  });
+
+  test("start samples at once and on its interval; stop ends the interval", async () => {
+    let captures = 0;
+    const tracker = createPaneActivity({
+      panes: () => Promise.resolve([pane("%1")]),
+      capture: () => {
+        captures += 1;
+        return Promise.resolve("s");
+      },
+      intervalMs: 5,
+    });
+    tracker.start();
+    tracker.start();
+    await pollUntil(() => captures >= 3, "the interval kept sampling");
+    tracker.stop();
+    // Let a pass already in flight settle, then nothing more may come.
     await tracker.sample();
-    expect(tracker.activity("%1")).toBeNull();
-    expect(captured).toEqual([]);
+    const settled = captures;
+    await Bun.sleep(40);
+    expect(captures).toBe(settled);
+  });
+});
+
+describe("normaliseScreen", () => {
+  const rule = "─".repeat(60);
+  const screen = (spinner: string, footer: string, typed = ""): string =>
+    ["⏺ Ran the build", "  ⎿  all green", "", spinner, "", rule, `❯ ${typed}`, rule, footer].join("\n");
+
+  test("a ticking spinner, its counters, the input box and the footer do not change it", () => {
+    const a = screen("✻ Cogitating… (2m 14s · ↑ 3.1k tokens · esc to interrupt)", "  ctx 41% · 12:01 · $0.52");
+    const b = screen(
+      "✽ Cogitating… (3m 14s · ↑ 3.4k tokens · esc to interrupt)",
+      "  ctx 42% · 12:02 · $0.55",
+      "half a",
+    );
+    expect(normaliseScreen(a)).toBe(normaliseScreen(b));
+  });
+
+  test("a running tool's elapsed time does not change it", () => {
+    const tool = (t: string): string => `⏺ Bash(sleep 9999)\n  ⎿  Running… (${t})\n\n${rule}\n❯ \n${rule}\n  footer`;
+    expect(normaliseScreen(tool("4s"))).toBe(normaliseScreen(tool("1h 2m 5s")));
+  });
+
+  test("real progress still does: new transcript output, or the spinner's verb changing", () => {
+    const base = screen("✻ Cogitating… (2m 14s)", "f");
+    expect(normaliseScreen(base)).not.toBe(normaliseScreen(base.replace("all green", "2 failed")));
+    expect(normaliseScreen(base)).not.toBe(normaliseScreen(base.replace("Cogitating", "Pondering")));
+  });
+
+  test("a screen without an input box is kept whole, bar the masks", () => {
+    const dialog = "Exiting worktree session\n❯ 1. Keep worktree\n  2. Remove worktree";
+    expect(normaliseScreen(dialog)).toBe(dialog);
+    expect(normaliseScreen(`${dialog}\n${rule}`)).toBe(`${dialog}\n${rule}`);
   });
 });

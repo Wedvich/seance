@@ -4,7 +4,8 @@ import type { SessionState } from "@seance/shared";
  * What the daemon keeps per pane séance started (`ours`), tasked or not, for the custodian's due check and its
  * `sessions` verb (docs/custodian.md, C14, C23, C24; DESIGN.md, "Session events", "Per-pane retention"): the
  * last state a bound session-event frame carried, and when the pane's visible screen last changed. In memory
- * only. The screen is reduced to a hash at once; its text is never kept, logged or sent.
+ * only. The screen is normalised (`normaliseScreen`) and reduced to a hash at once; its text is never kept,
+ * logged or sent.
  *
  * Retention, not an act: the state comes from frames the ingest already bound to a pane by the kernel's peer
  * pid, and nothing here runs anything shaped by a frame. The sampler's own subprocesses are fixed-argv tmux
@@ -55,12 +56,49 @@ export interface PaneActivityTracker {
   readonly sample: () => Promise<void>;
   /** Null for a pane not tracked: not `ours`, gone, or neither sampled nor heard from yet. */
   readonly activity: (paneId: string) => PaneActivity | null;
-  /** Samples at once, then every `intervalMs`. */
+  /** Samples at once, then every `intervalMs`; a call while running does nothing. */
   readonly start: () => void;
+  /**
+   * Stops the timer only. The facts stay: the tracker is one per process (`run-capabilities.ts`), so a config
+   * reload's stop→start keeps what every pane's frames and screen said, and a pass in flight finishes harmlessly.
+   */
   readonly stop: () => void;
 }
 
 export const SAMPLE_INTERVAL_MS = 60_000;
+
+/** A run of 10+ box-drawing rule characters alone on its line: the top and bottom edge of Claude's input box. */
+const RULE = /^\s*[─━]{10,}\s*$/u;
+/** A parenthesised elapsed time, with or without counters after it: `(2m 14s · ↑ 3.1k tokens · esc to interrupt)`. */
+const TIMER = /\(\s*(?:\d+[hms]\s*)+(?:·[^)]*)?\)/gu;
+/** The spinner's animated glyph at the start of its line; the word after it stays, it is fixed per turn. */
+const SPINNER_GLYPH = /^(\s*)[✻✽✶✳✢✺✹·*](?=\s)/u;
+
+/**
+ * The screen as the change hash sees it: what a session that is doing nothing leaves still. Claude Code repaints
+ * parts of its own screen with no work behind them, and a busy session hung inside a command is exactly one
+ * ticking spinner, so a verbatim hash would never read it as unchanged (C27's `interrupt`, C14's due check).
+ * Dropped:
+ * - everything from the input box's top edge down (the last-but-one rule line): the box, which also changes
+ *   when someone types, the status line and the hint lines, whose cost, context and clock readings move;
+ * - an elapsed time in parentheses, with the token counter and hint beside it, on the spinner line and a
+ *   running tool's line (`(2m 14s · ↑ 3.1k tokens · esc to interrupt)`, `(12s)`), masked to `(…)`;
+ * - the spinner's animated glyph, masked to `*`.
+ * Kept: the transcript, so real progress (new output, a tool finishing, the spinner's verb changing) still
+ * moves the hash. A screen with fewer than two rule lines (an exit dialog, a pane not running Claude) is
+ * hashed whole bar the masks. Limits: a repaint this does not know (wording from Claude Code 2.1.x), a
+ * resize, or a client attaching at another size, still moves it, which only ever reads as activity, the
+ * safe side for every consumer.
+ */
+export function normaliseScreen(screen: string): string {
+  const lines = screen.split("\n");
+  const rules = lines.flatMap((line, at) => (RULE.test(line) ? [at] : []));
+  const kept = rules.length >= 2 ? lines.slice(0, rules[rules.length - 2]) : lines;
+  return kept
+    .map((line) => line.replace(TIMER, "(…)").replace(SPINNER_GLYPH, "$1*"))
+    .join("\n")
+    .trimEnd();
+}
 
 interface Entry {
   /** A tmux server restart reuses `%n`; the pid tells the new pane from the old one. */
@@ -78,7 +116,6 @@ interface Entry {
 export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker {
   const now = deps.now ?? Date.now;
   const entries = new Map<string, Entry>();
-  let stopped = false;
   let running: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -109,18 +146,24 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
       return;
     }
     const live = panes.filter((pane) => pane.ours && !pane.dead);
-    const listed = new Set(live.map((pane) => pane.id));
+    const listed = new Map(live.map((pane) => [pane.id, pane.pid]));
     for (const [id, entry] of entries) {
-      if (!listed.has(id) && entry.createdAt < listedAt) entries.delete(id);
+      // A listed id under another pid is a reused `%n` (tmux restarted): the old pane's facts are not the new one's.
+      if (entry.createdAt < listedAt && listed.get(id) !== entry.pid) entries.delete(id);
     }
     for (const pane of live) {
-      if (stopped) return;
-      // oxlint-disable-next-line no-await-in-loop -- one capture at a time: the sampler's cost stays one tmux exec in flight
-      const screen = await deps.capture(pane.id);
-      if (screen === null || stopped) continue;
+      let screen: string | null;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one capture at a time: the sampler's cost stays one tmux exec in flight
+        screen = await deps.capture(pane.id);
+      } catch {
+        // A spawn failure (tmux briefly missing, EMFILE) is a failed capture, never a reason to reject the pass.
+        continue;
+      }
+      if (screen === null) continue;
       const at = now();
       const entry = entryFor(pane, at);
-      const hash = Bun.hash(screen);
+      const hash = Bun.hash(normaliseScreen(screen));
       if (entry.hash !== hash) {
         entry.hash = hash;
         entry.screenSince = at;
@@ -130,7 +173,6 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
   };
 
   const sample = (): Promise<void> => {
-    if (stopped) return Promise.resolve();
     running ??= pass().finally(() => {
       running = null;
     });
@@ -139,7 +181,7 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
 
   return {
     observe: (pane, state, turnEnded): void => {
-      if (stopped || !pane.ours || pane.dead) return;
+      if (!pane.ours || pane.dead) return;
       const at = now();
       const entry = entryFor(pane, at);
       if (entry.state !== state || entry.turnEnded !== turnEnded) entry.stateSince = at;
@@ -159,15 +201,15 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
       };
     },
     start: (): void => {
-      if (stopped || timer !== null) return;
-      void sample();
-      timer = setInterval(() => void sample(), deps.intervalMs ?? SAMPLE_INTERVAL_MS);
+      if (timer !== null) return;
+      void sample().catch(() => {});
+      timer = setInterval(() => void sample().catch(() => {}), deps.intervalMs ?? SAMPLE_INTERVAL_MS);
+      // The daemon's stop clears it; a handle dropped without one must not hold the process open.
+      timer.unref();
     },
     stop: (): void => {
-      stopped = true;
       if (timer !== null) clearInterval(timer);
       timer = null;
-      entries.clear();
     },
   };
 }

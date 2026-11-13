@@ -110,6 +110,18 @@ const fleetBroker: DaemonCapability = (ctx) => {
   return { stop: broker.stop, local: { broker: broker.handle } };
 };
 
+/**
+ * The custodian's per-pane facts (C15), one per process like `endedTasksFor`: a config reload restarts the daemon in
+ * process, and a tracker per instance would forget every pane's state at each one. No reader yet: the due check and
+ * its `sessions` verb are later PRs. Instances share its timer by count, so an outgoing instance's stop never
+ * halts the incoming one's sampling.
+ */
+const paneActivity = createPaneActivity({
+  panes: readPanePids,
+  capture: (paneId) => capturePane(paneId, { history: false }),
+});
+let paneActivityUsers = 0;
+
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
   // claim — said once, since it changes what an event can be trusted to mean.
@@ -127,11 +139,6 @@ const sessionEvents: DaemonCapability = (ctx) => {
   // Without a despawn nothing could close a passed session, so no ask is wired (as for the pass itself).
   // `events` is built from the ask's own `observe`, and the ask reads its `marked`: bound late.
   const late: { events?: SessionEvents } = {};
-  // The custodian's per-pane facts (C15). No reader yet: the due check and its `sessions` verb are later PRs.
-  const paneActivity = createPaneActivity({
-    panes: readPanePids,
-    capture: (paneId) => capturePane(paneId, { history: false }),
-  });
   const drainAsk =
     despawn === undefined
       ? undefined
@@ -203,10 +210,12 @@ const sessionEvents: DaemonCapability = (ctx) => {
   });
   late.events = events;
   drainAsk?.start();
+  paneActivityUsers += 1;
   paneActivity.start();
   return {
     stop: (): void => {
-      paneActivity.stop();
+      paneActivityUsers -= 1;
+      if (paneActivityUsers === 0) paneActivity.stop();
       drainAsk?.stop();
       events.stop();
     },

@@ -10493,26 +10493,39 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     grace counts from the turn's end; a later plain idle (a respawn) makes `turnEnded` false again. **`done` is
     never retained**, tasked or not: it is a report the session sends mid-turn, not a state it rests in, and an
     untasked one is refused `untasked` anyway. Hand-off and pass frames carry no state and are not retained.
-    Nothing is retained once ingest has stopped (the daemon is going away, and the memory with it). A pane with
+    Nothing is retained once ingest has stopped. The tracker is one per process, like `endedTasksFor`: a config
+    reload's stop and start keeps the facts, only a process restart loses them. A pane with
     no frame since this process started reads `state: null`: C24's `unobserved`, never closed on the screen alone.
   - **When the screen last changed.** Once a minute, one `list-panes` (the binding's format, through
     `readPanePids`, which unlike `listPanePids` throws on a failed read) and one `capture-pane` of the visible
-    screen, no history, per live `ours` pane, one capture at a time; none when there is none. The capture is
-    hashed (`Bun.hash`) at once and the text dropped: `screenSince` moves when the hash differs from the last
+    screen, no history, per live `ours` pane, one capture at a time; none when there is none. A capture
+    that throws (a spawn failure) counts as a failed one: the pass goes on and never rejects. The capture is
+    normalised (below), hashed (`Bun.hash`) at once and the text dropped: `screenSince` moves when the hash differs from the last
     one, and `sampledAt` says when it was last captured, so a reader can tell a stalled sampler from a still
     screen. The first sample of a pane counts as a change, so `screenSince` is how long the screen has been
     still as far as this process has seen, never longer: after a daemon restart nothing looks at rest earlier
     than it is. A pass asked for while one runs joins it, so a slow tmux never stacks passes.
+  - **What counts as unchanged** (`normaliseScreen`). A busy Claude repaints its own chrome with no work
+    behind it, and a session hung inside a command is a ticking spinner, so hashing the screen verbatim would
+    never read it as still (C14's "unchanged for `everyMinutes`", C27's interrupt). The hash is of the screen
+    minus: everything from the input box's top edge down (the last-but-one line made only of `─`/`━`: the
+    box, status line and hint lines, whose cost, context and clock readings move, and which change when
+    someone types); any parenthesised elapsed time with the counters beside it (`(2m 14s · ↑ 3.1k tokens ·
+    esc to interrupt)`, a running tool's `(12s)`), masked; and the spinner's animated glyph, masked. The
+    transcript is kept, so new output, a tool finishing or the spinner's verb changing still count. A screen
+    with fewer than two rule lines (an exit dialog, a non-Claude pane) is hashed whole bar the masks. Wording
+    is from Claude Code 2.1.x; what it misses can only make a still session read as moving, never the
+    reverse (open details in docs/custodian.md).
   - **Entries go when the pane does.** An entry is keyed by pane id and holds the pane's pid: a tmux server
     restart reuses `%n`, and a new pid starts a fresh entry. A successful listing prunes every entry it does not
-    list as a live `ours` pane (so a dead pane's entry goes too: C24 closes a dead pane without these facts),
+    list as a live `ours` pane, or lists under another pid (a reused `%n` must not show the old pane's state) (so a dead pane's entry goes too: C24 closes a dead pane without these facts),
     except one made after the listing began, which may be a pane newer than it. A failed listing prunes nothing.
     A failed capture leaves the entry as it was.
   - **Read API:** `activity(paneId)` → `{state, stateSince, turnEnded, screenSince, sampledAt}`, or null for a
     pane not tracked (foreign, gone, or neither sampled nor heard from). No reader yet: the due check (custodian
     PR 3) and the `sessions` verb (PR 4) are its consumers.
   - **Threat model: retention, not an act.** It gives the frame no new act: the pane is the kernel's answer
-    (the frame names nothing), only the state and `turnEnded` are kept, nothing is run, sent, forwarded or
+    (the frame names nothing, except on a host with no peer pid, where its `pane` decides, as above), only the state and `turnEnded` are kept, nothing is run, sent, forwarded or
     persisted, and no reply, forward, coalescing, hand-off, pass or drain behaviour depends on it (`onState`
     still sees tasked frames only). The sampler's subprocesses are fixed-argv tmux reads with a validated `%n`
     target. The screen's text is never kept, logged or sent; what stays is a 64-bit hash and timestamps in this

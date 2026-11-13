@@ -19,8 +19,9 @@ dead task pane, a scheduler cancel. Everything else waits for the owner, per mac
 - **A stuck session stays stuck.** A session waiting on a CI watch whose condition it lost, or
   idle mid-task without a report, sits until the owner asks it what is going on. The needs-input
   alert covers only a session waiting on the owner.
-- **Nothing reads a pane.** No code looks at a live session's screen except to spot an exit dialog,
-  so nothing can tell "finished" from "waiting" from "hung".
+- **Nothing reads a pane's meaning.** Code looks at a live session's screen to spot an exit dialog and,
+  since C15, hashes it once a minute to tell a still screen from a moving one; nothing can tell
+  "finished" from "waiting" from "hung" by what it says.
 
 The custodian is a cheap agent, one seat per machine, that walks the machine's sessions on a
 timer, closes the finished ones, nudges the stuck ones and flags what it cannot settle.
@@ -402,7 +403,14 @@ delivery); nothing else here does.
   session already at rest when the daemon restarts is `unobserved` too until its next frame; whether
   `sessions` (C23) should say why.
 - **The sampler's cost on a machine with no seat.** It runs whether or not `custodian` is configured
-  (one `list-panes` a minute, plus a capture per `ours` pane). PR 3 can start it only with the seat.
+  (one `list-panes` a minute, plus a capture per `ours` pane). Decided for C15: left running, because
+  gating it needs the config block PR 3 adds; PR 3 can start it only with the seat.
+- **What "unchanged on screen" cannot see.** The change hash drops Claude's input box and footer and masks
+  elapsed timers and the spinner glyph (DESIGN.md, "Per-pane retention"), matched on wording from Claude
+  Code 2.1.x. A release that rewords them, or a repaint nobody has listed (a rotating tip, a clock in the
+  transcript), moves the hash while the session is hung, so C27's `interrupt` would read it as moving:
+  it fails to fire, never fires wrongly. Worth checking against a live busy session when PR 3 or 5 builds
+  on it. A resize (another client attaching at another size) moves it too.
 - **The `gh` lookup's shape** for C32: by head branch, and how the PR's head is fetched to test
   that it contains the local tip once the remote branch is deleted.
 - **A closed machine.** Whether rounds run while a machine is draining. C7 already keeps the
