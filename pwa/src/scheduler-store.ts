@@ -26,7 +26,7 @@ import {
   type RelayClient,
 } from "@seance/shared";
 import { nextReveal } from "./input-debounce.ts";
-import type { FollowEnd, PreviewState, QueueState, TaskAction } from "./state.ts";
+import { worktreeFor, type FollowEnd, type PreviewState, type QueueState, type TaskAction } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
 import {
@@ -675,7 +675,7 @@ export class SchedulerStore {
       const { requires } = this.#state.form;
       const requiring = requires.length > 0 && deriveTraitsAvailability(relay) ? { requires } : {};
       const reply = await this.#client.routePreview({
-        ...taskRequest(this.#state.form, repo.origin, false),
+        ...taskRequest({ ...form, worktree: worktreeFor(form, repo.origin) }, repo.origin, false),
         ...attaching,
         ...requiring,
       });

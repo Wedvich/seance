@@ -44,6 +44,8 @@ import {
   RANGE_SPANS,
   RESCAN_IDLE,
   TARGET_METRICS,
+  withWorktree,
+  worktreeFor,
   type Effort,
   type HeldTask,
   type HistoryRange,
@@ -539,8 +541,11 @@ export class Store {
     this.dismissLayer();
   }
 
+  /** Remembered for the repo the form resolves to, so picking that repo again brings it back. */
   toggleWorktree(): void {
-    this.#patch({ form: { ...this.#state.form, worktree: !this.#state.form.worktree } });
+    const { relay, form } = this.#state;
+    const origin = resolveRepo(scopedRepos(relay.machines, form), form)?.origin ?? null;
+    this.#patch({ form: withWorktree(form, origin, !worktreeFor(form, origin)) });
   }
 
   /** A layer already showing is replaced in place: one entry per layer, never two. */
@@ -993,7 +998,7 @@ export class Store {
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
     if (level === null) return refused(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
-    const request = taskRequest(form, repo.origin, true);
+    const request = taskRequest({ ...form, worktree: worktreeFor(form, repo.origin) }, repo.origin, true);
     // Appended here so the length below is the one the leader reads; it never rewrites a prompt.
     const prompt = reported && request.prompt !== undefined ? withReportInstruction(request.prompt) : request.prompt;
     const length = prompt?.length ?? 0;

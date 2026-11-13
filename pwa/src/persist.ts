@@ -7,7 +7,16 @@ import {
   TASK_UNTIL,
   type TaskDep,
 } from "@seance/shared";
-import { DEFAULT_FORM, HELD_MAX, heldOrder, isEffort, isModel, type HeldTask, type PersistedForm } from "./state.ts";
+import {
+  DEFAULT_FORM,
+  HELD_MAX,
+  heldOrder,
+  isEffort,
+  isModel,
+  WORKTREE_REPOS_MAX,
+  type HeldTask,
+  type PersistedForm,
+} from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
@@ -74,6 +83,13 @@ function asRequires(value: unknown): readonly string[] {
   return names;
 }
 
+/** Boolean entries only, the newest `WORKTREE_REPOS_MAX` kept. */
+function asWorktreeByRepo(value: unknown): Readonly<Record<string, boolean>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const entries = Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean");
+  return Object.fromEntries(entries.slice(Math.max(0, entries.length - WORKTREE_REPOS_MAX)));
+}
+
 /** Hand-validated rather than trusted: this is last week's build's output. */
 export function readForm(): PersistedForm {
   const raw = readJson(FORM_KEY);
@@ -91,6 +107,7 @@ export function readForm(): PersistedForm {
     repo: asString(record["repo"]) ?? (record["auto"] === true ? asString(record["autoRepo"]) : null),
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
+    worktreeByRepo: asWorktreeByRepo(record["worktreeByRepo"]),
     model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,
     effort: isEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
     after: asDeps(record["after"]),

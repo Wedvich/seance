@@ -40,7 +40,7 @@ import {
   type UploadOptions,
 } from "@seance/shared";
 import { openDeepLink } from "../src/deep-link.ts";
-import { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, type HeldTask } from "../src/state.ts";
+import { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, WORKTREE_REPOS_MAX, type HeldTask } from "../src/state.ts";
 import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
@@ -3774,6 +3774,78 @@ describe("authoring a task from the auto form", () => {
       prompt: "keep",
       after: [{ task: "base", after: "opened" }],
     });
+  });
+});
+
+describe("the fresh worktree choice", () => {
+  let timers: ReturnType<typeof captureTimers>;
+  let fake: ReturnType<typeof fakeHistory>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+    fake = fakeHistory();
+  });
+
+  afterEach(() => {
+    timers.restore();
+    fake.restore();
+  });
+
+  const OPS = "github.com/acme/ops";
+  const twoRepos = (): ScriptedClient =>
+    new ScriptedClient({
+      machines: [
+        autoMachine("dev-a", {
+          repos: [
+            { name: "app", path: "/r/dev-a/app", defaultBranch: "main", origin: ORIGIN },
+            { name: "ops", path: "/r/dev-a/ops", defaultBranch: "main", origin: OPS },
+          ],
+        }),
+      ],
+    });
+
+  test("is remembered per repo: picking a repo again brings back the last choice made there", async () => {
+    const client = twoRepos();
+    const store = new Store(client, { ...DEFAULT_FORM, repo: ORIGIN, prompt: "fix it" });
+    store.toggleWorktree();
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+
+    // A repo never toggled starts from the last choice made anywhere.
+    store.selectRepo(OPS);
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+    store.toggleWorktree();
+    expect(deriveView(store.getState(), 0).worktree).toBe(true);
+
+    store.selectRepo(ORIGIN);
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+    await store.spawn();
+    expect(firstCreate(client).spec).toMatchObject({ repo: ORIGIN, mode: "here" });
+    // The routing preview asks with the repo's own choice too.
+    expect(client.previews.at(-1)).toMatchObject({ repo: ORIGIN, mode: "here" });
+
+    store.selectRepo(OPS);
+    expect(deriveView(store.getState(), 0).worktree).toBe(true);
+    await store.spawn();
+    expect(client.creates[1]?.spec).toMatchObject({ repo: OPS, mode: "worktree" });
+  });
+
+  test("with no repo picked, it belongs to the repo the form resolves to", () => {
+    const store = new Store(twoRepos(), { ...DEFAULT_FORM, repo: null });
+    store.toggleWorktree();
+    expect(store.getState().form.worktreeByRepo).toEqual({ [ORIGIN]: false });
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+  });
+
+  test("a repo toggled past the bound evicts the oldest choice, not the newest", () => {
+    const remembered = Object.fromEntries(
+      Array.from({ length: WORKTREE_REPOS_MAX }, (_, i) => [`github.com/acme/r${i}`, true]),
+    );
+    const store = new Store(twoRepos(), { ...DEFAULT_FORM, repo: OPS, worktreeByRepo: remembered });
+    store.toggleWorktree();
+    const kept = Object.keys(store.getState().form.worktreeByRepo);
+    expect(kept).toHaveLength(WORKTREE_REPOS_MAX);
+    expect(kept).not.toContain("github.com/acme/r0");
+    expect(kept.at(-1)).toBe(OPS);
   });
 });
 
