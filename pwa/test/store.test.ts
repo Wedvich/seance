@@ -4572,21 +4572,31 @@ describe("a closed machine's drain reads", () => {
     await drain();
     const base = asked(client);
     const realNow = Date.now;
+    const timers = captureTimers();
     let now = 1_000_000;
     Date.now = () => now;
     try {
       client.nudge({ at: 2, tasks: ["x"] });
       await drain();
       expect(asked(client)).toBe(base + 1);
+      // Dropped inside the spacing, but read once it ends: the last nudge of a burst is never lost.
+      now += 4_000;
       client.nudge({ at: 3, tasks: ["x"] });
-      await drain();
-      expect(asked(client)).toBe(base + 1);
-      now += 11_000;
       client.nudge({ at: 4, tasks: ["x"] });
       await drain();
+      expect(asked(client)).toBe(base + 1);
+      expect(timers.armed(6_000)).toBe(1);
+      now += 6_000;
+      timers.fire(6_000);
+      await drain();
       expect(asked(client)).toBe(base + 2);
+      now += 11_000;
+      client.nudge({ at: 5, tasks: ["x"] });
+      await drain();
+      expect(asked(client)).toBe(base + 3);
     } finally {
       Date.now = realNow;
+      timers.restore();
     }
     detach();
 

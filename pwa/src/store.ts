@@ -198,6 +198,8 @@ export class Store {
   #closedSess = new Map<string, string>();
   /** When a queue nudge last re-read the closed machines' sessions: a box parked closed for days must not cost a read per nudge. */
   #nudgeReadAt = 0;
+  /** The one trailing read for nudges dropped inside the spacing, so the last of a burst is never lost. */
+  #nudgeTimer: ReturnType<typeof setTimeout> | null = null;
   /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
   #historyRange: HistoryRange = DEFAULT_HISTORY_RANGE;
   /** Tells this document's history entries from ones a previous load left behind. */
@@ -331,10 +333,15 @@ export class Store {
     document.addEventListener("visibilitychange", onVisibility);
     const unsubscribeQueue = this.#client.onQueueChanged((change) => {
       this.#queue.onQueueChanged(change);
-      const now = Date.now();
-      if (now - this.#nudgeReadAt < CLOSED_SESSIONS_NUDGE_MS) return;
-      this.#nudgeReadAt = now;
-      this.#refreshClosedSessions();
+      const wait = CLOSED_SESSIONS_NUDGE_MS - (Date.now() - this.#nudgeReadAt);
+      if (wait <= 0) {
+        this.#readOnNudge();
+        return;
+      }
+      this.#nudgeTimer ??= setTimeout(() => {
+        this.#nudgeTimer = null;
+        this.#readOnNudge();
+      }, wait);
     });
     const unsubscribeAccounts = this.#client.onStoreChanged((key, version) =>
       this.#accounts.onStoreChanged(key, version),
@@ -348,6 +355,7 @@ export class Store {
       attached = false;
       document.removeEventListener("visibilitychange", onVisibility);
       this.#disarmUndo();
+      this.#clearNudgeTimer();
       this.#queue.dispose();
       this.#accounts.dispose();
       this.#archive.dispose();
@@ -396,6 +404,7 @@ export class Store {
       this.#wokenAt = new Map();
       this.#closedSess = new Map();
       this.#nudgeReadAt = 0;
+      this.#clearNudgeTimer();
       this.#queue.onDrop();
       this.#wasOpen = false;
       this.#sentOnSettle = false;
@@ -447,18 +456,31 @@ export class Store {
   /**
    * A closed machine's sessions are what its drain row counts, and they change without its register
    * (a pass closes a pane): re-read them when the queue changes and when its status's per-exclave
-   * session counts do, never on a timer; a queue nudge at most once per `CLOSED_SESSIONS_NUDGE_MS`
-   * (a status change carries on from there). Only under a `drainPass` leader, and not for a machine
+   * session counts do, never on a poll; a queue nudge at most once per `CLOSED_SESSIONS_NUDGE_MS`
+   * (one dropped inside it is read when the spacing ends; a status change carries on from there). Only under a `drainPass` leader, and not for a machine
    * `woken` already read this call.
    */
-  #refreshClosedSessions(skip: readonly { readonly deviceId: string }[] = []): void {
+  #refreshClosedSessions(skip: readonly { readonly deviceId: string }[] = []): boolean {
     const { relay } = this.#state;
-    if (relay.status !== "open" || !deriveDrainAvailability(relay)) return;
+    if (relay.status !== "open" || !deriveDrainAvailability(relay)) return false;
     const skipped = new Set(skip.map((machine) => machine.deviceId));
     const due = relay.machines
       .filter((machine) => machine.connected && closedAt(machine) !== null && !skipped.has(machine.deviceId))
       .map((machine) => machine.deviceId);
-    if (due.length > 0) void this.#fetchSessions(due);
+    if (due.length === 0) return false;
+    void this.#fetchSessions(due);
+    return true;
+  }
+
+  /** The spacing opens only on a read actually issued: a nudge that found nothing closed spends none of it. */
+  #readOnNudge(): void {
+    if (this.#refreshClosedSessions()) this.#nudgeReadAt = Date.now();
+  }
+
+  #clearNudgeTimer(): void {
+    if (this.#nudgeTimer === null) return;
+    clearTimeout(this.#nudgeTimer);
+    this.#nudgeTimer = null;
   }
 
   /** On a relay change: the closed machines whose reported session counts moved since last seen. */
