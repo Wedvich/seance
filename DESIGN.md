@@ -3347,7 +3347,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   Every clone is a candidate for a task carrying `succeeds`, the old one included: the successor
   never checks the remote branch out under its own name, so no local branch is shared between
   worktrees. A candidate on the predecessor's account (`succeeds.account`) is `predecessor_account`
-  only for `trigger: "quota"`, which only stage 3 writes (built); a manual or session pass relies on the
+  only for `trigger: "quota"`, which only stage 3 writes (built); a drain successor relies on the `closed` filter alone, which is what keeps it off the closed machine (its account may be the predecessor's and welcome elsewhere on that machine's peers); a manual or session pass relies on the
   quota filter, since a full or over-the-line account is already rejected and a pass is also how
   a long session gives a fresh context to an account with headroom (decided by the orchestrator).
   Stage 3 emits it from `placementFilter`, so an automatic successor never lands back on the
@@ -4112,7 +4112,7 @@ reuses the record helpers.
   `TaskSpec.succeeds { task, account, at, trigger }` rides the sealed record as any spec field, parsed
   by `parseTaskSpec` (and so by `createTask` and every reseal). `account` is the old exclave's
   `accountId`, `at` the old assignment as a `Target` (display and stage 3; nothing routes on its
-  clone), `trigger` `"session"`, `"manual"` or `"quota"`, the last with `since`, the reading's time in epoch
+  clone), `trigger` `"session"`, `"manual"`, `"quota"` or `"drain"` (a closed machine's pass), `"quota"` with `since`, the reading's time in epoch
   ms, which no other trigger may carry. It is refused with a `mode` other than
   `worktree`, with `continues` and with `attachments`, and `succeeds.task === id` is `malformed` in
   `bindTaskRecord`, as a self-continuation is. `Task.successor` is the forward link; `parseTask`
@@ -7665,28 +7665,28 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 - **The `pass` op and its refusals (D11).** The same structured codes on every outside surface (PWA,
   `seanced pass`, `pass_task`):
 
-  | Code                     | When                                                                  |
-  | ------------------------ | --------------------------------------------------------------------- |
-  | `task_not_found`         | the leader holds no such task                                         |
-  | `finished`               | already finished (a `superseded` one answers `ok` with its successor) |
-  | `dispatching`            | `reserved`                                                            |
-  | `not_running`            | waiting states, `lost`, `awaiting-merge`, or no assignment            |
-  | `needs_input`            | `needs-input`, outside paths: never moved while a person is asked     |
-  | `here`                   | `spec.mode === "here"`: no worktree branch of its own                 |
-  | `offline`                | the old machine is not connected                                      |
-  | `successor_unsupported`  | the old machine does not advertise `successor`                        |
-  | `account_unknown`        | the old exclave reports no `accountId`                                |
-  | `pr_unreadable`          | the task has a GitHub PR and the leader could not read its head       |
-  | `pr_not_open`            | the task's PR is already merged or closed: nothing to pass            |
-  | `branch_mismatch`        | the remote branch is not the PR's head, or the PR is from a fork      |
-  | `dirty_worktree`         | uncommitted or untracked changes                                      |
-  | `detached_head`          | the worktree is on no branch                                          |
-  | `default_branch`         | the local or the remote branch is the repo's default branch           |
-  | `push_rejected`          | non-fast-forward or a protected ref: never forced                     |
-  | `push_failed`            | git failed, timed out, refused repo config or started late            |
-  | `not_launched`           | the old machine's ledger holds no worktree launch of the task         |
-  | `pass_failed`            | the successor's create was refused or went unanswered                 |
-  | `conflict`, `unrecorded` | as for `cancel` (`unrecorded` is wire `internal_error`)               |
+  | Code                     | When                                                                                                              |
+  | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+  | `task_not_found`         | the leader holds no such task                                                                                     |
+  | `finished`               | already finished (a `superseded` one answers `ok` with its successor)                                             |
+  | `dispatching`            | `reserved`                                                                                                        |
+  | `not_running`            | waiting states, `lost`, `awaiting-merge`, or no assignment                                                        |
+  | `needs_input`            | `needs-input`, outside paths: never moved while a person is asked, but a drain pass (`trigger: "drain"`) moves it |
+  | `here`                   | `spec.mode === "here"`: no worktree branch of its own                                                             |
+  | `offline`                | the old machine is not connected                                                                                  |
+  | `successor_unsupported`  | the old machine does not advertise `successor`                                                                    |
+  | `account_unknown`        | the old exclave reports no `accountId`                                                                            |
+  | `pr_unreadable`          | the task has a GitHub PR and the leader could not read its head                                                   |
+  | `pr_not_open`            | the task's PR is already merged or closed: nothing to pass                                                        |
+  | `branch_mismatch`        | the remote branch is not the PR's head, or the PR is from a fork                                                  |
+  | `dirty_worktree`         | uncommitted or untracked changes                                                                                  |
+  | `detached_head`          | the worktree is on no branch                                                                                      |
+  | `default_branch`         | the local or the remote branch is the repo's default branch                                                       |
+  | `push_rejected`          | non-fast-forward or a protected ref: never forced                                                                 |
+  | `push_failed`            | git failed, timed out, refused repo config or started late                                                        |
+  | `not_launched`           | the old machine's ledger holds no worktree launch of the task                                                     |
+  | `pass_failed`            | the successor's create was refused or went unanswered                                                             |
+  | `conflict`, `unrecorded` | as for `cancel` (`unrecorded` is wire `internal_error`)                                                           |
 
   A `needs-input` task is refused on the outside paths in v1 (decided by the orchestrator): the person
   can answer or cancel first, and widening it is cheap later. The self path accepts it (_Decided_: a
@@ -7781,7 +7781,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   one is already `superseded`); a successor whose session ends with the PR open goes `awaiting-merge`
   like any task, the old one never does.
 - **Measures**, read from audit and leader logs with no new storage: passes per week by trigger (the
-  leader's `audit pass … trigger=<t>` line); time from limit to successor running (a quota pass
+  leader's `audit pass … trigger=<t>` line, `<t>` being `manual`, `session`, `quota` or `drain`); time from limit to successor running (a quota pass
   stamps `succeeds.since`, and the leader logs `successor placed task=<id> after=<ms> from=since|created`
   each time the successor moves from `reserved` to `running` or `needs-input`, counted from `since` for a
   quota pass and from its `createdAt` otherwise; for a manual or session pass, which has no limit time, it measures the pass to the
@@ -7912,11 +7912,13 @@ waiting task's prompt, title, model and effort in place, under its own id.
   op's strict keys leave room for them as they leave it for `deps`. A version-number `expect` in place of `basis`: an app never sees the store
   version of a leader write it did not make, and a hash survives a leader rewriting only state.
 
-## Closing a machine (`availability`) — built 2026-11-13 (drain 1/N)
+## Closing a machine (`availability`) — built 2026-11-13 (drain 1/3, 2/3)
 
 docs/drain.md is the spec of the whole feature; this section is what its first build-order item
-decided. Closing stops the scheduler placing new work on a machine and moves nothing already there:
-running sessions finish in place. The drain (moving the work off) is later items.
+decided. Closing stops the scheduler placing new work on a machine. What already runs there is passed to
+other machines after a grace, by the leader (item 2, "The drain's outside pass" below); asking the
+session to pass itself first (item 3) is spec only, so until it lands a session may still be passed
+with an uncommitted tree refused (`dirty_worktree`).
 
 - **State is the daemon's own and sticky.** `state.json` carries `closed: { at }` (absent when
   open); it survives restarts, tmux restarts and reboots until reopened. `loadOrInitState` fails
@@ -7958,9 +7960,9 @@ running sessions finish in place. The drain (moving the work off) is later items
   waits ("closed to new work") until the machine reopens. Closing is about what the scheduler does, not
   about locking the box.
 - **Capabilities.** `CAPABILITIES.close` (a daemon answers `availability`) and `CAPABILITIES.drain` (a
-  leader routes around `cl` and sends `routesClosed`; named for the feature, though item 1 only closes: in
-  this build `drain` means exactly that, and the drain's outside pass and session ask each add a capability of their own, so
-  a client can tell the builds apart).
+  leader routes around `cl` and sends `routesClosed`; named for the feature: `drain` means exactly that, and
+  the drain's outside pass (`CAPABILITIES.drainPass`, built) and the session ask (`CAPABILITIES.drainAsk`,
+  not built) each have a capability of their own, so a client can tell the builds apart).
   A close is offered only to a target advertising `close` under a verified leader advertising `drain`; a
   reopen needs only `close`.
 - **Surfaces.** The PWA's Machines screen has an "Open for work" switch in the machine's menu, a Closed
@@ -7970,7 +7972,8 @@ running sessions finish in place. The drain (moving the work off) is later items
   null on `list_machines`. The tool ends nothing and sends no keys, but, like `pass_task`, it changes
   what the fleet does, so it stays behind Claude Code's per-tool approval and is never allowlisted (docs/psk.md).
   The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
-  `parseMachineStatus` ignores `cl`.
+  `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
+  row, `--wait` and `list_machines`' `drain` (below).
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
   sealed and replay-guarded, answered only for an app, and audited.
 
@@ -7986,30 +7989,71 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and adve
   push through `pushTaskBranch`, the successor's create, the `pass-close`, all as a manual pass does,
   audited `pass … trigger=drain` under origin `leader`. The successor's `succeeds.trigger` is `"drain"`
   and it keeps the predecessor's `steer` (`successorSpec`: a drain is not the task's own judgement call,
-  unlike a quota pass). `trigger: "drain"` is the one trigger that lifts the `needs_input` refusal;
-  manual passes still refuse a `needs-input` task. Not gated on placement: the successor is routed by
-  the ordinary pass, never onto the closed machine (the `closed` filter).
+  unlike a quota pass; a manual pass still makes it `checkpoint`). `trigger: "drain"` lifts the
+  `needs_input` refusal, as the session's own pass already does (its caller waits on nobody): the drain
+  is the owner's act on the machine they closed (N4), so a task waiting on them is passed too, and manual
+  and quota passes still refuse it. The leader's three `needs-input` checks in `#runPass` (the entry, the
+  recheck after the push, the commit) widen together. The app's `pass` op cannot reach the drain trigger.
+  Only a worktree task (never `here`) on a connected machine advertising `successor` whose status carries
+  `cl` is due (`drainDue`). Not gated on placement: the successor is routed by the ordinary pass, never
+  onto the closed machine (the `closed` filter, not `predecessor_account`), and waits `ready` when no
+  machine can take it.
 - **Grace.** The leader waits `drainSelfPassMs` (10 minutes) after `cl` on every machine, its own
   included, through the one predicate `drainWaitMs`: a reopen inside it stops the drain before any
-  session is touched. The texts a client shows say "10 minutes".
+  session is touched. The texts a client shows say "10 minutes": a literal in the close sheet, `seanced
+  close` and MCP `set_machine_open`, noted beside `drainSelfPassMs`, since a client cannot read the
+  leader's config. docs/drain.md's "pass at once when the machine lacks `successorSelf`" is not built:
+  every machine gets the grace, so a mistaken close is recoverable and a session may pass itself
+  meanwhile. `drainAsk` is defined and advertised by nobody; this leader does not read it.
 - **One at a time per machine, detached.** `#drainPasses` holds the in-flight pass per machine; the
-  scheduler pass never awaits a push.
+  scheduler pass never awaits a push. A finished pass frees its machine before its own `tick`, which
+  starts the next task, so a drain costs one push per task rather than one per tick. A task under a
+  quota pass (`#autoPasses`) or a manual one (`#passInFlight`) is skipped, so the drain never joins
+  or races it.
 - **`Task.drained { at, tried, refused?, held? }`** is the write-ahead stamp, written before the push:
   `at` is the `cl` it was for, so a later close of the same machine is a new drain. A stamp whose
-  pass did not finish is retried after `drainRetryMs` (5 minutes). `conflict` and `unrecorded` write
-  `held` and are never retried for the same `cl`; any other refusal is `refused: <code>`, shown by
-  clients and retried after the same delay. A finished task drops the stamp (`advance`).
+  pass did not finish is retried after `drainRetryMs` (5 minutes), the retry being a decision: a refusal
+  is often a tree the session has yet to commit, and the drain has no other way to try again while the
+  machine stays closed. A refusal that precedes the create (`refused: <code>`) is shown by clients and
+  retried after the same delay; so is a `conflict` that precedes the create (the task moved under the
+  push, or a cancel is out), as the quota path does. A `conflict` that follows the create (the commit
+  declined) writes `held` and is never retried for that `cl`, or a second successor would follow; the
+  leader tells the two apart by whether a task carrying `succeeds.task === id` exists. `unrecorded`
+  (the term ended between the create and the commit) writes nothing, as the follow-up write would meet
+  the same revoked term: the next term retries after `drainRetryMs` and the first successor is an orphan
+  that admission fails `pass_abandoned`, as for any pass cut off there. A finished task drops the stamp
+  (`advance`).
 - **Progress is `drainView`** (`shared/src/drain.ts`), pure, the one rule the PWA, MCP `list_machines`
   and `seanced close --wait` share. It reads a queue reply's tasks and the machine's `sessions` and
   returns `moving`, `moved`, `stuck` (`here`, `untasked`, `unplaced`, `refused`) and `empty`. A pane
-  whose task the (capped) queue reply does not list counts as moving; `--wait` asks for it by id.
+  whose task the (capped) queue reply does not list counts as moving; the CLI's `--wait` and MCP ask
+  for it by id (`queueTasksFor`). Through the fleet broker the by-id read is dropped (its `queue` leg
+  carries no request; `SchedulerLeg.queueByIdUnsupported`), so there a task missing from the reply
+  counts as moving: a long-running task on a closed box can fall out of a capped reply under a backlog,
+  and `--wait` then waits on it until the queue shrinks. Kept: a broker request carrying `tasks` is a
+  wire change to a deliberately narrow frame. A successor still waiting for a machine is counted once,
+  as stuck `unplaced`, never also as moved.
 - **Surfaces.** The PWA's close sheet counts the tasks that will be passed and lists what cannot move
   (runs in the clone, not a task); a closed machine's row shows "Draining: moving N · M stuck" and
-  re-reads its sessions on `queue-changed`, when the Machines screen opens and when its status's session
-  counts change. `seanced close [--wait]` exits 0 when empty, 2 when only stuck work is left, 1 on a
-  failure, reopen or offline; it uses the close reply's `closed` as the drain's `cl` since status lags.
+  re-reads its sessions on `queue-changed` (at most once per ten seconds: a box parked closed for days
+  must not cost a read per nudge), when the Machines screen opens and when its status's session
+  counts change; a sessions read not yet answered reads "reading", an unanswered one "unknown". The
+  sheet folds a `needs-input` task into "N running tasks" where docs/drain.md §8 wanted a separate
+  "waiting on you" line, and lists an untasked pane per line rather than counting it. `seanced close
+  [--wait]` exits 0 when empty (a successor still `unplaced` is listed after "is empty" and does not
+  block it), 2 when only stuck work is left, 1 on a failure; it uses the close reply's `closed` as the
+  drain's `cl` since status lags. Exit 1 also covers a reopen (no `cl` after this close's own showed, or
+  a later one: an older close's `cl` is the lag, not a reopen), three polls in a row offline (one is a
+  daemon restarting itself), and sixty unreadable polls in a row.
   MCP `list_machines` adds `drain` to a closed machine, reading this machine's own sessions through
   `local.request` (the broker refuses `self_target`).
+- **Skew.** An older PWA, MCP or archivist parsing a queue reply drops a `trigger: "drain"` successor
+  (it fails their `parseSucceeds`), as for `"quota"`; an older leader nominee holds such a record
+  unreadable and never places it, and a rolled-back leader neither reads `Task.drained` nor drains at all. A new client against an older leader shows item 1's
+  behaviour (no `drainPass`). Deploy order: daemons, then PWA/CLI.
+- **Deferred.** docs/drain.md's step A (the session ask, item 3), §6 (a closed leader keeps leading; the
+  sheet's warning about the only nominee) and §12's time-from-close-to-empty measure are not built; the
+  pass's own `audit pass … trigger=drain` line is the one measure.
 - **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
   the stamp is written only by the leader through the one task sealer, never from a frame.
 
