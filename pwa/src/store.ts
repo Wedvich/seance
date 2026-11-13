@@ -61,6 +61,7 @@ import {
   type HistoryResult,
   type HistoryTarget,
   type HistoryView,
+  type DeviceAvailability,
   type Model,
   type PersistedForm,
   type OlderPick,
@@ -162,6 +163,9 @@ function enqueueFailureText(failure: RequestFailure): string {
 }
 
 const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that settle on a done report yet.";
+
+/** How long a close or reopen's asked state is held for the machine's status to catch up (the relay's floor is ~10 s). */
+const AVAILABILITY_HOLD_MS = 20_000;
 
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
@@ -1060,34 +1064,47 @@ export class Store {
 
   /**
    * Closes or reopens one machine to new scheduled work (`availability`). Nothing else to apply on
-   * success: the machine's next `status` carries `cl`. The switch shows the asked state meanwhile.
+   * success: the machine's next `status` carries `cl`, so the asked state is held (`sent`) meanwhile.
+   * Machines are independent: only a second toggle of the same machine mid-request is dropped.
    */
   async setMachineOpen(deviceId: string, open: boolean): Promise<void> {
-    if (this.#state.availability.kind === "sending") return;
+    if (this.#state.availability[deviceId]?.kind === "sending") return;
     const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+    if (machine === undefined) {
+      this.#setAvailability(deviceId, { kind: "failed", text: "This machine isn't listed right now" });
+      return;
+    }
     // A close is offered only to a verified drain-capable leader (an older one would fail the tasks it sends); checked again at send.
-    if (machine === undefined || (!open && !deriveCloseAvailability(this.#state.relay, machine))) {
-      this.#patch({
-        availability: { kind: "failed", deviceId, text: "The scheduler can't route around a closed machine yet" },
+    if (!open && !deriveCloseAvailability(this.#state.relay, machine)) {
+      this.#setAvailability(deviceId, {
+        kind: "failed",
+        text: "The scheduler can't route around a closed machine yet",
       });
       return;
     }
-    this.#patch({ availability: { kind: "sending", deviceId, open } });
+    this.#setAvailability(deviceId, { kind: "sending", open });
     try {
       const reply = await this.#client.request<AvailabilityResponse>(deviceId, "availability", { open });
       const parsed = parseAvailabilityResponse(reply);
       if (parsed === null) throw new Error("unreadable reply");
       if (!parsed.ok) throw new Error(parsed.message);
-      this.#patch({ availability: AVAILABILITY_IDLE });
+      this.#setAvailability(deviceId, { kind: "sent", open });
+      const timer = setTimeout(() => {
+        if (this.#state.availability[deviceId]?.kind === "sent") this.#setAvailability(deviceId, null);
+      }, AVAILABILITY_HOLD_MS);
+      // Bun's timer is an object that would hold a test run open; a browser's is a number.
+      if (typeof timer === "object") timer.unref();
     } catch (err) {
-      this.#patch({
-        availability: {
-          kind: "failed",
-          deviceId,
-          text: `Couldn't ${open ? "reopen" : "close"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
-        },
+      this.#setAvailability(deviceId, {
+        kind: "failed",
+        text: `Couldn't ${open ? "reopen" : "close"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  #setAvailability(deviceId: string, entry: DeviceAvailability | null): void {
+    const rest = Object.fromEntries(Object.entries(this.#state.availability).filter(([id]) => id !== deviceId));
+    this.#patch({ availability: entry === null ? rest : { ...rest, [deviceId]: entry } });
   }
 
   /**

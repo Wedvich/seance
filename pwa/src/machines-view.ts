@@ -255,9 +255,9 @@ function schedulerLine(machines: readonly Machine[], scheduler: SchedulerAvailab
   return `scheduler on ${name ?? scheduler.deviceId.slice(0, 8)} · term ${scheduler.term}`;
 }
 
-/** The verified leader advertises `drain`: the gate `deriveCloseAvailability` applies, over the registry alone. */
-function leaderDrains(machines: readonly Machine[], scheduler: SchedulerAvailability): boolean {
-  if (scheduler.kind !== "ready") return false;
+/** The verified leader advertises `drain` over an open relay: the gate `deriveCloseAvailability` applies, over the registry alone. */
+function leaderDrains(machines: readonly Machine[], scheduler: SchedulerAvailability, relayOpen: boolean): boolean {
+  if (!relayOpen || scheduler.kind !== "ready") return false;
   return machines.find((m) => m.deviceId === scheduler.deviceId)?.capabilities?.includes(CAPABILITIES.drain) === true;
 }
 
@@ -466,12 +466,22 @@ export function deriveMachines(
   aliases: AccountAliases = {},
   fleetQuota: readonly FleetQuotaEntry[] = [],
   archive: ArchiveReach = NO_ARCHIVE,
+  /** The relay socket is open: a close is not offered without it, as `deriveCloseAvailability`. */
+  relayOpen = true,
 ): MachinesView {
   const known = knownAccounts(machines);
   return {
     scheduler: schedulerLine(machines, scheduler),
     cards: machines.map((machine) =>
-      machineCard(machine, now, scheduler, aliases, known, archive.machine, leaderDrains(machines, scheduler)),
+      machineCard(
+        machine,
+        now,
+        scheduler,
+        aliases,
+        known,
+        archive.machine,
+        leaderDrains(machines, scheduler, relayOpen),
+      ),
     ),
     accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),
     ranges: { machine: historyRanges(archive.machine), account: historyRanges(archive.account) },

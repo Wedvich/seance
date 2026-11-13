@@ -53,6 +53,8 @@ describe("the Open for work switch", () => {
     const closable = machine({ capabilities: [CAPABILITIES.close] });
     expect(cardOf(closable, ready, [leader])).toMatchObject({ closed: false, openSwitch: "on" });
     expect(cardOf(closable, NO_LEADER, [leader])?.openSwitch).toBeNull();
+    // Socket down: the last scheduler state is stale, and the store would refuse the close.
+    expect(deriveMachines([closable, leader], NOW, ready, {}, [], undefined, false).cards[0]?.openSwitch).toBeNull();
     expect(cardOf(closable, ready, [{ ...leader, capabilities: [] }])?.openSwitch).toBeNull();
     const closed = machine({ capabilities: [CAPABILITIES.close], status: closedStatus });
     expect(cardOf(closed, NO_LEADER)).toMatchObject({ closed: true, openSwitch: "off" });

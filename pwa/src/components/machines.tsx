@@ -170,9 +170,11 @@ function MachineCardView(props: {
   onToggleOpen: (open: boolean) => void;
 }): JSX.Element {
   const { card, history, ranges, availability, onShowHistory, onHideHistory, onToggleOpen } = props;
-  // The asked state shows while the request is out, so the switch does not bounce back until the status agrees.
-  const here = availability.kind !== "idle" && availability.deviceId === card.deviceId ? availability : null;
-  const switchOn = here?.kind === "sending" ? here.open : card.openSwitch === "on";
+  // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
+  const here = availability[card.deviceId] ?? null;
+  const asked = here?.kind === "sending" || here?.kind === "sent" ? here.open : null;
+  const switchOn = asked ?? card.openSwitch === "on";
+  const closed = here?.kind === "sent" ? !here.open : card.closed;
   const offersMenu = card.charts || history !== null || card.openSwitch !== null;
   const target: HistoryTarget = { kind: "machine", deviceId: card.deviceId };
   const menu = useMenu();
@@ -191,7 +193,7 @@ function MachineCardView(props: {
                 {card.role === "leader" ? "Scheduler" : "Unverified"}
               </span>
             )}
-            {card.closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
+            {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
           <p className="fleet-meta">{card.meta}</p>
           {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
@@ -201,7 +203,12 @@ function MachineCardView(props: {
             <MoreTrigger menu={menu} label={`More actions for ${card.name}`} />
             <Menu menu={menu} label={`Actions for ${card.name}`}>
               {card.openSwitch !== null && (
-                <MenuSwitchItem label="Open for work" checked={switchOn} onToggle={() => onToggleOpen(!switchOn)} />
+                <MenuSwitchItem
+                  label="Open for work"
+                  checked={switchOn}
+                  closesMenu={switchOn}
+                  onToggle={() => onToggleOpen(!switchOn)}
+                />
               )}
               {card.openSwitch !== null && offersHistory && <MenuDivider />}
               {offersHistory && (
@@ -456,10 +463,7 @@ function CloseMachineDialog(props: { name: string; onClose: () => void; onConfir
   return (
     <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
       <div className="rename">
-        <p className="rename-hint">
-          Closing {name} stops new work landing on it. Running work finishes where it is. A spawn you aim at it directly
-          still runs.
-        </p>
+        <p className="rename-hint">Closing {name} stops new work landing on it. Running work finishes where it is.</p>
         <div className="rename-actions">
           <button type="button" className="quiet" onClick={onClose}>
             Cancel

@@ -40,7 +40,7 @@ import type { ServerWebSocket } from "bun";
 import { pollUntil } from "./poll.ts";
 import { failureReasonText, RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
-import { AVAILABILITY_IDLE, DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
+import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
 import type { AppState } from "../src/view.ts";
 import { installBrowserGlobals } from "./stubs.ts";
@@ -2175,12 +2175,13 @@ describe("store", () => {
       await waitForApp(online(deviceId), "machine online");
       await store.setMachineOpen(deviceId, true);
       expect(asked).toEqual([{ open: true }]);
-      expect(store.getState().availability).toEqual(AVAILABILITY_IDLE);
+      // Held until the machine's status agrees, so the switch and badge do not bounce back meanwhile.
+      expect(store.getState().availability).toEqual({ [deviceId]: { kind: "sent", open: true } });
       refuse = true;
       await store.setMachineOpen(deviceId, true);
-      const failed = store.getState().availability;
-      expect(failed).toMatchObject({ kind: "failed", deviceId });
-      expect(failed.kind === "failed" ? failed.text : "").toContain("cannot");
+      const failed = store.getState().availability[deviceId];
+      expect(failed?.kind).toBe("failed");
+      expect(failed?.kind === "failed" ? failed.text : "").toContain("cannot");
     } finally {
       stop();
       daemon.close();
@@ -2207,7 +2208,7 @@ describe("store", () => {
     try {
       await waitForApp(online(deviceId), "machine online");
       await store.setMachineOpen(deviceId, false);
-      expect(store.getState().availability).toMatchObject({ kind: "failed", deviceId });
+      expect(store.getState().availability[deviceId]?.kind).toBe("failed");
       expect(asked).toEqual([]);
     } finally {
       stop();

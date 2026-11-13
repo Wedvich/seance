@@ -747,7 +747,7 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         sub = `${accountNameIn(known, form.account, aliasOf(state.accounts.aliases, form.account))} isn't signed in here`;
       }
       const here = rescan.kind !== "idle" && rescan.deviceId === machine.deviceId ? rescan.kind : null;
-      // Selectable: a direct spawn still runs there, only the scheduler's tasks stop.
+      // Selectable: a pin on it waits until it reopens, which the form's status says.
       if (!disabled && closedAt(machine) !== null) sub = `closed to scheduled work · ${sub}`;
       if (here === "scanning") sub = "scanning…";
       if (here === "failed") sub = "couldn't rescan — last known list";
