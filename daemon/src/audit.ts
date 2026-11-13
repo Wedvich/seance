@@ -20,6 +20,7 @@ import {
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
 import type { BrokerErrorCode, BrokerSchedulerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
+import type { CloseRefusal, KeptWhy } from "./custodian-frame.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
@@ -729,16 +730,28 @@ export interface CustodianAudit {
   readonly start: (exclave: string, pane: string | null, outcome: "started" | "launch_failed") => Promise<void>;
   readonly kill: (
     pane: string,
-    reason: "deadline" | "stray" | "off" | "exited",
+    reason: "deadline" | "stray" | "off" | "exited" | "done",
     outcome: "exited" | "killed" | "gone",
   ) => Promise<void>;
-  readonly end: (pane: string | null, reason: "deadline" | "exited" | "lost") => Promise<void>;
+  readonly end: (
+    pane: string | null,
+    outcome: "healthy" | "failed",
+    reason: "done" | "deadline" | "exited" | "lost",
+  ) => Promise<void>;
+  /** A `close` the round asked for, refused or done (`custodian-verbs.ts`). */
+  readonly close: (
+    pane: string,
+    taskId: string | null,
+    outcome: "exited" | "killed" | "harvested" | CloseRefusal | "not_custodian" | "internal",
+  ) => Promise<void>;
+  readonly removedWorktree: (pane: string, taskId: string, how: string) => Promise<void>;
+  readonly keptWorktree: (pane: string, taskId: string, why: KeptWhy) => Promise<void>;
 }
 
 /**
- * One line per round start, kill and end. A round has no task id, so none is named; nothing read from a pane, the
- * seed, the notes or the agent's text reaches a line. Every end is `failed` until the verbs exist (custodian PR 4
- * adds `healthy`).
+ * One line per round start, kill and end, and per `close` and worktree decision the round's verbs make. A round has
+ * no task id, so a start, kill and end name none; a close and a worktree line name the closed session's task. Nothing
+ * read from a pane, the seed, the notes, the summary or the agent's text reaches a line, and no path or branch does.
  */
 export function custodianAudit(sink: AuditSink): CustodianAudit {
   const origin: CustodianOrigin = "custodian";
@@ -751,8 +764,17 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
     kill: async (pane, reason, outcome) => {
       await sink(`audit custodian origin=${origin} op=kill pane=${pane} reason=${reason} outcome=${outcome}`);
     },
-    end: async (pane, reason) => {
-      await sink(`audit custodian origin=${origin} op=end pane=${pane ?? "-"} outcome=failed reason=${reason}`);
+    end: async (pane, outcome, reason) => {
+      await sink(`audit custodian origin=${origin} op=end pane=${pane ?? "-"} outcome=${outcome} reason=${reason}`);
+    },
+    close: async (pane, taskId, outcome) => {
+      await sink(`audit custodian origin=${origin} op=close pane=${pane} task=${taskId ?? "-"} outcome=${outcome}`);
+    },
+    removedWorktree: async (pane, taskId, how) => {
+      await sink(`audit custodian origin=${origin} op=worktree pane=${pane} task=${taskId} outcome=removed how=${how}`);
+    },
+    keptWorktree: async (pane, taskId, why) => {
+      await sink(`audit custodian origin=${origin} op=worktree pane=${pane} task=${taskId} outcome=kept why=${why}`);
     },
   };
 }

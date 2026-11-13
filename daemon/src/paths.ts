@@ -97,6 +97,10 @@ export function custodianDir(): string {
   return join(stateDir(), "custodian");
 }
 
+export function custodianRoundsPath(): string {
+  return join(custodianDir(), "rounds.jsonl");
+}
+
 export function custodianNotesPath(): string {
   return join(custodianDir(), "notes.md");
 }

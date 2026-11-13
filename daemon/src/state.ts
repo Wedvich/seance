@@ -135,7 +135,7 @@ export function custodianSeatOf(state: State): SeatRecord {
   const { lastEndedAt, round } = raw;
   const ended = finiteMs(lastEndedAt) ? { lastEndedAt } : {};
   if (!isRecord(round)) return ended;
-  const { pane, startedAt, tmpDir, exclave } = round;
+  const { pane, startedAt, tmpDir, exclave, done } = round;
   if (
     !(pane === null || (typeof pane === "string" && PANE_ID.test(pane))) ||
     !finiteMs(startedAt) ||
@@ -146,7 +146,7 @@ export function custodianSeatOf(state: State): SeatRecord {
   ) {
     return ended;
   }
-  return { ...ended, round: { pane, startedAt, tmpDir, exclave } };
+  return { ...ended, round: { pane, startedAt, tmpDir, exclave, ...(done === true ? { done } : {}) } };
 }
 
 /** State without its close, for a reopen. */

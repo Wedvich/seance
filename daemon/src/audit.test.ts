@@ -165,14 +165,35 @@ describe("custodian audit lines", () => {
     await audit.start('ex"1', "%7", "started");
     await audit.start("default", null, "launch_failed");
     await audit.kill("%7", "deadline", "killed");
-    await audit.end("%7", "deadline");
-    await audit.end(null, "lost");
+    await audit.end("%7", "failed", "deadline");
+    await audit.end(null, "failed", "lost");
+    await audit.kill("%7", "done", "exited");
+    await audit.end("%7", "healthy", "done");
     expect(out).toEqual([
       'audit custodian origin=custodian op=start exclave="ex\\"1" pane=%7 outcome=started',
       'audit custodian origin=custodian op=start exclave="default" pane=- outcome=launch_failed',
       "audit custodian origin=custodian op=kill pane=%7 reason=deadline outcome=killed",
       "audit custodian origin=custodian op=end pane=%7 outcome=failed reason=deadline",
       "audit custodian origin=custodian op=end pane=- outcome=failed reason=lost",
+      "audit custodian origin=custodian op=kill pane=%7 reason=done outcome=exited",
+      "audit custodian origin=custodian op=end pane=%7 outcome=healthy reason=done",
+    ]);
+  });
+
+  test("close and worktree lines: pane, task and an enumerated outcome, never a path or text", async () => {
+    const out: string[] = [];
+    const audit = custodianAudit((line) => void out.push(line));
+    await audit.close("%7", "t-1", "exited");
+    await audit.close("%8", null, "busy");
+    await audit.close("%9", null, "not_custodian");
+    await audit.removedWorktree("%7", "t-1", "origin");
+    await audit.keptWorktree("%7", "t-2", "dirty");
+    expect(out).toEqual([
+      "audit custodian origin=custodian op=close pane=%7 task=t-1 outcome=exited",
+      "audit custodian origin=custodian op=close pane=%8 task=- outcome=busy",
+      "audit custodian origin=custodian op=close pane=%9 task=- outcome=not_custodian",
+      "audit custodian origin=custodian op=worktree pane=%7 task=t-1 outcome=removed how=origin",
+      "audit custodian origin=custodian op=worktree pane=%7 task=t-2 outcome=kept why=dirty",
     ]);
   });
 });
