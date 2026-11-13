@@ -3,6 +3,7 @@
   "owner": { "name": "Séance" },
   "plugins": [
     { "name": "tmux-rename", "source": "./claude-mods/tmux-rename" },
-    { "name": "session-events", "source": "./claude-mods/session-events" }
+    { "name": "session-events", "source": "./claude-mods/session-events" },
+    { "name": "inbox", "source": "./claude-mods/inbox" }
   ]
 }

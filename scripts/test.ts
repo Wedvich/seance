@@ -33,7 +33,7 @@ interface Shard {
 }
 
 /** One shard each: `claude plugin test` runs one folder per call. */
-const MOD_FOLDERS = ["claude-mods/tmux-rename", "claude-mods/session-events"] as const;
+const MOD_FOLDERS = ["claude-mods/tmux-rename", "claude-mods/session-events", "claude-mods/inbox"] as const;
 
 const modShard = (folder: string): Shard => ({ name: folder, paths: [folder], runner: "claude-plugin" });
 

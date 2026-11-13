@@ -1,0 +1,5 @@
+{
+  "name": "inbox",
+  "version": "0.1.0",
+  "description": "Delivers messages from other séance sessions into this one (note, question, request) and adds read_messages"
+}

@@ -323,6 +323,10 @@ of its turn once the scheduler has recorded the pass. Allow it in the exclave th
 there too until the interrupt ends it), and keep `pass_task`, which passes
 another task and closes it at once, for tasks that are not the caller's own.
 
+`send_message` (`mcp__seance__send_message`) lets a session message another Séance session's task
+on the same machine, across Claude accounts (below, the **inbox** mod delivers it). Allow it in the
+exclave the same way, or a send stops at a permission prompt.
+
 ### 7. Optional: spawn from Raycast (macOS)
 
 On a Mac with [Raycast](https://raycast.com) installed:
@@ -372,6 +376,15 @@ signed-in account's own cached reading with a `claude -p /usage` run once it is 
 minutes old, checking every minute and whenever a session there reports. It runs this
 checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs no
 `seanced link`. A session started outside tmux reports nothing.
+
+It also installs **inbox**, which delivers messages other Séance sessions on this machine send to
+this one (`send_message`: a note, a question or a request, addressed by task id) and adds a
+`read_messages` tool for the long ones. Each message reaches the session through the mod's own
+calls, never as keystrokes, so it never touches what you are typing or answers a prompt. It runs
+this checkout's `daemon/src/main.ts inbox` with `bun` from PATH, like session-events. A session
+started outside tmux gets none, and sessions already running pick the mod up when they restart. Run
+`seanced mod install` on each machine: a self-update does not, and `seanced doctor` warns per
+exclave where it is missing.
 
 ### 9. Optional: the archivist (fleet history)
 
@@ -762,7 +775,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; `now` skips the 5-minute wait before its sessions are interrupted to pass themselves; `list_machines` shows when one was closed and, under a leader that passes its tasks on, how the drain is going), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; `now` skips the 5-minute wait before its sessions are interrupted to pass themselves; `list_machines` shows when one was closed and, under a leader that passes its tasks on, how the drain is going), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`, or messaging another session's task on this machine (a note, a question or a request; the receiver reads long ones with the inbox mod's `read_messages`), `send_message`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
