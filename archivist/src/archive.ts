@@ -344,8 +344,10 @@ export class Archive {
   }
 
   /**
-   * Every machine the archive holds an assigned task for, newest end first, so
-   * the app can offer a retired machine no page read so far names (A24, A36h).
+   * Every machine the archive holds an assigned task for, so the app can offer
+   * a retired machine no page read so far names (A24, A36h). Those off the
+   * registry come first (the only ones the app lacks), then newest end, so a cut
+   * at the cap drops live machines.
    * The name is the machines table's, else the newest row's (SQLite's bare
    * column beside a lone `max()` comes from that row). One aggregate scan of
    * `tasks`, which every page's `total` already pays; no index, since one would
@@ -358,7 +360,7 @@ export class Archive {
          FROM tasks t LEFT JOIN machines m ON m.device_id = t.device_id
          WHERE t.device_id IS NOT NULL
          GROUP BY t.device_id
-         ORDER BY lastSeen DESC, t.device_id
+         ORDER BY coalesce(m.in_registry, 0), lastSeen DESC, t.device_id
          LIMIT ?1`,
       )
       .all(limit);

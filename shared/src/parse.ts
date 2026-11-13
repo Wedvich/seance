@@ -809,7 +809,7 @@ function parseArchivedMachine(value: unknown): ArchivedMachine | null {
 /**
  * Lenient per entry, as `queue`'s tasks are: a row or machine an archivist a
  * version ahead writes in a shape this build cannot read costs that entry, not
- * the page. `machines` absent (an older archivist) stays absent.
+ * the page. `machines` absent (an older archivist) or not an array stays absent.
  */
 export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null {
   if (!isRecord(value)) return null;
@@ -822,15 +822,20 @@ export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null
   if (ok !== true || !Array.isArray(tasks) || !isUint(total)) return null;
   const cursor = next === null ? null : parseArchiveTasksCursor(next);
   if (cursor === null && next !== null) return null;
-  if (machines !== undefined && !(Array.isArray(machines) && machines.length <= ARCHIVE_MACHINES_MAX)) return null;
   return {
     ok: true,
     tasks: tasks.map(parseArchivedTask).filter((task) => task !== null),
     total,
     next: cursor,
-    ...(machines === undefined
-      ? {}
-      : { machines: machines.map(parseArchivedMachine).filter((machine) => machine !== null) }),
+    // Display only: a listing this build cannot read as an array is absent, a longer one cut to what it bounds.
+    ...(Array.isArray(machines)
+      ? {
+          machines: machines
+            .slice(0, ARCHIVE_MACHINES_MAX)
+            .map(parseArchivedMachine)
+            .filter((machine) => machine !== null),
+        }
+      : {}),
   };
 }
 

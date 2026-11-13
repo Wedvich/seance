@@ -2979,7 +2979,7 @@ describe("archive-tasks", () => {
     expect(parseArchiveTasksReply({ ...reply, ok: undefined })).toBeNull();
   });
 
-  test("machines stay absent from an older archivist, drop a bad entry, and refuse the reply when not a bounded list", () => {
+  test("machines stay absent from an older archivist, drop a bad entry, and never cost the page when not a bounded list", () => {
     const reply = { ok: true, tasks: [], total: 0, next: null } as const;
     expect(parseArchiveTasksReply(reply)).toEqual(reply);
     const gone = { deviceId: "dev-gone", name: "old-box", lastSeen: 2_000 };
@@ -2990,10 +2990,12 @@ describe("archive-tasks", () => {
         machines: [gone, unnamed, { ...gone, deviceId: "has space" }, { ...gone, lastSeen: -1 }, { ...gone, name: 1 }],
       }),
     ).toEqual({ ...reply, machines: [gone, unnamed] });
-    expect(parseArchiveTasksReply({ ...reply, machines: {} })).toBeNull();
-    expect(
-      parseArchiveTasksReply({ ...reply, machines: Array.from({ length: ARCHIVE_MACHINES_MAX + 1 }, () => gone) }),
-    ).toBeNull();
+    expect(parseArchiveTasksReply({ ...reply, machines: {} })).toEqual(reply);
+    const long = parseArchiveTasksReply({
+      ...reply,
+      machines: Array.from({ length: ARCHIVE_MACHINES_MAX + 1 }, () => gone),
+    });
+    expect(long?.ok && long.machines).toHaveLength(ARCHIVE_MACHINES_MAX);
   });
 
   test("each error code parses, an unknown one is unreadable", () => {

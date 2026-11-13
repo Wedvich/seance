@@ -161,6 +161,30 @@ describe("archive-tasks", () => {
     expect(later.tasks.length).toBeGreaterThan(0);
     expect("machines" in later).toBe(false);
   });
+
+  test("taskMachines puts machines off the registry first, breaks a tie by device id, and honours its limit", () => {
+    archive.applyFleet(
+      {
+        machines: [{ deviceId: "dev-live", name: "live", platform: "linux", build: null, connected: true }],
+        leader: null,
+      },
+      10,
+    );
+    const put = (id: string, deviceId: string, at: number): void => {
+      const row = taskRow(task({ id, assignment: { deviceId, exclave: "default", clone: "seance" } }), 1, {
+        machine: null,
+        account: null,
+      });
+      if (row === null) throw new Error("finished task refused");
+      archive.upsertTask(row, at);
+    };
+    put("t-1", "dev-live", 900);
+    put("t-2", "dev-b", 100);
+    put("t-3", "dev-a", 100);
+    put("t-4", "dev-c", 50);
+    expect(archive.taskMachines(10).map((m) => m.deviceId)).toEqual(["dev-a", "dev-b", "dev-c", "dev-live"]);
+    expect(archive.taskMachines(2).map((m) => m.deviceId)).toEqual(["dev-a", "dev-b"]);
+  });
 });
 
 describe("page filling", () => {
@@ -221,6 +245,42 @@ describe("page filling", () => {
     const key = await importPsk(toBase64(crypto.getRandomValues(new Uint8Array(32))));
     const sealed = await seal(key, { to: APP_ID, from: "archivist" }, reply);
     expect(sealed.ct.length).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+  });
+
+  test("an oversized machine is skipped, not the end of the listing, and a multibyte name is charged by bytes", () => {
+    const big = { deviceId: "dev-big", name: "b".repeat(MACHINES_BUDGET_BYTES), lastSeen: 3 };
+    const wide = { deviceId: "dev-wide", name: "\u00E5".repeat(3_000), lastSeen: 2 };
+    const small = { deviceId: "dev-small", name: "small", lastSeen: 1 };
+    const machines = [big, wide, small];
+    const listed = createTasksAnswer(fake(rows(1), machines), quiet)({}).machines ?? [];
+    expect(listed).toEqual([wide, small]);
+    expect(Buffer.byteLength(JSON.stringify(listed), "utf8")).toBeLessThanOrEqual(MACHINES_BUDGET_BYTES);
+  });
+
+  test("the listing never makes a page too large that would have fitted without it", async () => {
+    const huge: ArchivedRow = {
+      ...rows(1)[0]!,
+      machine: "m".repeat(40_000),
+    };
+    const machines = [{ deviceId: "dev-a", name: "n".repeat(7_000), lastSeen: 1 }];
+    const withList = await answerArchiveTasks(
+      plain("archive-tasks", {}),
+      APP_ID,
+      createTasksAnswer(fake([huge], machines), quiet),
+      quiet,
+    );
+    const without = await answerArchiveTasks(
+      plain("archive-tasks", {}),
+      APP_ID,
+      createTasksAnswer(fake([huge]), quiet),
+      quiet,
+    );
+    if (withList === null || without === null) throw new Error("dropped");
+    const key = await importPsk(toBase64(crypto.getRandomValues(new Uint8Array(32))));
+    const sealed = await seal(key, { to: APP_ID, from: "archivist" }, withList);
+    expect(sealed.ct.length).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    expect(parseArchiveTasksReply(withList.payload)).toMatchObject({ ok: true });
+    expect(parseArchiveTasksReply(without.payload)).toMatchObject({ ok: true });
   });
 
   test("a full page of the largest rows is cut to the budget, seals inside an envelope, and points past its last row", async () => {

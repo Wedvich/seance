@@ -55,14 +55,14 @@ function archivedEntry(row: ArchivedRow): ArchivedTask | null {
   };
 }
 
-/** The newest machines that fit `MACHINES_BUDGET_BYTES`. */
-function machinesWithin(all: readonly ArchivedMachine[]): ArchivedMachine[] {
+/** The leading machines whose JSON array fits `budget` bytes; one too big to fit is skipped, not the end. */
+function machinesWithin(all: readonly ArchivedMachine[], budget: number): ArchivedMachine[] {
   const kept: ArchivedMachine[] = [];
-  let left = MACHINES_BUDGET_BYTES;
+  let bytes = 2;
   for (const machine of all) {
-    const size = jsonBytes(machine) + 1;
-    if (size > left) break;
-    left -= size;
+    const next = bytes + jsonBytes(machine) + (kept.length > 0 ? 1 : 0);
+    if (next > budget) continue;
+    bytes = next;
     kept.push(machine);
   }
   return kept;
@@ -88,14 +88,24 @@ export function createTasksAnswer(
   return (query) => {
     const limit = query.limit ?? ARCHIVE_TASKS_PAGE;
     const { rows, total } = archive.queryTasks(query, limit + 1);
-    const machines = query.before === undefined ? machinesWithin(archive.taskMachines(ARCHIVE_MACHINES_MAX)) : null;
-    let left = REPLY_JSON_BUDGET - PAGE_FRAME_BYTES - (machines === null ? 0 : jsonBytes(machines));
+    const entries = rows.slice(0, limit).map(archivedEntry);
+    const frame = REPLY_JSON_BUDGET - PAGE_FRAME_BYTES;
+    // The first row is kept whatever its size, so the listing gets only what is left beside it: it never turns a page that fitted into one that does not.
+    const firstSize = jsonBytes(entries.find((entry) => entry !== null) ?? null) + 1;
+    const machines =
+      query.before === undefined
+        ? machinesWithin(
+            archive.taskMachines(ARCHIVE_MACHINES_MAX),
+            Math.min(MACHINES_BUDGET_BYTES, Math.max(0, frame - firstSize)),
+          )
+        : null;
+    let left = frame - (machines === null ? 0 : jsonBytes(machines));
     const tasks: ArchivedTask[] = [];
     let consumed: ArchivedRow | null = null;
     let cut = false;
     let unreadable = 0;
-    for (const row of rows.slice(0, limit)) {
-      const entry = archivedEntry(row);
+    for (const [index, row] of rows.slice(0, limit).entries()) {
+      const entry = entries[index] ?? null;
       if (entry === null) {
         unreadable += 1;
         consumed = row;
