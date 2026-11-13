@@ -1,0 +1,5 @@
+{
+  "name": "text-in",
+  "version": "0.1.0",
+  "description": "Spike: deliver text into a live session (submit, append, read_messages)"
+}
