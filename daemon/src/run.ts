@@ -23,7 +23,7 @@ import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
 import { attachmentsRoot, taskAttachments } from "./attachments.ts";
 import { createHandler, createLocalOps, type HandlerContext, type MachineAvailability } from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
-import { createLeader, type Leader, type QueueStore } from "./leader.ts";
+import { createLeader, type Leader, type QueueStore, type SchedulerConfig } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { sealMachineInfo } from "./machine-info.ts";
@@ -125,6 +125,8 @@ export interface RunOpts {
     readonly store?: QueueStore;
     readonly tickIntervalMs?: number;
     readonly takeoverRetryMs?: number;
+    /** Tests shorten the drain's grace and retry; production runs `DEFAULT_CONFIG`. */
+    readonly config?: SchedulerConfig;
     /** Tests point the PR poller at a `gh` stub; production runs its defaults. */
     readonly prStatus?: PrPollerOpts;
   };
@@ -558,6 +560,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : { storeLeg: { store: (frame) => client.store(frame) }, key }),
     ...(opts.leader?.tickIntervalMs === undefined ? {} : { tickIntervalMs: opts.leader.tickIntervalMs }),
     ...(opts.leader?.takeoverRetryMs === undefined ? {} : { takeoverRetryMs: opts.leader.takeoverRetryMs }),
+    ...(opts.leader?.config === undefined ? {} : { config: opts.leader.config }),
     now,
     httpFetch,
     // The relay's own origin: a contact the push services can show, and no person's address.

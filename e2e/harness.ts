@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config, TraitsConfig } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
-import type { QueueStore, Task } from "../daemon/src/leader.ts";
+import { DEFAULT_CONFIG, type QueueStore, type Task } from "../daemon/src/leader.ts";
 import { createQueueStore, type StoreLeg } from "../daemon/src/queue-store.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { identityOfState, loadOrInitState, readState } from "../daemon/src/state.ts";
@@ -59,6 +59,9 @@ Object.defineProperty(globalThis, "history", {
   value: { state: null, pushState(): void {}, replaceState(): void {}, back(): void {}, go(): void {} },
   configurable: true,
 });
+
+/** What the suite's leader waits after a close before it passes a machine's tasks on (`drainSelfPassMs`). */
+export const DRAIN_GRACE_MS = 1_500;
 
 export const TOKEN = "e2e-bearer";
 export const PSK = toBase64(new Uint8Array(32).fill(5));
@@ -301,7 +304,12 @@ export async function startStack(
       fleetQuota: { intervalMs: 500 },
       httpFetch: pushGuardFetch(pushAttempts),
       // A failed takeover still retries promptly: only the regular tick waits the hour.
-      ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } } : {}),
+      ...(quiet ? { telemetryIntervalMs: QUIET_MS } : {}),
+      // The drain's 10-minute grace and 5-minute retry would outlast any test: seconds here.
+      leader: {
+        config: { ...DEFAULT_CONFIG, drainSelfPassMs: DRAIN_GRACE_MS, drainRetryMs: DRAIN_GRACE_MS },
+        ...(quiet ? { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } : {}),
+      },
     });
 
   let daemon = await startTestDaemon().catch(failed);
