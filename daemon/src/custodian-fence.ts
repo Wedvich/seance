@@ -117,6 +117,22 @@ const TMUX_DENIED = [
   "switchc",
   "detach-client",
   "detach",
+  // The server writes the buffer as the user, outside the sandbox (`capture-pane -b x` fills one); `-C` on attach reads
+  // commands from stdin, past every entry here; the lock family runs `lock-command`; the modes make the drain ask's
+  // `send-keys -l` land as mode keys and `capture-pane` hash another screen; `server-access` edits the server's ACL.
+  "save-buffer",
+  "saveb",
+  "attach-session",
+  "attach",
+  "lock-server",
+  "lock",
+  "lock-session",
+  "locks",
+  "lock-client",
+  "lockc",
+  "copy-mode",
+  "clock-mode",
+  "server-access",
 ] as const;
 
 /**
@@ -138,6 +154,7 @@ const GH_WRITE_VERBS = [
   "cancel",
   "rerun",
   "update-branch",
+  "delete-asset",
   "revert",
   "lock",
   "unlock",

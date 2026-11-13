@@ -8707,7 +8707,7 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
     spec missed (`killp`, `killw`, `unlink-window`, `send-prefix`); tmux's other writers of state a reader trusts, or of commands that run later
     (`set-environment`, which every session started later inherits, `bind-key`, `display-menu`, `select-pane`, whose
     `-T` sets the title `isRegistered` reads, the `rename-*`, `swap-*`, `move-*`, `link-window`, `join-pane`,
-    `break-pane`, `switch-client` and `detach-client` families); and `gh`'s further write verbs (`update-branch`,
+    `break-pane`, `switch-client` and `detach-client` families; `save-buffer`, which writes a buffer to any path as the user, `attach-session`, whose `-C` reads commands from stdin, the `lock-*` family, which runs `lock-command`, `copy-mode`, `clock-mode` and `server-access`); and `gh`'s further write verbs (`update-branch`, `delete-asset`,
     `revert`, `lock`, `pin`, `transfer`, `develop`, `archive`, `rename`, `sync`, `fork`, `add`, `upload`, `set`,
     `clone`, `link`, `copy`, `item-*`, `field-*`, `mark-template`, …). `capture-pane`, `list-*`,
     `display-message` and the `gh` read verbs stay free (a test checks it). Every entry tested was refused with
