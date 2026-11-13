@@ -168,7 +168,7 @@ export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAI
   const n = view.moving.length;
   if (n > 0 && asks) {
     lines.push(
-      `${n === 1 ? "1 running task" : `${n} running tasks`} will be asked to pass ${n === 1 ? "itself" : "themselves"} at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.`,
+      `${n === 1 ? "1 running task" : `${n} running tasks`} will be asked to pass ${n === 1 ? "itself" : "themselves"} at ${n === 1 ? "its" : "their"} next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.`,
     );
     // A question is dismissed by the interrupt; a permission wait is interrupted at the deadline like a busy turn.
     const waiting = view.moving.filter(

@@ -167,10 +167,10 @@ describe("the close sheet for a drainAsk machine", () => {
   test("says the sessions are asked to pass themselves, and what is left is passed in 10 minutes only under drainPass", () => {
     expect(deriveCloseSheet(asks, inputs([running("t1")]))).toEqual([
       "Closing mac stops new work landing on it.",
-      "1 running task will be asked to pass itself at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
+      "1 running task will be asked to pass itself at its next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
     ]);
     expect(deriveCloseSheet(asks, inputs([running("t1"), running("t2")]))[1]).toContain(
-      "2 running tasks will be asked",
+      "2 running tasks will be asked to pass themselves at their next pause",
     );
   });
 
