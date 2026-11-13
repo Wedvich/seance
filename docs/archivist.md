@@ -10,7 +10,8 @@ docs) built 2026-11-12, recorded in DESIGN.md, "Archivist", with setup in the RE
 (the status op and the health card) built 2026-11-12, recorded in DESIGN.md, "Archivist", Threat
 model item 2 and the PWA's Machines section; item 7 (the metrics and task query ops) built
 2026-11-13, recorded in DESIGN.md, "Archivist" ("The query ops"), Threat model item 2 and the
-frame→module table.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+frame→module table; item 8 (the PWA's charts) built 2026-11-13, recorded in DESIGN.md,
+"Archivist" ("The PWA's charts") and the PWA's Machines section.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -270,7 +271,7 @@ One stack of PRs, each based on the one before, merged together.
 
 7. The metrics and task query ops, in the archivist and `RelayClient` (A31, A33). **Built 2026-11-13.**
 8. PWA charts: 90-day and 1-year ranges, merged account charts, asleep machines (A32, A35,
-   A36d–A36f).
+   A36d–A36f). **Built 2026-11-13.**
 9. PWA task history: the older list, filters, title search (A34, A35, A36g–A36j).
 
 **Milestone 3 — alert**
@@ -297,3 +298,11 @@ to a daemon); the observer label is `machine`, the device id.
 Settled at item 5 (DESIGN.md, "Archivist"): two system units on one box can each load a
 `seance-psk` credential, since each gets its own private tmpfs. The archivist's blob is its own
 file under that same id (A27b).
+
+Settled at item 8 (DESIGN.md, "Archivist", "The PWA's charts"): 90 days asks at 6 h and a year at
+1 d. The source is chosen at ask time from the registry, not kept in the chart's target. A merged
+account chart also needs the install's account key, since the archive files an account's series
+under its `account:` store key; an install without it keeps the account chart on a host and shows
+the account no long ranges. A machine asleep is charted from the archive at every range, not only
+the long ones. Only a 90d or 1y chart falls back to 24h when the archivist leaves; a short range
+already open stays.
