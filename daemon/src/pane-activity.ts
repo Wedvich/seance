@@ -241,3 +241,38 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
     },
   };
 }
+
+/**
+ * The tracker as the daemon holds it: one per process, taken by each running custodian seat. Frames are retained, and
+ * the sampler runs, only while some seat holds it: without a reader nothing would prune the facts (only a sampler
+ * pass does), and a frame dropped while nobody held it would leave a state that is hours old when the next seat
+ * reads it, so the first taker forgets states. The gate is the process's, not one daemon instance's: a reload's
+ * incoming instance retains from its first frame while the outgoing one still holds the tracker.
+ */
+export interface PaneRetention {
+  /** A frame's state, kept only while the tracker is held. */
+  readonly observe: PaneActivityTracker["observe"];
+  /** Takes the tracker (the first taker forgets stale states and starts the sampler); the release is idempotent. */
+  readonly acquire: () => () => void;
+}
+
+export function createPaneRetention(tracker: PaneActivityTracker): PaneRetention {
+  let holders = 0;
+  return {
+    observe: (pane, state, turnEnded): void => {
+      if (holders > 0) tracker.observe(pane, state, turnEnded);
+    },
+    acquire: (): (() => void) => {
+      if (holders === 0) tracker.forgetStates();
+      holders += 1;
+      tracker.start();
+      let released = false;
+      return (): void => {
+        if (released) return;
+        released = true;
+        holders -= 1;
+        if (holders === 0) tracker.stop();
+      };
+    },
+  };
+}

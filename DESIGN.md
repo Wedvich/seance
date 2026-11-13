@@ -8598,7 +8598,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   tick.
 - **Retention and the sampler run only with the seat.** `pane-activity.ts`'s retention (`retain` on session
   events) and its once-a-minute sampler are started by the seat once its checks pass and stopped with it, shared
-  by count across a reload's two instances. Without a seat nothing reads the facts, and only a sampler pass
+  by count across a reload's two instances (`createPaneRetention`, `pane-activity.ts`: frames are kept while any
+  seat in the process holds the tracker, not only the instance whose socket took the frame, so a reload's
+  incoming instance retains from its first frame while the outgoing one still holds it). Without a seat nothing reads the facts, and only a sampler pass
   prunes them, so retention without the sampler would grow without bound; a machine with no seat now pays no
   `list-panes` or `capture-pane` a minute (the cost docs/custodian.md left open for C15). Frames are dropped
   while nothing retains, so when the first seat takes the tracker (`forgetStates`) every pane's retained state is

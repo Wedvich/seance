@@ -34,7 +34,7 @@ import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
 import { pushForTask } from "./handlers.ts";
-import { createPaneActivity, type TrackedActivity } from "./pane-activity.ts";
+import { createPaneActivity, createPaneRetention } from "./pane-activity.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
@@ -50,7 +50,6 @@ import {
   peerBindingProblem,
   readPanePids,
   type EndedTasks,
-  type SessionEventDeps,
   type SessionEvents,
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
@@ -147,32 +146,17 @@ const fleetBroker: DaemonCapability = (ctx) => {
 /**
  * The custodian's per-pane facts (C15), one per process like `endedTasksFor`: a config reload restarts the daemon in
  * process, and a tracker per instance would forget every pane's state at each one. Its reader is the seat's due check
- * (`custodianSeat`); instances share its timer by count, so an outgoing instance's stop never halts the incoming
- * one's sampling.
+ * (`custodianSeat`); `paneRetention` holds it by count, so an outgoing instance's stop never halts the incoming
+ * one's retention or sampling, and no frame is retained while no seat holds it.
  */
 const paneActivity = createPaneActivity({
   panes: readPanePids,
   capture: (paneId) => capturePane(paneId, { history: false }),
 });
-let paneActivityUsers = 0;
+const paneRetention = createPaneRetention(paneActivity);
 
-/**
- * Per daemon instance: the seat running (retention is on only then — without a reader nothing would prune the facts,
- * which only a sampler pass does), and the session-events instance whose marks the due check reads.
- */
-const seated = new WeakSet<object>();
+/** Per daemon instance: the session-events instance whose marks the due check reads. */
 const eventsOf = new WeakMap<WiringCtx, SessionEvents>();
-
-/** Session events' `retain` and the tracker's user count, with a read of each for the tests that pin the gate. */
-export const custodianRetention = {
-  retainFor:
-    (ctx: object): NonNullable<SessionEventDeps["retain"]> =>
-    (pane, state, turnEnded): void => {
-      if (seated.has(ctx)) paneActivity.observe(pane, state, turnEnded);
-    },
-  users: (): number => paneActivityUsers,
-  facts: (): readonly TrackedActivity[] => paneActivity.all(),
-} as const;
 /** The drain ask's `holds`: a pane it has a live entry for, which `SessionEvents.marked` does not know. */
 const drainHoldsOf = new WeakMap<WiringCtx, DrainAsk["holds"]>();
 
@@ -274,7 +258,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     onEnded: messages.onEnded,
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
-    retain: custodianRetention.retainFor(ctx),
+    retain: paneRetention.observe,
   });
   late.events = events;
   eventsOf.set(ctx, events);
@@ -339,13 +323,10 @@ const custodianSeat: DaemonCapability = (ctx) => {
   // The checks are async and `Started` is sync: the seat starts once they pass, and `stop` before that cancels it.
   let seat: CustodianSeat | null = null;
   let cancelled = false;
-  let counted = false;
+  let releaseActivity: (() => void) | null = null;
   const release = (): void => {
-    if (!counted) return;
-    counted = false;
-    paneActivityUsers -= 1;
-    if (paneActivityUsers === 0) paneActivity.stop();
-    seated.delete(ctx);
+    releaseActivity?.();
+    releaseActivity = null;
   };
   const begin = async (): Promise<void> => {
     const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
@@ -359,13 +340,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     const agents = await loadAgent();
     if (cancelled) return;
     const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
-    // Frames were dropped while no seat was retaining (off, declined, between a reload's instances), so what a pane's
-    // state says may be hours old: forget it, and a busy session is never read as idle since then.
-    if (paneActivityUsers === 0) paneActivity.forgetStates();
-    paneActivityUsers += 1;
-    counted = true;
-    seated.add(ctx);
-    paneActivity.start();
+    releaseActivity = paneRetention.acquire();
     seat = createCustodianSeat({
       settings,
       now: ctx.now,

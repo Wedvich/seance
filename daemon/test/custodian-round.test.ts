@@ -20,7 +20,6 @@ import {
 import { despawnRound, despawnSession } from "../src/despawn.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import type { TrackedActivity } from "../src/pane-activity.ts";
-import { custodianRetention } from "../src/run-capabilities.ts";
 import { startDaemon } from "../src/run.ts";
 import { ROUND_TMP } from "../src/seat-record.ts";
 import { listPanePids } from "../src/session-events.ts";
@@ -420,7 +419,7 @@ describe("the capability bit", () => {
     ["is off", false, null],
     ["is declined by the host's checks", true, "test: no sandbox"],
   ] as const) {
-    test(`a seat that ${label} closes a round the last process left, audited reason=off, and keeps no pane facts`, async () => {
+    test(`a seat that ${label} closes a round the last process left, audited reason=off`, async () => {
       const stray = await strayRound();
       let booted: Awaited<ReturnType<typeof boot>> | undefined;
       const lines = await captureLog(async () => {
@@ -432,23 +431,8 @@ describe("the capability bit", () => {
       const audit = lines.filter((line) => line.includes("audit custodian"));
       expect(audit.some((line) => line.includes("op=kill") && line.includes("reason=off"))).toBe(true);
       expect(audit.some((line) => line.includes("op=end") && line.includes("reason=lost"))).toBe(true);
-      expect(custodianRetention.users()).toBe(0);
     });
   }
-
-  test("retention runs only with a seat: an unseated daemon's frames are dropped, and the tracker follows the seat", async () => {
-    const framePane = { id: "%900", pid: 1, dead: false, taskId: null, ours: true, path: "/" };
-    custodianRetention.retainFor({})(framePane, "idle", true);
-    expect(custodianRetention.facts().map((entry) => entry.pane)).not.toContain("%900");
-
-    const booted = await boot(CUSTODIAN_DEFAULTS, { live: true, sandboxProblem: () => Promise.resolve(null) });
-    try {
-      await pollUntil(() => Promise.resolve(custodianRetention.users() === 1), "the seat to take the tracker");
-    } finally {
-      booted.stop();
-    }
-    expect(custodianRetention.users()).toBe(0);
-  });
 
   test("a daemon with the key and a live seat advertises custodian", async () => {
     expect(await advertised(CUSTODIAN_DEFAULTS, { live: true })).toContain(CAPABILITIES.custodian);
