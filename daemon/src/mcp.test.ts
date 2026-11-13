@@ -1096,6 +1096,35 @@ describe("resolveOrigin", () => {
     expect(resolved.error).toContain("github.com/fork/seance (on Work)");
   });
 
+  test("a bare basename finds clones the scan named parent/base on collision, and an exact name wins over it", () => {
+    const backend = "github.com/acme/backend";
+    const machines = [
+      machine({
+        deviceId: "device-1",
+        name: "Mac",
+        repos: [
+          { name: "acme/backend", path: "/a/backend", defaultBranch: "main", origin: backend },
+          { name: "acme2/backend", path: "/b/backend", defaultBranch: "main", origin: backend },
+          { name: "work/api", path: "/w/api", defaultBranch: "main", origin: "github.com/work/api" },
+          { name: "fork/api", path: "/f/api", defaultBranch: "main", origin: "github.com/fork/api" },
+          { name: "tools", path: "/t/tools", defaultBranch: "main", origin: "github.com/acme/tools" },
+          { name: "x/tools", path: "/x/tools", defaultBranch: "main", origin: "github.com/x/tools" },
+        ],
+      }),
+    ];
+    expect(resolveOrigin(machines, "backend")).toEqual({ origin: backend });
+    expect(resolveOrigin(machines, "tools")).toEqual({ origin: "github.com/acme/tools" });
+    const api = resolveOrigin(machines, "api");
+    if (!("error" in api)) throw new Error("expected an error");
+    expect(api.error).toContain('"api" names clones of more than one repo');
+    expect(api.error).toContain("github.com/work/api (on Mac)");
+    expect(api.error).toContain("github.com/fork/api (on Mac)");
+    // A partial last segment is no basename.
+    const partial = resolveOrigin(machines, "end");
+    if (!("error" in partial)) throw new Error("expected an error");
+    expect(partial.error).toContain('no repo "end"');
+  });
+
   test("an unknown name lists the known origins, and says when an older daemon has a clone by that name", () => {
     const machines = [
       ...autoMachines(),

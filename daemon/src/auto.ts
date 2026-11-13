@@ -62,10 +62,14 @@ const failed = (text: string): AutoEnqueued => ({ ok: false, text });
  * clone names from `list_machines`, so either is accepted: an origin in any
  * form `originQuery` keys (a pasted URL, mixed case), or a clone name —
  * matched exactly, since it is a directory name — whose clones all share one
- * origin. Clone names are machine-local, so two unrelated repos can share one
- * — picking between them would run the task in the wrong repo, so that is an
- * error naming each. A pinned task passes only the pin's machines and clones
- * (`scope` names them), so a name is read as the pinned machine lists it.
+ * origin. Failing any exact name, a bare basename matches the `parent/base`
+ * form the scan gives colliding clones: a machine with a clone per exclave
+ * lists only `pengefix/pengefix-backend`, while an agent reads the basename
+ * off an origin or a path. Clone names are machine-local, so two unrelated
+ * repos can share one — picking between them would run the task in the wrong
+ * repo, so that is an error naming each. A pinned task passes only the pin's
+ * machines and clones (`scope` names them), so a name is read as the pinned
+ * machine lists it.
  */
 export function resolveOrigin(
   machines: readonly Machine[],
@@ -75,27 +79,35 @@ export function resolveOrigin(
   const origins = new Set<string>();
   /** origin → the machines whose clone of it is named `repo` */
   const named = new Map<string, string[]>();
-  /** Machines whose clone named `repo` reports no origin: an older daemon the scheduler cannot route to. */
+  /** origin → the machines whose clone of it is named `<parent>/repo` */
+  const based = new Map<string, string[]>();
+  /** Machines whose clone named `repo` (or `<parent>/repo`) reports no origin: an older daemon the scheduler cannot route to. */
   const unkeyed: string[] = [];
+  const note = (into: Map<string, string[]>, origin: string, on: string): void => {
+    const list = into.get(origin) ?? [];
+    if (!list.includes(on)) list.push(on);
+    into.set(origin, list);
+  };
   for (const machine of machines) {
     for (const entry of machine.repos) {
+      const exact = entry.name === repo;
+      const base = !exact && entry.name.endsWith(`/${repo}`);
       if (entry.origin === undefined) {
-        if (entry.name === repo) unkeyed.push(machine.name);
+        if (exact || base) unkeyed.push(machine.name);
         continue;
       }
       origins.add(entry.origin);
-      if (entry.name !== repo) continue;
-      const on = named.get(entry.origin) ?? [];
-      if (!on.includes(machine.name)) on.push(machine.name);
-      named.set(entry.origin, on);
+      if (exact) note(named, entry.origin, machine.name);
+      if (base) note(based, entry.origin, machine.name);
     }
   }
   const key = originQuery(repo).find((candidate) => origins.has(candidate));
   if (key !== undefined) return { origin: key };
-  const [only, ...rest] = named.keys();
+  const matched = named.size > 0 ? named : based;
+  const [only, ...rest] = matched.keys();
   if (only !== undefined && rest.length === 0) return { origin: only };
   if (only !== undefined) {
-    const each = [...named].map(([origin, on]) => `${origin} (on ${on.join(", ")})`).join("; ");
+    const each = [...matched].map(([origin, on]) => `${origin} (on ${on.join(", ")})`).join("; ");
     return { error: `"${repo}" names clones of more than one repo — pass the origin instead: ${each}` };
   }
   const known = [...origins].toSorted().join(", ");

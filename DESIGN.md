@@ -9589,7 +9589,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   on one line, pointing at `get_queue` when it does not say whether the cancel landed. `"auto"` is matched
   in any case, so a machine named "auto" is pinned by its `deviceId`. **`repo` on a spawn** is the `TaskRequest`'s origin, but an agent holds clone
   names from `list_machines`, so either is accepted: an origin exactly, or a clone name
-  whose clones across the fleet all share one origin. A name behind two origins is an
+  whose clones across the fleet all share one origin. Failing any exact name, a bare
+  basename matches the `parent/base` names the scan gives colliding clones (2026-11-13: a
+  machine with a clone per exclave lists only `pengefix/pengefix-backend`, and agents
+  asked for `pengefix-backend` first every time, costing a refused round trip); an exact
+  name still wins over a basename. A name behind two origins is an
   error listing each origin with its machines, never a guess — a guess runs the task in
   the wrong repo. `list_machines` does not show origins: the clone name serves the
   common case, the ambiguity error names the origins when it doesn't, and its output

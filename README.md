@@ -729,7 +729,7 @@ fleet, as below. Bare words after it become the prompt, which makes
 `claude --resume` by hand in the worktree works too, but séance does not see that session.
 
 A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or
-origin from any machine in the fleet, and the task waits in the relay's queue until a leader
+origin from any machine in the fleet (a bare basename finds a `parent/base` clone), and the task waits in the relay's queue until a leader
 places it. It needs the relay: it reads the PSK itself, or on a box where only the daemon can
 (below) asks the running daemon to enqueue for it. The app's queue shows where it lands.
 `--now` is the direct path: it spawns on this machine right away, with no relay, key, leader or
