@@ -1200,6 +1200,7 @@ describe("a scheduler spawn that continues a failed task", () => {
     readonly exit?: number;
     readonly prUrl?: string;
     readonly handedOff?: true;
+    readonly branch?: string;
     /** `null`: noted by a daemon predating session ids. */
     readonly session?: string | null;
   }
@@ -1219,6 +1220,7 @@ describe("a scheduler spawn that continues a failed task", () => {
         ...(where.exit === undefined ? {} : { exit: where.exit }),
         ...(where.prUrl === undefined ? {} : { prUrl: where.prUrl }),
         ...(where.handedOff === undefined ? {} : { handedOff: true as const }),
+        ...(where.branch === undefined ? {} : { branch: where.branch }),
       });
     const calls: { readonly request: SpawnRequest; readonly continuation: Continuation | undefined }[] = [];
     const backend: SessionBackend = {
@@ -1442,7 +1444,28 @@ describe("a scheduler spawn that continues a failed task", () => {
       await refusedWith({ path: link }, /not a worktree of myrepo/u);
     });
 
-    test("it is gone", () => refusedWith({ path: join(clone, ".claude", "worktrees", "reaped") }, /is gone/u));
+    test("it is gone and no branch was noted to re-add it from", () =>
+      refusedWith({ path: join(clone, ".claude", "worktrees", "reaped") }, /is gone .*no branch/u));
+
+    test("it is gone and was not a direct child of the clone's .claude/worktrees", () =>
+      refusedWith(
+        { path: join(clone, ".claude", "worktrees", "fix", "nested"), branch: "wt-nested" },
+        /not a worktree of myrepo/u,
+      ));
+
+    test("it is gone and its parent is reached through a symlink", async () => {
+      const linked = join(clone, "linked-worktrees");
+      await symlink(join(clone, ".claude", "worktrees"), linked);
+      await refusedWith({ path: join(linked, "reaped"), branch: "wt-reaped" }, /not a worktree of myrepo/u);
+    });
+  });
+
+  test("a gone worktree with a noted branch reaches the backend with that branch, for it to re-add", async () => {
+    const gone = join(clone, ".claude", "worktrees", "reaped");
+    const { calls, handlerCtx } = await rig({ path: gone, branch: "wt-reaped" });
+    const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: true, path: gone });
+    expect(calls[0]?.continuation).toEqual({ path: gone, session: SESSION, branch: "wt-reaped" });
   });
 
   test("a repo the scan set no longer holds answers repo_not_found, before anything is recorded", async () => {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1132,12 +1132,90 @@ describe("spawnSession continuing a failed task's session", () => {
     }
   });
 
-  test("refuses, launching nothing, when the worktree is gone", async () => {
-    const wt = await makeWorktree();
-    await dropWorktree(wt);
-    const refused = await continuing(wt, { title: "Cont Gone" }).catch((err: unknown) => err);
-    expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("is gone") });
-    expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Gone");
+  describe("a worktree reap removed", () => {
+    const continuingOn = (wt: { readonly path: string }, title: string, branch?: string): Promise<SpawnOutcome> =>
+      spawnSession(
+        { repo: "myrepo", mode: "continue", title, taskId: `cont-new-${seq}`, continues: OLD, client: "scheduler" },
+        repos,
+        WAIT,
+        { path: wt.path, session: CONTINUED_SESSION, ...(branch === undefined ? {} : { branch }) },
+      );
+
+    /** A commit only the worktree's branch holds, so the re-added checkout is provably that branch. */
+    async function workOn(wt: { readonly path: string }): Promise<string> {
+      const before = await headOf(wt.path);
+      expect((await git(wt.path, ["commit", "-q", "--allow-empty", "-m", "work"])).exitCode).toBe(0);
+      const tip = await headOf(wt.path);
+      expect(tip).not.toBe(before);
+      return tip;
+    }
+
+    test.each(["worktree remove", "rm -rf"] as const)(
+      "(%s) is re-added at the same path on its kept branch, and the noted session resumes there",
+      async (how) => {
+        const wt = await makeWorktree();
+        const tip = await workOn(wt);
+        if (how === "worktree remove") await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+        // Removed by hand: still registered, which `worktree add` refuses until cleared.
+        else await rm(wt.path, { recursive: true, force: true });
+        await rm(stub.argvFile, { force: true });
+        let outcome: SpawnOutcome | undefined;
+        try {
+          outcome = await continuingOn(wt, `Cont Readd ${how}`, `wt-${wt.name}`);
+          expect(outcome.path).toBe(wt.path);
+          expect(await headOf(wt.path)).toBe(tip);
+          expect((await git(wt.path, ["symbolic-ref", "HEAD"])).stdout.trim()).toBe(`refs/heads/wt-${wt.name}`);
+          const argv = await stub.argv();
+          expect(argv[argv.indexOf("--resume") + 1]).toBe(CONTINUED_SESSION);
+          expect((await waitForSession(`Cont Readd ${how}`))?.path).toBe(wt.path);
+        } finally {
+          if (outcome !== undefined) await killWindow(outcome.window);
+          await dropWorktree(wt);
+        }
+      },
+    );
+
+    test("is refused, launching nothing and adding no worktree, when its branch is gone too", async () => {
+      const wt = await makeWorktree();
+      await dropWorktree(wt);
+      // A remote-tracking ref of the same name must not stand in: `worktree add` would make a branch tracking it.
+      await git(fixture.repoPath, ["update-ref", `refs/remotes/origin/wt-${wt.name}`, "HEAD"]);
+      try {
+        const refused = await continuingOn(wt, "Cont Gone", `wt-${wt.name}`).catch((err: unknown) => err);
+        expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("both gone") });
+        expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Gone");
+        expect(await stat(wt.path).catch(() => null)).toBeNull();
+        expect((await git(fixture.repoPath, ["branch", "--list", `wt-${wt.name}`])).stdout).toBe("");
+      } finally {
+        await git(fixture.repoPath, ["update-ref", "-d", `refs/remotes/origin/wt-${wt.name}`]);
+      }
+    });
+
+    test("is refused when no branch was noted for it", async () => {
+      const wt = await makeWorktree();
+      await dropWorktree(wt);
+      const refused = await continuingOn(wt, "Cont Unnoted").catch((err: unknown) => err);
+      expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("no branch") });
+      expect(await stat(wt.path).catch(() => null)).toBeNull();
+    });
+
+    test("is refused when its branch is checked out in another worktree", async () => {
+      const wt = await makeWorktree();
+      await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+      const other = join(fixture.repoPath, ".claude", "worktrees", `${wt.name}-other`);
+      await git(fixture.repoPath, ["worktree", "add", "-q", other, `wt-${wt.name}`]);
+      try {
+        const refused = await continuingOn(wt, "Cont Taken", `wt-${wt.name}`).catch((err: unknown) => err);
+        expect(refused).toMatchObject({
+          code: "not_continuable",
+          message: expect.stringContaining("could not be re-added"),
+        });
+        expect(await stat(wt.path).catch(() => null)).toBeNull();
+      } finally {
+        await git(fixture.repoPath, ["worktree", "remove", "--force", other]);
+        await git(fixture.repoPath, ["branch", "-D", `wt-${wt.name}`]);
+      }
+    });
   });
 
   test("a plan continuation allows bypass under the same user-settings rule as a fresh spawn", async () => {

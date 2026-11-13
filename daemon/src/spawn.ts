@@ -9,7 +9,7 @@ import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile, exclaveSettingsFile } from "./exclaves.ts";
 import { canonical } from "./gitdir.ts";
-import { hardenedGit } from "./git-hardened.ts";
+import { hardenedGit, repoConfigRefusal } from "./git-hardened.ts";
 import { log } from "./log.ts";
 import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
 import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
@@ -580,9 +580,10 @@ function pidGone(pid: number): boolean {
 /**
  * A killed claude leaves the lock it took on its worktree (and it makes reap keep it). The
  * continuation clears it only in that one shape — Claude's own reason, a dead pid — and any
- * other lock is someone's, so it refuses and leaves it.
+ * other lock is someone's, so it refuses and leaves it. True when git lists a worktree at `path`,
+ * present or not.
  */
-async function releaseStaleLock(repo: RepoEntry, path: string): Promise<void> {
+async function releaseStaleLock(repo: RepoEntry, path: string): Promise<boolean> {
   const listed = await hardenedGit(repo.path, ["worktree", "list", "--porcelain", "-z"]);
   if (listed.exitCode !== 0) {
     throw new SpawnFailure("not_continuable", `could not read the worktrees of ${repo.name}, so its lock is unknown`);
@@ -592,9 +593,9 @@ async function releaseStaleLock(repo: RepoEntry, path: string): Promise<void> {
     parseWorktreeList(listed.stdout).map(async (record) => ({ record, real: await canonical(record.path) })),
   );
   const found = records.find((entry) => entry.real === path)?.record;
-  if (found === undefined) return;
+  if (found === undefined) return false;
   const lock = parseWorktreeLock(listed.stdout, found.path);
-  if (lock === null) return;
+  if (lock === null) return true;
   const pid = CLAUDE_LOCK.exec(lock.reason)?.[1];
   if (pid === undefined || !pidGone(Number(pid))) {
     const why = lock.reason === "" ? "no reason given" : lock.reason;
@@ -608,6 +609,71 @@ async function releaseStaleLock(repo: RepoEntry, path: string): Promise<void> {
     );
   }
   log.info(`unlocked ${path}: the lock was a dead claude's (${lock.reason})`);
+  return true;
+}
+
+function isDirectory(path: string): Promise<boolean> {
+  return stat(path).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
+}
+
+/** A checkout of a large clone takes longer than `hardenedGit`'s default. */
+const READD_TIMEOUT_MS = 60_000;
+
+/**
+ * Puts a worktree reap removed back at its noted path, on the local branch the ledger last saw it on
+ * (DESIGN.md, Daemon, "Continuing a session"): never origin's, so nothing on the spawn path goes to the
+ * network and no ref anyone with push access can move is checked out. `path` and `branch` are this machine's
+ * ledger's, the path's parent already checked canonical by the handler.
+ */
+async function readdWorktree(repo: RepoEntry, path: string, branch: string | undefined): Promise<void> {
+  if (branch === undefined) {
+    throw new SpawnFailure(
+      "not_continuable",
+      `its worktree ${path} is gone, and no branch of it was noted to re-add it from`,
+    );
+  }
+  // A checkout runs the filters repo-local config names, which a session can write.
+  const refused = await repoConfigRefusal(repo.path);
+  if (refused !== null) {
+    throw new SpawnFailure(
+      "not_continuable",
+      `its worktree ${path} is gone, and re-adding it is refused: repo-local ${refused}`,
+    );
+  }
+  // The exact ref: no revision syntax, no tag or remote branch of the same name standing in. Without it,
+  // `worktree add` would make a branch tracking a remote one of that name.
+  const kept = await hardenedGit(repo.path, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+  if (kept.exitCode !== 0) {
+    throw new SpawnFailure(
+      "not_continuable",
+      `its worktree ${path} and its branch are both gone (merged and swept by reap, or deleted)`,
+    );
+  }
+  // A directory removed by hand stays registered, which `worktree add` refuses and which keeps the branch "in use".
+  if (await releaseStaleLock(repo, path)) {
+    if (await isDirectory(path)) throw new SpawnFailure("not_continuable", `its worktree ${path} reappeared`);
+    const cleared = await hardenedGit(repo.path, ["worktree", "remove", path]);
+    if (cleared.exitCode !== 0) {
+      throw new SpawnFailure(
+        "not_continuable",
+        `its worktree ${path} is gone but still registered: ${cleared.stderr.trim()}`,
+      );
+    }
+  }
+  const added = await hardenedGit(repo.path, ["worktree", "add", "--", path, branch], READD_TIMEOUT_MS);
+  if (added.exitCode !== 0) {
+    throw new SpawnFailure(
+      "not_continuable",
+      `its worktree ${path} is gone and could not be re-added: ${added.stderr.trim()}`,
+    );
+  }
+  if ((await canonical(path)) !== path) {
+    throw new SpawnFailure("not_continuable", `its re-added worktree ${path} is not where it was noted`);
+  }
+  log.info(`re-added ${path} from its local branch for a continuation`);
 }
 
 function liveInside(panes: readonly PaneInfo[], path: string): Promise<PaneInfo | undefined> {
@@ -661,13 +727,7 @@ async function continueLocked(
   if (repo === undefined) {
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
   }
-  const present = await stat(path).then(
-    (info) => info.isDirectory(),
-    () => false,
-  );
-  if (!present) {
-    throw new SpawnFailure("not_continuable", `its worktree ${path} is gone (removed or reaped)`);
-  }
+  const present = await isDirectory(path);
   const panes = await listPanes();
   const running = paneRunningTask(panes, continues);
   if (running !== null) {
@@ -679,6 +739,8 @@ async function continueLocked(
     const where = open.windowName === "" ? open.paneId : open.windowName;
     throw new SpawnFailure("not_continuable", `a session is open in its worktree (${where})`);
   }
+  // After the pane checks: nothing is written to git while a session may still hold the conversation.
+  if (!present) await readdWorktree(repo, path, continuation.branch);
   await releaseStaleLock(repo, path);
 
   // The worktree, not the clone root, is where claude starts, so trust is asked for the worktree's own path.
