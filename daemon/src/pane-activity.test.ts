@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { pollUntil } from "../test/fixtures.ts";
-import { createPaneActivity, normaliseScreen, type TrackedPane } from "./pane-activity.ts";
+import { createPaneActivity, createPaneRetention, normaliseScreen, type TrackedPane } from "./pane-activity.ts";
 
 const pane = (id: string, extra: Partial<TrackedPane> = {}): TrackedPane => ({
   id,
@@ -231,6 +231,21 @@ describe("the screen sampler", () => {
     expect(tracker.activity("%1")).toMatchObject({ state: "busy" });
   });
 
+  test("forgetStates drops every pane's state and keeps its screen facts", async () => {
+    const { tracker, screens } = setup([pane("%1")]);
+    screens.set("%1", "hello");
+    await tracker.sample();
+    tracker.observe(pane("%1"), "idle", true);
+    tracker.forgetStates();
+    expect(tracker.activity("%1")).toEqual({
+      state: null,
+      stateSince: null,
+      turnEnded: false,
+      screenSince: 1_000,
+      sampledAt: 1_000,
+    });
+  });
+
   test("start samples at once and on its interval; stop ends the interval", async () => {
     let captures = 0;
     const tracker = createPaneActivity({
@@ -283,5 +298,59 @@ describe("normaliseScreen", () => {
     const dialog = "Exiting worktree session\n❯ 1. Keep worktree\n  2. Remove worktree";
     expect(normaliseScreen(dialog)).toBe(dialog);
     expect(normaliseScreen(`${dialog}\n${rule}`)).toBe(`${dialog}\n${rule}`);
+  });
+});
+
+describe("retention", () => {
+  test("frames are kept only while a holder has the tracker, and the first taker forgets stale states", () => {
+    const { tracker } = setup([pane("%1")]);
+    const retention = createPaneRetention(tracker);
+    retention.observe(pane("%1"), "idle", true);
+    expect(tracker.activity("%1")).toBeNull();
+
+    const releaseA = retention.acquire();
+    retention.observe(pane("%1"), "busy", false);
+    expect(tracker.activity("%1")).toMatchObject({ state: "busy" });
+
+    // A reload's second holder keeps what the first retained, and retains from its first frame.
+    const releaseB = retention.acquire();
+    expect(tracker.activity("%1")).toMatchObject({ state: "busy" });
+    releaseA();
+    releaseA();
+    retention.observe(pane("%1"), "idle", true);
+    expect(tracker.activity("%1")).toMatchObject({ state: "idle" });
+
+    releaseB();
+    retention.observe(pane("%1"), "busy", false);
+    expect(tracker.activity("%1")).toMatchObject({ state: "idle" });
+
+    // Frames dropped while nobody held it: the next first taker reads no state, not an old one.
+    const releaseC = retention.acquire();
+    expect(tracker.activity("%1")).toMatchObject({ state: null });
+    releaseC();
+  });
+
+  test("the sampler runs from the first holder and stops with the last", async () => {
+    let captures = 0;
+    const tracker = createPaneActivity({
+      panes: () => Promise.resolve([pane("%1")]),
+      capture: () => {
+        captures += 1;
+        return Promise.resolve("s");
+      },
+      intervalMs: 5,
+    });
+    const retention = createPaneRetention(tracker);
+    const releaseA = retention.acquire();
+    const releaseB = retention.acquire();
+    await pollUntil(() => captures >= 3, "the sampler ran");
+    releaseA();
+    const afterA = captures;
+    await pollUntil(() => captures > afterA, "the second holder kept it sampling");
+    releaseB();
+    await tracker.sample();
+    const stopped = captures;
+    await Bun.sleep(30);
+    expect(captures).toBe(stopped);
   });
 });

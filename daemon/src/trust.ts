@@ -1,10 +1,10 @@
-import { rename, stat, writeFile } from "node:fs/promises";
+import { realpath, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { isRecord } from "@seance/shared";
 import { log } from "./log.ts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return isRecord(value) ? value : null;
 }
 
 /** Repo paths already ensured this run, keyed by config file — trust never un-sets itself mid-run. */
@@ -65,5 +65,45 @@ async function ensureNow(configPath: string, repoPath: string, memoKey: string):
   } catch (err) {
     // unreadable config or fs error — not memoized, so the next spawn retries
     log.warn(`could not pre-trust ${repoPath}: ${String(err)}`);
+  }
+}
+
+/**
+ * Whether Claude Code would start in `dir` without its trust dialog: `projects[<path>].hasTrustDialogAccepted` for the
+ * dir's own entry or an ancestor's (the custodian spec's verified rule). Read-only, silent and false on anything
+ * unreadable: the custodian's round dir is never pre-trusted by the daemon, because `.claude.json` races every
+ * running session's own rewrite of it (DESIGN.md, "Exclaves"); the owner trusts it once, which `seanced doctor`
+ * says. Never logs: nothing the seat reads from there reaches a log.
+ */
+export async function isDirTrusted(dir: string, configFile: string): Promise<boolean> {
+  let projects: unknown;
+  try {
+    const config: unknown = await Bun.file(configFile).json();
+    projects = isRecord(config) ? config["projects"] : undefined;
+  } catch {
+    return false;
+  }
+  if (!isRecord(projects)) return false;
+  // Claude Code keys `projects` by the session's real cwd, and a round runs in the real path (`ensureRoundDir`): trust
+  // recorded under a symlinked spelling is trust a round would not see, so only the real path and its ancestors count.
+  for (let at = await realpathOfExisting(dir); ; at = dirname(at)) {
+    const entry = projects[at];
+    if (isRecord(entry) && entry["hasTrustDialogAccepted"] === true) return true;
+    if (dirname(at) === at) break;
+  }
+  return false;
+}
+
+/** `path` with its deepest existing ancestor realpath'd and the rest appended: the real path a mkdir would make. */
+async function realpathOfExisting(path: string): Promise<string> {
+  const rest: string[] = [];
+  for (let at = path; ; at = dirname(at)) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each step up depends on the last failing
+      return join(await realpath(at), ...rest.toReversed());
+    } catch {
+      if (dirname(at) === at) return path;
+      rest.push(basename(at));
+    }
   }
 }

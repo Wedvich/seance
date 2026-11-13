@@ -1,14 +1,8 @@
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { exec } from "./exec.ts";
+import { PANE_ID } from "./pane-id.ts";
 import { classifyPane, isRegistered, paneInfo, type PaneInfo } from "./sessions.ts";
 import { tmux } from "./tmux.ts";
-
-/**
- * tmux's own pane-id form, and the only target a wire-supplied id may name:
- * `-t` would also resolve `main:1.0`, `{marked}` or `=name`, none of which a
- * session list ever handed out.
- */
-export const PANE_ID = /^%\d+$/u;
 
 const DEFAULT_GRACE_MS = 5_000;
 /** How long a killed pane's processes get to exit on their own, and again after SIGTERM. */
@@ -45,17 +39,47 @@ export async function despawnSession(id: string, opts: DespawnOptions): Promise<
     throw new DespawnFailure("invalid_target", `"${id}" is not a session id — take one from the session list (%12)`);
   }
   const pane = await paneInfo(id);
-  // The session list's own predicate: despawn reaches exactly what a list offered.
-  if (pane === null || !isRegistered(pane)) {
+  // The session list's own predicate: despawn reaches exactly what a list offered. The seat's round is never
+  // a session (C10), and answers as a gone pane so nothing about it leaks.
+  if (pane === null || pane.custodian || !isRegistered(pane)) {
     throw new DespawnFailure("session_not_found", `no session in pane ${id} — it may have exited already`);
   }
-  const window = pane.windowName;
   if (pane.taskId !== null) await opts.closing?.(pane.taskId);
   const leaveDead = opts.leaveDeadTask === true && pane.taskId !== null;
-  if (!opts.force && (await exitGracefully(pane, opts.graceMs ?? DEFAULT_GRACE_MS, leaveDead))) {
+  return close(pane, opts.force, opts.graceMs, opts.reapWaitMs, leaveDead);
+}
+
+/**
+ * Ends the custodian seat's round, the only close that reaches one: a graceful `/exit` for a round that registered,
+ * a straight kill for one that never did (stuck on a dialog). Its own entry point, with no option a frame can set, so
+ * no wire path can close a round and none can name another pane as one (DESIGN.md, "The custodian's seat").
+ */
+export async function despawnRound(
+  id: string,
+  opts: { readonly graceMs?: number; readonly reapWaitMs?: number } = {},
+): Promise<DespawnResult> {
+  if (!PANE_ID.test(id)) {
+    throw new DespawnFailure("invalid_target", `"${id}" is not a session id — take one from the session list (%12)`);
+  }
+  const pane = await paneInfo(id);
+  if (pane === null || !pane.custodian) {
+    throw new DespawnFailure("session_not_found", `no session in pane ${id} — it may have exited already`);
+  }
+  return close(pane, !isRegistered(pane), opts.graceMs, opts.reapWaitMs, false);
+}
+
+async function close(
+  pane: PaneInfo,
+  force: boolean,
+  graceMs: number | undefined,
+  reapWaitMs: number | undefined,
+  leaveDead: boolean,
+): Promise<DespawnResult> {
+  const window = pane.windowName;
+  if (!force && (await exitGracefully(pane, graceMs ?? DEFAULT_GRACE_MS, leaveDead))) {
     return { window, outcome: "exited" };
   }
-  await killPane(id, opts.reapWaitMs ?? DEFAULT_REAP_WAIT_MS);
+  await killPane(pane.paneId, reapWaitMs ?? DEFAULT_REAP_WAIT_MS);
   return { window, outcome: "killed" };
 }
 

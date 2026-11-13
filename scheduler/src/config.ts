@@ -1,7 +1,7 @@
-import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB, STORE_TOMBSTONE_MS } from "@seance/shared";
+import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB, STORE_TOMBSTONE_MS, type QuotaSpan } from "@seance/shared";
 
 /** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
-export type WindowSpan = "5h" | "7d";
+export type WindowSpan = QuotaSpan;
 
 /** One seat tier's size and the gated models its quota covers (docs/scheduler.md, Settled defaults 17). */
 export interface SeatProfile {

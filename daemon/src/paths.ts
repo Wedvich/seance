@@ -92,6 +92,15 @@ export function runDir(): string {
   return join(stateDir(), "run");
 }
 
+/** The custodian seat's own files (docs/custodian.md): the notes, and the default exclave's round dir. */
+export function custodianDir(): string {
+  return join(stateDir(), "custodian");
+}
+
+export function custodianNotesPath(): string {
+  return join(custodianDir(), "notes.md");
+}
+
 export function socketPath(): string {
   return join(runDir(), "seanced.sock");
 }

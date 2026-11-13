@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureRepoTrusted } from "./trust.ts";
+import { ensureRepoTrusted, isDirTrusted } from "./trust.ts";
 
 let dir: string;
 
@@ -121,5 +121,66 @@ describe("ensureRepoTrusted", () => {
     const config = await readConfig();
     expect(config.projects?.[a]?.["hasTrustDialogAccepted"]).toBe(true);
     expect(config.projects?.[b]?.["hasTrustDialogAccepted"]).toBe(true);
+  });
+});
+
+describe("isDirTrusted", () => {
+  // Claude Code keys by the real path, which macOS spells /private/var/... for a tmpdir.
+  let base: string;
+  beforeEach(async () => {
+    base = await realpath(dir);
+  });
+  const roundDir = (): string => join(base, "root", ".seance-custodian");
+
+  async function write(projects: unknown): Promise<void> {
+    await writeFile(configPath(), JSON.stringify({ projects }), { mode: 0o600 });
+  }
+
+  test("the dir's own entry, or an ancestor's, counts; neither does not", async () => {
+    await write({ [roundDir()]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
+    await write({ [join(base, "root")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
+    await write({
+      [roundDir()]: { hasTrustDialogAccepted: false },
+      [join(base, "other")]: { hasTrustDialogAccepted: true },
+    });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write({ "/": { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
+  });
+
+  test("a missing file, malformed JSON and an unexpected shape are not trusted", async () => {
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await writeFile(configPath(), "{not json");
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write("nope");
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write([roundDir()]);
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write({ [roundDir()]: "yes" });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+  });
+
+  test("a dir reached through a symlink is trusted under its real path, uncreated or not", async () => {
+    const real = join(await realpath(dir), "real");
+    await mkdir(join(real, "root"), { recursive: true });
+    await symlink(real, join(dir, "link"));
+    await write({ [join(real, "root", ".seance-custodian")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(join(dir, "link", "root", ".seance-custodian"), configPath())).toBe(true);
+    await write({ [join(real, "root")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(join(dir, "link", "root", "x", "y"), configPath())).toBe(true);
+    await write({ [join(dir, "elsewhere")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(join(dir, "link", "root", "x"), configPath())).toBe(false);
+    // The symlinked spelling is not what a round's cwd is, so trust under it does not count.
+    await write({ [join(dir, "link", "root", ".seance-custodian")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(join(dir, "link", "root", ".seance-custodian"), configPath())).toBe(false);
+  });
+
+  test("never writes: the file's bytes and mtime are unchanged", async () => {
+    await write({ [roundDir()]: { hasTrustDialogAccepted: false } });
+    const before = { text: await readFile(configPath(), "utf8"), mtime: (await stat(configPath())).mtimeMs };
+    await isDirTrusted(roundDir(), configPath());
+    expect({ text: await readFile(configPath(), "utf8"), mtime: (await stat(configPath())).mtimeMs }).toEqual(before);
   });
 });

@@ -29,6 +29,7 @@ import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import { configSkeleton, loadConfig, loadPsk, REAP_DEFAULTS, type Config } from "./config.ts";
 import { bearerTokenWarnings, pskFingerprint, runnableProblems } from "./config-checks.ts";
 import type { Check } from "./check.ts";
+import { custodianChecks } from "./custodian-checks.ts";
 import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
@@ -722,6 +723,11 @@ export async function cmdDoctor(): Promise<void> {
     // probes the server; a replacement reports whatever it depends on instead.
     console.log("backend");
     render(await createBackend(config, { home: homedir() }).doctor());
+
+    if (config.custodian !== undefined) {
+      console.log("custodian");
+      render(await custodianChecks({ config, home: homedir(), platform: process.platform }));
+    }
 
     console.log("relay");
     if (/^wss?:\/\/.+/u.test(config.relayUrl)) {

@@ -1,6 +1,7 @@
 import type { NeedsInputReason, SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
-import { KEY_GAP_MS, PANE_ID } from "./despawn.ts";
+import { KEY_GAP_MS } from "./despawn.ts";
+import { PANE_ID } from "./pane-id.ts";
 import { log } from "./log.ts";
 import type { BoundPane } from "./session-events.ts";
 import { capturePane, tmux } from "./tmux.ts";
@@ -109,6 +110,12 @@ export interface DrainAsk {
   readonly closed: (cl: number, now: boolean) => Promise<void>;
   /** Reopened: every pending ask and timer is dropped; a prompt already typed stays typed. */
   readonly reopened: () => void;
+  /**
+   * Whether this ask holds a live entry for the pane: waiting for its turn's end or its deadline, or mid-typing. Gone
+   * once the prompt is typed, the pane skipped or dropped, or its session ended, so a stuck pane the ask gave up on is
+   * the custodian's again. Read-only, for the custodian's `untouchable` (C7).
+   */
+  readonly holds: (pane: string) => boolean;
   /** A daemon that starts closed asks again; one ask per pane per process per `cl`. */
   readonly start: () => void;
   readonly stop: () => void;
@@ -416,6 +423,7 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       else maybeInterrupt(pane, entry);
     },
     closed,
+    holds: (pane): boolean => entries.has(pane),
     reopened: (): void => {
       clearEntries();
       clearDeadline();

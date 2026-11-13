@@ -1,6 +1,9 @@
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  EFFORTS,
+  isEffort,
+  type Effort,
   type ArchiveMetricsStep,
   type ArchiveTaskOutcome,
   type ArchiveTasksCursor,
@@ -25,8 +28,7 @@ import {
 export const MODELS = ["fable", "opus", "sonnet", "haiku"] as const;
 export type Model = (typeof MODELS)[number];
 
-export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-export type Effort = (typeof EFFORTS)[number];
+export { EFFORTS, isEffort, type Effort };
 
 /** `xhigh` capitalises badly; this matches what Claude Code on web shows. */
 export const EFFORT_LABELS: Record<Effort, string> = {
@@ -461,8 +463,4 @@ export function withWorktree(form: PersistedForm, origin: string | null, worktre
 
 export function isModel(value: unknown): value is Model {
   return typeof value === "string" && (MODELS as readonly string[]).includes(value);
-}
-
-export function isEffort(value: unknown): value is Effort {
-  return typeof value === "string" && (EFFORTS as readonly string[]).includes(value);
 }

@@ -32,6 +32,11 @@ export interface PaneActivity {
   readonly sampledAt: number | null;
 }
 
+/** One tracked pane's activity with its id: what the custodian seat's due check reads (`all`). */
+export interface TrackedActivity extends PaneActivity {
+  readonly pane: string;
+}
+
 /** A pane as the tracker needs it; `BoundPane` (`session-events.ts`) is one. */
 export interface TrackedPane {
   readonly id: string;
@@ -56,6 +61,13 @@ export interface PaneActivityTracker {
   readonly sample: () => Promise<void>;
   /** Null for a pane not tracked: not `ours`, gone, or neither sampled nor heard from yet. */
   readonly activity: (paneId: string) => PaneActivity | null;
+  /** Every tracked pane's activity, for the custodian seat's due check (C14). */
+  readonly all: () => readonly TrackedActivity[];
+  /**
+   * Forgets every pane's last state, keeping its screen facts: frames were dropped while nothing retained them, so
+   * a state held across that gap may be hours old and would read as a pane idle since then.
+   */
+  readonly forgetStates: () => void;
   /** Samples at once, then every `intervalMs`; a call while running does nothing. */
   readonly start: () => void;
   /**
@@ -93,7 +105,7 @@ const SPINNER_GLYPH = /^(\s*)[✻✽✶✳✢✺✹·*](?=\s)/u;
 export function normaliseScreen(screen: string): string {
   const lines = screen.split("\n");
   const rules = lines.flatMap((line, at) => (RULE.test(line) ? [at] : []));
-  const kept = rules.length >= 2 ? lines.slice(0, rules[rules.length - 2]) : lines;
+  const kept = rules.length >= 2 ? lines.slice(0, rules.at(-2)) : lines;
   return kept
     .map((line) => line.replace(TIMER, "(…)").replace(SPINNER_GLYPH, "$1*"))
     .join("\n")
@@ -200,6 +212,22 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
         sampledAt: entry.sampledAt,
       };
     },
+    all: (): readonly TrackedActivity[] =>
+      [...entries].map(([pane, entry]) => ({
+        pane,
+        state: entry.state,
+        stateSince: entry.stateSince,
+        turnEnded: entry.turnEnded,
+        screenSince: entry.screenSince,
+        sampledAt: entry.sampledAt,
+      })),
+    forgetStates: (): void => {
+      for (const entry of entries.values()) {
+        entry.state = null;
+        entry.stateSince = null;
+        entry.turnEnded = false;
+      }
+    },
     start: (): void => {
       if (timer !== null) return;
       void sample().catch(() => {});
@@ -210,6 +238,41 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
     stop: (): void => {
       if (timer !== null) clearInterval(timer);
       timer = null;
+    },
+  };
+}
+
+/**
+ * The tracker as the daemon holds it: one per process, taken by each running custodian seat. Frames are retained, and
+ * the sampler runs, only while some seat holds it: without a reader nothing would prune the facts (only a sampler
+ * pass does), and a frame dropped while nobody held it would leave a state that is hours old when the next seat
+ * reads it, so the first taker forgets states. The gate is the process's, not one daemon instance's: a reload's
+ * incoming instance retains from its first frame while the outgoing one still holds the tracker.
+ */
+export interface PaneRetention {
+  /** A frame's state, kept only while the tracker is held. */
+  readonly observe: PaneActivityTracker["observe"];
+  /** Takes the tracker (the first taker forgets stale states and starts the sampler); the release is idempotent. */
+  readonly acquire: () => () => void;
+}
+
+export function createPaneRetention(tracker: PaneActivityTracker): PaneRetention {
+  let holders = 0;
+  return {
+    observe: (pane, state, turnEnded): void => {
+      if (holders > 0) tracker.observe(pane, state, turnEnded);
+    },
+    acquire: (): (() => void) => {
+      if (holders === 0) tracker.forgetStates();
+      holders += 1;
+      tracker.start();
+      let released = false;
+      return (): void => {
+        if (released) return;
+        released = true;
+        holders -= 1;
+        if (holders === 0) tracker.stop();
+      };
     },
   };
 }

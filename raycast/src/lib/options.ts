@@ -1,20 +1,21 @@
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type AutonomyLevel } from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, EFFORTS, isEffort, type AutonomyLevel, type Effort } from "@seance/shared";
 
 /**
- * The offered models and efforts. Three copies of this list exist and cannot be
- * one: `pwa/src/state.ts` (a different runtime, no dependency either way), the
- * `preferences[].data` arrays in package.json (Raycast reads static JSON — a
+ * The offered models and efforts. The model list has three copies that cannot
+ * be one: `pwa/src/state.ts` (a different runtime, no dependency either way),
+ * the `preferences[].data` arrays in package.json (Raycast reads static JSON — a
  * manifest cannot import), and this. `options.test.ts` asserts all three agree,
  * so the duplication drifts loudly rather than silently.
  *
- * The wire keeps `model` and `effort` free strings, so adding one here needs no
- * daemon deploy.
+ * `EFFORTS` is `shared/src/types.ts`'s one list, which the PWA and the daemon's
+ * custodian config validation read too: a new effort changes what
+ * `custodian.effort` accepts. The wire keeps `model` and `effort` free strings,
+ * so a new model here needs no daemon deploy.
  */
 export const MODELS = ["fable", "opus", "sonnet", "haiku"] as const;
 export type Model = (typeof MODELS)[number];
 
-export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-export type Effort = (typeof EFFORTS)[number];
+export { EFFORTS, isEffort, type Effort };
 
 /** `xhigh` capitalises badly; this matches what Claude Code on web shows. */
 export const EFFORT_LABELS: Record<Effort, string> = {
@@ -49,8 +50,4 @@ export const FALLBACK_EFFORT: Effort = DEFAULT_EFFORT;
 
 export function isModel(value: unknown): value is Model {
   return typeof value === "string" && (MODELS as readonly string[]).includes(value);
-}
-
-export function isEffort(value: unknown): value is Effort {
-  return typeof value === "string" && (EFFORTS as readonly string[]).includes(value);
 }

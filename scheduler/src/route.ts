@@ -1,16 +1,19 @@
 import {
   CAPABILITIES,
   DEFAULT_MODEL,
-  effectivePct,
   exclaveAuth,
   isQuotaTrimmed,
   isSkillName,
   isStatusStale,
   liveStatus,
   newestQuotaByAccount,
+  QUOTA_SPAN_MS,
+  quotaPressure,
+  quotaWindows,
   sameCreditMonth,
   SKILL_TOKEN,
   trimSkillName,
+  windowAppliesTo,
   type Candidate,
   type Decision,
   type ExclaveInfo,
@@ -21,11 +24,12 @@ import {
   type PauseHold,
   type QuotaBasis,
   type QuotaReading,
+  type QuotaWindow,
   type Reason,
   type RepoEntry,
   type ScoreComponents,
 } from "@seance/shared";
-import type { SchedulerConfig, SeatProfile, WindowSpan } from "./config.ts";
+import type { SchedulerConfig, SeatProfile } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
@@ -67,19 +71,7 @@ export interface RouteInput {
   readonly attachments?: boolean;
 }
 
-export const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
-/** The convex cost is unbounded at 100%; this keeps an over-full account finite and still worst. */
-const MAX_UTILISATION = 0.99;
-
-interface QuotaWindow {
-  readonly label: string;
-  readonly pct: number;
-  /** Unix seconds. */
-  readonly resetsAt: number | undefined;
-  readonly span: WindowSpan;
-  /** A per-model weekly's display name (`Fable`); absent on the all-models windows. */
-  readonly model?: string;
-}
+export const SPAN_MS = QUOTA_SPAN_MS;
 
 type AccountQuota =
   | { readonly known: true; readonly newest: NewestQuota; readonly windows: readonly QuotaWindow[] }
@@ -287,13 +279,13 @@ function judgeAccount(
 ): AccountJudgement {
   const account = pass.quotaOf(accountId);
   if (!account.known) return { reason: { code: "quota_unknown", why: account.why }, pressure: 0 };
-  const windows = account.windows.filter((w) => appliesTo(w, pass.task.spec.model ?? DEFAULT_MODEL));
+  const windows = account.windows.filter((w) => windowAppliesTo(w, pass.task.spec.model ?? DEFAULT_MODEL));
   // Only another model's weekly was read: nothing says how full this task's windows are.
   if (windows.length === 0) return { reason: { code: "quota_unknown", why: "unobserved" }, pressure: 0 };
   const { observation, deviceId } = account.newest;
   const quota = { observedAt: observation.at, observer: deviceId, source: observation.s };
   const added = estimate(pass.config, capacity, sharing + 1);
-  const pressure = pressureOf(windows, added, pass.now);
+  const pressure = quotaPressure(windows, added, pass.now);
   const over = overLine(windows, added, pass.now, pass.config);
   if (over === null) return { quota, pressure };
   // Spent credits can't take the spill. Unknown credits (a daemon that predates `c`) still may: refusing them would
@@ -445,7 +437,7 @@ function accountQuota(
     if (found === undefined || found.observation.at < status.at) return { known: false, why: "trimmed" };
   }
   if (found === undefined) return { known: false, why: "unobserved" };
-  const windows = windowsOf(found.observation);
+  const windows = quotaWindows(found.observation);
   return windows.length === 0 ? { known: false, why: "unobserved" } : { known: true, newest: found, windows };
 }
 
@@ -544,7 +536,7 @@ export function exhaustion(
   const observer = machines.find((m) => m.deviceId === account.newest.deviceId);
   const status = observer === undefined ? undefined : liveStatus(observer);
   if (status === undefined || isStatusStale(status, now)) return null;
-  const windows = account.windows.filter((w) => appliesTo(w, task.spec.model ?? DEFAULT_MODEL));
+  const windows = account.windows.filter((w) => windowAppliesTo(w, task.spec.model ?? DEFAULT_MODEL));
   const full = fullWindow(windows, () => 0, now, config);
   if (full === null) return null;
   const { observation } = account.newest;
@@ -574,18 +566,6 @@ function seatTierOf(machines: readonly Machine[], accountId: string): string | u
   return undefined;
 }
 
-/**
- * All-models windows bind every task; a per-model weekly only a task on that
- * model — a full Fable week leaves Opus work free. Matched on the display
- * name's first word (`Fable` in `claude-fable-5-1[1m]`), since the cache
- * holds no model id.
- */
-function appliesTo(window: QuotaWindow, model: string): boolean {
-  if (window.model === undefined) return true;
-  const family = window.model.trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
-  return family !== "" && model.toLowerCase().includes(family);
-}
-
 /** The `gatedModels` family `model` names (an alias like `fable`, or an id like `claude-fable-5-1[1m]`), else null. */
 function gatedModel(model: string, config: SchedulerConfig): string | null {
   const lower = model.toLowerCase();
@@ -598,15 +578,6 @@ function hosts(machine: Machine, accountId: string): boolean {
 
 function carries(machine: Machine, status: MachineStatus, accountId: string): boolean {
   return (status.quota ?? []).some((q) => machine.exclaves?.[q.x]?.accountId === accountId);
-}
-
-/** Every window the reading has; which of them a task is judged on is `appliesTo`'s. */
-function windowsOf(o: QuotaReading): QuotaWindow[] {
-  const windows: QuotaWindow[] = [];
-  if (o.h !== undefined) windows.push({ label: "5h", pct: o.h, resetsAt: o.hr, span: "5h" });
-  if (o.d !== undefined) windows.push({ label: "7d", pct: o.d, resetsAt: o.dr, span: "7d" });
-  for (const w of o.w ?? []) windows.push({ label: `7d ${w.m}`, pct: w.p, resetsAt: w.r, span: "7d", model: w.m });
-  return windows;
 }
 
 /** Percent `tasks` add to a window on a seat of `capacity`: the span's estimate, scaled to the seat. */
@@ -659,21 +630,6 @@ function worstWindow(
   return worst;
 }
 
-/**
- * max over windows of the convex `(u/(1-u))²` at projected usage, discounted
- * by the share of the window still to run: a nearly-spent 5h window that
- * resets in ten minutes costs little, the same reading on a fresh one a lot.
- */
-function pressureOf(windows: readonly QuotaWindow[], added: (w: QuotaWindow) => number, now: number): number {
-  let worst = 0;
-  for (const w of windows) {
-    const u = Math.min((effectivePct(w.pct, w.resetsAt, now) + added(w)) / 100, MAX_UTILISATION);
-    const remaining = w.resetsAt === undefined ? 1 : clamp((w.resetsAt * 1000 - now) / SPAN_MS[w.span]);
-    worst = Math.max(worst, (u / (1 - u)) ** 2 * remaining);
-  }
-  return worst;
-}
-
 /** 0 where the base lives, 0.25 on its machine in another exclave, 0.5 elsewhere (it must be pushed). */
 function distance(base: Placement | undefined, at: Placement): number {
   if (base === undefined || samePlacement(base, at)) return 0;
@@ -682,10 +638,6 @@ function distance(base: Placement | undefined, at: Placement): number {
 
 function samePlacement(a: Placement | undefined, b: Placement): boolean {
   return a !== undefined && a.deviceId === b.deviceId && a.exclave === b.exclave;
-}
-
-function clamp(x: number): number {
-  return Math.min(Math.max(x, 0), 1);
 }
 
 function cached<T>(fn: (key: string) => T): (key: string) => T {

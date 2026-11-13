@@ -33,7 +33,7 @@ import {
   type SessionEventReply,
 } from "./session-event-frame.ts";
 import type { TrackedState } from "./pane-activity.ts";
-import { FIELD_SEP, listAllPanes, OURS, TASK_FIELD, tmux } from "./tmux.ts";
+import { CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
  * The `session-event` frame kind on the local op socket (DESIGN.md, "Session
@@ -168,25 +168,37 @@ export interface BoundPane {
   readonly path: string;
 }
 
-const PANE_PID_FORMAT = ["#{pane_id}", "#{pane_pid}", "#{pane_dead}", TASK_FIELD, OURS, "#{pane_current_path}"].join(
-  FIELD_SEP,
-);
+const PANE_PID_FORMAT = [
+  "#{pane_id}",
+  "#{pane_pid}",
+  "#{pane_dead}",
+  TASK_FIELD,
+  OURS,
+  CUSTODIAN_FIELD,
+  "#{pane_current_path}",
+].join(FIELD_SEP);
 
-/** Pure parser over `list-panes -a` in `PANE_PID_FORMAT`; path last, taken as the remainder. */
+/**
+ * Pure parser over `list-panes -a` in `PANE_PID_FORMAT`; path last, taken as the remainder. A pane carrying
+ * `@seance-custodian` is dropped (C10): the seat's round can bind no frame, take no message or drain key and is never
+ * sampled. The `custodian` frame (custodian PR 4) needs its own reader that keeps these panes.
+ */
 export function parsePanePids(raw: string): readonly BoundPane[] {
   const seen = new Set<string>();
   const panes: BoundPane[] = [];
   for (const line of raw.split("\n")) {
-    const [id, pid, dead, task, ours, ...rest] = line.split(FIELD_SEP);
+    const [id, pid, dead, task, ours, custodian, ...rest] = line.split(FIELD_SEP);
     if (
       id === undefined ||
       pid === undefined ||
       dead === undefined ||
       task === undefined ||
       ours === undefined ||
+      custodian === undefined ||
       rest.length === 0
     )
       continue;
+    if (custodian === "1") continue;
     // Grouped sessions repeat every pane.
     if (seen.has(id) || !/^%\d+$/u.test(id)) continue;
     seen.add(id);

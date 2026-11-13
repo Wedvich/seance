@@ -116,7 +116,7 @@ async function freeWorktreeName(repo: RepoEntry, slug: string): Promise<string> 
   throw new SpawnFailure("internal_error", `too many worktrees named ${slug}-* — clean some up`);
 }
 
-function shq(s: string): string {
+export function shq(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 

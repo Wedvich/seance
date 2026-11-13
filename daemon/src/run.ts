@@ -23,6 +23,7 @@ import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
 import { attachmentsRoot, taskAttachments } from "./attachments.ts";
 import { createHandler, createLocalOps, type HandlerContext, type MachineAvailability } from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
+import { seatEnabled, type CustodianSeatOpts } from "./custodian-seat.ts";
 import { createLeader, type Leader, type QueueStore, type SchedulerConfig } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -49,6 +50,7 @@ import { createUsageRefresh, type UsageRefreshOpts } from "./usage-refresh.ts";
 import { unmatchedTraitExclaves, withTraits } from "./traits.ts";
 import {
   closedOf,
+  custodianSeatOf,
   identityOfState,
   loadOrInitState,
   saveState,
@@ -113,6 +115,13 @@ export interface RunOpts {
    * child by surprise; main.ts passes `{}`. `keychain` defaults to the config's `authHealth.keychain`.
    */
   readonly authHealth?: Partial<Omit<AuthHealthDeps, "scan" | "home">>;
+  /**
+   * Enables the custodian seat's side of this process (`custodian-seat.ts`): with a `custodian` key in the config it
+   * advertises the capability and starts rounds, and without one (or with rounds not live) it closes any round a
+   * seat left. Off unless supplied, as `authHealth` is — a test daemon must never start a real round in a developer's
+   * tmux; main.ts passes `{}`. The rest are test seams.
+   */
+  readonly custodian?: CustodianSeatOpts;
   /**
    * Seams only — probes run whenever `config.traits` declares one (`trait-probes.ts`), unlike the
    * opt-in children above: a probe exists only because this machine's own config file named it, and a
@@ -287,6 +296,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // (DESIGN.md, Presence & identity). Committed only once the frame has left —
   // keyed by the blob, so two overlapping registers each commit their own.
   let registered: Registered = { scan: 0, exclaves: exclaveScan };
+  // One predicate for the capability bit and the seat, so they cannot disagree. Read per startDaemon, like the rest of the config.
+  const custodianOn = seatEnabled(config, opts.custodian, process.platform);
   // Read per startDaemon, so a config reload's new daemon takes a changed `authHealth.keychain`.
   const authHealth =
     opts.authHealth === undefined
@@ -351,6 +362,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // "Drain now" promise an action.
         ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
+        ...(custodianOn ? [CAPABILITIES.custodian] : []),
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
@@ -704,6 +716,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     exclaveScan: () => exclaveScan,
     authHealth,
     traitProbes,
+    custodian: opts.custodian ?? null,
+    quotaReadings: () => newestReadings(status.latest(), registered.scan, registered.exclaves.info),
+    custodianSeat: () => custodianSeatOf(state),
+    custodianSaved: async (record) => {
+      state = { ...state, custodian: record };
+      await persistState();
+    },
     usageRefresh:
       opts.usageRefresh === undefined
         ? null

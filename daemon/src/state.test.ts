@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   closedOf,
+  custodianSeatOf,
   livePid,
   loadOrInitState,
   pidAlive,
@@ -140,5 +141,58 @@ describe("file modes", () => {
     await chmod(path, 0o644);
     await writeRuntime(runtime, path);
     expect(await modeOf(path)).toBe(0o600);
+  });
+});
+
+describe("custodianSeatOf", () => {
+  const base = { deviceId: "d", repos: [], scannedAt: null };
+  const round = { pane: "%3", startedAt: 5, tmpDir: "/tmp/seance-cu-abc123", exclave: "work" };
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "seance-state-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Through the file, as a daemon reads it: the field arrives as whatever JSON the disk held. */
+  const seatOf = async (custodian: unknown): Promise<ReturnType<typeof custodianSeatOf>> => {
+    const path = join(dir, "state.json");
+    await writeFile(path, JSON.stringify({ ...base, ...(custodian === undefined ? {} : { custodian }) }));
+    const state = await readState(path);
+    if (state === null) throw new Error("state did not parse");
+    return custodianSeatOf(state);
+  };
+
+  test("reads a whole record, with the pane still null before the window exists", async () => {
+    expect(await seatOf({ lastEndedAt: 9, round })).toEqual({ lastEndedAt: 9, round });
+    expect(await seatOf({ round: { ...round, pane: null } })).toEqual({ round: { ...round, pane: null } });
+    expect((await seatOf({ round: { ...round, exclave: "default" } })).round?.exclave).toBe("default");
+  });
+
+  test("anything unreadable reads as none, field by field", async () => {
+    expect(await seatOf(undefined)).toEqual({});
+    expect(await seatOf("x")).toEqual({});
+    expect(await seatOf(null)).toEqual({});
+    expect(await seatOf({ lastEndedAt: "9", round })).toEqual({ round });
+    expect(await seatOf({ lastEndedAt: -1 })).toEqual({});
+  });
+
+  test("a round with a bad pane, tmp dir, exclave or time is dropped whole and keeps the end time", async () => {
+    for (const bad of [
+      { ...round, pane: "3" },
+      { ...round, pane: "%3; rm" },
+      { ...round, tmpDir: "/tmp/seance-cu-abc123/../x" },
+      { ...round, tmpDir: "/home/m" },
+      { ...round, tmpDir: "/tmp/claude-501" },
+      { ...round, exclave: "../x" },
+      { ...round, exclave: "Work" },
+      { ...round, startedAt: "5" },
+      { ...round, startedAt: -5 },
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- one file, rewritten per case
+      expect(await seatOf({ lastEndedAt: 9, round: bad })).toEqual({ lastEndedAt: 9 });
+    }
   });
 });

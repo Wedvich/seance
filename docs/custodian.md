@@ -1,8 +1,10 @@
 # The custodian — spec
 
 **Status: spec; build order items 1 (the nothing-lost rule in `reap` and reap's defaults under a
-custodian, now DESIGN.md, Reap, "Nothing lost") and 2 (C15, now DESIGN.md, "Session events") built
-2026-11-13 and folded into DESIGN.md.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
+custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session events") and 3 (the
+seat and the round, now DESIGN.md, "The custodian's seat") built 2026-11-13 and folded into DESIGN.md.
+Rounds are held until item 4 (`ROUNDS_LIVE`, owner decision 2026-11-13): the seat is built and tested,
+and runs nothing in production until the verbs exist.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -57,31 +59,7 @@ Each is the owner's unless marked _derived_.
 
 ### 1. The seat
 
-- **C1.** One custodian seat per machine, held by that machine's daemon. It is a daemon capability
-  like `reapSchedule` and `traitProbes` (`DAEMON_CAPABILITIES`, `daemon/src/run-capabilities.ts`),
-  not a registry role: the relay learns nothing new, and there is no nomination, term or secret.
-- **C2.** Off until the machine's own `config.json` carries a `custodian` key. Like traits, it is
-  declared only in that file, never from a frame, the PWA or another machine.
-
-  ```json
-  "custodian": {
-    "model": "haiku",
-    "everyMinutes": 15,
-    "closeAfterMinutes": 15,
-    "roundTimeoutMinutes": 10,
-    "maxNudges": 3,
-    "interruptAfterMinutes": 30
-  }
-  ```
-
-  Every field is optional; the values shown are the defaults.
-
-- **C3.** The daemon and the agent watch each other. The daemon starts each round, kills one that
-  overruns and reports the seat's health (§8). The agent watches every other session the daemon
-  started.
-- **C4.** _Derived._ A fleet with no custodian behaves exactly as it does today. Nothing waits on
-  a round: the daemon's own closes (hand-off, pass, harvest, drain, cancel) are unchanged and run
-  whether the seat is on, off, paused or failing.
+- **C1–C4.** Built: DESIGN.md, "The custodian's seat".
 
 ### 2. Scope
 
@@ -96,59 +74,17 @@ Each is the owner's unless marked _derived_.
 
 ### 3. A round
 
-- **C8.** A round is a fresh Claude session. Nothing carries over in the model's context; what must
-  persist is in the notes (§7) and in the daemon's own counters (§5). There is no compaction and no
-  recycling rule: a corrupted agent is gone at the end of its round.
-- **C9.** It runs in a tmux window in Séance's group, named `custodian`, with Remote Control, so the
-  owner can watch a round live or open it from the PWA while it runs. It exits when the round is
-  reported.
-- **C10.** It is not a task. It has no task id, takes no queue space, holds no session slot and is
-  not counted in `MachineStatus.sess`. _Derived:_ its window carries a pane option of its own
-  (`@seance-custodian`) so every reader of panes can tell it apart, and it is never a spawn,
-  despawn or message target.
-- **C11.** Model: the config's `model`, default `haiku`. The instructions are written for a cheap
-  model: a short fixed checklist, not open-ended investigation.
-- **C12.** Account: per round, the daemon picks the exclave on this machine with the most
-  headroom, using the scheduler's own quota scoring over this machine's exclaves (the same
-  function, imported, never a copy). An exclave whose auth has lapsed is skipped.
-- **C13.** A round always runs when it is due, however tight quota is. It never counts against a
-  slot, so it cannot block a task.
-- **C14.** When a round is due. The daemon checks once a minute, with no model call, and starts a
-  round only when all of these hold:
-  - at least one `ours` pane has been idle, or unchanged on screen, for `everyMinutes`;
-  - the last round ended at least `everyMinutes` ago;
-  - no round is running, the seat is not paused (§9) and the daemon is not restarting (`drn`).
-
-  No sessions, or every session busy and moving, means no round and no tokens. "Round now" (§9)
-  skips the first two conditions.
-
+- **C8–C14.** Built: DESIGN.md, "The custodian's seat".
+  C14's due check is narrowed there to the panes C7 allows, and "Round now" and the pause (§9) are
+  not built yet.
 - **C15.** Built: DESIGN.md, "Session events", "Per-pane retention and the screen sampler".
-- **C16.** A round has `roundTimeoutMinutes` to report. One that has not is closed through the
-  graceful despawn, then killed, and counts as failed (§8).
-- **C17.** _Derived._ The seed is a constant plus the notes; the session list comes from a verb,
-  not the seed. The constant is shipped in the repo as an agent definition, with the settings that
-  fence it (§4).
+- **C16, C17.** Built: DESIGN.md, "The custodian's seat".
 
 ### 4. What the agent may do
 
-- **C18.** A near-full shell for looking: Bash and Read, with `tmux capture-pane`, `git`, `gh` and
-  the like free to use on any path. It can read anything the owner's user can.
-- **C19.** Everything that changes a session or a worktree exists only as a `seanced custodian`
-  verb (§5), which checks its preconditions in code and audits. The agent's instructions decide
-  _whether_; the daemon decides _if it may_.
-- **C20.** The shell is fenced against a cheap model's mistakes:
-  - the OS sandbox allows writes nowhere but the round's own scratch directory;
-  - denied outright: `rm`, `kill`/`pkill`, `git worktree remove`, `git branch -d/-D`, `git push`,
-    `git reset`, `git clean`, `git checkout`/`switch`, `git stash`, every `tmux` subcommand that
-    types or kills (`send-keys`, `paste-buffer`, `kill-*`, `respawn-*`), `gh` commands that write,
-    and every `seanced` command but `seanced custodian`;
-  - no Edit, Write, web or MCP tools;
-  - a command outside the rules is refused, never asked about (a round has nobody to answer).
-- **C21.** The fence is not a security boundary, and the spec does not claim one. Every pane the
-  custodian reads belongs to a session that already has a full shell as the same user, so an
-  injected custodian gains an attacker little; and a deny list of command prefixes can be worked
-  around. What holds under injection is C19: a wrong close, nudge, interrupt or flag is bounded by
-  the verb's own checks.
+- **C18–C21.** Built: DESIGN.md, "The custodian's seat". The deny list there is generated, with the additions
+  the launch battery found (tmux's shell runners and state setters, `gh`'s further write verbs). C19 is
+  what holds under injection, and is the verbs' (item 4).
 - **C22.** Raw keystrokes into another session's pane are never the custodian's. docs/messaging.md
   rejected `send-keys` delivery on evidence (an injected Enter approved a permission prompt,
   pasted text answered an AskUserQuestion, text merged into a draft); a nudge goes through that
@@ -299,7 +235,8 @@ moment of the act.
 
 ## Threat model
 
-To be folded into DESIGN.md's as each part lands.
+To be folded into DESIGN.md's as each part lands. The round as a reader of untrusted text behind a
+fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat model).
 
 - **A new reader of untrusted text that can act.** The agent reads every session's screen. Assume
   an injection can make it call any verb with any argument. The bounds are the verbs' own checks:
@@ -311,7 +248,6 @@ To be folded into DESIGN.md's as each part lands.
 - **Nudge text is a new path from one session's output into another's input**, through a model.
   The receiver reads it as a request from the custodian. It is bounded by the count, the cap and
   messaging's wrapper, and it is local to the machine.
-- **The shell fence is for mistakes** (C21).
 - **Notes persist model-written text** (C39).
 - **Peer binding.** Only the round's own pane may call the verbs. A same-user process that can
   make itself a descendant of that pane can call them; that process could already type into any
@@ -359,9 +295,10 @@ delivery); nothing else here does.
    defaults under a configured custodian (C35).
 2. ~~Per-pane state and screen-change tracking for every `ours` pane (C15).~~ Built 2026-11-13
    (`daemon/src/pane-activity.ts`); its read API is `activity(paneId)`.
-3. The seat: config, `CAPABILITIES.custodian`, the due check, the exclave pick, the round's launch
+3. ~~The seat: config, `CAPABILITIES.custodian`, the due check, the exclave pick, the round's launch
    with its agent definition and fence, the deadline, and audit origin `custodian` (C1–C4,
-   C8–C17, C18–C21).
+   C8–C17, C18–C21).~~ Built 2026-11-13 (`daemon/src/custodian-seat.ts`), held behind `ROUNDS_LIVE =
+   false`; item 4 turns it on with the verbs.
 4. The `custodian` frame kind with `sessions`, `close`, `notes` and `done`, and the round log
    (C23–C25, C37–C39, C42).
 5. `MachineStatus.cu` and the Machines row; `seanced custodian status | log | round | pause |
@@ -377,224 +314,17 @@ delivery); nothing else here does.
 
 8. `nudge` over messaging's local delivery, and `interrupt` (C26–C28, C30).
 
-## The launch (verified)
-
-Verified 2026-11-13 on macOS with Claude Code 2.1.323, against the current docs and by running
-fenced `haiku` rounds in a private tmux server through two batteries of commands. Linux was run the
-same day, with its own fence keys (Linux, below). Re-verify on a Claude Code upgrade:
-several of these are behaviours, not documented contracts.
-
-### The command
-
-The tmux inner command, every value constant or daemon-made, in a window started with `-c <round
-dir>` (next section):
-
-```sh
-export CLAUDE_CODE_TMPDIR=<round tmp> CLAUDE_CODE_DISABLE_CLAUDE_MDS=1
-exec caffeinate -is claude -n custodian --remote-control \
-  --agents '<agent JSON>' --agent custodian \
-  --settings '<fence>' --setting-sources project \
-  --permission-mode dontAsk --strict-mcp-config \
-  --model <config model> --effort <effort> -- < <seed file>
-```
-
-- **The agent definition** is a markdown agent file in the repo; the daemon turns its frontmatter
-  and body into `--agents` JSON on argv. `--agents <file>` is read only with `--print`, and
-  `--add-dir` (which would load a `.claude/agents/`) also widens the sandbox's write scope. The
-  definition's `tools: Bash, Read` holds for the main thread: Write, Edit and WebFetch answer "No
-  such tool available". Its prompt replaces the system prompt. Its **`permissionMode` is ignored**
-  for the main thread: a round carrying only that ran in the exclave's own `bypassPermissions`. The
-  mode is the flag.
-- **`--permission-mode dontAsk` is the only mode that holds C20's last rule.** In `default` a host
-  off the allowlist raised a "Network request outside of sandbox" prompt, where a round would hang;
-  `bypassPermissions` and `auto` both let `curl https://example.com` out past the sandbox's
-  allowlist. Under `dontAsk` that request, an unparseable command (`$(echo rm) …`, `eval '…'`) and
-  `find -delete` are refused, never asked. The fence sets `defaultMode: dontAsk` as well.
-- **`--setting-sources project`** keeps the exclave's user settings out: its hooks, its plugins
-  (`tmux-rename` would rename the window; `session-events` would report the round as a session),
-  its statusline and its `bypassPermissions` default. `--settings` still applies, and auth and
-  Remote Control still work. The round dir holds no `.claude/settings.json`, so nothing loads from
-  the project either.
-- **`--strict-mcp-config`** with no `--mcp-config`: no MCP server starts, claude.ai connectors
-  included.
-- **`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`**: without it the owner's CLAUDE.md files (the user one,
-  and the exclave root's by walk-up) load into every round, 25k tokens of context against 11k.
-- **`--effort`** must be passed: with user settings out, a round fell back to `medium`. C2 has no
-  effort key yet; the build adds one or fixes a constant.
-- The seed on stdin works as spawn's does. Killing the tmux server left `claude` running for a few
-  seconds; C16's graceful despawn, then kill, covers it.
-
-### The fence
-
-Passed as `--settings` (a file was tested; the flag also takes a JSON string). Its shape is
-constant; the paths are the daemon's:
-
-```json
-{
-  "permissions": {
-    "defaultMode": "dontAsk",
-    "allow": ["Read", "Bash(seanced custodian *)"],
-    "deny": ["…the deny list below"]
-  },
-  "sandbox": {
-    "enabled": true,
-    "failIfUnavailable": true,
-    "allowUnsandboxedCommands": false,
-    "autoAllowBashIfSandboxed": true,
-    "enableWeakerNetworkIsolation": true,
-    "filesystem": { "denyWrite": ["<round dir>"] },
-    "network": {
-      "allowedDomains": ["github.com", "api.github.com", "*.githubusercontent.com"],
-      "allowUnixSockets": ["<tmux socket dir>", "<stateDir()/run>"]
-    }
-  }
-}
-```
-
-- `autoAllowBashIfSandboxed` makes C18's near-full shell: every sandboxed command no rule denies
-  runs, without an allow rule.
-- `Read` in `allow`: under `dontAsk` the Read tool is otherwise refused outside the round dir.
-- `enableWeakerNetworkIsolation`: without it every `gh` call fails TLS (`x509: OSStatus -26276`)
-  inside the macOS sandbox. It lets sandboxed commands reach `trustd`.
-- `allowUnixSockets`: without it `tmux capture-pane` and the daemon's local socket fail with
-  `Operation not permitted`. A directory works as an entry. Git's fsmonitor socket stays blocked:
-  `git status` prints an `fsmonitor_ipc` error and still succeeds.
-- `allowedDomains`: GitHub's hosts only. Every other host is refused silently.
-
-### Writes: one directory
-
-A sandboxed command may write its cwd and `$TMPDIR`, and Claude Code chooses that `$TMPDIR`:
-`$CLAUDE_CODE_TMPDIR/claude-<uid>`, unless that path counts as long, when it falls back to the
-shared `/tmp/claude-<uid>`. That is every session's temp dir, and a round wrote into another
-session's scratchpad there. The cut-off is undocumented: 32 characters kept, 35 fell back. A
-`denyWrite` on `/tmp/claude-<uid>` is no fix, because Claude Code's own shell wrapper writes its cwd
-file there, so every command then fails. So:
-
-- `CLAUDE_CODE_TMPDIR` is a fresh 0700 `mkdtemp` under `/tmp/seance-cu-` (21 characters), removed
-  after the round. The `claude-<uid>` dir under it is the round's scratch.
-- The round dir, the cwd, is in `denyWrite`.
-
-With both, the round's shell could not write to the cwd, the exclave root, `/tmp/claude-501`,
-`/private/tmp` or the default `/var/folders/…/T`. The fallback is silent, and the daemon cannot see
-the sandbox's `$TMPDIR`; keep the prefix this short. Claude Code's own process is not sandboxed: it
-still writes `.claude/` into the cwd and the transcript into the config dir.
-
-### The deny list
-
-`rm`, `rmdir`, `kill`, `pkill`, `killall`; the `git` and `tmux` subcommands of C20; `gh` writes;
-every `seanced` command but `custodian`. Every entry tested (all but `rmdir`, `killall`, tmux's
-`send`/`pasteb` aliases and some `gh` verbs) was refused with "Permission to use Bash with command …
-has been denied", in plain form and through each workaround below that Claude Code unwraps.
-
-- **Unwrapped, so refused:** compound commands (`;`, `&&`, `|`): `seanced custodian sessions;
-  seanced status` was refused whole. Also `env rm`, `command rm`, bare `xargs rm`, and an absolute
-  path to the binary (`/bin/rm`, `/usr/bin/git … push`, `/opt/homebrew/bin/tmux … send-keys`).
-- **A global option before the subcommand is not unwrapped.** `Bash(git push *)` does not catch
-  `git -C <path> push`, and `Bash(tmux send-keys *)` does not catch `tmux -L <socket> send-keys`
-  (keys reached a pane). So every `git` and `tmux` entry comes in four forms: `git push`,
-  `git push *`, `git * push` and `git * push *`, with `*` matching across spaces. The cost is a few
-  false refusals (`git -C … checkout --help`).
-- **`seanced`:** deny beats allow, so `Bash(seanced *)` would refuse `seanced custodian` too. The
-  list denies `Bash(seanced)` and `Bash(seanced <command>*)` for every command but `custodian`,
-  generated from the CLI's own command table, with a test that each one is covered, so a new
-  command is denied by default. `seanced custodian …` runs, with stdin piped or as a heredoc.
-- **`gh` writes, by verb:** `Bash(gh * <verb>*)` for `create`, `delete`, `edit`, `merge`,
-  `comment`, `close`, `reopen`, `review`, `ready`, `cancel` and `rerun`; `gh workflow`, `gh auth`,
-  `gh secret`, `gh variable` and `gh extension` whole; and `gh api` with `-X`, `--method`, `-f`,
-  `-F`, `--field`, `--raw-field` or `--input`. That last refuses `gh api graphql -f …` reads too, so
-  a round reads through `gh pr view --json`, `gh run view` and plain `gh api <path>`. A verb missing
-  from the list runs.
-
-**What gets through** (C21: noted, not chased): `bash -c '…'` and `sh -c '…'` around any denied
-command (`rm`, `kill`, `tmux send-keys` and `seanced status` all ran), `python3 -c` and other
-interpreters, and `xargs -n1 rm` (`xargs` with a flag is not unwrapped). The sandbox still confines
-their file writes to the scratch dir, but not `kill`, `tmux send-keys`, a `gh` write or a
-`seanced` command, which act through a signal, a socket or the network. What is left is C19.
-
-### Where a round runs
-
-The exclave is decided by `$PWD` when the window's shell starts: the owner's zsh hook picks
-`CLAUDE_CONFIG_DIR` from it, and the daemon never sets one (DESIGN.md, "Exclaves"). So each exclave
-gets its own round dir, created empty by the daemon:
-
-- a named exclave `<name>`: `~/<name>/.seance-custodian`. Verified: the round came up with
-  `CLAUDE_CONFIG_DIR=~/.claude-<name>` and that account;
-- `default`: a dir under `~` outside every named root, such as `stateDir()/custodian/cwd` (tested
-  as another dir under `~/.local/state/seance`).
-
-The dir must be trusted in that exclave's `.claude.json`: its own entry, or an ancestor's
-`hasTrustDialogAccepted`. A round dir under a named root the owner had trusted started with no
-dialog. One in `default`, where `~` is not trusted, stopped at "Is this a project you created or one
-you trust?", which nobody answers, and Remote Control never came up.
-
-### Linux
-
-Run 2026-11-13 with Claude Code 2.1.323 on Debian 13 in an LXC container (Proxmox),
-with real `haiku` rounds in a window of the daemon's own tmux server, so under its `--system` unit's
-environment (no user bus, no `XDG_RUNTIME_DIR`). Held as on macOS: Bash and Read only; writes
-refused everywhere but `$CLAUDE_CODE_TMPDIR/claude-<uid>` (the cwd, the exclave root, the worktree,
-`/tmp/claude-<uid>` and `/tmp` all `Read-only file system`), with the same short prefix; reads,
-`git` (fetch included) and `gh` reads on any path; the deny list refusing in every form above (`gh
-api -X …` needs `Bash(gh api -X*)` beside `Bash(gh api * -X*)`, as `*` matches no empty gap);
-`seanced custodian` allowed; a host off `allowedDomains`, `eval` and `find -delete` refused without
-a prompt; `bash -c` and `xargs -n1 rm` getting through; and the round landing in the exclave its
-`$PWD` picks (`EXCLAVE=pengefix2`, `CLAUDE_CONFIG_DIR=~/.claude-pengefix2`). Trust behaved as
-above: a round dir under a trusted repo started; `~/pengefix2/.seance-custodian`, whose root this
-box has never trusted, stopped at the dialog. Differences:
-
-- **Prerequisite: `bubblewrap` and `socat`** (`apt install bubblewrap socat`). Without them
-  `failIfUnavailable` refuses to start: "sandbox required but unavailable … bubblewrap (bwrap) not
-  installed, socat not installed". The daemon's doctor should name them.
-- **No `caffeinate`.** It is macOS-only; the Linux command drops it.
-- **`enableWeakerNetworkIsolation`** is for macOS's `trustd`; it was left set, and `gh` worked. Not
-  tried without it.
-- **Unix sockets are all or none.** `allowUnixSockets` is "macOS only … Ignored on Linux (seccomp
-  cannot filter by path)". With it, `tmux capture-pane` and the daemon's local socket fail with
-  `Operation not permitted`: the seccomp filter refuses every `AF_UNIX` socket, so C18's
-  `capture-pane` and C19's `seanced custodian` cannot run. The Linux key is `allowAllUnixSockets:
-  true`, which turns the filter off and reaches every socket the user can (Docker's, an
-  ssh-agent's, a bus), not just the two directories. `excludedCommands` did not run `tmux
-  capture-pane` unsandboxed under `allowUnsandboxedCommands: false`.
-- **On this host `allowAllUnixSockets` alone breaks every command.** With the seccomp filter off,
-  Claude Code passes bubblewrap `--disable-userns`, which writes
-  `/proc/sys/user/max_user_namespaces`;
-  LXC mounts `/proc/sys` read-only, so every sandboxed command failed with `bwrap: cannot open
-  /proc/sys/user/max_user_namespaces: Read-only file system`. Adding `enableWeakerNestedSandbox:
-  true` makes every command above work, but drops `--disable-userns` (Claude Code warns a sandboxed
-  command "that creates [a user namespace] can undo the write denies"; `unshare -Ur` ran) and leaves
-  the host `/proc` readable. On a VM or bare-metal Linux `allowAllUnixSockets` alone is expected to
-  work, but was not tested: no such box was online.
-
-**Decided (owner, 2026-11-13): accept both on Linux.** The Linux fence sets `allowAllUnixSockets:
-true` in place of `allowUnixSockets`, and adds `enableWeakerNestedSandbox: true` only where
-`--disable-userns` cannot run (a container whose `/proc/sys` is read-only); `seanced doctor` names
-the weaker mode. A deliberate command can then get past the write fence, which C21 already allows:
-the fence is for a cheap model's mistakes, and C19 bounds what a session or worktree change can do.
-
 ## Open details (build time)
 
-- **Trusting a round dir.** A round cannot answer the trust dialog (above), so an exclave whose
-  round dir is untrusted cannot host one. Recommended: the daemon reads the trust (it already reads
-  `.claude.json`), skips such an exclave as C12 skips a lapsed one, and `seanced doctor` names it;
-  the owner trusts it once by running `claude` in that dir. Writing the entry ourselves would race
-  every running session's rewrite of `.claude.json` (DESIGN.md, "Exclaves"). The owner's call.
-- **Importing the scheduler's scoring.** `scheduler/test/layering.test.ts` lets only the leader's
-  modules host the scheduler library. C12 needs the pure scoring function outside them: either the
-  test's list grows by the custodian's one module, or the function moves somewhere both import.
 - **The live link.** `cu` is in a fixed-size frame; whether the round's Remote Control id rides
   there or in a reply to a card's own request.
 - **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
   closed (C24). Whether `seanced doctor` should warn about it. The retained state is per process, so a
   session already at rest when the daemon restarts is `unobserved` too until its next frame; whether
   `sessions` (C23) should say why.
-- **The sampler's cost on a machine with no seat.** It runs whether or not `custodian` is configured
-  (one `list-panes` a minute, plus a capture per `ours` pane). Decided for C15: left running, because
-  gating it needs the config block PR 3 adds; PR 3 can start it only with the seat.
 - **What "unchanged on screen" cannot see.** The change hash drops Claude's input box and footer and masks
   elapsed timers and the spinner glyph (DESIGN.md, "Per-pane retention"), matched on wording from Claude
   Code 2.1.x. A release that rewords them, or a repaint nobody has listed (a rotating tip, a clock in the
   transcript), moves the hash while the session is hung, so C27's `interrupt` would read it as moving:
   it fails to fire, never fires wrongly. Worth checking against a live busy session when PR 3 or 5 builds
   on it. A resize (another client attaching at another size) moves it too.
-- **A closed machine.** Whether rounds run while a machine is draining. C7 already keeps the
-  custodian off any pane the drain has marked.
