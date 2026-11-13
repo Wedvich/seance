@@ -2620,11 +2620,12 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   off `REPLY_JSON_BUDGET` before any task, since a reader refuses a reply whose holds do not
   parse — 32 at every bound still seal under the envelope. It carries the idle releases too
   (`QueueResponse.idle`, `{ taskId, since }` for each `running` task "Routing caps" releases
-  for sitting idle at its prompt, whatever `tasks` named): the release is the leader's memory, on
-  no record, so the reply is the only place an app can learn it. Off the budget first as well, at
-  most one per task; a reader drops a bad entry alone and shows that task as running, which it is.
-  A release beginning or ending writes nothing, so the scheduler tells the host
-  (`SchedulerOptions.onIdleChange`) and the leader nudges `queue-changed` naming the task, as a
+  for sitting idle at its prompt, whatever `tasks` named): the release is the leader's clock,
+  which the record's `idleRelease` stamp only seeds, so the reply is where an app learns it. Off the
+  budget first as well, at most one per task; a reader drops a bad entry alone and shows that task
+  as running, which it is. A release beginning or ending also writes or drops that stamp, but
+  the scheduler tells the host of each regardless (`SchedulerOptions.onIdleChange`), since the
+  release is the clock's and not the write's, and the leader nudges `queue-changed` naming the task, as a
   write would. **All five are audited** (`queueAudit`
   in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|run-now|pause|resume id=<request>`, with
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
@@ -3311,7 +3312,20 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   from that machine clears it, another machine's event touches it no more than it moves the task
   (or any machine could hold a slot by resetting it), and any write into or out of `running` ends
   it, so a task back from `lost` starts its grace over. No task state:
-  `busy`/`idle` flip every turn, and a stored state would cost two writes per turn per task. Why: a
+  `busy`/`idle` flip every turn, and a stored state would cost two writes per turn per task. What
+  is stored is the release (2026-11-13): once a clock passes the grace the leader stamps
+  `Task.idleRelease` (`{ since, deviceId }`, its own write, never a frame's) on the record, and
+  the event or write that ends the stay drops it in the same write, or in one of its own for a
+  `busy` that moves nothing — at most two writes per release, none per turn. `load()` (so
+  takeover) seeds the clock from a stamp on a task still `running` on the machine it names, and a
+  stamp on any other record frees nothing; the parser keeps it on `running` only and drops a
+  malformed one, never the task. Why: leadership moved several times one night on relay socket
+  drops, and each new leader counted three sessions parked at their prompts as busy for hours —
+  the fleet read 9/8 running and a `ready` task could not dispatch — since a parked session never
+  sends another `idle`. An older leader's parser drops the field (`parseTask` builds field by
+  field), so no sentinel is needed: on its own rewrite the stamp is gone, today's behaviour. Rejected:
+  daemons remembering each pane's last state and telling a new leader — a fleet update restarts
+  every daemon just as leadership changes, so that memory is lost exactly when it is needed. Why: a
   session that finished and asked "want a follow-up?" but was never settled held a slot for good,
   and nothing bills while it waits. `needs-input` keeps its slot — a dialog is mid-task, so work
   resumes for certain when it is answered. Detection reads the mod's state, never the session's
@@ -3324,9 +3338,12 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   mid-turn until its next turn event ("Where the states come from"), so long background work can
   be released while it runs. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
   a working session released until its next event; `sessions` cannot see busy from idle, so
-  nothing else corrects it. (d) A new leader starts no clock until the next `idle`: on takeover
-  every released task counts again at once, an over-cap fleet that drains as in (a). (e) An
-  `idle` from a sender naming no machine frees nothing.
+  nothing else corrects it; a `busy` sent while no leader runs leaves the stamp too, so the next
+  leader keeps that task released until its next event. (d) A clock inside its grace is memory
+  only: a leader change in a stay's first `idleReleaseAfterMs` loses it, and the new leader counts
+  the task until its next `idle`. In a mixed-version fleet an older leader leaves a stamp it never
+  rewrites — a `busy` writes nothing under it — so a newer leader after it may seed a release for
+  a session that went busy meanwhile, until that session's next event, as in (c). (e) An `idle` from a sender naming no machine frees nothing.
 - **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
   whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
   it, so a whole-queue pause always fits. The library reads it on `load()` —

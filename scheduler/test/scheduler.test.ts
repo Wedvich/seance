@@ -1012,6 +1012,126 @@ describe("a session idle past idleReleaseAfterMs", () => {
     await at(env, NOW + GRACE);
     expect(scheduler.task(second.id)?.state).toBe("running");
   });
+
+  describe("across a leader change", () => {
+    /** A new leader over the same store and fleet, taken over at `now` and through its first pass. */
+    async function newLeader(env: Awaited<ReturnType<typeof holdingTheSlot>>, now: number): Promise<Scheduler> {
+      env.clock.now = now;
+      env.fleet.beat(now);
+      const next = new Scheduler({
+        store: readerChecked(env.store, () => env.clock.now),
+        fleet: env.fleet,
+        config: { ...DEFAULT_CONFIG, globalMax: 1 },
+        now: () => env.clock.now,
+      });
+      await next.takeover();
+      await pass(next);
+      return next;
+    }
+
+    test("a release is stamped on the record once, and a new leader holds it released with no new event", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, second, report } = env;
+      await report("idle");
+      const before = (await stored(store, first.id))?.version ?? 0;
+      await at(env, NOW + GRACE - 1);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+
+      await at(env, NOW + GRACE);
+      expect(env.scheduler.task(second.id)?.state).toBe("running");
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual({ since: NOW, deviceId: "a" });
+      await at(env, NOW + GRACE * 2);
+      expect((await stored(store, first.id))?.version).toBe(before + 1);
+
+      const next = await newLeader(env, NOW + GRACE * 2 + 1);
+      expect(next.idle()).toEqual([{ taskId: first.id, since: NOW }]);
+      // The second alone counts: a third waits at 1 of 1, not 2.
+      const third = await enqueue(store, next, spec());
+      await pass(next);
+      capped(next, third.id, 1);
+    });
+
+    test("a leader change inside the grace loses the clock: the new leader counts the task until its next idle", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, second, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE - 1);
+      const next = await newLeader(env, NOW + GRACE);
+      expect(next.idle()).toEqual([]);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+      capped(next, second.id, 1);
+    });
+
+    test("a stamp naming a machine the task does not run on frees nothing", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      const held = await stored(store, first.id);
+      if (held === undefined) throw new Error("first is not stored");
+      const moved = await store.put(first.id, held.version, {
+        ...held.body,
+        idleRelease: { since: NOW, deviceId: "b" },
+      });
+      expect(moved.ok).toBe(true);
+
+      const next = await newLeader(env, NOW + GRACE + 1);
+      expect(next.idle()).toEqual([]);
+      const third = await enqueue(store, next, spec());
+      await pass(next);
+      capped(next, third.id, 2);
+    });
+
+    test("a busy after the release clears the stamp, so a new leader counts the task again", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      const released = (await stored(store, first.id))?.version ?? 0;
+
+      await report("busy");
+      const after = await stored(store, first.id);
+      expect(after?.body.idleRelease).toBeUndefined();
+      expect(after?.body.state).toBe("running");
+      expect(after?.version).toBe(released + 1);
+
+      const next = await newLeader(env, NOW + GRACE + 1);
+      expect(next.idle()).toEqual([]);
+      const third = await enqueue(store, next, spec());
+      await pass(next);
+      capped(next, third.id, 2);
+    });
+
+    test("another machine's events neither stamp a release nor clear one", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle", "b");
+      await at(env, NOW + GRACE);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+
+      const later = NOW + GRACE + 1;
+      env.clock.now = later;
+      await report("idle");
+      await at(env, later + GRACE);
+      const stamp = { since: later, deviceId: "a" };
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual(stamp);
+      await report("busy", "b");
+      await report("needs-input", "b");
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual(stamp);
+      expect(env.scheduler.idle()).toEqual([{ taskId: first.id, since: later }]);
+    });
+
+    test("a write out of running drops the stamp with the clock", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      await report("needs-input");
+      const after = await stored(store, first.id);
+      expect(after?.body.state).toBe("needs-input");
+      expect(after?.body.idleRelease).toBeUndefined();
+    });
+  });
 });
 
 describe("prune", () => {

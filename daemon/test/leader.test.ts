@@ -345,7 +345,7 @@ describe("queue-changed", () => {
     }
   });
 
-  test("an idle release, which writes nothing, is named in a nudge and listed by queue; busy ends it the same way", async () => {
+  test("an idle release is stamped on the record, named in a nudge and listed by queue; busy ends it the same way", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
     const store = new MemoryQueueStore();
@@ -380,12 +380,20 @@ describe("queue-changed", () => {
       const before = (await store.get("t-b"))?.version;
       await event("idle");
       expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
-      expect(await listed()).toEqual([{ taskId: "t-b", since: expect.any(Number) }]);
-      expect((await store.get("t-b"))?.version).toBe(before);
+      const listing = await listed();
+      expect(listing).toEqual([{ taskId: "t-b", since: expect.any(Number) }]);
+      // One write as the release begins, so a new leader holds it released too.
+      const stamped = await store.get("t-b");
+      expect(stamped?.version).toBe((before ?? 0) + 1);
+      expect(stamped?.body?.idleRelease).toEqual({ since: expect.any(Number), deviceId: "b" });
+      expect(stamped?.body?.idleRelease?.since).toBe(listing?.[0]?.since);
 
       await event("busy");
       expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
       expect(await listed()).toBeUndefined();
+      const cleared = await store.get("t-b");
+      expect(cleared?.version).toBe((before ?? 0) + 2);
+      expect(cleared?.body?.idleRelease).toBeUndefined();
     } finally {
       leader.stop();
       relay.stop();
