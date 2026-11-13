@@ -10796,7 +10796,13 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     and the account's alias. The record is parsed and passed through `archivedTask` again on the
     way out, so even a row an older build or a hand edit stored whole sends no prompt, no
     attachment manifest and no raw account id; a record that no longer parses is skipped, counted
-    in one warning, and still consumed.
+    in one warning, and still consumed. A page asked without `before` also carries `machines`:
+    every machine the archive holds an assigned task for, whatever the filters, as its device id,
+    last-known name (the machines table's, else the newest row's) and newest end time, newest
+    first, at most `ARCHIVE_MACHINES_MAX` (100) and cut to 8 000 bytes of the page's budget (machine
+    names have no length bound). It is one aggregate over `tasks`, which each page's `total`
+    already scans, with no index (one would be a migration on every existing archive); later pages
+    repeat none. An older archivist sends no `machines`, and an older app's parser ignores it.
 - **The PWA's charts** (item 8, A32, A35, A36d–A36f; 2026-11-13). The range picker is
   `6h · 24h · 30d · 90d · 1y`; 90 days asks at 6 h and a year at 1 d, so neither crosses
   `METRICS_MAX_POINTS`. Which side answers is the store's choice at ask time, from the registry
@@ -10836,9 +10842,12 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   the PR chip in its last archived state with no checks icon. Its machine is the registry's
   current name, else the archive's last-known one. Its account is the live account's display
   name, matched by the `account:` store key this install derives, else the archived alias, else
-  a short key, never the raw id. The Machine sheet lists the registry's machines, then those
-  only the rows read name, as "no longer listed · last seen 41d ago", where "last seen" is the
-  newest archived end among them; the archive has no machine listing to ask. The Repo and
+  a short key, never the raw id. The Machine sheet lists the registry's machines, then every
+  other machine the archive names, newest first, as "no longer listed · last seen 41d ago", where
+  "last seen" is the newest archived end among its tasks: page one's `machines` listing (above,
+  "The query ops"), kept while Load older pages on, merged with the rows read, the newer
+  sighting giving the name and age. From an archivist too old to send the listing, only the rows
+  read name them. The Repo and
   Account sheets likewise offer the registry's or the rows' values. The states are "Loading…"
   under the filters, "No older tasks match." with "Clear search and filters", and the charts'
   failure wording ("No answer — the archivist may be offline." for a timeout or an unsent ask;
