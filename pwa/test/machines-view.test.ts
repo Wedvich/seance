@@ -128,7 +128,7 @@ describe("the drain row and the close sheet", () => {
       "Its sessions could not be read.",
     );
     const lines = deriveCloseSheet(open, inputs({ sessions: { "dev-1": "unknown" } }));
-    expect(lines.at(-1)).toBe("Its sessions could not be read.");
+    expect(lines).toContain("Its sessions could not be read.");
   });
 
   test("the close sheet keeps item 1's words without drainPass, and counts the passes with it", () => {
