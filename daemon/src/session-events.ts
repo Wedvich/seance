@@ -761,7 +761,15 @@ const PROBE_TIMEOUT_MS = 2_000;
  * but this fails, every event is refused — the probe is what says why, at
  * start, instead of a stream of `unbound` replies after a Bun upgrade.
  */
-export async function peerBindingProblem(): Promise<string | null> {
+export function peerBindingProblem(): Promise<string | null> {
+  // Once per process, like `peerPidSupported`: the start-up warning and the `messages` capability both read it.
+  peerProbe ??= probePeerBinding();
+  return peerProbe;
+}
+
+let peerProbe: Promise<string | null> | undefined;
+
+async function probePeerBinding(): Promise<string | null> {
   if (!peerPidSupported()) return null;
   const dir = await mkdtemp(join(tmpdir(), "seanced-peer-"));
   const accepted = Promise.withResolvers<number | null>();

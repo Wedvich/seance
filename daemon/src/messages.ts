@@ -90,6 +90,8 @@ interface Held {
   /** The sender's task, null when untasked: for the audit line only. */
   readonly from: string | null;
   readonly bytes: number;
+  /** Its own grace, from the moment it was held: one timer per inbox would age a later message by an earlier one's clock. */
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 interface Inbox {
@@ -97,7 +99,6 @@ interface Inbox {
   items: Held[];
   bytes: number;
   dropped: number;
-  timer: ReturnType<typeof setTimeout> | null;
 }
 
 export function createMessages(deps: MessagesDeps): Messages {
@@ -143,12 +144,20 @@ export function createMessages(deps: MessagesDeps): Messages {
     }
   };
 
+  const release = (item: Held): void => {
+    if (item.timer === null) return;
+    clearTimeout(item.timer);
+    item.timer = null;
+  };
+
   const dropInbox = (paneId: string, outcome: "ended" | "nolistener"): void => {
     const inbox = inboxes.get(paneId);
     if (inbox === undefined) return;
     inboxes.delete(paneId);
-    if (inbox.timer !== null) clearTimeout(inbox.timer);
-    for (const item of inbox.items) auditHeld(inbox.taskId, item, outcome);
+    for (const item of inbox.items) {
+      release(item);
+      auditHeld(inbox.taskId, item, outcome);
+    }
   };
 
   const lineOf = (item: Held, dropped: number): string => {
@@ -163,18 +172,23 @@ export function createMessages(deps: MessagesDeps): Messages {
     return JSON.stringify(line);
   };
 
+  /**
+   * Writes what the sink takes, oldest first. A write that fails (the connection closed, or its unread output passed
+   * the cap) leaves the rest held, each with its own grace: the pane's next listener, typically a second away,
+   * would still be served.
+   */
   const flush = (paneId: string, inbox: Inbox, sink: ListenerSink): void => {
-    inboxes.delete(paneId);
-    if (inbox.timer !== null) clearTimeout(inbox.timer);
-    let failed = false;
-    inbox.items.forEach((item, index) => {
-      if (failed || !sink.write(lineOf(item, index === 0 ? inbox.dropped : 0))) {
-        failed = true;
-        auditHeld(inbox.taskId, item, "nolistener");
-        return;
-      }
+    let written = 0;
+    for (const item of inbox.items) {
+      if (!sink.write(lineOf(item, inbox.dropped))) break;
+      // The notice rode the first line out: a retry after a failed write must not repeat it.
+      inbox.dropped = 0;
+      release(item);
       auditHeld(inbox.taskId, item, "delivered");
-    });
+      written += 1;
+    }
+    for (const item of inbox.items.splice(0, written)) inbox.bytes -= item.bytes;
+    if (inbox.items.length === 0) inboxes.delete(paneId);
   };
 
   const hold = (paneId: string, to: string, item: Held): void => {
@@ -183,21 +197,27 @@ export function createMessages(deps: MessagesDeps): Messages {
       dropInbox(paneId, "ended");
       inbox = undefined;
     }
-    const box: Inbox = inbox ?? { taskId: to, items: [], bytes: 0, dropped: 0, timer: null };
+    const box: Inbox = inbox ?? { taskId: to, items: [], bytes: 0, dropped: 0 };
     inboxes.set(paneId, box);
+    item.timer = setTimeout(() => {
+      item.timer = null;
+      const at = box.items.indexOf(item);
+      if (at === -1) return;
+      box.items.splice(at, 1);
+      box.bytes -= item.bytes;
+      auditHeld(to, item, "nolistener");
+      if (box.items.length === 0 && inboxes.get(paneId) === box) inboxes.delete(paneId);
+    }, graceMs);
     box.items.push(item);
     box.bytes += item.bytes;
     while (box.items.length > INBOX_MAX_MESSAGES || box.bytes > INBOX_MAX_BYTES) {
       const oldest = box.items.shift();
       if (oldest === undefined) break;
+      release(oldest);
       box.bytes -= oldest.bytes;
       box.dropped += 1;
       auditHeld(to, oldest, "dropped");
     }
-    box.timer ??= setTimeout(() => {
-      box.timer = null;
-      if (inboxes.get(paneId) === box) dropInbox(paneId, "nolistener");
-    }, graceMs);
   };
 
   /** Records a send against its rate key; false when it would pass either limit. */
@@ -224,10 +244,12 @@ export function createMessages(deps: MessagesDeps): Messages {
     };
     if (!parseInboxFrame(raw)) return refuse("invalid");
     if (stopped) return refuse("stopping");
+    // Nothing on this host can ever bind: a refusal the mod waits out, where `unbound` would read as transient.
+    if (!hostNamesPeers()) return refuse("unsupported");
     const panes = await deps.panes();
     const pane = await bind(peer, panes);
     if (pane === null) {
-      // Info: a claude run outside tmux, or a background session, is ordinary.
+      // Info: a claude run outside tmux, in another tmux server, or a background session is ordinary.
       log.info(`local socket: inbox listener from pid=${peer ?? "unknown"} matched no live pane — refused`);
       return refuse("unbound");
     }
@@ -235,6 +257,9 @@ export function createMessages(deps: MessagesDeps): Messages {
     // The peer may have gone while the pane list was read: nothing to serve, and no binding to keep.
     if (sink.gone.aborted) return;
     sweep(panes);
+    // Nothing is ever addressed to a pane without a task this machine launched, so its listener would only idle.
+    // Silent: a hand-started session is ordinary, and the mod asks again every few minutes.
+    if (pane.taskId === null || deps.launchedAt(pane.taskId) === undefined) return refuse("untasked");
 
     const previous = listeners.get(pane.id);
     if (previous !== undefined) {
@@ -257,7 +282,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     const ack: InboxAck = {
       ok: true,
       keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
-      ...(pane.taskId === null ? {} : { instruction: STANDING_INSTRUCTION }),
+      instruction: STANDING_INSTRUCTION,
     };
     sink.write(JSON.stringify(ack));
 
@@ -330,6 +355,7 @@ export function createMessages(deps: MessagesDeps): Messages {
       ...(pushed ? {} : { body: full }),
       from,
       bytes,
+      timer: null,
     };
 
     // The listener was bound for a task and a pane process: a pane re-tagged or respawned since is closed, not served.
@@ -378,9 +404,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     stop: () => {
       stopped = true;
       // A restart clears the inboxes by design (nothing is at rest), so no audit: the lines would claim an outcome.
-      for (const inbox of inboxes.values()) {
-        if (inbox.timer !== null) clearTimeout(inbox.timer);
-      }
+      for (const inbox of inboxes.values()) inbox.items.forEach(release);
       inboxes.clear();
       for (const listener of listeners.values()) listener.sink.close();
       listeners.clear();

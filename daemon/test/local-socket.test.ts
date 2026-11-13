@@ -329,6 +329,34 @@ describe("the local op socket", () => {
     }
   });
 
+  test("a message handler that throws is answered internal, never invalid: the sender is not sent to update a daemon that is current", async () => {
+    const path = join(base, "crash.sock");
+    const handle = await startLocalSocket({
+      handle: () => Promise.resolve(null),
+      path,
+      messages: {
+        listen: () => Promise.resolve(),
+        send: () => Promise.reject(new Error("boom")),
+      },
+    });
+    try {
+      let answer = "";
+      const client = await Bun.connect<undefined>({
+        unix: path,
+        socket: {
+          open: (s): void =>
+            void s.write(`${JSON.stringify({ v: 1, kind: "message", to: "t-1", messageKind: "note", text: "x" })}\n`),
+          data: (_s, chunk: Buffer): void => void (answer += chunk.toString()),
+        },
+      });
+      await pollUntil(() => answer.includes("\n"), "the reply");
+      expect(JSON.parse(answer)).toEqual({ ok: false, code: "internal" });
+      client.end();
+    } finally {
+      handle.stop();
+    }
+  });
+
   test("a session-event ingest is handed a signal that aborts when the peer goes away mid-request", async () => {
     let seen: AbortSignal | undefined;
     const reached = Promise.withResolvers<void>();

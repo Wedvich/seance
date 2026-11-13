@@ -39,7 +39,7 @@ import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { checkoutRoot, readSource } from "./selfsource.ts";
-import { EndedTasks } from "./session-events.ts";
+import { EndedTasks, peerBindingProblem } from "./session-events.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
 import type { Fetch } from "./seams.ts";
@@ -344,8 +344,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,
-        // A host that cannot name a socket's peer refuses every inbox listener, so it could not receive.
-        ...(peerPidSupported() ? [CAPABILITIES.messages] : []),
+        // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
+        // so it could not receive.
+        ...(peerPidSupported() && (await peerBindingProblem()) === null ? [CAPABILITIES.messages] : []),
         // Only where an ask is wired (`sessionEvents` wires none without a despawn): the clients' wording and
         // "Drain now" promise an action.
         ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),

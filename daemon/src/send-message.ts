@@ -46,7 +46,8 @@ const GRACE_SECONDS = LISTENER_GRACE_MS / 1_000;
 const REFUSED = {
   unbound: () =>
     "this session is not in a tmux pane this machine's daemon can see, or this machine cannot name a socket's peer process; messages need both",
-  unknown: (to) => `task ${to} is not running on this machine; this version delivers only to tasks on the same machine`,
+  unknown: (to) =>
+    `this machine has no launch record of task ${to} (it was not launched here, or its record has aged out); this version delivers only to tasks on the same machine`,
   ended: (to) => `task ${to} has no live session on this machine`,
   too_long: () =>
     `the message is too long: at most ${MESSAGE_MAX} bytes, and a request at most ${MESSAGE_PUSH_MAX} bytes`,
@@ -54,6 +55,7 @@ const REFUSED = {
     `too many messages: ${MESSAGE_RATE.perMinute} a minute and ${MESSAGE_RATE.perHour} an hour per task`,
   invalid: () => "this machine's daemon could not read the message; it may predate send_message (`seanced update`)",
   unsupported: () => "this machine's daemon runs no message delivery",
+  internal: () => "this machine's daemon hit an error handling the message (see its log); nothing was sent",
   stopping: () => "this machine's daemon is stopping, so nothing was sent",
   held: (to) =>
     `task ${to} is starting on this machine and has no session yet; nothing was kept — send again in a little while`,

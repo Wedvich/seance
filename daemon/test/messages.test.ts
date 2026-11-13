@@ -112,7 +112,7 @@ async function pane(name: string, taskId?: string): Promise<Pane> {
   return { id, pid: Number(pid) };
 }
 
-function sinkDouble(): {
+function sinkDouble(failAfter = Infinity): {
   readonly sink: ListenerSink;
   readonly lines: string[];
   readonly closed: () => boolean;
@@ -125,6 +125,12 @@ function sinkDouble(): {
     sink: {
       write: (line) => {
         if (closed) return false;
+        if (written.length >= failAfter) {
+          // As the real sink's: a write it cannot take closes the connection.
+          closed = true;
+          gone.abort();
+          return false;
+        }
         written.push(line);
         return true;
       },
@@ -217,8 +223,8 @@ async function runner(name: string, command: string, taskId?: string): Promise<R
 }
 
 /** `seanced inbox`, the real CLI: stdout to a file, its exit code beside it. */
-function inboxCommand(out: string): string {
-  return `${shq(process.execPath)} ${shq(MAIN)} inbox > ${shq(out)}; echo $? > ${shq(`${out}.exit`)}`;
+function inboxCommand(out: string, state = stateDir): string {
+  return `SEANCE_STATE_DIR=${shq(state)} ${shq(process.execPath)} ${shq(MAIN)} inbox > ${shq(out)}; echo $? > ${shq(`${out}.exit`)}`;
 }
 
 /** The raw replies to `frames`, sent in order from inside the pane: not through `sendMessage`, so the reply is the daemon's own. */
@@ -252,7 +258,7 @@ const readLines = async (file: string): Promise<string[]> => {
 };
 
 describe("the real listener child and a real sender", () => {
-  test("a tasked listener is acked with the standing instruction, an untasked one without, and a note arrives as one line naming its sender", async () => {
+  test("a tasked listener is acked with the standing instruction, an untasked one is refused (exit 4), and a note arrives as one line naming its sender", async () => {
     const receiver = await launched("recv");
     const sender = await launched("send");
     const recvOut = join(base, "a-recv.out");
@@ -262,16 +268,15 @@ describe("the real listener child and a real sender", () => {
     await recv.go();
     await bare.go();
     await pollUntil(async () => (await readLines(recvOut)).length > 0, "the tasked listener's ack");
-    await pollUntil(async () => (await readLines(bareOut)).length > 0, "the untasked listener's ack");
+    await pollUntil(() => Bun.file(`${bareOut}.exit`).exists(), "the untasked listener to be refused");
     expect(JSON.parse((await readLines(recvOut))[0] ?? "")).toEqual({
       ok: true,
       keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
       instruction: STANDING_INSTRUCTION,
     });
-    expect(JSON.parse((await readLines(bareOut))[0] ?? "")).toEqual({
-      ok: true,
-      keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
-    });
+    // The refusal is the CLI's exit code, never a line the mod would read.
+    expect(await readLines(bareOut)).toEqual([]);
+    expect((await readFile(`${bareOut}.exit`, "utf8")).trim()).toBe("4");
 
     const text = "schema v2 landed";
     const send = await senderCommand("a-send", [message(receiver, "note", text)]);
@@ -288,7 +293,6 @@ describe("the real listener child and a real sender", () => {
     expect(delivered.push).toContain("Sender Win");
     expect(delivered.push).toContain("testbox");
     expect(delivered.push).toContain(text);
-    expect((await readLines(bareOut)).length).toBe(1);
 
     expect(lines.filter((l) => l.includes(`to="${receiver}"`))).toEqual([
       `audit message origin=message dir=out from="${sender}" to="${receiver}" kind=note bytes=${text.length} outcome=delivered`,
@@ -318,6 +322,64 @@ describe("the real listener child and a real sender", () => {
     await pollUntil(async () => (await readLines(outB)).length >= 2, "the line on the second listener");
     expect(lineOf((await readLines(outB))[1]).push).toContain("second only");
     expect((await readLines(outA)).length).toBe(1);
+  });
+
+  test("the CLI's exit code is the mod's backoff signal: 3 for unsupported, 4 for a pane in no tmux of the daemon's, 2 for no daemon, a close with no reply, and a reader that went away", async () => {
+    const exitOf = async (name: string, state: string): Promise<string> => {
+      const out = join(base, `${name}.out`);
+      const proc = Bun.spawn(["sh", "-c", inboxCommand(out, state)], { stdout: "ignore", stderr: "ignore" });
+      await proc.exited;
+      return (await readFile(`${out}.exit`, "utf8")).trim();
+    };
+
+    // A daemon that runs no message delivery answers the inbox frame `unsupported`.
+    const bare = join(base, "exit-bare");
+    await mkdir(bare, { recursive: true });
+    const bareSocket = await startLocalSocket({
+      handle: () => Promise.resolve(null),
+      path: join(bare, "run", "seanced.sock"),
+    });
+    try {
+      expect(await exitOf("x-unsupported", bare)).toBe("3");
+    } finally {
+      bareSocket.stop();
+    }
+
+    // This process runs in no pane of the daemon's tmux: its pid walks to none.
+    expect(await exitOf("x-unbound", stateDir)).toBe("4");
+
+    // Nothing listening.
+    expect(await exitOf("x-nodaemon", join(base, "exit-none"))).toBe("2");
+
+    // A connection closed with no reply: an older daemon dropping the frame as malformed.
+    const quiet = join(base, "exit-quiet");
+    await mkdir(join(quiet, "run"), { recursive: true });
+    const server = Bun.listen<undefined>({
+      unix: join(quiet, "run", "seanced.sock"),
+      socket: { data: (sock) => void sock.end(), open: () => {} },
+    });
+    try {
+      expect(await exitOf("x-noreply", quiet)).toBe("2");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a child whose stdout has no reader exits 2 at its first write, so the daemon holds the next message instead of calling it delivered", async () => {
+    const receiver = await launched("epipe");
+    const out = join(base, "epipe.out");
+    const go2 = join(base, "epipe-start.go");
+    // `true` is gone before the child starts: its first write, the ack, meets a closed pipe.
+    const child = `SEANCE_STATE_DIR=${shq(stateDir)} ${shq(process.execPath)} ${shq(MAIN)} inbox; echo $? > ${shq(`${out}.exit`)}`;
+    const command = `( while [ ! -e ${shq(go2)} ]; do sleep 0.05; done; ${child} ) | true`;
+    const listeners = await runner("epipe-listener", command, receiver);
+    await listeners.go();
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    await writeFile(go2, "");
+    await pollUntil(() => Bun.file(`${out}.exit`).exists(), "the child to exit on its broken stdout");
+    expect((await readFile(`${out}.exit`, "utf8")).trim()).toBe("2");
   });
 
   test("an unbound sender, in no pane, is refused", async () => {
@@ -354,15 +416,28 @@ describe("refusing to bind", () => {
     expect(await messages.send(message(receiver, "note", "x"), null)).toEqual({ ok: false, code: "unbound" });
   });
 
-  test("a host that names no peers refuses even a pid that sits in a pane", async () => {
+  test("a host that names no peers refuses even a pid that sits in a pane: a listener is told unsupported (a retry changes nothing), a sender unbound", async () => {
     const messages = setup({ hostNamesPeers: () => false });
     const receiver = await launched("host");
     const target = await pane("host-pane", receiver);
     const listener = sinkDouble();
     await messages.listen(INBOX, target.pid, listener.sink);
-    expect(listener.lines.map((l) => JSON.parse(l))).toEqual([{ ok: false, code: "unbound" }]);
+    expect(listener.lines.map((l) => JSON.parse(l))).toEqual([{ ok: false, code: "unsupported" }]);
     expect(listener.closed()).toBe(true);
     expect(await messages.send(message(receiver, "note", "x"), target.pid)).toEqual({ ok: false, code: "unbound" });
+  });
+
+  test("a pane with no task, or one tagged with an id this machine never launched, is refused untasked and acked nothing: no listener idles for a session nothing can reach", async () => {
+    const messages = setup();
+    const bare = await pane("bare-pane");
+    const forged = await pane("forged-pane", "task-never-launched-here");
+    for (const target of [bare, forged]) {
+      const listener = sinkDouble();
+      // oxlint-disable-next-line no-await-in-loop -- one pane at a time
+      await messages.listen(INBOX, target.pid, listener.sink);
+      expect(listener.lines.map((l) => JSON.parse(l))).toEqual([{ ok: false, code: "untasked" }]);
+      expect(listener.closed()).toBe(true);
+    }
   });
 
   test("a frame that is not exactly {v:1, kind:inbox} is invalid, so a listener can never name a pane", async () => {
@@ -430,6 +505,57 @@ describe("the daemon's inbox", () => {
     expect(delivered[0]?.push).toContain("61440 bytes; call read_messages to read it");
     expect(delivered[0]?.body).toContain("1".repeat(100));
     expect(delivered[3]?.body).toContain("4".repeat(100));
+  });
+
+  test("each held message has its own grace: an earlier one's expiry takes no later one with it", async () => {
+    const messages = setup({ graceMs: 600 });
+    const receiver = await launched("peritem");
+    const sender = await launched("peritemsend");
+    const target = await pane("peritem-target", receiver);
+    const from = await pane("peritem-from", sender);
+    await messages.send(message(receiver, "note", "first"), from.pid);
+    // The second is held part-way through the first's grace: a fixed wait is the scenario itself.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 400);
+    });
+    await messages.send(message(receiver, "note", "second"), from.pid);
+    await pollUntil(() => inAudits("nolistener").length === 1, "the first message's grace to end");
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(listener.lines).toHaveLength(2);
+    expect(lineOf(listener.lines[1]).push).toContain("second");
+    expect(inAudits("nolistener")).toHaveLength(1);
+    expect(inAudits("delivered")).toHaveLength(1);
+  });
+
+  test("a write that fails mid-flush leaves the rest held for the next listener, and the dropped notice is not repeated", async () => {
+    const messages = setup({ graceMs: 1e9 });
+    const receiver = await launched("flush");
+    const sender = await launched("flushsend");
+    const target = await pane("flush-target", receiver);
+    const from = await pane("flush-from", sender);
+    for (let i = 0; i < 34; i++) {
+      clock.now += 5_000;
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      await messages.send(message(receiver, "note", `n${i}`), from.pid);
+    }
+    // The ack and one message get out, then the connection dies.
+    const first = sinkDouble(2);
+    await messages.listen(INBOX, target.pid, first.sink);
+    expect(first.lines).toHaveLength(2);
+    expect(lineOf(first.lines[1]).push).toContain("2 earlier message(s)");
+    expect(inAudits("delivered")).toHaveLength(1);
+    expect(inAudits("nolistener")).toHaveLength(0);
+
+    const second = sinkDouble();
+    await messages.listen(INBOX, target.pid, second.sink);
+    const [, ...rest] = second.lines;
+    expect(rest).toHaveLength(INBOX_MAX_MESSAGES - 1);
+    expect(lineOf(rest[0]).push).toContain("n3");
+    expect(lineOf(rest[0]).push).not.toContain("dropped before delivery");
+    expect(lineOf(rest.at(-1)).push).toContain("n33");
+    expect(inAudits("delivered")).toHaveLength(INBOX_MAX_MESSAGES);
+    expect(inAudits("nolistener")).toHaveLength(0);
   });
 
   test("is cleared when its pane is bound to another task: the held messages are audited ended and nothing is delivered", async () => {

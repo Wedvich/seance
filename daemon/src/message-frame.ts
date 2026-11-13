@@ -26,6 +26,8 @@ export const MESSAGE_REPLY_CODES = [
   /** This daemon runs no message delivery. */
   "unsupported",
   "stopping",
+  /** A bug in the daemon's handling of the frame: not an old daemon, so `seanced update` would not help. */
+  "internal",
   /** No task this machine launched carries that id. */
   "unknown",
   /** The task was launched here and has no live session, or the session has no inbox listener (`reason: "nolistener"`). */
@@ -43,13 +45,17 @@ export type MessageReply =
   | { readonly ok: true; readonly id: string; readonly outcome: "delivered" | "sent" }
   | { readonly ok: false; readonly code: MessageReplyCode; readonly reason?: "nolistener" };
 
-export const INBOX_REFUSAL_CODES = ["invalid", "unbound", "unsupported", "stopping"] as const;
+/**
+ * `unsupported`: no message delivery here, or a host that can name no peer. `unbound` and `untasked`: this pane
+ * will not bind (a tmux server other than the daemon's, a hand-started session), which a retry does not change.
+ */
+export const INBOX_REFUSAL_CODES = ["invalid", "unbound", "unsupported", "stopping", "untasked"] as const;
 
-/** The first line a listener reads. `instruction` only for a pane carrying a task (an untasked one is not addressable). */
+/** The first line a listener reads. Only a pane carrying a task this machine launched is acked: nothing is addressed to any other. */
 export type InboxAck =
   | {
       readonly ok: true;
-      readonly instruction?: string;
+      readonly instruction: string;
       readonly keep: { readonly messages: number; readonly bytes: number };
     }
   | { readonly ok: false; readonly code: (typeof INBOX_REFUSAL_CODES)[number] };

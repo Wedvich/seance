@@ -234,7 +234,7 @@ async function dispatchMessage(
   } catch (err) {
     // Never the frame: it carries message text.
     log.error(`local socket: message delivery crashed: ${String(err)}`);
-    reply = { ok: false, code: "invalid" };
+    reply = { ok: false, code: "internal" };
   }
   sendLine(sock, conn, JSON.stringify(reply));
 }
