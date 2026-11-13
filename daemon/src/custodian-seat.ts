@@ -143,6 +143,29 @@ export interface PickDeps {
   readonly ensureDir: (dir: string) => Promise<string>;
 }
 
+export type HostProblem =
+  | "root missing"
+  | "round dir is in another exclave"
+  | "round dir untrusted"
+  | "round dir holds settings or agents";
+
+/**
+ * Why a signed-in exclave's round dir cannot host a round, null when it can: the one rule the pick and `seanced
+ * doctor` share, so doctor never says an exclave can host while the seat skips it.
+ */
+export async function hostProblem(
+  d: Pick<PickDeps, "roundDirFor" | "rootExists" | "trusted" | "planted">,
+  exclave: Exclave,
+  exclaves: readonly Exclave[],
+): Promise<HostProblem | null> {
+  const dir = d.roundDirFor(exclave);
+  if (!(await d.rootExists(exclave.root))) return "root missing";
+  if (exclaveOf(dir, exclaves) !== exclave.id) return "round dir is in another exclave";
+  if (!(await d.trusted(dir, exclave.configFile))) return "round dir untrusted";
+  if (await d.planted(dir)) return "round dir holds settings or agents";
+  return null;
+}
+
 /**
  * Touches no disk but reads until the pick: each candidate's round dir is checked at its uncreated path (trust walks
  * the path and its ancestors; a missing dir is unplanted), and only the exclave picked has its dir made. An
@@ -162,16 +185,10 @@ export function createPick(d: PickDeps): () => Promise<PickResult> {
         reasons.push(`${exclave.id}: ${skip}`);
         continue;
       }
-      const dir = d.roundDirFor(exclave);
       // oxlint-disable-next-line no-await-in-loop -- a handful of exclaves, one small read each
-      if (!(await d.rootExists(exclave.root))) reasons.push(`${exclave.id}: root missing`);
-      else if (exclaveOf(dir, scan.exclaves) !== exclave.id)
-        reasons.push(`${exclave.id}: round dir is in another exclave`);
-      // oxlint-disable-next-line no-await-in-loop
-      else if (!(await d.trusted(dir, exclave.configFile))) reasons.push(`${exclave.id}: round dir untrusted`);
-      // oxlint-disable-next-line no-await-in-loop
-      else if (await d.planted(dir)) reasons.push(`${exclave.id}: round dir holds settings or agents`);
-      else eligible.add(exclave.id);
+      const problem = await hostProblem(d, exclave, scan.exclaves);
+      if (problem === null) eligible.add(exclave.id);
+      else reasons.push(`${exclave.id}: ${problem}`);
     }
     const exclave = pickExclave({
       scan,

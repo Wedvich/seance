@@ -4,6 +4,7 @@ import {
   fromBase64,
   generateIdentitySeed,
   identityFromSeed,
+  isRecord,
   toBase64,
   type Identity,
   type RepoEntry,
@@ -130,11 +131,11 @@ const finiteMs = (value: unknown): value is number => typeof value === "number" 
  */
 export function custodianSeatOf(state: State): SeatRecord {
   const raw: unknown = state.custodian;
-  if (typeof raw !== "object" || raw === null) return {};
-  const { lastEndedAt, round } = raw as { lastEndedAt?: unknown; round?: unknown };
+  if (!isRecord(raw)) return {};
+  const { lastEndedAt, round } = raw;
   const ended = finiteMs(lastEndedAt) ? { lastEndedAt } : {};
-  if (typeof round !== "object" || round === null) return ended;
-  const { pane, startedAt, tmpDir, exclave } = round as Record<string, unknown>;
+  if (!isRecord(round)) return ended;
+  const { pane, startedAt, tmpDir, exclave } = round;
   if (
     !(pane === null || (typeof pane === "string" && PANE_ID.test(pane))) ||
     !finiteMs(startedAt) ||

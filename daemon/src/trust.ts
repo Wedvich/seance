@@ -1,5 +1,5 @@
-import { rename, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { realpath, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { isRecord } from "@seance/shared";
 import { log } from "./log.ts";
 
@@ -86,9 +86,29 @@ export async function isDirTrusted(dir: string, configFile: string): Promise<boo
     return false;
   }
   if (!isRecord(projects)) return false;
-  for (let at = dir; ; at = dirname(at)) {
-    const entry = projects[at];
-    if (isRecord(entry) && entry["hasTrustDialogAccepted"] === true) return true;
-    if (dirname(at) === at) return false;
+  // Claude Code keys `projects` by the session's real cwd, and a round runs in the real path (`ensureRoundDir`): a
+  // dir reached through a symlink (a state dir under one) is trusted under the real path, which the uncreated path
+  // does not spell. Either spelling counts.
+  for (const start of new Set([dir, await realpathOfExisting(dir)])) {
+    for (let at = start; ; at = dirname(at)) {
+      const entry = projects[at];
+      if (isRecord(entry) && entry["hasTrustDialogAccepted"] === true) return true;
+      if (dirname(at) === at) break;
+    }
+  }
+  return false;
+}
+
+/** `path` with its deepest existing ancestor realpath'd and the rest appended: the real path a mkdir would make. */
+async function realpathOfExisting(path: string): Promise<string> {
+  const rest: string[] = [];
+  for (let at = path; ; at = dirname(at)) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each step up depends on the last failing
+      return join(await realpath(at), ...rest.toReversed());
+    } catch {
+      if (dirname(at) === at) return path;
+      rest.push(basename(at));
+    }
   }
 }

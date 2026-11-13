@@ -35,6 +35,8 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
     deps: {
       scan: () => Promise.resolve(scan(["work"])),
       trusted: () => Promise.resolve(true),
+      rootExists: () => Promise.resolve(true),
+      planted: () => Promise.resolve(false),
       sandboxProblem: () => Promise.resolve(null),
       weakerNested: () => Promise.resolve(false),
       ...deps,
@@ -71,6 +73,19 @@ describe("custodianChecks", () => {
     expect(await run({})).toEqual([
       { level: "ok", message: "exclave work: round dir ~/work/.seance-custodian trusted" },
     ]);
+  });
+
+  test("an exclave the seat would skip is never reported as able to host: no root, a planted dir", async () => {
+    for (const [deps, reason] of [
+      [{ rootExists: () => Promise.resolve(false) }, "root missing"],
+      [{ planted: () => Promise.resolve(true) }, "round dir holds settings or agents"],
+    ] as const) {
+      const checks = await run(deps);
+      expect(checks).toEqual([
+        { level: "warn", message: `exclave work: ${reason} — rounds skip it` },
+        { level: "fail", message: "no exclave can host a round" },
+      ]);
+    }
   });
 
   test("a sandbox problem fails with its own words", async () => {

@@ -40,6 +40,14 @@ export async function ensureRoundDir(dir: string): Promise<string> {
   return realpath(dir);
 }
 
+/** Whether an exclave's root is a directory: a root is never invented, so one that is not makes the exclave ineligible. */
+export function exclaveRootExists(root: string): Promise<boolean> {
+  return stat(root).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
+}
+
 /**
  * Whether anything outside the round could have planted settings or an agent in the round dir:
  * `--setting-sources project` still loads a project `settings.json`, and a project agent of the same name may outrank
