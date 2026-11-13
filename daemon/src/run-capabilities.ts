@@ -190,9 +190,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
         }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
-    ...(drainAsk === undefined
-      ? {}
-      : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
+    ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
   });
   late.events = events;
   drainAsk?.start();

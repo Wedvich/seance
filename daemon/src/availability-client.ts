@@ -50,6 +50,8 @@ export async function setMachineOpen(opts: {
   readonly ref: string | null;
   readonly selfId: string | null;
   readonly open: boolean;
+  /** Closing only, and only to a target advertising `drainAsk`: its sessions are interrupted at once, not after 5 minutes. */
+  readonly now?: boolean;
   readonly lease: FleetLease;
 }): Promise<AvailabilityOutcome> {
   const { lease, open } = opts;
@@ -68,6 +70,9 @@ export async function setMachineOpen(opts: {
   if (target.capabilities?.includes(CAPABILITIES.close) !== true) {
     return failed(`${target.name} cannot be opened or closed yet — its daemon needs \`seanced update\``);
   }
+  const asks = target.capabilities?.includes(CAPABILITIES.drainAsk) === true;
+  const now = opts.now === true && !open;
+  if (now && !asks) return failed(`${target.name} cannot drain now yet — its daemon needs \`seanced update\``);
   // A reopen needs only the target, so a close can always be undone.
   if (!open) {
     if (lease.scheduler === null) return failed(`not closed — ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
@@ -76,7 +81,7 @@ export async function setMachineOpen(opts: {
   if (!target.connected) {
     return failed(`${target.name} is not connected — last seen ${new Date(lastHeardAt(target)).toISOString()}`);
   }
-  const request: AvailabilityRequest = { open };
+  const request: AvailabilityRequest = { open, ...(now ? { now: true } : {}) };
   let reply;
   try {
     reply = parseAvailabilityResponse(await lease.appRequest(target.deviceId, "availability", request));
@@ -93,7 +98,13 @@ export async function setMachineOpen(opts: {
   if (reply.closed === null) return done(`${target.name} is open for work`);
   const closed = { deviceId: target.deviceId, name: target.name, at: reply.closed };
   if (closedAt(target) === reply.closed) {
-    return done(`${target.name} was already closed (since ${new Date(reply.closed).toISOString()})`, closed);
+    const since = new Date(reply.closed).toISOString();
+    return done(
+      asks && now
+        ? `${target.name} was already closed (since ${since}); its sessions are being interrupted now`
+        : `${target.name} was already closed (since ${since})`,
+      closed,
+    );
   }
   // Only a leader that advertises `drainPass` passes the work off; an older one leaves it where it is.
   const passes = advertises(
@@ -101,6 +112,14 @@ export async function setMachineOpen(opts: {
     lease.scheduler?.availability() ?? { kind: "none" },
     CAPABILITIES.drainPass,
   );
+  if (asks) {
+    const when = now ? "interrupted now" : "interrupted after 5 minutes";
+    const left = passes ? "; any left are passed to other machines in 10 minutes unless you reopen it" : "";
+    return done(
+      `${target.name} is closed to new work; its sessions are asked to pass themselves at their next pause (${when})${left}`,
+      closed,
+    );
+  }
   return done(
     passes
       ? `${target.name} is closed to new work; its running tasks will be passed to other machines in 10 minutes unless you reopen it`

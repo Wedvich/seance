@@ -480,11 +480,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   };
   const availability: MachineAvailability = {
     closed: () => closedOf(state),
-    set: (open, now) => {
+    set: (open, immediately) => {
       // After the write is durable, inside the serialized chain; an unchanged close still reaches the ask, so `now` applies to an already-closed machine.
       const run = setting.then(async () => {
         const result = await setOpen(open);
-        if (!open && result.closed !== null) void drainAsk.ask?.closed(result.closed, now === true);
+        if (!open && result.closed !== null) void drainAsk.ask?.closed(result.closed, immediately === true);
         else if (open && result.changed) drainAsk.ask?.reopened();
         return result;
       });

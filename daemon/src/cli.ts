@@ -353,29 +353,32 @@ export async function cmdPass(argv: readonly string[]): Promise<void> {
 
 /**
  * Exported for tests. `close` and `open` take at most the one machine they act on; none means this one.
- * `close` alone takes `--wait`: block until the machine is empty.
+ * `close` alone takes `--wait` (block until the machine is empty) and `--now` (interrupt its sessions at once).
  */
 export function parseAvailabilityArgs(
   argv: readonly string[],
   verb: "close" | "open",
-): { readonly machine: string | null; readonly wait: boolean } {
-  const usage = verb === "close" ? "usage: seanced close [<machine>] [--wait]" : "usage: seanced open [<machine>]";
-  const wait = verb === "close" && argv.includes("--wait");
-  const words = argv.filter((arg) => !(verb === "close" && arg === "--wait"));
+): { readonly machine: string | null; readonly wait: boolean; readonly now: boolean } {
+  const usage =
+    verb === "close" ? "usage: seanced close [<machine>] [--now] [--wait]" : "usage: seanced open [<machine>]";
+  const flags = verb === "close" ? ["--wait", "--now"] : [];
+  const wait = argv.includes("--wait") && verb === "close";
+  const now = argv.includes("--now") && verb === "close";
+  const words = argv.filter((arg) => !flags.includes(arg));
   const [machine] = words;
   if (words.length > 1 || machine?.startsWith("-") === true) throw new Error(usage);
-  return { machine: machine ?? null, wait };
+  return { machine: machine ?? null, wait, now };
 }
 
 /** Closes a machine to new scheduled work (default: this one); the scheduler passes its running tasks on, and `--wait` blocks until it is empty. Over the relay (`cli-auto.ts`). */
 export async function cmdClose(argv: readonly string[]): Promise<void> {
-  const { machine, wait } = parseAvailabilityArgs(argv, "close");
-  return cmdAvailabilityAuto(machine, false, wait);
+  const { machine, wait, now } = parseAvailabilityArgs(argv, "close");
+  return cmdAvailabilityAuto(machine, false, now, wait);
 }
 
 /** Reopens a closed machine. */
 export async function cmdOpen(argv: readonly string[]): Promise<void> {
-  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false);
+  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false);
 }
 
 const AMEND_USAGE =

@@ -103,7 +103,10 @@ export interface HandlerContext {
 export interface MachineAvailability {
   readonly closed: () => number | null;
   /** Persists, then refreshes status; `changed` false when it already was. Throws when the write fails. */
-  readonly set: (open: boolean, now?: boolean) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
+  readonly set: (
+    open: boolean,
+    now?: boolean,
+  ) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
 }
 
 /** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
