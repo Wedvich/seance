@@ -4678,6 +4678,77 @@ describe("history sources", () => {
     }
   });
 
+  test("with no archivist, an asleep machine's chart still goes to its daemon", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ machines: [autoMachine("dev-z", { connected: false })] });
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-z" }, "24h");
+    expect(client.archiveMetricsAsks).toEqual([]);
+    expect(client.metricsAsks.map((ask) => ask.deviceId)).toEqual(["dev-z"]);
+  });
+
+  test("an asleep machine's chart closes when the archivist leaves, asking nothing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({
+      ...ONLINE,
+      machines: [autoMachine("dev-a"), autoMachine("dev-z", { connected: false })],
+    });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      await store.showHistory({ kind: "machine", deviceId: "dev-z" }, "1y");
+      expect(store.getState().history).toMatchObject({ range: "1y", result: { kind: "ok" } });
+
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history).toBeNull();
+      expect(client.metricsAsks).toEqual([]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("an account's long chart falls back to its host, or says the archivist is away with none", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE, accountKey);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" }, "1y");
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history?.range).toBe("24h");
+      await pollUntil(() => store.getState().history?.result.kind === "ok", "the day's chart");
+      expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([["dev-a", 300]]);
+
+      // Every host asleep: the chart came from the archive alone.
+      client.emit({ archivist: archivistEntry("arch-1") });
+      await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: null }, "1y");
+      expect(client.archiveMetricsAsks).toHaveLength(2);
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      await pollUntil(() => store.getState().history?.result.kind === "failed", "the failure");
+      expect(store.getState().history).toMatchObject({
+        range: "24h",
+        result: { kind: "failed", message: "No answer — the archivist may be offline." },
+      });
+      expect(client.metricsAsks).toHaveLength(1);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a chart the archive can't serve doesn't cost the next one its remembered long range", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "1y");
+    // No account key: the account's chart clamps to a day.
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" });
+    expect(store.getState().history?.range).toBe("24h");
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" });
+    expect(store.getState().history?.range).toBe("1y");
+  });
+
   test("the archive's failures say the archivist, not the machine", async () => {
     fake = fakeHistory();
     const client = new ScriptedClient({ ...ONLINE, machines: [autoMachine("dev-a", { connected: false })] });
@@ -4691,6 +4762,11 @@ describe("history sources", () => {
     expect(await failure()).toEqual({ kind: "failed", message: "No answer — the archivist may be offline." });
     client.onArchiveMetrics = () => Promise.reject(new RequestFailure("offline", "the archivist is offline"));
     expect(await failure()).toEqual({ kind: "failed", message: "No answer — the archivist may be offline." });
+    client.onArchiveMetrics = () => Promise.reject(new RequestFailure("unknown", "never seen"));
+    expect(await failure()).toEqual({
+      kind: "failed",
+      message: "The relay couldn't deliver the request to the archivist.",
+    });
     client.onArchiveMetrics = async () => null;
     expect(await failure()).toEqual({
       kind: "failed",
