@@ -5,7 +5,8 @@ DESIGN.md, Scheduler, "Leadership" ("The archivist's seat"); item 2 (the `archiv
 built 2026-11-12, recorded in DESIGN.md, "Archivist", and its trust entry in the Threat model,
 item 2; item 3 (tasks and fleet events in `archive.sqlite`) built 2026-11-12, recorded in
 DESIGN.md, "Archivist"; item 4 (metrics in `metrics.sqlite`) built 2026-11-12, recorded in
-DESIGN.md, "Archivist", "Metrics", and Daemon, "Telemetry".** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+DESIGN.md, "Archivist", "Metrics", and Daemon, "Telemetry"; item 5 (install, update and the
+docs) built 2026-11-12, recorded in DESIGN.md, "Archivist", with setup in the README's step 9.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -112,8 +113,8 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 ### 6. Hosting and packaging
 
 - **A25.** A workspace of its own, `archivist/`, command `seance-archivist` (`run`,
-  `install --system`, `update`, `status`; the workspace, `run` and `status` built 2026-11-12,
-  DESIGN.md, "Archivist"), unit `seance-archivist.service`, database
+  `install --system`, `update`, `status`; all built 2026-11-12, DESIGN.md, "Archivist",
+  which adds `uninstall --system`), unit `seance-archivist.service`, database
   `archive.sqlite` in its state dir (0600, WAL, migrations on `PRAGMA user_version` as
   `metrics-store.ts` does). Bun and `bun:sqlite`; no other database, no Node. _Derived_ at item
   4: metrics live in a second file beside it, `metrics.sqlite`, opened the same way — retention
@@ -121,6 +122,9 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   alone. A30's queries `ATTACH` it.
 - **A26.** It runs from the same git checkout layout as `seanced` and follows the fleet's update
   announce: an archivist that cannot parse a newer task record would archive nothing, silently.
+  _Built 2026-11-12_ (DESIGN.md, "Archivist", "Updating without exec in the key's process"):
+  the running archivist only writes a request file, and a credential-less unit of the same
+  user runs the update.
 - **A27.** The archivist runs on any Linux box or container a daemon can run on (an unprivileged
   LXC included), alone or beside a `seanced`. Where it is deployed is the operator's choice and
   no part of this spec; this supersedes any task prompt that requires a container of its own.
@@ -128,21 +132,26 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A27a.** On a shared box the archivist runs as a Unix user of its own, never the daemon's:
   sessions run as the daemon's user and must not be able to read or change `archive.sqlite`.
   `install --system` takes the target user, refuses root and refuses the user a `seanced` unit on
-  the box runs as. That user owns the archivist's state dir (0700) and its own checkout, which
+  the box runs as; `seanced install --system` refuses the user the archivist's unit runs as, the
+  other direction. Both are the same separation, held where each is installed. That user owns the archivist's state dir (0700) and its own checkout, which
   `update` fast-forwards; it shares neither with the daemon. A daemon's user who can `sudo` is
   outside what this protects against.
 - **A27b.** The archivist's PSK is its own sealed blob under its own unit, sealed by the operator
-  as docs/psk.md describes for a daemon. Whether it may instead load the blob the box's `seanced`
-  unit already uses is a build-time question (open details).
+  as docs/psk.md describes for a daemon. _Settled at item 5_ (DESIGN.md, "Archivist"; docs/psk.md,
+  "A second service: the archivist"): the blob is the archivist's own file, sealed under the same
+  credential id `seance-psk`. A copy of the box's `seanced` blob decrypts and may be used, but the
+  unit never loads the daemon's file, which the daemon's user could swap.
 - **A28.** Backups are the host's (snapshots of the box or container it runs in). The service ships no
   copies anywhere.
 - **A29.** Moving the seat is manual and documented: stop the service, copy `archive.sqlite`,
   seal the PSK on the new box (the blob is machine-bound), put the new id on `ARCHIVIST`.
+  _Documented 2026-11-12_: the README's step 9, "Moving the seat", which also copies
+  `metrics.sqlite` and forgets the old id.
 
 ### 7. Reading it
 
 - **A30. SQL.** `ssh` to the box and `sqlite3`, opening the file read-only. The schema and a few
-  example queries are documented.
+  example queries are documented (the README's step 9, "Reading it", 2026-11-12).
 - **A31. The PWA** reads through the relay only (its CSP allows nothing else): sealed requests
   addressed to the archivist's device id, answered sealed. Three ops: an archive status, a
   metrics query (the `MetricsRequest` shape, extended to name a machine or an account), and a
@@ -245,7 +254,7 @@ One stack of PRs, each based on the one before, merged together.
 4. Metrics: the shared rollup module, live `status` ingest, `metrics` pulls with watermarks, the
    first-start import, retention (A17, A19, A20, A22). **Built 2026-11-12.**
 5. `install --system`, update on the announce, and the docs: README setup, the move-the-seat
-   runbook, schema and example queries (A26–A30).
+   runbook, schema and example queries (A26–A30). **Built 2026-11-12.**
 6. The archive status op and the Machines screen's health card (A31, A36–A36c).
 
 **Milestone 2 — read**
@@ -261,14 +270,13 @@ One stack of PRs, each based on the one before, merged together.
 
 ## Open details (build time)
 
-- Whether two system units on one box can each load the same `seance-psk` blob, or the archivist
-  needs one sealed under a name of its own (A27b).
 - **The flag is per push.** The relay stores the signed claim and derives `archivist` against
   `ARCHIVIST` as it is at each push. Moving the seat (A29, the runbook in item 5) turns the old
   id's kept entry into an ordinary offline entry. With the seat's blob (not a `MachineInfo`;
   DESIGN.md, "Archivist") it is never a `Machine`
-  row, so the PWA counts it as skewed and offers no forget button; the runbook must say to
-  forget it by id (`RelayClient.forget`, or a raw `forget` frame from an app socket). Item 6's health card and item 10's silence alert read the flag, so
+  row, so the PWA counts it as skewed and offers no forget button; the runbook says to
+  forget it by id, with the daemon's `deregisterMachine` (a raw `forget` frame from an app
+  socket) run from the checkout (README, step 9). Item 6's health card and item 10's silence alert read the flag, so
   they follow the seat, not the old entry.
 
 Settled at item 4 (DESIGN.md, "Archivist", "Metrics"): the shared rollup module is
@@ -276,3 +284,7 @@ Settled at item 4 (DESIGN.md, "Archivist", "Metrics"): the shared rollup module 
 pulls run every 5 minutes in pages of at most `METRICS_MAX_POINTS` steps, split by metric then
 halved on `too_large`, and the relay's `store-list` floors do not apply (the op is an envelope
 to a daemon); the observer label is `machine`, the device id.
+
+Settled at item 5 (DESIGN.md, "Archivist"): two system units on one box can each load a
+`seance-psk` credential, since each gets its own private tmpfs. The archivist's blob is its own
+file under that same id (A27b).

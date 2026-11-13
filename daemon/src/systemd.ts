@@ -26,6 +26,28 @@ import { NO_SERVICE_MANAGER, type InstallResult } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";
 
 export const UNIT_NAME = "seanced.service";
+/** The archivist's service (archivist/src/units.ts); named here so the daemon's install can refuse its user. */
+export const ARCHIVIST_UNIT_NAME = "seance-archivist.service";
+
+/**
+ * The other half of A27a (docs/archivist.md): the archivist's user must not run
+ * sessions, so `install --system` refuses the user an installed archivist unit
+ * runs as. Pure over the unit text read, null when there is none.
+ */
+export function archivistUserRefusal(
+  target: string,
+  archivistUnit: string | null,
+  remedy = "pass `--user <name>` naming another account",
+): string | null {
+  if (archivistUnit === null || unitUser(archivistUnit) !== target) return null;
+  return (
+    `${target} is the user /etc/systemd/system/${ARCHIVIST_UNIT_NAME} runs the archivist as — sessions run as the ` +
+    `daemon's user and must not be able to read or change archive.sqlite (docs/archivist.md, A27a); ${remedy}`
+  );
+}
+
+/** A user-scope `seanced install` is the same daemon as a system one, by another route, so it is held to the same line. */
+const USER_SCOPE_REMEDY = "run `seanced install` as another account";
 
 /** Windows scheduled task that boots the distro at logon and pins the VM against its idle timeout. */
 export const PIN_TASK_NAME = "SeanceWslPin";
@@ -49,7 +71,7 @@ export function unitPath(): string {
 }
 
 /** `--user` or `--system`, so no call site spells the scope itself. */
-function scopeArgv(scope: UnitScope): readonly string[] {
+export function scopeArgv(scope: UnitScope): readonly string[] {
   return ["systemctl", `--${scope}`];
 }
 
@@ -144,6 +166,11 @@ export function unitCredentialBlob(unit: string): string | null {
   return line === undefined ? null : unitUnescape(line.trim().slice(prefix.length));
 }
 
+/** The account a system unit runs as, or null when it names none. */
+export function unitUser(unit: string): string | null {
+  return unitField(unit, "User");
+}
+
 export function unitStateDirEnv(unit: string): string | null {
   const raw = /^Environment="SEANCE_STATE_DIR=([^"]*)"/mu.exec(unit)?.[1];
   return raw === undefined ? null : unitUnescape(raw);
@@ -158,7 +185,7 @@ export function unitStateDirEnv(unit: string): string | null {
  * Null when the unit isn't one of ours to compare.
  */
 export function expectedSystemUnit(unitText: string): string | null {
-  const user = unitField(unitText, "User");
+  const user = unitUser(unitText);
   const bunPath = unitBunPath(unitText);
   const pathEnv = unitPathEnv(unitText);
   const logFile = unitField(unitText, "StandardOutput")?.replace(/^append:/u, "") ?? null;
@@ -176,7 +203,7 @@ export function expectedSystemUnit(unitText: string): string | null {
 }
 
 /** systemd expands % specifiers inside unit values; paths and PATH must stay literal. */
-function unitEscape(s: string): string {
+export function unitEscape(s: string): string {
   return s.replaceAll("%", "%%");
 }
 
@@ -366,6 +393,14 @@ export function conflictingScopeMessage(installing: UnitScope, existing: string)
 export async function installService(): Promise<InstallResult> {
   await assertSystemdRunning();
   if (installedUnits().system) throw new Error(conflictingScopeMessage("user", systemUnitPath()));
+  const archivistRefusal = archivistUserRefusal(
+    userInfo().username,
+    await Bun.file(join("/etc/systemd/system", ARCHIVIST_UNIT_NAME))
+      .text()
+      .catch(() => null),
+    USER_SCOPE_REMEDY,
+  );
+  if (archivistRefusal !== null) throw new Error(archivistRefusal);
   const notes: string[] = [];
   const target = unitPath();
   await mkdir(dirname(target), { recursive: true });
@@ -480,6 +515,11 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   // default location; a relocated user unit is caught by doctor instead.
   const userUnit = join(user.home, ".config", "systemd", "user", UNIT_NAME);
   if (existsSync(userUnit)) throw new Error(conflictingScopeMessage("system", userUnit));
+  const archivistUnit = await Bun.file(join("/etc/systemd/system", ARCHIVIST_UNIT_NAME))
+    .text()
+    .catch(() => null);
+  const archivistRefusal = archivistUserRefusal(user.name, archivistUnit);
+  if (archivistRefusal !== null) throw new Error(archivistRefusal);
 
   const asUser = asTargetArgv(user);
   const { pathEnv, dropped } = await reachablePath(opts.pathEnv ?? process.env["PATH"] ?? "", asUser);
@@ -652,13 +692,28 @@ export function parseMainPid(stdout: string): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
-async function systemMainPid(): Promise<number | null> {
-  const result = await exec(scopeArgv("system").concat(["show", "-p", "MainPID", "--value", UNIT_NAME]));
+async function systemMainPid(unit: string): Promise<number | null> {
+  const result = await exec(scopeArgv("system").concat(["show", "-p", "MainPID", "--value", unit]));
   return result.exitCode === 0 ? parseMainPid(result.stdout) : null;
 }
 
 /** RestartSec plus a cold start, with room to spare on a slow box. */
 const RELAUNCH_TIMEOUT_MS = 30_000;
+
+export interface RestartWording {
+  /** Who runs as the unit's user, for the messages. */
+  readonly who: string;
+  /** The root command a refusal names. */
+  readonly privileged: string;
+  /** Appended to the relaunch-timeout message: where else to look. */
+  readonly checkAlso: string;
+}
+
+const DAEMON_RESTART_WORDING: RestartWording = {
+  who: "the daemon",
+  privileged: restartCommandFor("system"),
+  checkAlso: " and `seanced doctor`",
+};
 
 /**
  * Restarts a system unit's daemon without root, by the same route `selfRestart`
@@ -667,17 +722,20 @@ const RELAUNCH_TIMEOUT_MS = 30_000;
  * and it stays root-only. MainPID comes from systemd rather than `runtime.json`
  * so a stale pid can never aim the signal at an unrelated process. Like
  * `selfRestart`, this can't apply a changed unit definition — doctor reports drift.
+ * The unit and the wording are parameters for the archivist's `update`, which
+ * restarts its own system unit the same way (`Restart=always` there too).
  */
-async function signalRestart(): Promise<void> {
-  const pid = await systemMainPid();
+export async function signalRestartUnit(unit: string, wording: RestartWording = DAEMON_RESTART_WORDING): Promise<void> {
+  const { privileged } = wording;
+  const pid = await systemMainPid(unit);
   if (pid === null) {
-    throw new Error(`the system unit isn't running, and starting it needs root: ${restartCommandFor("system")}`);
+    throw new Error(`the system unit isn't running, and starting it needs root: ${privileged}`);
   }
   try {
     process.kill(pid, "SIGTERM");
   } catch (err) {
     if (err instanceof Error && "code" in err && err.code === "EPERM") {
-      throw new Error(`the daemon runs as another user — restarting it needs root: ${restartCommandFor("system")}`, {
+      throw new Error(`${wording.who} runs as another user — restarting it needs root: ${privileged}`, {
         cause: err,
       });
     }
@@ -688,12 +746,12 @@ async function signalRestart(): Promise<void> {
     // oxlint-disable-next-line no-await-in-loop -- a poll is sequential by definition
     await Bun.sleep(500);
     // oxlint-disable-next-line no-await-in-loop -- ditto
-    const next = await systemMainPid();
+    const next = await systemMainPid(unit);
     if (next !== null && next !== pid) return;
   }
   throw new Error(
-    `the daemon exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
-      `check \`systemctl status ${UNIT_NAME}\` and \`seanced doctor\``,
+    `${wording.who} exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
+      `check \`systemctl status ${unit}\`${wording.checkAlso}`,
   );
 }
 
@@ -702,7 +760,7 @@ export async function restartService(): Promise<void> {
   const scope = await ownerScope();
   // Root-owned unit, unprivileged caller: systemctl would answer with an
   // interactive-auth refusal, so signal the daemon instead.
-  if (scope === "system" && process.getuid?.() !== 0) return signalRestart();
+  if (scope === "system" && process.getuid?.() !== 0) return signalRestartUnit(UNIT_NAME);
   const result = await exec(scopeArgv(scope).concat(["restart", UNIT_NAME]));
   if (result.exitCode !== 0) {
     throw new Error(`systemctl --${scope} restart failed: ${result.stderr.trim()}`);

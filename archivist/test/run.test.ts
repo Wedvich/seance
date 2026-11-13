@@ -7,6 +7,7 @@ import {
   APP_ID,
   CLOSE_ROLE_REFUSED,
   importPsk,
+  MACHINES_ID,
   open,
   parseMachineInfo,
   REGISTER_REFUSALS,
@@ -128,6 +129,46 @@ describe("seance-archivist run", () => {
     } finally {
       console.log = realLog;
       archivist?.stop();
+      relay.stop();
+    }
+  });
+
+  test("follows the fleet's update announce by writing a request, never by replying", async () => {
+    const relay = startTestRelay(TOKEN);
+    const paths = await setup(relay.url);
+    const requestPath = join(paths.stateDir, "update-requested");
+    const archivist = await startArchivist({ ...paths, credentialPath });
+    try {
+      const { deviceId } = archivist;
+      await relay.registers.next();
+      // The seat's connect asks once, as a daemon checks on its register.
+      await pollUntil(async () => existsSync(requestPath), "the connect's request");
+      expect(await readFile(requestPath, "utf8")).toBe("register\n");
+
+      const key = await importPsk(PSK);
+      const broadcast = async (payload: unknown): Promise<void> => {
+        const env = await seal(
+          key,
+          { to: MACHINES_ID, from: "some-daemon" },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "update-available", payload },
+        );
+        relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
+      };
+      await broadcast({ sha: "malformed" });
+      // A non-event, and frames are handled in order: the file must still hold the connect's request.
+      await Bun.sleep(200);
+      expect(await readFile(requestPath, "utf8")).toBe("register\n");
+      const sha = "c".repeat(40);
+      await broadcast({ sha, commitTs: Date.now() });
+      await pollUntil(
+        async () => (await readFile(requestPath, "utf8")) === `announce ${sha}\n`,
+        "the announce's request",
+      );
+      // A non-event: an announce is never answered.
+      await Bun.sleep(200);
+      expect(relay.messages.size).toBe(0);
+    } finally {
+      archivist.stop();
       relay.stop();
     }
   });

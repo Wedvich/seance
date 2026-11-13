@@ -160,6 +160,38 @@ reach them (an ssh agent or a helper that works without a login session), or the
 `push_failed` and nothing ends. The push refuses a repo-local `remote.*.pushurl` and
 `url.*.pushinsteadof`, as the fetch path does.
 
+### The archivist's units
+
+`seance-archivist install --system` (README, step 9) writes three system units, all
+`User=` the archivist's own account:
+
+- `seance-archivist.service` — `run`, the only one with `LoadCredentialEncrypted=`
+  (docs/psk.md, "A second service: the archivist"), `Restart=always` with `RestartSec=5`,
+  and `WantedBy=multi-user.target`, so it needs no linger. It logs to the journal
+  (`journalctl -u seance-archivist`), not an `append:` file, so the log-owner trap below
+  does not apply to it.
+- `seance-archivist-update.path` — watches `~/.local/state/seance-archivist/update-requested`
+  and starts the update unit when it changes.
+- `seance-archivist-update.service` — a oneshot running `update --requested`: fetch,
+  fast-forward, `bun install --frozen-lockfile`, restart. It loads no credential, and
+  has no start limit (`StartLimitIntervalSec=0`): under the default one a crash loop
+  would fail it, and then the path unit with it.
+
+The split exists because the process that holds the key must never run anything. The
+running archivist neither execs git nor restarts itself (DESIGN.md, Threat model, item 2).
+When the fleet announces a new build, or when it takes its seat (at most every 30 minutes,
+to catch an announce it slept through), it writes the request file, and systemd starts the
+update unit. The update restarts the service the way `seanced`'s does under a system
+unit: it SIGTERMs the service's `MainPID`, which it may as the same user, and
+`Restart=always` brings it back on the new code.
+
+One update runs at a time (`update.lock` in the state dir), so a hand `update` and this unit
+never overlap. Neither process rewrites a unit file, since neither is root. A change to the units
+themselves (a new directive, a moved checkout, another PATH) lands only when root re-runs
+`install --system`, which rewrites all three and restarts the service if its definition
+changed. `uninstall --system` stops and removes the three, leaving the state dir: both
+databases, the identity and the sealed blob.
+
 ## WSL
 
 `systemd=true` under `[boot]` in `/etc/wsl.conf` is a prerequisite, not a tweak:

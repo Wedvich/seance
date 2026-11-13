@@ -63,6 +63,29 @@ const FORBIDDEN_DAEMON: ReadonlySet<string> = new Set(
 );
 
 /**
+ * The admin commands (`install --system`, `uninstall --system`, `update`) run
+ * systemctl, getent, setpriv, systemd-creds, git and `bun install` through the
+ * daemon's exec path, in processes that are never handed the key: root's install
+ * from a shell, and `update` from a shell or its own unit, which loads no
+ * credential. `main.ts` reaches them only by `import()` in their own branches, so
+ * the `run` process — the key holder — never loads them, and the walk below
+ * holds the service's closure to what it was before they existed.
+ */
+const ADMIN_MODULES: ReadonlySet<string> = new Set(
+  ["install", "self-update", "units"].map((name) => `archivist/src/${name}.ts`),
+);
+
+/**
+ * What the admin closure may load of FORBIDDEN_DAEMON: the exec path and the
+ * systemd-creds wrapper (`blobLoadable`), and two type-only modules `audit.ts`
+ * names for its line formats. Never a module that spawns a session, drives
+ * tmux, dispatches ops, brokers, leads or writes the queue or the store.
+ */
+const ADMIN_MAY_LOAD: ReadonlySet<string> = new Set(
+  ["exec", "tpmcreds", "backend", "broker-protocol"].map((name) => `daemon/src/${name}.ts`),
+);
+
+/**
  * Calls the archivist's own code may not make: every write the shared app
  * client and the daemon leg's client offer (enqueue, cancel, store, reply,
  * status, scheduler frames), and `execPath`, which nothing may persist.
@@ -83,6 +106,19 @@ export function specifiers(source: string): string[] {
   return [...source.matchAll(pattern)].map((m) => m[1] ?? "");
 }
 
+/** Imports of `file` (by basename) that load it at runtime: not `import type`, and `import()` included. */
+export function valueImportsOf(source: string, file: string): string[] {
+  const name = file.replaceAll(".", String.raw`\.`);
+  const statics = new RegExp(String.raw`^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s*["'][^"']*/${name}["']`, "gmu");
+  const dynamic = new RegExp(String.raw`\bimport\s*\(\s*["'][^"']*/${name}["']`, "gu");
+  return [...source.matchAll(statics), ...source.matchAll(dynamic)].map((m) => m[0].trim());
+}
+
+/** The `import("…")` subset of `specifiers`: loaded only when that line runs. */
+export function dynamicSpecifiers(source: string): string[] {
+  return [...source.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/gu)].map((m) => m[1] ?? "");
+}
+
 /** A specifier the archivist may not name at all, wherever it sits: the scheduler library, the daemon as a package, or `child_process`. */
 export function forbiddenPackage(specifier: string): boolean {
   return /^@seance\/(?:scheduler|daemon)(?:\/|$)/u.test(specifier) || /^(?:node:)?child_process$/u.test(specifier);
@@ -94,16 +130,21 @@ function resolveRelative(file: string, specifier: string): string | null {
   return relative(ROOT, resolve(dirname(join(ROOT, file)), specifier));
 }
 
-/** Every repo file reachable from `entries` through relative imports, with the package specifiers met on the way. */
+/**
+ * Every repo file reachable from `entries` through relative imports, with the
+ * package specifiers met on the way. `stop` names files the walk never enters —
+ * the admin modules, for the service's closure.
+ */
 export async function closure(
   entries: readonly string[],
   read: (file: string) => Promise<string> = (file) => readFile(join(ROOT, file), "utf8"),
+  stop: ReadonlySet<string> = new Set(),
 ): Promise<{ readonly files: ReadonlySet<string>; readonly packages: ReadonlySet<string> }> {
   const files = new Set<string>();
   const packages = new Set<string>();
   const pending = [...entries];
   for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
-    if (files.has(file)) continue;
+    if (files.has(file) || stop.has(file)) continue;
     files.add(file);
     for (const specifier of specifiers(await read(file))) {
       const target = resolveRelative(file, specifier);
@@ -141,20 +182,72 @@ async function archivistSources(): Promise<string[]> {
     .map((path) => `archivist/src/${path}`);
 }
 
+async function spawnersIn(files: ReadonlySet<string>): Promise<string[]> {
+  const spawners: string[] = [];
+  for (const file of files) {
+    // oxlint-disable-next-line no-await-in-loop -- a handful of small files
+    if (spawnCalls(await readFile(join(ROOT, file), "utf8")).length > 0) spawners.push(file);
+  }
+  return spawners.toSorted();
+}
+
 describe("archivist layering", () => {
-  test("nothing archivist/src loads, however indirectly, spawns, brokers, leads or writes the queue", async () => {
-    const entries = await archivistSources();
+  test("nothing the service loads, however indirectly, spawns, brokers, leads or writes the queue", async () => {
+    const entries = (await archivistSources()).filter((file) => !ADMIN_MODULES.has(file));
     expect(entries).toContain("archivist/src/main.ts");
-    const { files, packages } = await closure(entries);
+    expect(entries).toContain("archivist/src/run.ts");
+    const { files, packages } = await closure(entries, undefined, ADMIN_MODULES);
     // The reuse is real: the walk does reach into the daemon.
     expect(files).toContain("daemon/src/relay-client.ts");
     expect(closureViolations(files, packages)).toEqual([]);
-    const spawners: string[] = [];
+    expect(await spawnersIn(files)).toEqual([]);
+  });
+
+  test("the admin modules are reached only by main.ts's import(), never a static import", async () => {
+    const sources = await archivistSources();
+    // Every admin module is named here; a new one that is not would be walked as service code and fail above.
+    for (const admin of ADMIN_MODULES) expect(sources).toContain(admin);
+    const offenders: string[] = [];
+    for (const file of sources.filter((source) => !ADMIN_MODULES.has(source))) {
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files
+      const source = await readFile(join(ROOT, file), "utf8");
+      const all = specifiers(source);
+      const dynamic = dynamicSpecifiers(source);
+      for (const specifier of new Set(all)) {
+        const target = relative(ROOT, resolve(dirname(join(ROOT, file)), specifier));
+        if (!ADMIN_MODULES.has(target)) continue;
+        // One static import beside any number of dynamic ones still loads it at start.
+        const count = (list: readonly string[]): number => list.filter((s) => s === specifier).length;
+        if (file !== "archivist/src/main.ts" || count(all) > count(dynamic)) offenders.push(`${file} → ${target}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the admin commands load the exec path, but nothing that spawns a session, brokers, leads or writes", async () => {
+    const { files, packages } = await closure([...ADMIN_MODULES]);
+    expect(files).toContain("daemon/src/systemd.ts");
+    expect(files).toContain("daemon/src/update.ts");
+    expect(closureViolations(files, packages).filter((file) => !ADMIN_MAY_LOAD.has(file))).toEqual([]);
+    // exec.ts is the one spawner, and it strips CREDENTIALS_DIRECTORY from every child.
+    expect(await spawnersIn(files)).toEqual(["daemon/src/exec.ts"]);
+  });
+
+  test("the admin closure names backend.ts and broker-protocol.ts only as `import type`", async () => {
+    const { files } = await closure([...ADMIN_MODULES]);
+    const offenders: string[] = [];
     for (const file of files) {
       // oxlint-disable-next-line no-await-in-loop -- a handful of small files
-      if (spawnCalls(await readFile(join(ROOT, file), "utf8")).length > 0) spawners.push(file);
+      const source = await readFile(join(ROOT, file), "utf8");
+      for (const name of ["backend", "broker-protocol"]) {
+        for (const specifier of valueImportsOf(source, `${name}.ts`)) offenders.push(`${file}: ${specifier}`);
+      }
     }
-    expect(spawners).toEqual([]);
+    expect(offenders).toEqual([]);
+    expect(valueImportsOf(`import { X } from "./backend.ts";`, "backend.ts")).toHaveLength(1);
+    expect(valueImportsOf(`import type { X } from "./backend.ts";`, "backend.ts")).toEqual([]);
+    expect(valueImportsOf(`import {\n  a,\n} from "./backend.ts";`, "backend.ts")).toHaveLength(1);
+    expect(valueImportsOf(`await import("./backend.ts");`, "backend.ts")).toHaveLength(1);
   });
 
   test("archivist/src makes no write call and names no execPath", async () => {
@@ -237,6 +330,19 @@ describe("archivist layering", () => {
     );
     expect(closureViolations(viaPath.files, viaPath.packages)).toEqual(["scheduler/src/task.ts"]);
     expect(closureViolations(new Set(["daemon/src/relay-client.ts"]), new Set(["@seance/shared"]))).toEqual([]);
+  });
+
+  test("the walk stops at an admin module, and the dynamic scan sees only import()", async () => {
+    const tree: Record<string, string> = {
+      "archivist/src/main.ts": `const { x } = await import("./install.ts");`,
+      "archivist/src/install.ts": `import { exec } from "../../daemon/src/exec.ts";`,
+    };
+    const read = (file: string): Promise<string> => Promise.resolve(tree[file] ?? "");
+    const { files } = await closure(["archivist/src/main.ts"], read, ADMIN_MODULES);
+    expect([...files]).toEqual(["archivist/src/main.ts"]);
+    expect(dynamicSpecifiers(`import { a } from "./install.ts"; await import("./install.ts");`)).toEqual([
+      "./install.ts",
+    ]);
   });
 
   test("the call scan catches writes and execPath, and passes reads", () => {

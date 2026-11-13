@@ -45,7 +45,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   its own workspace that keeps long-term task, metrics and fleet history in SQLite (the seat and
   the `ARCHIVIST` secret, what it collects and never stores, retention, how the PWA reads it, the
   build order). Read it before touching history, retention, registry roles or the Machines
-  screen's charts.
+  screen's charts. Its setup, move-the-seat runbook and schema are the README's step 9.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -355,10 +355,15 @@ green:
   Its key comes only from its unit's `$CREDENTIALS_DIRECTORY/seance-psk` (`CRED_NAME`, imported),
   never a config field; it never runs as root; its state dir is its own, never the daemon's. It
   registers only claiming `archivist`, with a blob `parseMachineInfo` refuses, answers no op, sends
-  no `status` and no store frame, and never enqueues. `archivist/test/layering.test.ts` walks its
-  whole import closure (type-only imports too) and its own source's calls: a module that spawns,
+  no `status` and no store frame, and never enqueues; the fleet's `update-available` broadcast only
+  makes it write `update-requested`, for the credential-less update unit to act on. `archivist/test/layering.test.ts` walks
+  `run`'s whole import closure (type-only imports too) and its own source's calls: a module that spawns,
   drives tmux, dispatches ops, brokers, leads or writes the queue or store, `daemon/src/config.ts`,
-  anything in `scheduler/`, or a client write method is refused. When a daemon module it needs sits
+  anything in `scheduler/`, or a client write method is refused. `install.ts`, `self-update.ts` and
+  `units.ts` are the admin closure: reached only by `main.ts`'s `import()`, allowed the daemon's
+  exec path (`exec.ts`, `tpmcreds.ts`) and, type-only (`import type`, checked per edge), the
+  two modules `audit.ts` names for its line formats (`backend.ts`, `broker-protocol.ts`), nothing else
+  forbidden, and never run with the key. When a daemon module it needs sits
   beside one it must not load, move the module (as `config-checks.ts` was), never copy it, and
   never widen the forbidden list's exceptions.
 - The daemon never runs as root. `install --system` / `uninstall --system` are the only commands
@@ -366,4 +371,6 @@ green:
   root, and they never invoke `sudo` themselves — the operator supplies the privilege. Under them
   nothing may read the ambient environment for a value that ends up in the unit: as root
   `homedir()`, `stateDir()`, `logPath()`, `PATH` and `Bun.which` all answer for the wrong user, and
-  the unit outlives the install. `daemon/src/target-user.ts` resolves the target instead.
+  the unit outlives the install. `daemon/src/target-user.ts` resolves the target instead. The same
+  holds for `seance-archivist install --system` / `uninstall --system` (`archivist/src/install.ts`),
+  which reuse that module and the daemon's unit helpers rather than copying them.

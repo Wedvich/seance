@@ -60,6 +60,7 @@ import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
+import { isUpdateAvailable } from "./update-notice.ts";
 
 export interface HandlerContext {
   readonly backend: SessionBackend;
@@ -203,12 +204,6 @@ export function isDespawnRequest(payload: unknown): payload is DespawnRequest {
   if (obj["force"] !== undefined && typeof obj["force"] !== "boolean") return false;
   if (obj["client"] !== undefined && typeof obj["client"] !== "string") return false;
   return true;
-}
-
-function isUpdateAvailable(payload: unknown): payload is UpdateAvailable {
-  if (typeof payload !== "object" || payload === null) return false;
-  const obj = payload as Record<string, unknown>;
-  return typeof obj["sha"] === "string" && obj["sha"] !== "" && typeof obj["commitTs"] === "number";
 }
 
 /**
