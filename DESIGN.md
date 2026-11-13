@@ -8557,8 +8557,11 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
 
 - **A daemon capability, not a role (C1, C2).** `custodianSeat` is the last entry of `DAEMON_CAPABILITIES`
   (`run-capabilities.ts`), so it stops first. The relay learns nothing: no nomination, term or secret.
-  `CAPABILITIES.custodian` is advertised only where the seat is on, and nothing reads it yet (the Machines
-  row, custodian 5). One predicate, `seatEnabled` (`custodian-seat.ts`), says whether a seat exists, and both the
+  `CAPABILITIES.custodian` is advertised only where a seat is configured on, and nothing reads it yet (the Machines
+  row, custodian 5). It says _configured_, not that the host's checks passed: a host without `bwrap`/`socat`, or
+  with an agent file that does not parse, logs once, runs no round, and still advertises it (the daemon is
+  registered before those async checks finish); such a host closes any round the last process left, as a seat
+  that is off does. One predicate, `seatEnabled` (`custodian-seat.ts`), says whether a seat exists, and both the
   capability bit (`buildInfo`) and the capability call it, so the two cannot disagree. It is true when
   `config.custodian` is set (the key lives only in the machine's own file, never in a frame, the PWA or another
   machine), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
@@ -8583,7 +8586,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   `pane-activity.ts` keeps: some `ours` pane has stood `idle`, or unchanged on screen, for `everyMinutes`; the
   last round ended at least that long ago; none is running; the daemon is not restarting (`EndedTasks.draining`).
   **Narrowed from the spec to the panes C7 lets the custodian act on:** a pane whose last state is `needs-input`,
-  or that carries a hand-off, pass or drain-ask mark (`SessionEvents.marked`), never counts, since no verb may
+  or that carries a hand-off or pass mark or has a close under way (`SessionEvents.marked`) or has been asked by
+  the drain (`DrainAsk.asked`: an entry made for the pane under the current `cl`; `marked` alone is what the ask
+  _reads_, and does not say a pane was asked), never counts, since no verb may
   touch it and it would otherwise keep a round due for ever. Pause (C45) is custodian 5. A round is not held
   back on a closed machine (`cl`): closing a machine routes work away and asks its sessions to pass, and the
   sessions it still holds are the ones a round tidies; only a restart drain stops a launch, because the daemon
@@ -8593,7 +8598,10 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   events) and its once-a-minute sampler are started by the seat once its checks pass and stopped with it, shared
   by count across a reload's two instances. Without a seat nothing reads the facts, and only a sampler pass
   prunes them, so retention without the sampler would grow without bound; a machine with no seat now pays no
-  `list-panes` or `capture-pane` a minute (the cost docs/custodian.md left open for C15).
+  `list-panes` or `capture-pane` a minute (the cost docs/custodian.md left open for C15). Frames are dropped
+  while nothing retains, so when the first seat takes the tracker (`forgetStates`) every pane's retained state is
+  forgotten, keeping its screen facts: a state held across such a gap may be hours old and would read as a pane idle
+  since then.
 - **Which exclave (C12, C13, `pickExclave`).** The lowest quota pressure among this machine's exclaves, by the
   scheduler's own scoring function, `quotaPressure` with `quotaWindows` and `windowAppliesTo`, which moved
   to `shared/src/quota.ts` (with `QuotaSpan`, `QUOTA_SPAN_MS`) rather than let the custodian's module into
@@ -8616,8 +8624,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   the trust (`isDirTrusted`, `trust.ts`: the dir's own `projects[<path>].hasTrustDialogAccepted` or an ancestor's)
   and skips an exclave that lacks it; `seanced doctor` names it with the one-time fix (`mkdir -p <dir> && cd <dir> &&
   claude`). **The daemon never writes a `.claude.json` for the custodian**: it races every running session's own
-  rewrite of the file. The check is read-only, silent, and walks the uncreated path and its ancestors, so the
-  pick touches no disk until an exclave is chosen: only then is the round dir made (0700, `ensureRoundDir`) and
+  rewrite of the file. The check is read-only, silent, and walks the uncreated path and its ancestors, under both its own spelling and
+  its real path (the deepest existing ancestor realpath'd: Claude Code keys `projects` by the real cwd, so a state
+  dir under a symlink is trusted under a path the uncreated one does not spell), so the pick touches no disk until an exclave is chosen: only then is the round dir made (0700, `ensureRoundDir`) and
   its real path compared again with `exclaveOf`. `roundDirPlanted` refuses a dir holding `.claude/settings.json` or
   `.claude/agents` (`--setting-sources project` still loads a project `settings.json`, and a project agent of the
   same name may outrank `--agents`; `.claude/` itself is Claude Code's own and is never refused as a whole).
@@ -8781,8 +8790,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   `inbox` are: the verbs run many times a round. No `custodian` socket frame, no `rounds.jsonl`, no health, no PWA.
 - **Doctor.** `seanced doctor` has a `custodian` section on a machine whose config carries the key
   (`custodian-checks.ts`): the platform, `bwrap`/`socat` and the sandbox probe, the weaker nested mode's warning,
-  and per exclave signed out, trusted, or untrusted with the fix. `fail` when no exclave can host a round. It
-  never creates a round dir. While rounds are held (`ROUNDS_LIVE`) it is one `ok` line saying so and probes
+  and per exclave signed out, trusted, or untrusted with the fix, through the pick's own `hostProblem` (so a
+  missing root or a planted round dir is a `warn` too, and doctor never says an exclave can host while the seat
+  skips it). `fail` when no exclave can host a round. It never creates a round dir. While rounds are held (`ROUNDS_LIVE`) it is one `ok` line saying so and probes
   nothing: the key then only sets reap's defaults, and a machine that carries it for that must not start failing
   `doctor` (and, on Linux, running a `bwrap` probe) for rounds that cannot start.
 - **Rejected, and why:** a registry role and relay secret as the archivist has (per machine and local: the

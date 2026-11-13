@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import type { QuotaReading, RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
 import { custodianAudit, daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
@@ -10,6 +9,7 @@ import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
 import {
   ensureRoundDir,
+  exclaveRootExists,
   launchRound,
   listRoundPanes,
   readNotes,
@@ -34,7 +34,7 @@ import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
 import { pushForTask } from "./handlers.ts";
-import { createPaneActivity } from "./pane-activity.ts";
+import { createPaneActivity, type TrackedActivity } from "./pane-activity.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
@@ -50,6 +50,7 @@ import {
   peerBindingProblem,
   readPanePids,
   type EndedTasks,
+  type SessionEventDeps,
   type SessionEvents,
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
@@ -159,8 +160,21 @@ let paneActivityUsers = 0;
  * Per daemon instance: the seat running (retention is on only then — without a reader nothing would prune the facts,
  * which only a sampler pass does), and the session-events instance whose marks the due check reads.
  */
-const seated = new WeakSet<WiringCtx>();
+const seated = new WeakSet<object>();
 const eventsOf = new WeakMap<WiringCtx, SessionEvents>();
+
+/** Session events' `retain` and the tracker's user count, with a read of each for the tests that pin the gate. */
+export const custodianRetention = {
+  retainFor:
+    (ctx: object): NonNullable<SessionEventDeps["retain"]> =>
+    (pane, state, turnEnded): void => {
+      if (seated.has(ctx)) paneActivity.observe(pane, state, turnEnded);
+    },
+  users: (): number => paneActivityUsers,
+  facts: (): readonly TrackedActivity[] => paneActivity.all(),
+} as const;
+/** The drain ask's `asked`: a pane it typed into is mid-pass, which `SessionEvents.marked` does not know until the session calls. */
+const drainAskedOf = new WeakMap<WiringCtx, DrainAsk["asked"]>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -260,12 +274,11 @@ const sessionEvents: DaemonCapability = (ctx) => {
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     onEnded: messages.onEnded,
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
-    retain: (pane, state, turnEnded): void => {
-      if (seated.has(ctx)) paneActivity.observe(pane, state, turnEnded);
-    },
+    retain: custodianRetention.retainFor(ctx),
   });
   late.events = events;
   eventsOf.set(ctx, events);
+  if (drainAsk !== undefined) drainAskedOf.set(ctx, drainAsk.asked);
   drainAsk?.start();
   return {
     stop: (): void => {
@@ -290,9 +303,10 @@ const closeOutcome = async (pane: string, graceMs: number | undefined): Promise<
 
 /**
  * The custodian seat (docs/custodian.md; DESIGN.md, "The custodian's seat"). A daemon whose process was started for
- * one (`RunOpts.custodian`) always cleans up after a seat that is off — a round left by a seat the config or a
- * rollback turned off is closed, never orphaned — and holds a seat only where `seatEnabled` says so, the one
- * predicate the `custodian` capability bit reads too.
+ * one (`RunOpts.custodian`) always cleans up after a seat that is not running — a round left by a seat the config or
+ * a rollback turned off, or one this host's checks (the sandbox, the agent file) now decline, is closed, never
+ * orphaned — and holds a seat only where `seatEnabled` says so, the one predicate the `custodian` capability bit
+ * reads too: the bit says a seat is configured, not that its checks passed (the log says when they did not).
  */
 const custodianSeat: DaemonCapability = (ctx) => {
   const opts = ctx.custodian;
@@ -301,21 +315,24 @@ const custodianSeat: DaemonCapability = (ctx) => {
   const platform = custodianPlatform(process.platform);
   const settings = ctx.config.custodian;
 
-  if (!seatEnabled(ctx.config, opts, process.platform) || settings === undefined || platform === null) {
-    // Whatever the seat left: the record's round, and any other round pane (a stray).
-    const sweep = async (): Promise<void> => {
-      const round = ctx.custodianSeat().round;
-      const panes = await listRoundPanes();
-      for (const { pane } of panes) {
-        // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
-        await audit.kill(pane, "off", await closeOutcome(pane, opts.graceMs));
-      }
-      if (round === undefined && panes.length === 0) return;
-      if (round !== undefined) await removeRoundTmp(round.tmpDir);
-      await audit.end(round?.pane ?? panes[0]?.pane ?? null, "lost");
-      if (!ctx.stopped()) await ctx.custodianSaved({ lastEndedAt: ctx.now() });
-    };
+  // Whatever a seat that is not running left: the record's round, and any other round pane (a stray).
+  const sweep = async (): Promise<void> => {
+    const round = ctx.custodianSeat().round;
+    const panes = await listRoundPanes();
+    for (const { pane } of panes) {
+      // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
+      await audit.kill(pane, "off", await closeOutcome(pane, opts.graceMs));
+    }
+    if (round === undefined && panes.length === 0) return;
+    if (round !== undefined) await removeRoundTmp(round.tmpDir);
+    await audit.end(round?.pane ?? panes[0]?.pane ?? null, "lost");
+    if (!ctx.stopped()) await ctx.custodianSaved({ lastEndedAt: ctx.now() });
+  };
+  const sweepLeftovers = (): void =>
     void sweep().catch((err: unknown) => log.warn(`custodian: closing a leftover round failed: ${String(err)}`));
+
+  if (!seatEnabled(ctx.config, opts, process.platform) || settings === undefined || platform === null) {
+    sweepLeftovers();
     return { stop: (): void => {} };
   }
 
@@ -334,11 +351,17 @@ const custodianSeat: DaemonCapability = (ctx) => {
     const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
     if (problem !== null) {
       log.warn(`custodian: no rounds on this host — ${problem}`);
+      // A host that cannot run a round is as off as a seat that is not configured: a round the last process left
+      // would otherwise run on with no deadline. Not after a `stop`, whose incoming instance adopts it.
+      if (!cancelled) sweepLeftovers();
       return;
     }
     const agents = await loadAgent();
     if (cancelled) return;
     const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
+    // Frames were dropped while no seat was retaining (off, declined, between a reload's instances), so what a pane's
+    // state says may be hours old: forget it, and a busy session is never read as idle since then.
+    if (paneActivityUsers === 0) paneActivity.forgetStates();
     paneActivityUsers += 1;
     counted = true;
     seated.add(ctx);
@@ -348,7 +371,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       now: ctx.now,
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
-      untouchable: (pane) => eventsOf.get(ctx)?.marked(pane) ?? false,
+      untouchable: (pane) => eventsOf.get(ctx)?.marked(pane) === true || drainAskedOf.get(ctx)?.(pane) === true,
       draining: () => ctx.endedTasks.draining,
       stopped: ctx.stopped,
       record: ctx.custodianSeat,
@@ -360,11 +383,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
         model: settings.model,
         now: ctx.now,
         roundDirFor,
-        rootExists: (root) =>
-          stat(root).then(
-            (info) => info.isDirectory(),
-            () => false,
-          ),
+        rootExists: exclaveRootExists,
         trusted: isDirTrusted,
         planted: roundDirPlanted,
         ensureDir: ensureRoundDir,
@@ -398,6 +417,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   void begin().catch((err: unknown) => {
     log.warn(`custodian: the seat did not start: ${String(err)}`);
     release();
+    if (!cancelled) sweepLeftovers();
   });
   return {
     stop: (): void => {

@@ -20,12 +20,20 @@ import {
 import { despawnRound, despawnSession } from "../src/despawn.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import type { TrackedActivity } from "../src/pane-activity.ts";
+import { custodianRetention } from "../src/run-capabilities.ts";
 import { startDaemon } from "../src/run.ts";
 import { ROUND_TMP } from "../src/seat-record.ts";
 import { listPanePids } from "../src/session-events.ts";
 import { listClaudeSessions, listPanes, paneInfo } from "../src/sessions.ts";
 import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
-import { makeClaudeStub, pollUntil, usePrivateTmux, type ClaudeStub, type PrivateTmux } from "./fixtures.ts";
+import {
+  captureLog,
+  makeClaudeStub,
+  pollUntil,
+  usePrivateTmux,
+  type ClaudeStub,
+  type PrivateTmux,
+} from "./fixtures.ts";
 import { startTestRelay } from "./harness.ts";
 
 const platform = custodianPlatform(process.platform) ?? "linux";
@@ -208,6 +216,7 @@ describe("a round, with the stubs for claude", () => {
     expect((await listPanes()).map((p) => p.paneId)).not.toContain(pane);
     expect((await listPanePids()).map((p) => p.id)).not.toContain(pane);
     expect((await listClaudeSessions([])).map((s) => s.id)).not.toContain(pane);
+    const listedBefore = (await listClaudeSessions([])).length;
     const refusal = await despawnSession(pane, { force: true }).catch((err: unknown) => err);
     if (!(refusal instanceof DespawnFailure)) throw new Error(`despawnSession did not refuse: ${String(refusal)}`);
     expect(refusal.code).toBe("session_not_found");
@@ -231,6 +240,8 @@ describe("a round, with the stubs for claude", () => {
     await pollUntil(async () => (await paneInfo(control))?.titled === true, "the control pane to be titled");
     expect((await listPanes()).map((p) => p.paneId)).toContain(control);
     expect((await listPanePids()).map((p) => p.id)).toContain(control);
+    expect((await listClaudeSessions([])).map((s) => s.id)).toContain(control);
+    expect((await listClaudeSessions([])).length).toBe(listedBefore + 1);
     await despawnSession(control, { force: true });
     await pollUntil(async () => (await paneInfo(control)) === null, "the control pane to close");
 
@@ -264,23 +275,32 @@ describe("a round, with the stubs for claude", () => {
     r.seat.stop();
   });
 
-  test("failing: a claude that exits on its own ends as exited, with no kill line, and its tmp is removed", async () => {
+  test("failing: a claude that exits on its own leaves a dead pane the seat closes, audited, and its tmp is removed", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.failing;
-    const r = seatOver();
-    await r.seat.start();
-    await r.seat.tick();
-    const tmpDir = r.saved.record.round?.tmpDir ?? "";
-    expect(tmpDir).toMatch(ROUND_TMP);
-    await noRounds();
-    r.clock.now += MIN;
-    await r.seat.tick();
-    expect(r.audit).toEqual([
-      "audit custodian origin=custodian op=start exclave=default pane=%N outcome=started",
-      "audit custodian origin=custodian op=end pane=%N outcome=failed reason=exited",
-    ]);
-    expect(await tmpExists(tmpDir)).toBe(false);
-    expect(r.saved.record).toEqual({ lastEndedAt: r.clock.now });
-    r.seat.stop();
+    // The developer's ~/.tmux.conf may set either way, and a pane that closes the moment its command exits would also
+    // beat launchRound's own `set-option -p`: pin it, and put it back.
+    await tmuxOk(["set-option", "-gw", "remain-on-exit", "on"]);
+    try {
+      const r = seatOver();
+      await r.seat.start();
+      await r.seat.tick();
+      const tmpDir = r.saved.record.round?.tmpDir ?? "";
+      expect(tmpDir).toMatch(ROUND_TMP);
+      await pollUntil(async () => (await listRoundPanes()).some((entry) => entry.dead), "the failing round to exit");
+      r.clock.now += MIN;
+      await r.seat.tick();
+      expect(r.audit).toEqual([
+        "audit custodian origin=custodian op=start exclave=default pane=%N outcome=started",
+        "audit custodian origin=custodian op=kill pane=%N reason=exited outcome=killed",
+        "audit custodian origin=custodian op=end pane=%N outcome=failed reason=exited",
+      ]);
+      await noRounds();
+      expect(await tmpExists(tmpDir)).toBe(false);
+      expect(r.saved.record).toEqual({ lastEndedAt: r.clock.now });
+      r.seat.stop();
+    } finally {
+      await tmuxOk(["set-option", "-gw", "remain-on-exit", "off"]);
+    }
   });
 
   test("adoption: a second seat adopts the running round, kills a stray, and closes the round at its original deadline", async () => {
@@ -324,6 +344,24 @@ describe("the capability bit", () => {
     custodian: Config["custodian"],
     opts: { readonly live: boolean },
   ): Promise<readonly string[]> {
+    const booted = await boot(custodian, {
+      live: opts.live,
+      // A seat that starts must find nothing to do and nothing to launch: the sandbox check fails it first.
+      sandboxProblem: () => Promise.resolve("test: no sandbox"),
+    });
+    try {
+      const frame = await booted.relay.registers.next(5_000);
+      const info = parseMachineInfo((await openSealed(await importPsk(PSK), frame.info)).payload);
+      return info?.capabilities ?? [];
+    } finally {
+      booted.stop();
+    }
+  }
+
+  async function boot(
+    custodian: Config["custodian"],
+    opts: { readonly live: boolean; readonly sandboxProblem: () => Promise<string | null> },
+  ): Promise<{ readonly relay: ReturnType<typeof startTestRelay>; readonly stop: () => void }> {
     const home = await mkdtemp(join(base, "cap-home-"));
     await mkdir(join(home, ".claude"), { recursive: true });
     await writeFile(
@@ -340,9 +378,8 @@ describe("the capability bit", () => {
       tmuxSession: "main",
       ...(custodian === undefined ? {} : { custodian }),
     };
-    let daemon: { stop(): void } | undefined;
     try {
-      daemon = await startDaemon({
+      const daemon = await startDaemon({
         config,
         backend: createBackend(config, { home }),
         home,
@@ -350,21 +387,68 @@ describe("the capability bit", () => {
         pongTimeoutMs: 1_000,
         baseBackoffMs: 20,
         telemetryIntervalMs: 100_000,
-        // A seat that starts must find nothing to do and nothing to launch: the sandbox check fails it first.
         custodian: {
           live: opts.live,
           checkIntervalMs: 3_600_000,
-          sandboxProblem: () => Promise.resolve("test: no sandbox"),
+          sandboxProblem: opts.sandboxProblem,
+          weakerNested: () => Promise.resolve(false),
         },
       });
-      const frame = await relay.registers.next(5_000);
-      const info = parseMachineInfo((await openSealed(await importPsk(PSK), frame.info)).payload);
-      return info?.capabilities ?? [];
-    } finally {
-      daemon?.stop();
+      return {
+        relay,
+        stop: (): void => {
+          daemon.stop();
+          relay.stop();
+        },
+      };
+    } catch (err) {
       relay.stop();
+      throw err;
     }
   }
+
+  /** A round pane a seat that is not running must find and close: tagged, in the private tmux, never a real claude. */
+  async function strayRound(): Promise<string> {
+    const pane = (
+      await tmuxOk(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${session}:`, "-c", base, "exec sleep 600"])
+    ).trim();
+    await tmuxOk(["set-option", "-p", "-t", pane, "@seance-custodian", "1"]);
+    return pane;
+  }
+
+  for (const [label, live, problem] of [
+    ["is off", false, null],
+    ["is declined by the host's checks", true, "test: no sandbox"],
+  ] as const) {
+    test(`a seat that ${label} closes a round the last process left, audited reason=off, and keeps no pane facts`, async () => {
+      const stray = await strayRound();
+      let booted: Awaited<ReturnType<typeof boot>> | undefined;
+      const lines = await captureLog(async () => {
+        booted = await boot(CUSTODIAN_DEFAULTS, { live, sandboxProblem: () => Promise.resolve(problem) });
+        await pollUntil(async () => (await paneInfo(stray)) === null, "the stray round pane to close");
+        await Bun.sleep(50);
+      });
+      booted?.stop();
+      const audit = lines.filter((line) => line.includes("audit custodian"));
+      expect(audit.some((line) => line.includes("op=kill") && line.includes("reason=off"))).toBe(true);
+      expect(audit.some((line) => line.includes("op=end") && line.includes("reason=lost"))).toBe(true);
+      expect(custodianRetention.users()).toBe(0);
+    });
+  }
+
+  test("retention runs only with a seat: an unseated daemon's frames are dropped, and the tracker follows the seat", async () => {
+    const framePane = { id: "%900", pid: 1, dead: false, taskId: null, ours: true, path: "/" };
+    custodianRetention.retainFor({})(framePane, "idle", true);
+    expect(custodianRetention.facts().map((entry) => entry.pane)).not.toContain("%900");
+
+    const booted = await boot(CUSTODIAN_DEFAULTS, { live: true, sandboxProblem: () => Promise.resolve(null) });
+    try {
+      await pollUntil(() => Promise.resolve(custodianRetention.users() === 1), "the seat to take the tracker");
+    } finally {
+      booted.stop();
+    }
+    expect(custodianRetention.users()).toBe(0);
+  });
 
   test("a daemon with the key and a live seat advertises custodian", async () => {
     expect(await advertised(CUSTODIAN_DEFAULTS, { live: true })).toContain(CAPABILITIES.custodian);

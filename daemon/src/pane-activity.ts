@@ -63,6 +63,11 @@ export interface PaneActivityTracker {
   readonly activity: (paneId: string) => PaneActivity | null;
   /** Every tracked pane's activity, for the custodian seat's due check (C14). */
   readonly all: () => readonly TrackedActivity[];
+  /**
+   * Forgets every pane's last state, keeping its screen facts: frames were dropped while nothing retained them, so
+   * a state held across that gap may be hours old and would read as a pane idle since then.
+   */
+  readonly forgetStates: () => void;
   /** Samples at once, then every `intervalMs`; a call while running does nothing. */
   readonly start: () => void;
   /**
@@ -100,7 +105,7 @@ const SPINNER_GLYPH = /^(\s*)[✻✽✶✳✢✺✹·*](?=\s)/u;
 export function normaliseScreen(screen: string): string {
   const lines = screen.split("\n");
   const rules = lines.flatMap((line, at) => (RULE.test(line) ? [at] : []));
-  const kept = rules.length >= 2 ? lines.slice(0, rules[rules.length - 2]) : lines;
+  const kept = rules.length >= 2 ? lines.slice(0, rules.at(-2)) : lines;
   return kept
     .map((line) => line.replace(TIMER, "(…)").replace(SPINNER_GLYPH, "$1*"))
     .join("\n")
@@ -216,6 +221,13 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
         screenSince: entry.screenSince,
         sampledAt: entry.sampledAt,
       })),
+    forgetStates: (): void => {
+      for (const entry of entries.values()) {
+        entry.state = null;
+        entry.stateSince = null;
+        entry.turnEnded = false;
+      }
+    },
     start: (): void => {
       if (timer !== null) return;
       void sample().catch(() => {});

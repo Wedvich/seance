@@ -231,6 +231,21 @@ describe("the screen sampler", () => {
     expect(tracker.activity("%1")).toMatchObject({ state: "busy" });
   });
 
+  test("forgetStates drops every pane's state and keeps its screen facts", async () => {
+    const { tracker, screens } = setup([pane("%1")]);
+    screens.set("%1", "hello");
+    await tracker.sample();
+    tracker.observe(pane("%1"), "idle", true);
+    tracker.forgetStates();
+    expect(tracker.activity("%1")).toEqual({
+      state: null,
+      stateSince: null,
+      turnEnded: false,
+      screenSince: 1_000,
+      sampledAt: 1_000,
+    });
+  });
+
   test("start samples at once and on its interval; stop ends the interval", async () => {
     let captures = 0;
     const tracker = createPaneActivity({
