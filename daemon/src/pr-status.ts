@@ -14,7 +14,7 @@ import {
   taskPrs,
   wantsPrReading,
 } from "@seance/shared";
-import { exec } from "./exec.ts";
+import { askGithub, type GhAnswer, type GhFailure } from "./gh.ts";
 
 /**
  * Live PR status from the scheduler leader (DESIGN.md, "PR status"): one
@@ -83,11 +83,8 @@ const CHUNK = 50;
  * GitHub cuts a query off at about 10 s, so these run 10 at a time.
  */
 const BLOCKED_CHUNK = 10;
-const MAX_OUTPUT_BYTES = 1 << 20;
-/** `gh`'s exit code for a missing or rejected credential. */
-const EXIT_AUTH = 4;
 
-type Failure = "missing" | "unauthenticated" | "failed";
+type Failure = GhFailure;
 
 /** What a failing class tells the operator; never `gh`'s own words, which can carry a token's tail or a URL. */
 const REMEDY: Record<Failure, string> = {
@@ -405,11 +402,6 @@ function mergeOidOf(pullRequest: Record<string, unknown>): string | null {
   return typeof oid === "string" && COMMIT_OID.test(oid) ? oid : null;
 }
 
-/** A body with no `data` that is GitHub refusing the token: a revoked or expired one exits 1, not 4. */
-function isBadCredentials(body: Record<string, unknown>): boolean {
-  return body["message"] === "Bad credentials" || body["status"] === "401" || body["status"] === 401;
-}
-
 /** The GraphQL error `type` for alias `p<index>`, when it is the plain upper-case word GitHub sends. */
 function errorType(errors: unknown, index: number): string {
   if (!Array.isArray(errors)) return "UNKNOWN";
@@ -433,46 +425,14 @@ type Chunk =
   | { readonly kind: Failure }
   | { readonly kind: "ok"; readonly reads: readonly Read[]; readonly wide: readonly Wide[] };
 
-type Answer =
-  | { readonly kind: Failure }
-  | { readonly kind: "ok"; readonly body: Record<string, unknown>; readonly data: Record<string, unknown> };
-
-/**
- * One `gh` GraphQL run. A PR the forge does not answer for (not found, no
- * access) makes `gh` exit 1 with the full JSON on stdout and `null` at its
- * alias, so a non-zero exit is not a failure by itself — only exit 4, a
- * timeout, or stdout that is no GraphQL answer is.
- */
+/** `askGithub` (`gh.ts`) under the poller's default timeout. */
 async function ask(
   deps: Pick<PrPollerOpts, "gh" | "timeoutMs">,
   query: string,
   variables: readonly string[],
-): Promise<Answer> {
-  const gh = deps.gh ?? process.env["SEANCE_GH_BIN"] ?? "gh";
-  let result;
-  try {
-    result = await exec([gh, "api", "--hostname", "github.com", "graphql", "-f", `query=${query}`, ...variables], {
-      timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      killGroup: true,
-      killAfterMs: 5_000,
-      maxOutputBytes: MAX_OUTPUT_BYTES,
-      env: { GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", NO_COLOR: "1" },
-    });
-  } catch (err) {
-    return { kind: err instanceof Error && "code" in err && err.code === "ENOENT" ? "missing" : "failed" };
-  }
-  if (result.timedOut) return { kind: "failed" };
-  if (result.exitCode === EXIT_AUTH) return { kind: "unauthenticated" };
-  let body: unknown;
-  try {
-    body = JSON.parse(result.stdout);
-  } catch {
-    return { kind: "failed" };
-  }
-  if (!isRecord(body)) return { kind: "failed" };
-  const { data } = body;
-  if (!isRecord(data)) return { kind: isBadCredentials(body) ? "unauthenticated" : "failed" };
-  return { kind: "ok", body, data };
+): Promise<GhAnswer> {
+  const gh = deps.gh === undefined ? {} : { gh: deps.gh };
+  return askGithub({ ...gh, timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS }, query, variables);
 }
 
 /**
