@@ -12,15 +12,25 @@ afterAll(() => rm(dir, { recursive: true, force: true }));
 const TO = "t-0123456789abcdef";
 const MESSAGE_ID = "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11";
 
-/** A daemon double on a unix socket: records the frame it was sent and answers one line, or hangs up when `answer` is null. */
+/**
+ * A daemon double on a unix socket: records the frame it was sent and answers one line, or hangs up when `answer` is
+ * null. Buffers to the newline: a large frame arrives in several chunks on macOS.
+ */
 function daemon(name: string, answer: string | null): { path: string; frames: unknown[]; stop: () => void } {
   const path = join(dir, name);
   const frames: unknown[] = [];
-  const server = Bun.listen<undefined>({
+  const server = Bun.listen<{ buf: string }>({
     unix: path,
     socket: {
+      open: (sock) => {
+        sock.data = { buf: "" };
+      },
       data: (sock, chunk) => {
-        frames.push(JSON.parse(chunk.toString("utf8")));
+        sock.data.buf += chunk.toString("utf8");
+        const end = sock.data.buf.indexOf("\n");
+        if (end === -1) return;
+        frames.push(JSON.parse(sock.data.buf.slice(0, end)));
+        sock.data.buf = "";
         if (answer === null) sock.end();
         else sock.write(`${answer}\n`);
       },
