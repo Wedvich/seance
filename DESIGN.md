@@ -598,7 +598,7 @@ Séance's noise is cover for a real intruder.
    the record, so it does not bring push back; recorded under the Settings record's residual, as
    a gap with no repair path yet. The page's service worker holds no PSK: it opens
    nothing it receives, and a notification's text is fixed per kind with only a task id (or a
-   device id) from the payload, and a blocked PR's per reason from a fixed set of four, so a forged push (a thief leader's, with a subscription it
+   device id, or nothing for the archivist's silence) from the payload, and a blocked PR's per reason from a fixed set of four, so a forged push (a thief leader's, with a subscription it
    read) can make the browser show one of a few fixed sentences, a spill's with at worst a known window
    label (`5h` or `7d`) and a number, and nothing else. A click opens a
    same-origin path the worker itself built from an id that passed `isTaskId`
@@ -1405,7 +1405,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
 | record `account` (at rest)                                          | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                                                                                                                                                                         | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                                                                                        |
-| record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); its `diskAlerts` and `authAlerts` lists are the leader's own, one write for both (`daemon/src/machine-alerts.ts`); stored under `settings:main` (_Scheduler_, "The store") |
+| record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); its `diskAlerts`, `authAlerts`, `archivistSilence`: the leader's own, one update (`daemon/src/machine-alerts.ts`); stored under `settings:main` (_Scheduler_, "The store") |
 | op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted and push not turned off, retried while the leader starts; sent with the `deviceLabel` label, and the re-send is also the one-time label backfill for a browser already held without one)            | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                                                                                   |
 | op `push-unsubscribe` (→`"scheduler"`)                              | `shared/src/app-client.ts` `pushUnsubscribe`, from `pwa/src/push.ts` `disablePush` (the Notifications card's Turn off, after the browser unsubscribed) and `removeDevice` (the card's per-row Remove for another device)                                                                                                                                                           | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushUnsubscribeRequest`, then one `update` of the settings record that drops the endpoint, none when it is not held (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request`                                                                                                                                    |
 | HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
@@ -1966,6 +1966,11 @@ an old peer's frames parse as before. Mixed versions:
   alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts` and `authAlerts`
   (Scheduler, "Web Push", "Disk alerts", "Auth alerts"): an older leader's parser drops each at its next write
   of that record, which costs one repeated alert, never a missed one.
+- `SettingsRecord.archivistSilence` (2026-11-13; Scheduler, "Web Push", "Silence alert"): dropped the
+  same way. A later leader re-reads a still-down archivist's kept entry as absent since its `lastSeen`
+  and pushes once more; an archivist whose entry has also left the registry reads as never held, so
+  that absence goes unalerted. An older service worker shows its generic notification for the new
+  kind. No rollout order.
 - `Task.failure.exit` (2026-10-26, a `session_failed` task's exit status, 1–255): lenient both
   ways. A reader drops one out of range and keeps the failure; an older reader's parser takes only
   `code` and `message`, so it shows "exited with an error" as before, and an older leader
@@ -2780,10 +2785,11 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked"), a running task whose account ran
   out of usage (`quota-exhausted`, _Successor_, "The automatic trigger"), a session's own pass the leader
   refused (`pass-refused`) and, from the leader's own
-  watch, a nearly full disk or an exclave whose login lapsed or is about to (_The library_,
-  "Credits spill" and "Needs input"; _Disk alerts_ and _Auth alerts_, below). The line names task,
-  account and device ids, never a prompt, title or URL; the push payload names a task or device id
-  and state (a login alert, a device and exclave id and its state), and no account. A login's
+  watch, a nearly full disk, an exclave whose login lapsed or is about to, or an archivist absent
+  24 h (_The library_, "Credits spill" and "Needs input"; _Disk alerts_, _Auth alerts_ and
+  _Silence alert_, below). The line names task, account and device ids, never a prompt, title or
+  URL; the push payload names a task or device id and state (a login alert, a device and exclave
+  id and its state; the silence alert, only when the absence began), and no account. A login's
   lines are `scheduler: login expired:` or `login expiring: device=<id> exclave=<id>`, and, when
   the exclave reads `ok` again, `scheduler: login restored: device=<id> exclave=<id> after=<minutes>m`.
 - **Settings record** (M4). One record, `settings:main` (`SETTINGS_KEY`),
@@ -2839,7 +2845,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     from its parsed form, so a field a newer build added is dropped by an older leader's
     subscription write. Concretely: a leader from before `diskAlerts` drops that list on its
     next write, so a later leader may push each still-full disk once more, and one from before
-    `authAlerts` likewise each still-lapsed login. Accepted.
+    `authAlerts` likewise each still-lapsed login, and one from before `archivistSilence` a
+    still-down archivist (_Silence alert_). Accepted.
 - **Web Push** (M4; `daemon/src/web-push.ts`, `push-sender.ts`). The
   leader pushes each alert to every subscription in the settings record, beside its log line.
   - **Subscribing.** The PWA reads the VAPID public key with `store-get` and subscribes the
@@ -2941,6 +2948,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     head, the PR URL or a check name. The parser refuses a reason outside the four.
     `quota-exhausted` carries the window label (shown only as `5h`/`7d`) and, when the leader alerts
     instead of passing, `reason` `dirty` or `branch`; `pass-refused` carries the task id alone.
+    `auth` carries its device and exclave ids and state, and `archivist` only `since`, when the
+    absence began.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -2992,6 +3001,32 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     Rollout: a leader from before `authAlerts` drops the list at its next write, so a later leader
     pushes each still-lapsed login once more, once per term alternation (31 terms in 6 hours is the
     measured worst case, as for the disk list). Accepted.
+  - **Silence alert** (`daemon/src/archivist-silence.ts`, scheduler-free like the disk and auth steps;
+    Archivist, A37; built 2026-11-13). The same watch, in the same single write, runs
+    `archivistSilenceStep` over the registry's seat entry (`RelayState.archivist`, the entry the relay
+    flags per push, so it follows the seat, never an old id's kept entry). The archivist is absent when no
+    connected flagged entry exists: the relay keeps a down archivist's entry `connected: false`, and an
+    entry can also vanish (forgotten, the seat moved to an id not yet registered, a blob this build cannot
+    open). The record's `archivistSilence` holds `{state: "present"}`, `{state: "absent", since}` or
+    `{state: "alerted", since}`. Its existence is the "a registry held an archivist" fact, so a fleet
+    whose registry never held one is never alerted, by any leader, while a new leader of a fleet whose
+    archivist died before it took over still is. `since` is when the absence began: the entry's
+    relay-stamped `lastSeen` (written at register and at close, so about the disconnect; clamped to the
+    leader's clock), else the leader's clock when no entry is left; persisted, so every leader measures
+    24 h (`ARCHIVIST_SILENCE_MS`) from the same instant, and the tick catches the threshold with no
+    registry change. Past it the step writes `alerted` and the push goes once that write landed; nothing
+    more while it stays absent; a connected entry writes `present` again, which re-arms it. A record with
+    no field but a kept, disconnected flagged entry counts as held, measured from that `lastSeen`. A lost
+    write is settled as the other alerts' are: the next check's re-read record holding `alerted` at the
+    alert's own `since` raises it. The leader re-checks on a registry push whose seat entry changed, but
+    does not run the scheduler pass for it: nothing in routing, placement or the pass reads the archivist
+    (A4). One log line, `scheduler: archivist silent: since=<ISO time>`. The push payload is `{v: 1,
+    kind: "archivist", at, since}`, no id (one seat per fleet); the service worker shows the fixed "The
+    archivist has been offline for 24 hours." under the tag `archivist` and a click opens the Machines
+    screen. No "restored" push or line. Rollout: a leader from before `archivistSilence` drops it at its
+    next write; a later leader then reads a still-down archivist's kept entry as held and absent since its
+    `lastSeen`, so it pushes once more (as for `authAlerts`), and one whose entry has left the registry
+    altogether reads as never held and is not alerted for that absence. Accepted.
   - **Not built:** removing another browser's subscription from the PWA (a retired device's
     slot still goes only when its push service answers 404/410), and a recovery path for an
     unreadable record (above).
@@ -8369,7 +8404,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   for a first alert carrying `question: true` (a worker that predates the field words it as any
   wait), "A task may spill into credits
   (7d projected at 95%)", "A task is spending credits (5h full)", "A machine's disk is nearly
-  full", and per reason for a blocked PR: "A task's pull request has a failing required check",
+  full", "The archivist has been offline for 24 hours" (nothing of its payload shown), and per reason for a blocked PR: "A task's pull request has a failing required check",
   "… has merge conflicts", "… is behind its base branch", "… is ready, but nothing will merge it",
   falling back to "… is blocked" for a reason this worker does not know; the reason picks its text
   through a frozen null-prototype map, so `__proto__` or `constructor` reach the fallback); the spill is worded as spending only for a payload's `spending: true`, anything else
@@ -8383,7 +8418,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   shows no name or title, and a payload it cannot read (an unknown kind or version, an id that
   fails the `isTaskId` rule it copies) shows the generic text with no target.
   - **The deep link.** A click opens the app at `/?task=<id>` (a task, spill or blocked-PR alert) or
-    `/?screen=machines` (disk). The worker re-checks the target it stored against those two
+    `/?screen=machines` (disk, login or the archivist's silence). The worker re-checks the target it stored against those two
     shapes before using it, focuses an open window of its own origin and posts it
     `{t: "open", url}`, or opens a window at the path when none is. `pwa/src/deep-link.ts`
     reads the query on launch and the message on a running app (`parseDeepLink`: the id must

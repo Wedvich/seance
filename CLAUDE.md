@@ -247,7 +247,7 @@ green:
   timed out, never awaited by the scheduler pass; its payload carries ids and state only, and no
   endpoint, key, JWT or payload is logged, and the service worker (`pwa/public/push-sw.js`) holds
   no PSK, so a notification's text is fixed per kind (a spill's window label shown only as one of
-  the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed) and a click opens only a same-origin path it
+  the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed; the archivist's silence one text, nothing of its payload shown) and a click opens only a same-origin path it
   built from an id that passed `isTaskId` (`/?task=<id>`, `/?screen=machines`), which the app
   reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
   holds no prompt text, no attachment manifest and no raw account id: a task row is written only
