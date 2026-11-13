@@ -2,6 +2,9 @@ import {
   accountNameIn,
   CAPABILITIES,
   closedAt,
+  drainStuckText,
+  drainSummary,
+  drainView,
   knownAccounts,
   type KnownAccount,
   effectivePct,
@@ -15,6 +18,8 @@ import {
   sameCreditMonth,
   schedulerRole,
   type ArchiveStatusResponse,
+  type DrainStuck,
+  type SessionEntry,
   type ArchiveTableStatus,
   type ArchivistEntry,
   type ExclaveInfo,
@@ -25,9 +30,11 @@ import {
   type SchedulerAvailability,
   type SchedulerRole,
   type SourceInfo,
+  type Task,
   type UpdateOutcome,
 } from "@seance/shared";
 import { METRIC_LABELS } from "./chart.ts";
+import { taskTitle } from "./task-title.ts";
 import { historyRanges, type ArchiveReach, type HistoryRange, type HistoryTarget } from "./state.ts";
 import { formatSeen } from "./view.ts";
 
@@ -87,6 +94,69 @@ export interface MachineCard {
    * around a closed machine (`drain`), since an older one would fail the tasks it sends there.
    */
   readonly openSwitch: "on" | "off" | null;
+  /** A closed machine's drain under a `drainPass` leader: null otherwise, and while the queue is unread. */
+  readonly drain: DrainRow | null;
+}
+
+export interface DrainRow {
+  /** `drainSummary`: "moving 2 · 1 stuck", "empty". */
+  readonly summary: string;
+  /** One line per session the drain cannot move. */
+  readonly stuck: readonly string[];
+}
+
+/** What the drain rows are computed from; absent (the default) draws none. */
+export interface DrainInputs {
+  /** The verified leader advertises `drainPass`. */
+  readonly passes: boolean;
+  /** The queue read's tasks; null while unread. */
+  readonly tasks: readonly Task[] | null;
+  /** Per machine, its `sessions` read; "unknown" when it did not answer. */
+  readonly sessions: Readonly<Record<string, { readonly sessions: readonly SessionEntry[] } | "unknown">>;
+}
+
+const NO_DRAINS: DrainInputs = { passes: false, tasks: null, sessions: {} };
+
+function sessionsOf(inputs: DrainInputs, deviceId: string): readonly SessionEntry[] | null {
+  const read = inputs.sessions[deviceId];
+  return read === undefined || read === "unknown" ? null : read.sessions;
+}
+
+function stuckLine(tasks: readonly Task[], stuck: DrainStuck): string {
+  const task = stuck.taskId === undefined ? undefined : tasks.find((t) => t.id === stuck.taskId);
+  const text = drainStuckText(stuck);
+  return task === undefined ? text : `${taskTitle(task)}: ${text}`;
+}
+
+function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
+  if (!inputs.passes || inputs.tasks === null || closedAt(machine) === null) return null;
+  const view = drainView(machine, inputs.tasks, sessionsOf(inputs, machine.deviceId));
+  return { summary: drainSummary(view), stuck: view.stuck.map((entry) => stuckLine(inputs.tasks ?? [], entry)) };
+}
+
+/**
+ * The close sheet's words: what happens to the running work. Without a `drainPass` leader, item 1's
+ * line; with one, the tasks that will be passed and the sessions that cannot be.
+ */
+export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAINS): readonly string[] {
+  const first = `Closing ${machine.name} stops new work landing on it.`;
+  if (!inputs.passes) return [first, "Running work finishes where it is."];
+  if (inputs.tasks === null) {
+    return [first, "Its running tasks are passed to other machines 10 minutes after, unless you reopen it."];
+  }
+  const sessions = sessionsOf(inputs, machine.deviceId);
+  const view = drainView(machine, inputs.tasks, sessions, null);
+  const lines = [first];
+  const n = view.moving.length;
+  if (n > 0) {
+    lines.push(
+      `${n === 1 ? "1 running task" : `${n} running tasks`} will be passed to other machines in 10 minutes unless you reopen it.`,
+    );
+  } else {
+    lines.push(sessions === null ? "Its sessions could not be read." : "No running task to pass on.");
+  }
+  for (const entry of view.stuck) lines.push(stuckLine(inputs.tasks, entry));
+  return lines;
 }
 
 export interface QuotaBar extends Gauge {
@@ -269,6 +339,7 @@ function machineCard(
   known: readonly KnownAccount[],
   archived: boolean,
   canDrain: boolean,
+  drains: DrainInputs,
 ): MachineCard {
   const closed = closedAt(machine) !== null;
   const canClose = machine.capabilities?.includes(CAPABILITIES.close) === true;
@@ -306,6 +377,7 @@ function machineCard(
     charts: servesMetrics(machine) || (archived && !machine.connected),
     closed,
     openSwitch: !canClose ? null : closed ? "off" : canDrain ? "on" : null,
+    drain: drainRow(machine, drains),
   };
 }
 
@@ -468,6 +540,7 @@ export function deriveMachines(
   archive: ArchiveReach = NO_ARCHIVE,
   /** The relay socket is open: a close is not offered without it, as `deriveCloseAvailability`. */
   relayOpen = true,
+  drains: DrainInputs = NO_DRAINS,
 ): MachinesView {
   const known = knownAccounts(machines);
   return {
@@ -481,6 +554,7 @@ export function deriveMachines(
         known,
         archive.machine,
         leaderDrains(machines, scheduler, relayOpen),
+        drains,
       ),
     ),
     accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),

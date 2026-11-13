@@ -19,6 +19,7 @@ import type {
 } from "@seance/shared";
 import {
   ATTACHMENT_LIMITS,
+  closedAt,
   DEFAULT_AUTONOMY,
   failureReasonText,
   METRICS_STEPS,
@@ -85,6 +86,7 @@ import {
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
   deriveCloseAvailability,
+  deriveDrainAvailability,
   derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
@@ -190,6 +192,8 @@ export class Store {
    * kept coming on that socket.
    */
   #wokenAt = new Map<string, number>();
+  /** deviceId -> its status's session counts as last seen while closed, so a change re-reads its sessions (`#readMovedSessions`). */
+  #closedSess = new Map<string, string>();
   /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
   #historyRange: HistoryRange = DEFAULT_HISTORY_RANGE;
   /** Tells this document's history entries from ones a previous load left behind. */
@@ -321,7 +325,10 @@ export class Store {
       });
     };
     document.addEventListener("visibilitychange", onVisibility);
-    const unsubscribeQueue = this.#client.onQueueChanged((change) => this.#queue.onQueueChanged(change));
+    const unsubscribeQueue = this.#client.onQueueChanged((change) => {
+      this.#queue.onQueueChanged(change);
+      this.#refreshClosedSessions();
+    });
     const unsubscribeAccounts = this.#client.onStoreChanged((key, version) =>
       this.#accounts.onStoreChanged(key, version),
     );
@@ -380,6 +387,7 @@ export class Store {
       // woken again and the session lists stay at whatever the very first
       // connect saw.
       this.#wokenAt = new Map();
+      this.#closedSess = new Map();
       this.#queue.onDrop();
       this.#wasOpen = false;
       this.#sentOnSettle = false;
@@ -401,6 +409,7 @@ export class Store {
     const woken = connected.filter((machine) => this.#wokenAt.get(machine.deviceId) !== machine.lastSeen);
     for (const machine of connected) this.#wokenAt.set(machine.deviceId, machine.lastSeen);
     if (woken.length > 0) void this.#fetchSessions(woken.map((machine) => machine.deviceId));
+    this.#readMovedSessions(woken);
     this.#queue.onOpen(relay, reopened);
     this.#accounts.onOpen(reopened);
   }
@@ -425,6 +434,48 @@ export class Store {
       form: form.machine !== null && !live.has(form.machine) ? { ...form, machine: null } : form,
       sessions: Object.keys(kept).length === Object.keys(sessions).length ? sessions : kept,
     };
+  }
+
+  /**
+   * A closed machine's sessions are what its drain row counts, and they change without its register
+   * (a pass closes a pane): re-read them when the queue changes and when its status's per-exclave
+   * session counts do, never on a timer. Only under a `drainPass` leader, and not for a machine
+   * `woken` already read this call.
+   */
+  #refreshClosedSessions(skip: readonly { readonly deviceId: string }[] = []): void {
+    const { relay } = this.#state;
+    if (relay.status !== "open" || !deriveDrainAvailability(relay)) return;
+    const skipped = new Set(skip.map((machine) => machine.deviceId));
+    const due = relay.machines
+      .filter((machine) => machine.connected && closedAt(machine) !== null && !skipped.has(machine.deviceId))
+      .map((machine) => machine.deviceId);
+    if (due.length > 0) void this.#fetchSessions(due);
+  }
+
+  /** On a relay change: the closed machines whose reported session counts moved since last seen. */
+  #readMovedSessions(woken: readonly { readonly deviceId: string }[]): void {
+    const { relay } = this.#state;
+    if (!deriveDrainAvailability(relay)) return;
+    const justRead = new Set(woken.map((machine) => machine.deviceId));
+    const due: string[] = [];
+    for (const machine of relay.machines) {
+      if (!machine.connected || closedAt(machine) === null) {
+        this.#closedSess.delete(machine.deviceId);
+        continue;
+      }
+      const key = JSON.stringify(machine.status?.sess ?? null);
+      const seen = this.#closedSess.get(machine.deviceId);
+      this.#closedSess.set(machine.deviceId, key);
+      if (seen !== key && !justRead.has(machine.deviceId)) due.push(machine.deviceId);
+    }
+    if (due.length > 0) void this.#fetchSessions(due);
+  }
+
+  /** The close sheet and the Machines screen read a machine's sessions and the queue afresh. */
+  readDrain(deviceId: string): void {
+    if (!deriveDrainAvailability(this.#state.relay)) return;
+    void this.refreshQueue();
+    void this.#fetchSessions([deviceId]);
   }
 
   async #fetchSessions(deviceIds: readonly string[]): Promise<void> {
@@ -690,6 +741,7 @@ export class Store {
   openMachines(): void {
     if (!this.#state.machines) this.#pushLayer();
     this.#patch({ machines: true });
+    this.#refreshClosedSessions();
   }
 
   /** The Queue screen is a layer like settings: one entry, popped by back. */

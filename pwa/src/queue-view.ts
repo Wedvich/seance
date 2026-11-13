@@ -378,7 +378,9 @@ function carriesOnLine(task: Task, titles: ReadonlyMap<string, string>): string 
   const earlier = task.spec.succeeds?.task;
   if (earlier === undefined) return null;
   const line = `Carries on ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
-  return task.spec.succeeds?.trigger === "quota" ? `${line} after its usage ran out` : line;
+  const trigger = task.spec.succeeds?.trigger;
+  if (trigger === "quota") return `${line} after its usage ran out`;
+  return trigger === "drain" ? `${line} after its machine closed` : line;
 }
 
 function passedToLine(task: Task, titles: ReadonlyMap<string, string>): string | null {

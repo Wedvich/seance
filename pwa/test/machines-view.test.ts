@@ -11,9 +11,17 @@ import {
   type MachineStatus,
   type MetricsSeries,
   type SchedulerAvailability,
+  type SessionEntry,
+  type Task,
 } from "@seance/shared";
 import { accountSeries, chartLines } from "../src/chart.ts";
-import { accountDisplayName, deriveArchivist, deriveMachines } from "../src/machines-view.ts";
+import {
+  accountDisplayName,
+  deriveArchivist,
+  deriveCloseSheet,
+  deriveMachines,
+  type DrainInputs,
+} from "../src/machines-view.ts";
 import { knownAccounts } from "@seance/shared";
 import { archiveCharts } from "../src/state.ts";
 
@@ -59,6 +67,69 @@ describe("the Open for work switch", () => {
     const closed = machine({ capabilities: [CAPABILITIES.close], status: closedStatus });
     expect(cardOf(closed, NO_LEADER)).toMatchObject({ closed: true, openSwitch: "off" });
     expect(cardOf(closed, ready, [{ ...leader, capabilities: [] }])).toMatchObject({ closed: true, openSwitch: "off" });
+  });
+});
+
+describe("the drain row and the close sheet", () => {
+  const CL = NOW - 60_000;
+  const closed = machine({
+    capabilities: [CAPABILITIES.close],
+    status: { at: S - 5, scan: 1, cl: CL },
+  });
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "lead", term: 1 };
+  const task = (id: string, mode: "worktree" | "here" = "worktree"): Task => ({
+    id,
+    spec: { repo: "github.com/m/seance", mode, prompt: "x", title: id },
+    state: "running",
+    createdAt: 1,
+    assignment: { deviceId: "dev-1", exclave: "default", clone: "seance" },
+  });
+  const pane = (taskId?: string): SessionEntry => ({
+    window: "w",
+    repo: "seance",
+    path: "/x",
+    ...(taskId === undefined ? {} : { taskId }),
+  });
+  const inputs = (fields: Partial<DrainInputs> = {}): DrainInputs => ({
+    passes: true,
+    tasks: [task("t1"), task("t2", "here")],
+    sessions: { "dev-1": { sessions: [pane("t1"), pane("t2"), pane()] } },
+    ...fields,
+  });
+  const draw = (drains: DrainInputs) => deriveMachines([closed], NOW, ready, {}, [], undefined, true, drains).cards[0];
+
+  test("a closed machine's row says what is moving and lists what is stuck", () => {
+    expect(draw(inputs())?.drain).toEqual({
+      summary: "moving 1 · 2 stuck",
+      stuck: ["t2: Can't move: runs in the clone", "Not a task: close it yourself"],
+    });
+  });
+
+  test("no row without a drainPass leader, an unread queue, or a closed machine", () => {
+    expect(draw(inputs({ passes: false }))?.drain).toBeNull();
+    expect(draw(inputs({ tasks: null }))?.drain).toBeNull();
+    const open = machine({ capabilities: [CAPABILITIES.close] });
+    expect(deriveMachines([open], NOW, ready, {}, [], undefined, true, inputs()).cards[0]?.drain).toBeNull();
+  });
+
+  test("an unanswered sessions read reads as unknown, and an empty one as empty", () => {
+    expect(draw(inputs({ tasks: [], sessions: { "dev-1": "unknown" } }))?.drain?.summary).toBe("sessions unknown");
+    expect(draw(inputs({ tasks: [], sessions: { "dev-1": { sessions: [] } } }))?.drain?.summary).toBe("empty");
+  });
+
+  test("the close sheet keeps item 1's words without drainPass, and counts the passes with it", () => {
+    const open = machine({ capabilities: [CAPABILITIES.close] });
+    expect(deriveCloseSheet(open, inputs({ passes: false }))).toEqual([
+      "Closing mac stops new work landing on it.",
+      "Running work finishes where it is.",
+    ]);
+    expect(deriveCloseSheet(open, inputs())).toEqual([
+      "Closing mac stops new work landing on it.",
+      "1 running task will be passed to other machines in 10 minutes unless you reopen it.",
+      "t2: Can't move: runs in the clone",
+      "Not a task: close it yourself",
+    ]);
+    expect(deriveCloseSheet(open, inputs({ tasks: null }))[1]).toContain("10 minutes");
   });
 });
 
