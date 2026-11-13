@@ -123,7 +123,10 @@ describe("archive-tasks", () => {
 
   test("a first page lists every machine the archive holds tasks for by last known name, the filters aside; a later page none", () => {
     archive.applyFleet(
-      { machines: [{ deviceId: "dev-gone", name: "old-box", platform: "linux", build: null, connected: true }], leader: null },
+      {
+        machines: [{ deviceId: "dev-gone", name: "old-box", platform: "linux", build: null, connected: true }],
+        leader: null,
+      },
       10,
     );
     // Retired: it keeps its row and name (A24).
