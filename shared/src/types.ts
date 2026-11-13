@@ -1515,6 +1515,20 @@ export interface ArchivedTask {
   readonly alias: string | null;
 }
 
+/**
+ * A machine the archive holds assigned tasks for, display only (A24): `name`
+ * its last known one (null when the archive never resolved one), `lastSeen`
+ * the newest `ArchivedTask.endedAt` among its tasks.
+ */
+export interface ArchivedMachine {
+  readonly deviceId: string;
+  readonly name: string | null;
+  readonly lastSeen: number;
+}
+
+/** The most machines one `archive-tasks` reply lists. */
+export const ARCHIVE_MACHINES_MAX = 100;
+
 export interface ArchiveTasksResponse {
   readonly ok: true;
   /** Filled to `REPLY_JSON_BUDGET`: fewer than `limit` when the rows are large, never none while any match. */
@@ -1523,6 +1537,11 @@ export interface ArchiveTasksResponse {
   readonly total: number;
   /** Null when this page reached the last match. */
   readonly next: ArchiveTasksCursor | null;
+  /**
+   * Every machine the archive holds tasks for, the filters aside, newest first;
+   * only on a page asked without `before`, and absent from an older archivist.
+   */
+  readonly machines?: readonly ArchivedMachine[];
 }
 
 export const ARCHIVE_TASKS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;

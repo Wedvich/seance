@@ -68,6 +68,7 @@ import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ARCHIVE_STATUS_ERROR_CODES,
   ARCHIVE_TASKS_ERROR_CODES,
+  ARCHIVE_MACHINES_MAX,
   ARCHIVE_TASKS_MAX_PAGE,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
@@ -2976,6 +2977,23 @@ describe("archive-tasks", () => {
     expect(parseArchiveTasksReply({ ...reply, next: { id: "t-1" } })).toBeNull();
     expect(parseArchiveTasksReply({ ...reply, total: -1 })).toBeNull();
     expect(parseArchiveTasksReply({ ...reply, ok: undefined })).toBeNull();
+  });
+
+  test("machines stay absent from an older archivist, drop a bad entry, and refuse the reply when not a bounded list", () => {
+    const reply = { ok: true, tasks: [], total: 0, next: null };
+    expect(parseArchiveTasksReply(reply)).toEqual(reply);
+    const gone = { deviceId: "dev-gone", name: "old-box", lastSeen: 2_000 };
+    const unnamed = { deviceId: "dev-x", name: null, lastSeen: 1_000 };
+    expect(
+      parseArchiveTasksReply({
+        ...reply,
+        machines: [gone, unnamed, { ...gone, deviceId: "has space" }, { ...gone, lastSeen: -1 }, { ...gone, name: 1 }],
+      }),
+    ).toEqual({ ...reply, machines: [gone, unnamed] });
+    expect(parseArchiveTasksReply({ ...reply, machines: {} })).toBeNull();
+    expect(
+      parseArchiveTasksReply({ ...reply, machines: Array.from({ length: ARCHIVE_MACHINES_MAX + 1 }, () => gone) }),
+    ).toBeNull();
   });
 
   test("each error code parses, an unknown one is unreadable", () => {
