@@ -58,11 +58,14 @@ import {
   type HistoryView,
   type Model,
   type PersistedForm,
+  type OlderPick,
+  type OlderSheet,
   type SheetKind,
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
 import { ARCHIVE_NO_ANSWER, ARCHIVE_UNDELIVERED, ARCHIVE_UNREADABLE, ArchiveStore } from "./archivist-store.ts";
+import { OlderStore } from "./older-store.ts";
 import { admitFiles, manifestOf, notAttachedText } from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
@@ -205,6 +208,7 @@ export class Store {
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
   readonly #archive: ArchiveStore;
+  readonly #older: OlderStore;
   readonly #uploads: UploadQueue;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, held: readonly HeldTask[] = []) {
@@ -220,6 +224,11 @@ export class Store {
       (next) => this.#patch(next),
     );
     this.#archive = new ArchiveStore(
+      client,
+      () => this.#state,
+      (next) => this.#patch(next),
+    );
+    this.#older = new OlderStore(
       client,
       () => this.#state,
       (next) => this.#patch(next),
@@ -297,6 +306,7 @@ export class Store {
         this.#queue.onShown(relay);
         this.#accounts.onShown();
         this.#archive.sync();
+        this.#older.sync();
       });
     };
     document.addEventListener("visibilitychange", onVisibility);
@@ -316,6 +326,7 @@ export class Store {
       this.#queue.dispose();
       this.#accounts.dispose();
       this.#archive.dispose();
+      this.#older.dispose();
       this.#uploads.dispose();
     };
   }
@@ -329,6 +340,8 @@ export class Store {
     // Whether the card's counts are wanted turns on these three alone, however each one moved (the Machines
     // layer opening or closing by any path, the desktop layout, the registry's archivist).
     if (keys.some((key) => key === "machines" || key === "wide" || key === "relay")) this.#archive.sync();
+    // Older reads only while the Queue screen shows it and an archivist is connected.
+    if (keys.some((key) => key === "queue" || key === "wide" || key === "relay")) this.#older.sync();
   }
 
   #onRelay(): void {
@@ -341,6 +354,8 @@ export class Store {
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
     this.#fallBackHistory();
+    // Older is gone with the archivist (A36g): a filter sheet over it goes the way every layer does, through history.
+    if (relay.archivist?.connected !== true) this.closeOlderSheet();
     this.#uploads.onRelay(socketBack);
     const decided = relay.status === "open" ? relay.registrySettled : !relay.settling;
     if (decided && this.#settleWaiters.length > 0) {
@@ -632,6 +647,7 @@ export class Store {
       focusedTask: null,
       verdict: null,
     });
+    if (queue) this.#older.close();
     if (open > 0) history.go(-open);
     void this.refreshPreview();
   }
@@ -858,6 +874,7 @@ export class Store {
     // Any traversal leaves the entry that was current, held or not.
     this.#held = false;
     this.#renameClosing = false;
+    this.#olderSheetClosing = false;
     const entry = layerEntry(history.state);
     const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
     while (this.#openLayers() > depth) this.#closeTopLayer();
@@ -865,9 +882,10 @@ export class Store {
   }
 
   #openLayers(): number {
-    const { sheet, settings, machines, queue, verdict, accounts } = this.#state;
+    const { sheet, settings, machines, queue, verdict, accounts, older } = this.#state;
     return (
       (sheet === null ? 0 : 1) +
+      (older.sheet === null ? 0 : 1) +
       (settings ? 1 : 0) +
       (machines ? 1 : 0) +
       (queue ? 1 : 0) +
@@ -917,6 +935,11 @@ export class Store {
       this.#patch({ sheet: null, rescan });
       return;
     }
+    // Opened over the Queue screen, so it closes first.
+    if (this.#state.older.sheet !== null) {
+      this.#patch({ older: { ...this.#state.older, sheet: null } });
+      return;
+    }
     // Above settings, so it closes first.
     if (this.#state.machines) {
       this.#patch({ machines: false, history: null });
@@ -930,9 +953,55 @@ export class Store {
     if (this.#state.queue) {
       // A notification's focus never listed (the task was pruned) must not scroll some later visit.
       this.#patch({ queue: false, queueNotice: null, focusedTask: null });
+      this.#older.close();
       return;
     }
     if (this.#state.verdict !== null) this.#patch({ verdict: null });
+  }
+
+  /** Toggles the Queue screen's Older section; opening it reads the archive's first page. */
+  toggleOlder(): void {
+    this.#older.toggle();
+  }
+
+  /** The Older section's title search: shown as typed, asked for once typing pauses. */
+  searchOlder(title: string): void {
+    this.#older.search(title);
+  }
+
+  /** One of Older's filter sheets: a layer like the form's, so back closes it. */
+  openOlderSheet(sheet: OlderSheet): void {
+    if (this.#state.older.sheet === null) this.#pushLayer();
+    this.#patch({ older: { ...this.#state.older, sheet } });
+  }
+
+  /** A pick on a filter sheet: Older reads again from its first page, and the sheet closes. */
+  pickOlder(pick: OlderPick): void {
+    this.#older.pick(pick);
+    this.closeOlderSheet();
+  }
+
+  clearOlderFilters(): void {
+    this.#older.clear();
+  }
+
+  loadOlder(): void {
+    this.#older.loadMore();
+  }
+
+  /** Reads Older's first page again, as the screen's ↻ re-reads the queue; nothing while it is closed. */
+  refreshOlder(): void {
+    this.#older.refresh();
+  }
+
+  /** Set from asking for the filter sheet's back until the traversal lands, as `#renameClosing` is. */
+  #olderSheetClosing = false;
+
+  /** The one way the app closes a filter sheet; a no-op while none is up or one is already closing. */
+  closeOlderSheet(): void {
+    if (this.#state.older.sheet === null || this.#olderSheetClosing) return;
+    this.#olderSheetClosing = true;
+    history.back();
   }
 
   /** Set from asking for the rename layer's back until the traversal lands, so a second ask pops nothing more. */

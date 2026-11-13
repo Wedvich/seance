@@ -420,7 +420,11 @@ export function deriveOlder(state: AppState, now: number): OlderView | null {
     status,
     clearable,
     showing: rows.length === 0 ? null : `Showing ${rows.length} of ${Math.max(total, rows.length)}`,
-    more: ok !== null && ok.next !== null && rows.length > 0 ? { loading: ok.loadingMore } : null,
+    // Also after a failed read-on past live duplicates, which leaves nothing shown but more to ask for.
+    more:
+      ok !== null && ok.next !== null && (rows.length > 0 || ok.moreError !== null)
+        ? { loading: ok.loadingMore }
+        : null,
     moreError: ok?.moreError ?? null,
     sheet: older.sheet === null ? null : sheetView(older.sheet, state, read, now, known, ids),
   };
