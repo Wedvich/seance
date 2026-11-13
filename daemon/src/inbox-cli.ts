@@ -9,9 +9,11 @@ import { socketPath } from "./paths.ts";
  *
  * Silent: nothing here logs, because stdout is the mod's data channel. The exit code is the mod's backoff
  * signal. 0: the daemon acked and the connection later ended (a rebind or a restart; retry soon). 3: the daemon
- * answered `unsupported` and runs no message delivery here (retry rarely). 4: it refused this pane, `unbound`
- * (the pane is in no tmux server of this daemon's) or `untasked` (a hand-started session): nothing a retry changes
- * soon, so retry rarely. 2: anything else — no daemon, another refusal, a stdout nobody reads any more, or a
+ * answered `unsupported` and runs no message delivery here (retry rarely). 4: it refused this pane `untasked`
+ * (a hand-started session): nothing a retry changes soon, so retry rarely. 5: it refused this pane `unbound`
+ * (in no tmux server of this daemon's, or a pane list, a peer pid or a /proc read failed just then): mostly
+ * permanent, but not always, so the mod retries within the daemon's listener grace, where a held message survives
+ * one retry. 2: anything else — no daemon, another refusal, a stdout nobody reads any more, or a
  * close with no reply at all, which an older daemon (it drops the frame as malformed) and a daemon mid-update
  * look the same as, so neither is told apart from a restart, and a parent that changed (below).
  *
@@ -24,14 +26,13 @@ import { socketPath } from "./paths.ts";
 const EXIT_ACKED = 0;
 const EXIT_OTHER = 2;
 const EXIT_UNSUPPORTED = 3;
-const EXIT_PANE_REFUSED = 4;
+const EXIT_UNTASKED = 4;
+const EXIT_UNBOUND = 5;
 
 /** How often the parent is compared with the one this process started under. */
 const PARENT_CHECK_MS = 2_000;
 
-type FirstLine = "pending" | "acked" | "unsupported" | "pane-refused" | "other";
-
-const PANE_REFUSALS: ReadonlySet<unknown> = new Set(["unbound", "untasked"]);
+type FirstLine = "pending" | "acked" | "unsupported" | "untasked" | "unbound" | "other";
 
 function classify(line: string): FirstLine {
   try {
@@ -39,8 +40,8 @@ function classify(line: string): FirstLine {
     if (typeof reply !== "object" || reply === null) return "other";
     if (Reflect.get(reply, "ok") === true) return "acked";
     const code: unknown = Reflect.get(reply, "code");
-    if (code === "unsupported") return "unsupported";
-    return PANE_REFUSALS.has(code) ? "pane-refused" : "other";
+    if (code === "unsupported" || code === "untasked" || code === "unbound") return code;
+    return "other";
   } catch {
     return "other";
   }
@@ -107,5 +108,6 @@ export async function cmdInbox(): Promise<void> {
   await written;
   if (!connected || first === "pending" || first === "other") process.exit(EXIT_OTHER);
   if (first === "unsupported") process.exit(EXIT_UNSUPPORTED);
-  process.exit(first === "pane-refused" ? EXIT_PANE_REFUSED : EXIT_ACKED);
+  if (first === "untasked") process.exit(EXIT_UNTASKED);
+  process.exit(first === "unbound" ? EXIT_UNBOUND : EXIT_ACKED);
 }

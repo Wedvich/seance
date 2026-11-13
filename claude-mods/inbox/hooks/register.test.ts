@@ -3,6 +3,10 @@ import type { Engine, MockClock } from "claude-code/testing";
 import type { On, ToolCheckDecision } from "claude-code";
 import { daemonMain, restartDelay } from "./register.ts";
 
+// The mod itself never names a timer (a hot reload does not cancel one); these tests poll with real ones. The kit's
+// type root (es2023, no DOM or node) declares none, and a declaration here stays out of register.ts's scope.
+declare function setTimeout(handler: () => void, ms: number): unknown;
+
 const KEEP = { messages: 32, bytes: 262_144 };
 const ACK = `${JSON.stringify({ ok: true, keep: KEEP })}\n`;
 const READ = "mcp__inbox__read_messages";
@@ -173,6 +177,7 @@ describe("restartDelay", () => {
     expect(restartDelay(2, false, 15_000)).toEqual({ delayMs: 15_000, failureMs: 15_000 });
     expect(restartDelay(3, false, 2_000)).toEqual({ delayMs: 300_000, failureMs: 2_000 });
     expect(restartDelay(4, false, 2_000)).toEqual({ delayMs: 300_000, failureMs: 2_000 });
+    expect(restartDelay(5, false, 2_000)).toEqual({ delayMs: 60_000, failureMs: 2_000 });
   });
 });
 
@@ -254,6 +259,24 @@ describe("starting", () => {
     }
   });
 
+  test("an unbindable pane (exit 5) is retried after a minute, inside the daemon's two-minute listener grace", async ($, on) => {
+    mock.env(on, { TMUX_PANE: "%7" });
+    const clock = mock.clock(on);
+    session(on);
+    tools(on);
+    const child = fakeChild(on);
+    await start($);
+    await until(() => child.argvs.length === 1, "the child to start");
+    child.exit(5);
+    await clock.advance(59_999);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 30);
+    });
+    expect(child.argvs).toHaveLength(1);
+    await clock.advance(1);
+    await until(() => child.argvs.length === 2, "the restart after a minute");
+  });
+
   test("any other failure backs off from one second, doubling", async ($, on) => {
     mock.env(on, { TMUX_PANE: "%7" });
     const clock = mock.clock(on);
@@ -273,6 +296,53 @@ describe("starting", () => {
     expect(child.argvs).toHaveLength(2);
     await clock.advance(1);
     await until(() => child.argvs.length === 3, "the second retry, after two");
+  });
+
+  test("a backoff wait refused once is tried again, and refused twice it is given up until the next turn starts a fresh loop", async ($, on) => {
+    mock.env(on, { TMUX_PANE: "%7" });
+    // The clock under a plugin that refuses some waits: the rest resolve at once.
+    let refused = 1;
+    on("clock.sleep", () => {
+      if (refused <= 0) return { value: undefined };
+      refused -= 1;
+      throw new Error("refused");
+    });
+    const logged: string[] = [];
+    on("ui.log", (_$, e) => {
+      logged.push(e.text);
+      return { value: undefined };
+    });
+    session(on);
+    tools(on);
+    const child = fakeChild(on);
+    await start($);
+    await until(() => child.argvs.length === 1, "the child to start");
+    child.exit(2);
+    await until(() => child.argvs.length === 2, "the retry after one refused wait");
+
+    refused = 2;
+    child.exit(2);
+    await until(() => refused === 0, "both tries at the wait to be refused");
+    // A non-event cannot be polled for: the loop has given up, so nothing starts.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 30);
+    });
+    expect(child.argvs).toHaveLength(2);
+    expect(logged).toHaveLength(1);
+    await $.turn.start({ turnId: "t1", text: "work" });
+    await until(() => child.argvs.length === 3, "a fresh loop at the next turn");
+  });
+
+  test("a loop that ended with its session is not begun again by a later turn", async ($, on) => {
+    const child = await acked($, on);
+    await end($, "logout");
+    await until(() => child.killed(), "the child to be left");
+    await $.turn.start({ turnId: "t1", text: "work" });
+    // A non-event cannot be polled for.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 30);
+    });
+    expect(child.argvs).toHaveLength(1);
   });
 
   test("a session that ended for good stops its child, and a later session.start in the same process starts a fresh one", async ($, on) => {
