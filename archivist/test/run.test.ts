@@ -201,7 +201,7 @@ describe("seance-archivist run", () => {
         expect(answer.op).toBe(op);
         expect(answer.re).toBe(`${op}-app`);
         expect(answer.payload).toEqual(
-          op === "archive-metrics" ? { series: [] } : { ok: true, tasks: [], total: 0, next: null },
+          op === "archive-metrics" ? { series: [] } : { ok: true, tasks: [], total: 0, next: null, machines: [] },
         );
       }
     } finally {
