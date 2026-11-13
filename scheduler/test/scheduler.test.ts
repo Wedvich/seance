@@ -91,8 +91,8 @@ describe("dispatch", () => {
           plan: true,
           autonomy: "steer",
           client: SCHEDULER_CLIENT,
-          client: SCHEDULER_CLIENT,
           routesClosed: true,
+          taskId: task.id,
         },
       },
     ]);
