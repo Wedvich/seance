@@ -2286,9 +2286,11 @@ describe("M4 shapes", () => {
     expect(parseDecision(decide({ code: "closed" }))?.candidates[0]?.rejected).toEqual([{ code: "closed" }]);
   });
 
-  test("availability: open is required, now is accepted and dropped, a reply keeps its time or code", () => {
+  test("availability: open is required, now is kept only as true, a reply keeps its time or code", () => {
     expect(parseAvailabilityRequest({ open: false })).toEqual({ open: false });
-    expect(parseAvailabilityRequest({ open: true, now: true })).toEqual({ open: true });
+    expect(parseAvailabilityRequest({ open: false, now: true })).toEqual({ open: false, now: true });
+    expect(parseAvailabilityRequest({ open: true, now: true })).toEqual({ open: true, now: true });
+    expect(parseAvailabilityRequest({ open: false, now: false })).toEqual({ open: false });
     for (const bad of [null, "x", {}, { open: "false" }, { open: true, now: 1 }])
       expect(parseAvailabilityRequest(bad)).toBeNull();
     expect(parseAvailabilityResponse({ ok: true, closed: null })).toEqual({ ok: true, closed: null });
