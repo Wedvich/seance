@@ -76,7 +76,7 @@ Each is the owner's unless marked _derived_.
 ### 3. A round
 
 - **C8–C14.** Built: DESIGN.md, "The custodian's seat".
-  C14's due check is narrowed there to the panes C7 allows and to panes with an observed state, and
+  C14's due check is narrowed there to the panes C7 allows and a built verb could act on (today: idle since a turn's end), and
   "Round now" and the pause (§9) are not built yet.
 - **C15.** Built: DESIGN.md, "Session events", "Per-pane retention and the screen sampler".
 - **C16, C17.** Built: DESIGN.md, "The custodian's seat".

@@ -8657,7 +8657,7 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   whole number of 1–1440 (`maxNudges`: 0–20, `CUSTODIAN_LIMITS`). Anything else is refused at load, naming the allowed keys (`parseCustodian`,
   `daemon/src/config.ts`). `closeAfterMinutes` is read by `close` (custodian 4); `maxNudges` and `interruptAfterMinutes` by the nudge and interrupt verbs, which are not built.
 - **When a round is due (C14, `roundDue`).** Once a minute (`CHECK_INTERVAL_MS`), over the per-pane facts
-  `pane-activity.ts` keeps: some `ours` pane has stood `idle`, or unchanged on screen, for `everyMinutes`; the
+  `pane-activity.ts` keeps: some `ours` pane has stood `idle` since its turn ended for `everyMinutes`; the
   last round ended at least that long ago; none is running; the daemon is not restarting (`EndedTasks.draining`).
   **Narrowed from the spec to the panes C7 lets the custodian act on:** a pane whose last state is `needs-input`,
   or that carries a hand-off or pass mark or has a close under way (`SessionEvents.marked`) or has a live entry
@@ -8665,9 +8665,14 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   is what the ask _reads_, and does not say an entry is live; once the prompt is typed, the pane skipped or dropped
   or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
   as the machine stays closed), never counts, since no verb may
-  touch it and it would otherwise keep a round due for ever. **So does a pane with no observed state** (`state` null:
-  a restart's retention gap, or an exclave without the `session-events` mod): `close` answers it `unobserved` (C24),
-  and a round it keeps due would run every `everyMinutes` to do nothing (plan review F4, custodian 4). Pause (C45) is custodian 5. A round is not held
+  touch it and it would otherwise keep a round due for ever. **So does every pane no built verb could act on**
+  (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
+  gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (the mod's `session.start`,
+  raised on a reload, an install or a hooks-worker respawn, leaves a finished session so), and one `busy` or still
+  on screen, which only the `interrupt` verb (custodian 8) can act on. `close` answers the first two `unobserved`
+  (C24) and the third `busy`, and a round they kept due would run every `everyMinutes` to do nothing. So the due
+  check is the idle-since-turn-end term alone, and custodian 8 adds the still-screen term beside it
+  (`actionable`, `custodian-seat.ts`). Pause (C45) is custodian 5. A round is not held
   back on a closed machine (`cl`): closing a machine routes work away and asks its sessions to pass, and the
   sessions it still holds are the ones a round tidies; only a restart drain stops a launch, because the daemon
   is about to go. A broken launch counts as a round that ended, so it retries after `everyMinutes`, never every

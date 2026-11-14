@@ -47,13 +47,12 @@ const MINUTE_MS = 60_000;
 export const CHECK_INTERVAL_MS = MINUTE_MS;
 
 /**
- * C14 minus pause (PR 5): some tracked pane has stood `idle`, or unchanged on screen, for `everyMs`; the last round
- * ended at least that long ago; none is running; the daemon is not draining for a restart. A pane counts only when C7
- * lets the custodian act on it: its last state is not `needs-input`, and it carries no drain, hand-off or pass mark
- * (`untouchable`) — else a pane no verb may touch would keep a round due forever — and only once a frame has given
- * it a state: `close` refuses every pane with none (`unobserved`), so a still screen alone, on a machine or exclave
- * without the `session-events` mod, would keep a round due every `everyMinutes` that could close nothing (DESIGN.md
- * records both narrowings).
+ * C14 minus pause (PR 5): some tracked pane has stood `idle` since a turn's end for `everyMs`; the last round ended at
+ * least that long ago; none is running; the daemon is not draining for a restart. A pane counts only when a built verb
+ * could act on it, else it would keep a round due every `everyMinutes` that closes nothing (DESIGN.md records the
+ * narrowing): C7's exclusions (a last state of `needs-input`, or a drain, hand-off or pass mark: `untouchable`), a
+ * pane no frame has given a state (`close` answers `unobserved`), and an `idle` without `turnEnded` (`close` answers
+ * that `unobserved` too, and a mod's `session.start` on a reload or respawn sends exactly that for a finished session).
  */
 export function roundDue(o: {
   readonly now: number;
@@ -66,12 +65,16 @@ export function roundDue(o: {
 }): boolean {
   if (o.running || o.draining) return false;
   if (o.lastEndedAt !== undefined && o.now - o.lastEndedAt < o.everyMs) return false;
-  return o.panes.some((pane) => {
-    if (pane.state === null || pane.state === "needs-input" || o.untouchable(pane.pane)) return false;
-    const idle = pane.state === "idle" && pane.stateSince !== null && o.now - pane.stateSince >= o.everyMs;
-    const still = pane.screenSince !== null && o.now - pane.screenSince >= o.everyMs;
-    return idle || still;
-  });
+  return o.panes.some((pane) => !o.untouchable(pane.pane) && actionable(pane, o.now, o.everyMs));
+}
+
+/**
+ * Whether a verb that exists could act on this pane once `everyMs` has passed: `close`, on a pane idle since its
+ * turn ended. Custodian 8's `interrupt` adds its own term here (a `busy` pane whose screen has stood still,
+ * `screenSince`), so a due round keeps meaning "something could be done", never "something is old".
+ */
+function actionable(pane: TrackedActivity, now: number, everyMs: number): boolean {
+  return pane.state === "idle" && pane.turnEnded && pane.stateSince !== null && now - pane.stateSince >= everyMs;
 }
 
 /** Why an exclave cannot host a round before its round dir is looked at, null when it might. */

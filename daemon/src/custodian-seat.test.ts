@@ -39,7 +39,7 @@ const baseDue = {
   lastEndedAt: undefined,
   running: false,
   draining: false,
-  panes: [pane({ state: "idle", stateSince: NOW - EVERY })],
+  panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: true })],
   untouchable: (): boolean => false,
 };
 
@@ -48,8 +48,14 @@ describe("roundDue", () => {
     expect(roundDue(baseDue)).toBe(true);
   });
 
-  test("a screen unchanged long enough does, whatever the state", () => {
-    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })] })).toBe(true);
+  test("a pane idle without a turn's end is not due: close answers it unobserved", () => {
+    expect(
+      roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: false })] }),
+    ).toBe(false);
+  });
+
+  test("a busy pane with a long-still screen is not due until a verb can act on it", () => {
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })] })).toBe(false);
   });
 
   test("each other condition alone makes it not due", () => {
@@ -58,8 +64,15 @@ describe("roundDue", () => {
     expect(roundDue({ ...baseDue, lastEndedAt: NOW - EVERY + 1 })).toBe(false);
     expect(roundDue({ ...baseDue, lastEndedAt: NOW - EVERY })).toBe(true);
     expect(roundDue({ ...baseDue, panes: [] })).toBe(false);
-    expect(roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY + 1 })] })).toBe(false);
-    expect(roundDue({ ...baseDue, panes: [pane({ state: null, stateSince: null, screenSince: null })] })).toBe(false);
+    expect(
+      roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY + 1, turnEnded: true })] }),
+    ).toBe(false);
+  });
+
+  test("a pane with no observed state is not due, however long its screen has stood still", () => {
+    expect(
+      roundDue({ ...baseDue, panes: [pane({ state: null, stateSince: null, screenSince: NOW - EVERY })] }),
+    ).toBe(false);
   });
 
   test("a long-still needs-input pane alone is not due: no verb may touch it", () => {
@@ -85,7 +98,7 @@ describe("roundDue", () => {
         ...baseDue,
         panes: [
           pane({ pane: "%1", state: "needs-input", screenSince: NOW - EVERY }),
-          pane({ pane: "%2", state: "idle", stateSince: NOW - EVERY }),
+          pane({ pane: "%2", state: "idle", stateSince: NOW - EVERY, turnEnded: true }),
         ],
       }),
     ).toBe(true);
@@ -368,7 +381,7 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
     settings: CUSTODIAN_DEFAULTS,
     now: () => clock.now,
     checkIntervalMs: 3_600_000,
-    activity: () => [pane({ state: "idle", stateSince: clock.now - EVERY })],
+    activity: () => [pane({ state: "idle", stateSince: clock.now - EVERY, turnEnded: true })],
     untouchable: () => false,
     appendRound: (entry) => {
       rounds.push(entry);
