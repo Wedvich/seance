@@ -129,8 +129,11 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
     checkIntervalMs: 3_600_000,
     activity: tracked,
     untouchable: () => false,
+    // The round log's own rule (`upsertRound`): by start, never over a healthy line.
     appendRound: (entry) => {
-      rounds.push(entry);
+      const at = rounds.findIndex((round) => round.start === entry.start);
+      if (at < 0) rounds.push(entry);
+      else if (rounds[at]?.outcome !== "healthy") rounds[at] = entry;
       return Promise.resolve();
     },
     draining: () => false,

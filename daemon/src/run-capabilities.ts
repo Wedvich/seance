@@ -9,7 +9,7 @@ import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
 import { createWorktreeRule } from "./custodian-worktree.ts";
-import { emptyCounts, upsertRound } from "./custodian-rounds.ts";
+import { countedVerb, emptyCounts, upsertRound } from "./custodian-rounds.ts";
 import {
   ensureRoundDir,
   exclaveRootExists,
@@ -314,16 +314,18 @@ const custodianSeat: DaemonCapability = (ctx) => {
     }
     if (round === undefined && panes.length === 0) return;
     if (round !== undefined) await removeRoundTmp(round.tmpDir);
-    // A round that reported `done` already has its healthy log entry; any other was lost with nothing counted.
+    // A round that reported `done` has its healthy entry unless that write failed or the daemon died before it: the
+    // upsert never replaces a healthy line, so for those it records the round, without a summary. Any other was lost
+    // with nothing counted.
     const done = round?.done === true;
-    if (round !== undefined && !done) {
+    if (round !== undefined) {
       await upsertRound(custodianRoundsPath(), {
         start: round.startedAt,
         end: ctx.now(),
-        outcome: "failed",
-        reason: "lost",
+        outcome: done ? "healthy" : "failed",
+        reason: done ? "done" : "lost",
         exclave: round.exclave,
-        counts: emptyCounts(),
+        counts: done ? countedVerb(emptyCounts(), "done", true) : emptyCounts(),
       }).catch((err: unknown) => log.warn(`custodian: could not log a lost round: ${String(err)}`));
     }
     await audit.end(round?.pane ?? panes[0]?.pane ?? null, done ? "healthy" : "failed", done ? "done" : "lost");

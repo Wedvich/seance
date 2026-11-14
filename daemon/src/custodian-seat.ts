@@ -303,20 +303,20 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   ): Promise<void> => {
     await d.removeTmp(round.tmpDir);
     await d.audit.end(round.pane, reason === "done" ? "healthy" : "failed", reason);
-    // A `done` wrote its healthy entry when it was accepted, and the log never overwrites one: every other end is a
-    // failed round, which carries no summary.
-    if (reason !== "done") {
-      await d
-        .appendRound({
-          start: round.startedAt,
-          end: d.now(),
-          exclave: round.exclave,
-          outcome: "failed",
-          reason,
-          counts,
-        })
-        .catch((err: unknown) => d.warn(`custodian: writing the round log failed: ${String(err)}`));
-    }
+    // A `done` wrote its healthy entry, with the summary, when it was accepted, and the log never overwrites a healthy
+    // one: this upsert is then a no-op. When that write failed (warned) or the daemon died between the record and the
+    // log, the round is still recorded here, without its summary, which only the failed write held. Every other end is
+    // a failed round, which carries no summary.
+    await d
+      .appendRound({
+        start: round.startedAt,
+        end: d.now(),
+        exclave: round.exclave,
+        outcome: reason === "done" ? "healthy" : "failed",
+        reason,
+        counts: reason === "done" ? countedVerb(counts, "done", true) : counts,
+      })
+      .catch((err: unknown) => d.warn(`custodian: writing the round log failed: ${String(err)}`));
     await persist({ lastEndedAt: d.now() });
   };
 

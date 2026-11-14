@@ -388,8 +388,11 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
     checkIntervalMs: 3_600_000,
     activity: () => [pane({ state: "idle", stateSince: clock.now - EVERY, turnEnded: true })],
     untouchable: () => false,
+    // The round log's own rule (`upsertRound`, tested in custodian-rounds.test.ts): by start, never over a healthy line.
     appendRound: (entry) => {
-      rounds.push(entry);
+      const at = rounds.findIndex((round) => round.start === entry.start);
+      if (at < 0) rounds.push(entry);
+      else if (rounds[at]?.outcome !== "healthy") rounds[at] = entry;
       return Promise.resolve();
     },
     draining: () => state.draining,
@@ -904,7 +907,29 @@ describe("the round's verbs reach the seat", () => {
     r.seat.stop();
   });
 
-  test("a restart after done: a live pane is closed by the next tick, a gone one is finished at once, and neither logs again", async () => {
+  test("a done whose log write failed is still recorded, without its summary, when the round ends", async () => {
+    let failing = true;
+    const r = rig({
+      appendRound: (entry) => {
+        if (failing) return Promise.reject(new Error("disk full"));
+        r.rounds.push(entry);
+        return Promise.resolve();
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(await r.seat.done("lost with the failed write")).toBe("ok");
+    expect(r.rounds).toEqual([]);
+    failing = false;
+    r.clock.now += 1_000;
+    await r.seat.tick();
+    expect(r.rounds).toHaveLength(1);
+    expect(r.rounds[0]).toMatchObject({ outcome: "healthy", reason: "done", counts: { done: { ok: 1 } } });
+    expect(r.rounds[0]?.summary).toBeUndefined();
+    r.seat.stop();
+  });
+
+  test("a restart after done: a live pane is closed by the next tick, a gone one is finished at once, and each records the round", async () => {
     const record = { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default", done: true } } as const;
     const live = rig({}, record);
     live.live.add("%1");
@@ -913,14 +938,14 @@ describe("the round's verbs reach the seat", () => {
     await live.seat.tick();
     expect(live.log).toContain("kill %1 done exited");
     expect(live.log).toContain("end %1 done");
-    expect(live.rounds).toEqual([]);
+    expect(live.rounds).toMatchObject([{ outcome: "healthy", reason: "done" }]);
     expect(live.live.size).toBe(0);
     live.seat.stop();
 
     const gone = rig({}, record);
     await gone.seat.start();
     expect(gone.log).toContain("end %1 done");
-    expect(gone.rounds).toEqual([]);
+    expect(gone.rounds).toMatchObject([{ outcome: "healthy", reason: "done" }]);
     expect(gone.state.record).toEqual({ lastEndedAt: NOW });
     gone.seat.stop();
   });
