@@ -21,7 +21,8 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function store(clock: { now: number } = { now: 100 }) {
+function store(start = 100) {
+  const clock = { now: start };
   n += 1;
   const path = join(dir, `${n}`, "sessions.json");
   const warnings: string[] = [];
