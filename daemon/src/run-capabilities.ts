@@ -7,10 +7,14 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
+import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
+import { createWorktreeRule } from "./custodian-worktree.ts";
+import { countedVerb, emptyCounts, upsertRound } from "./custodian-rounds.ts";
 import {
   ensureRoundDir,
   exclaveRootExists,
   launchRound,
+  listRoundPanePids,
   listRoundPanes,
   readNotes,
   removeRoundTmp,
@@ -40,7 +44,7 @@ import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { createMessages } from "./messages.ts";
-import { pruneLogPath, reapRefusalsPath } from "./paths.ts";
+import { custodianRoundsPath, pruneLogPath, reapRefusalsPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import type { RelayClient } from "./relay-client.ts";
@@ -53,7 +57,8 @@ import {
   type SessionEvents,
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
-import { capturePane, paneWindowName } from "./tmux.ts";
+import { listPanes } from "./sessions.ts";
+import { capturePane, paneWindowName, tmux } from "./tmux.ts";
 import { isDirTrusted } from "./trust.ts";
 import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
@@ -107,7 +112,7 @@ export interface WiringCtx {
 }
 
 /** A local op socket surface a capability brings; the socket starts after every capability, with all of them. */
-export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages">;
+export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages" | "custodian">;
 
 export interface Started {
   readonly stop: () => void;
@@ -309,7 +314,21 @@ const custodianSeat: DaemonCapability = (ctx) => {
     }
     if (round === undefined && panes.length === 0) return;
     if (round !== undefined) await removeRoundTmp(round.tmpDir);
-    await audit.end(round?.pane ?? panes[0]?.pane ?? null, "lost");
+    // A round that reported `done` has its healthy entry unless that write failed or the daemon died before it: the
+    // upsert never replaces a healthy line, so for those it records the round, without a summary. Any other was lost
+    // with nothing counted.
+    const done = round?.done === true;
+    if (round !== undefined) {
+      await upsertRound(custodianRoundsPath(), {
+        start: round.startedAt,
+        end: ctx.now(),
+        outcome: done ? "healthy" : "failed",
+        reason: done ? "done" : "lost",
+        exclave: round.exclave,
+        counts: done ? countedVerb(emptyCounts(), "done", true) : emptyCounts(),
+      }).catch((err: unknown) => log.warn(`custodian: could not log a lost round: ${String(err)}`));
+    }
+    await audit.end(round?.pane ?? panes[0]?.pane ?? null, done ? "healthy" : "failed", done ? "done" : "lost");
     if (!ctx.stopped()) await ctx.custodianSaved({ lastEndedAt: ctx.now() });
   };
   const sweepLeftovers = (): void =>
@@ -324,14 +343,52 @@ const custodianSeat: DaemonCapability = (ctx) => {
   let seat: CustodianSeat | null = null;
   let cancelled = false;
   let releaseActivity: (() => void) | null = null;
+  /** When this process began retaining pane state: a pane's quiet time is only known from then (`closeVerdict`). */
+  let retainedSince: number | null = null;
   const release = (): void => {
     releaseActivity?.();
     releaseActivity = null;
+    retainedSince = null;
   };
+  // A hand-off, pass or drain ask marked it: one expression for the seat's due check and the `close` verb.
+  const untouchable = (pane: string): boolean =>
+    eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true;
+
+  /** The seat's checks failed or it could not start: no round will ever run here, so the verbs say `unsupported`. */
+  let seatFailed = false;
+  // The verbs exist before the seat does (its checks are async) and answer `not_custodian` until it names a round.
+  const { despawn } = ctx.backend;
+  const verbs: CustodianVerbs | null =
+    despawn === undefined
+      ? null
+      : createCustodianVerbs({
+          roundPane: () => seat?.roundPane() ?? null,
+          roundPanePids: listRoundPanePids,
+          activity: paneActivity.activity,
+          retainedSince: () => retainedSince,
+          untouchable,
+          tasks: ctx.endedTasks,
+          worktree: createWorktreeRule({ tasks: ctx.endedTasks, repos: ctx.repos, listPanes }),
+          despawn,
+          killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+          settings,
+          seat: {
+            count: (verb, ok) => seat?.count(verb, ok),
+            countWorktree: (kind) => seat?.countWorktree(kind),
+            done: async (summary) => (await seat?.done(summary)) ?? "no_round",
+            isDone: () => seat?.isDone() ?? false,
+          },
+          now: ctx.now,
+          audit,
+          // Custodian 6's seam: where a kept `dirty` or `unpushed` worktree will be flagged to the owner.
+          onKept: (): void => {},
+          warn: (line) => log.warn(line),
+        });
   const begin = async (): Promise<void> => {
     const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
     if (problem !== null) {
       log.warn(`custodian: no rounds on this host — ${problem}`);
+      seatFailed = true;
       // A host that cannot run a round is as off as a seat that is not configured: a round the last process left
       // would otherwise run on with no deadline. Not after a `stop`, whose incoming instance adopts it.
       if (!cancelled) sweepLeftovers();
@@ -341,12 +398,14 @@ const custodianSeat: DaemonCapability = (ctx) => {
     if (cancelled) return;
     const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
     releaseActivity = paneRetention.acquire();
+    retainedSince = ctx.now();
     seat = createCustodianSeat({
       settings,
       now: ctx.now,
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
-      untouchable: (pane) => eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true,
+      untouchable,
+      appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
       draining: () => ctx.endedTasks.draining,
       stopped: ctx.stopped,
       record: ctx.custodianSeat,
@@ -391,6 +450,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   };
   void begin().catch((err: unknown) => {
     log.warn(`custodian: the seat did not start: ${String(err)}`);
+    seatFailed = true;
     release();
     if (!cancelled) sweepLeftovers();
   });
@@ -400,6 +460,14 @@ const custodianSeat: DaemonCapability = (ctx) => {
       seat?.stop();
       release();
     },
+    ...(verbs === null
+      ? {}
+      : {
+          local: {
+            custodian: (raw, peer) =>
+              seatFailed ? Promise.resolve({ ok: false, code: "unsupported" }) : verbs.handle(raw, peer),
+          },
+        }),
   };
 };
 

@@ -3,14 +3,21 @@ import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 /**
- * `send_message` runs inside `seanced mcp`, whose stdout is the JSON-RPC channel, and `seanced inbox` writes the
- * mod's data channel to stdout; a `log.ts` call from either would corrupt it, and message text must never reach a
- * log. So neither entry may load `log.ts`, however indirectly: the walk follows every relative import, type-only
- * ones included, since an allowed module that grows an edge to a logging one must fail here.
+ * `send_message` runs inside `seanced mcp`, whose stdout is the JSON-RPC channel, `seanced inbox` writes the
+ * mod's data channel to stdout, and `seanced custodian` prints the round's replies there; a `log.ts` call from any
+ * would corrupt it, and message text, notes and a round's summary must never reach a log. So no entry may load
+ * `log.ts`, however indirectly: the walk follows every relative import, type-only ones included, since an allowed
+ * module that grows an edge to a logging one must fail here.
  */
 const SRC = resolve(import.meta.dir, "../src");
 
-const ENTRIES = ["send-message.ts", "message-frame.ts", "inbox-cli.ts"] as const;
+const ENTRIES = [
+  "send-message.ts",
+  "message-frame.ts",
+  "inbox-cli.ts",
+  "custodian-cli.ts",
+  "custodian-frame.ts",
+] as const;
 
 const IMPORT = /(?:from|import)\s*\(?\s*"(\.\/[^"]+)"/gu;
 

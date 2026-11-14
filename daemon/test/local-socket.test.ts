@@ -9,6 +9,7 @@ import type { Config } from "../src/config.ts";
 import { createHandler, type HandlerContext } from "../src/handlers.ts";
 import { localRequest, LocalUnavailable, localSocketReachable } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
+import { peerPidSupported } from "../src/peer.ts";
 import { scanRepos } from "../src/scan.ts";
 import { tmux } from "../src/tmux.ts";
 import {
@@ -351,6 +352,63 @@ describe("the local op socket", () => {
       });
       await pollUntil(() => answer.includes("\n"), "the reply");
       expect(JSON.parse(answer)).toEqual({ ok: false, code: "internal" });
+      client.end();
+    } finally {
+      handle.stop();
+    }
+  });
+
+  test("a custodian frame is answered unsupported with no custodian surface, and internal, never the frame, when its handler throws", async () => {
+    const frame = `${JSON.stringify({ v: 1, kind: "custodian", verb: "notes", text: "SECRET-NOTE" })}\n`;
+    expect(JSON.parse(await raw(frame))).toEqual({ ok: false, code: "unsupported" });
+
+    const path = join(base, "custodian-crash.sock");
+    const handle = await startLocalSocket({
+      handle: () => Promise.resolve(null),
+      path,
+      custodian: () => Promise.reject(new Error("boom")),
+    });
+    try {
+      let answer = "";
+      const client = await Bun.connect<undefined>({
+        unix: path,
+        socket: {
+          open: (s): void => void s.write(frame),
+          data: (_s, chunk: Buffer): void => void (answer += chunk.toString()),
+        },
+      });
+      await pollUntil(() => answer.includes("\n"), "the reply");
+      expect(JSON.parse(answer)).toEqual({ ok: false, code: "internal" });
+      client.end();
+    } finally {
+      handle.stop();
+    }
+  });
+
+  test("a custodian frame reaches its handler with the raw frame and the connecting process's pid", async () => {
+    const path = join(base, "custodian-peer.sock");
+    const seen: { raw: unknown; peer: number | null }[] = [];
+    const handle = await startLocalSocket({
+      handle: () => Promise.resolve(null),
+      path,
+      custodian: (frame, peer) => {
+        seen.push({ raw: frame, peer });
+        return Promise.resolve({ ok: true, verb: "done" });
+      },
+    });
+    try {
+      let answer = "";
+      const frame = { v: 1, kind: "custodian", verb: "done", summary: "s" };
+      const client = await Bun.connect<undefined>({
+        unix: path,
+        socket: {
+          open: (s): void => void s.write(`${JSON.stringify(frame)}\n`),
+          data: (_s, chunk: Buffer): void => void (answer += chunk.toString()),
+        },
+      });
+      await pollUntil(() => answer.includes("\n"), "the reply");
+      expect(JSON.parse(answer)).toEqual({ ok: true, verb: "done" });
+      expect(seen).toEqual([{ raw: frame, peer: peerPidSupported() ? process.pid : null }]);
       client.end();
     } finally {
       handle.stop();

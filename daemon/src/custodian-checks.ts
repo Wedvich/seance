@@ -1,4 +1,5 @@
 import type { Check } from "./check.ts";
+import { modMissing } from "./claude-mod.ts";
 import type { Config } from "./config.ts";
 import {
   exclaveRootExists,
@@ -19,6 +20,8 @@ export interface CustodianCheckDeps {
   readonly planted: (dir: string) => Promise<boolean>;
   readonly sandboxProblem: (platform: "darwin" | "linux") => Promise<string | null>;
   readonly weakerNested: () => Promise<boolean>;
+  /** The exclaves whose Claude Code lacks the `session-events` mod: its frames are how the custodian's `close` sees a session. */
+  readonly sessionEventsMissing: () => Promise<readonly string[]>;
 }
 
 const REAL: CustodianCheckDeps = {
@@ -28,13 +31,15 @@ const REAL: CustodianCheckDeps = {
   planted: roundDirPlanted,
   sandboxProblem,
   weakerNested: weakerNestedNeeded,
+  sessionEventsMissing: () => modMissing("session-events"),
 };
 
 /**
  * `seanced doctor`'s custodian section, for a machine whose config carries `custodian` (docs/custodian.md): why a
- * round would not start here. Read-only — it never creates a round dir, which only a round about to run does.
- * While rounds are held (`ROUNDS_LIVE`) the key only moves reap's defaults, so nothing here can fail a machine:
- * one informational line, and none of the probes run. `live` is the test seam, as `CustodianSeatOpts.live`.
+ * round would not start here, or could not close what it finds. Read-only — it never creates a round dir, which only a
+ * round about to run does. While rounds are held (`ROUNDS_LIVE`) the key only moves reap's defaults, so nothing here
+ * can fail a machine: one informational line, and none of the probes run (the session-events warn included: it is for
+ * the day rounds go live). `live` is the test seam, as `CustodianSeatOpts.live`.
  */
 export async function custodianChecks(o: {
   readonly config: Pick<Config, "custodian">;
@@ -44,7 +49,13 @@ export async function custodianChecks(o: {
   readonly deps?: Partial<CustodianCheckDeps>;
 }): Promise<readonly Check[]> {
   if (!seatLive({ live: o.live })) {
-    return [{ level: "ok", message: "rounds are held until custodian 4: the key only sets reap's defaults here" }];
+    return [
+      {
+        level: "ok",
+        message:
+          "rounds are held until the round is contained (docs/custodian.md, item 4b): the key only sets reap's defaults here",
+      },
+    ];
   }
   const deps = { ...REAL, ...o.deps };
   const platform = custodianPlatform(o.platform);
@@ -83,5 +94,12 @@ export async function custodianChecks(o: {
     }
   }
   if (hosts === 0) checks.push({ level: "fail", message: "no exclave can host a round" });
+  // `close` refuses a session with no observed turn end (`unobserved`), and that frame is the mod's.
+  for (const label of await deps.sessionEventsMissing()) {
+    checks.push({
+      level: "warn",
+      message: `${label}: the session-events mod is not installed or enabled — the custodian can never close its sessions (unobserved); run \`seanced mod install\``,
+    });
+  }
   return checks;
 }

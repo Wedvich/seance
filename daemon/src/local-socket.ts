@@ -5,6 +5,7 @@ import type { ErrorResponse, OpName, Plain } from "@seance/shared";
 import { quote } from "@seance/shared";
 import { brokerFail, brokerFrameId, isBrokerFrame, type BrokerReply } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
+import { isCustodianFrameKind, type CustodianReply } from "./custodian-frame.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
 import { isInboxFrameKind, isMessageFrameKind, type MessageReply } from "./message-frame.ts";
@@ -55,6 +56,11 @@ import { isSessionEventFrameKind } from "./session-events.ts";
  * message). `inbox` is the first frame that *reads* something a session did not write, so both are bound
  * by the kernel's peer pid only and refused where the host names no peer, never by a field a sender
  * claims. DESIGN.md's "Session messages" records the widening.
+ *
+ * The sixth is `custodian` (`custodian-verbs.ts`): the custodian round's four verbs (`sessions`, `close`, `notes`,
+ * `done`). It acts, but only for a process of the pane the seat record names as the running round, found by peer pid
+ * alone and refused `not_custodian` otherwise, and its acts are the daemon's checked verbs. DESIGN.md's "The custodian
+ * frame kind" records the widening.
  */
 
 /**
@@ -111,6 +117,11 @@ export interface LocalSocketOpts {
    * connection. Absent, both kinds are answered `unsupported`.
    */
   readonly messages?: Pick<Messages, "listen" | "send">;
+  /**
+   * The custodian round's verbs (`createCustodianVerbs(...).handle`), given the connection's peer pid. Absent, such
+   * frames are answered `unsupported`.
+   */
+  readonly custodian?: (raw: unknown, peer: number | null) => Promise<CustodianReply>;
   readonly path?: string;
 }
 
@@ -239,6 +250,24 @@ async function dispatchMessage(
   sendLine(sock, conn, JSON.stringify(reply));
 }
 
+/** Always answers, so the round's CLI can wait for the reply — and stay alive while its pid is walked. */
+async function dispatchCustodian(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  custodian: LocalSocketOpts["custodian"],
+): Promise<void> {
+  let reply: CustodianReply;
+  try {
+    reply = custodian === undefined ? { ok: false, code: "unsupported" } : await custodian(raw, conn.peer);
+  } catch (err) {
+    // Never the frame: it carries notes or a summary.
+    log.error(`local socket: custodian verb crashed: ${String(err)}`);
+    reply = { ok: false, code: "internal" };
+  }
+  sendLine(sock, conn, JSON.stringify(reply));
+}
+
 /** The connection stays open after this returns: the daemon writes to it as messages arrive. */
 async function dispatchInbox(
   sock: Socket<undefined>,
@@ -278,7 +307,7 @@ async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages">,
+  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages" | "custodian">,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -310,6 +339,10 @@ async function dispatch(
   }
   if (isInboxFrameKind(raw)) {
     await dispatchInbox(sock, conn, raw, opts.messages);
+    return;
+  }
+  if (isCustodianFrameKind(raw)) {
+    await dispatchCustodian(sock, conn, raw, opts.custodian);
     return;
   }
   if (!isPlain(raw)) {

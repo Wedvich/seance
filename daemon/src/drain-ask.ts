@@ -41,27 +41,150 @@ const SCREEN_CHECK_TRIES = 7;
 
 const NORMALIZE = /\s+/gu;
 const RULE = /^─{8,}$/u;
+/**
+ * What Claude Code puts in the box for a paste or an image, the owner's own content however it is styled: not measured
+ * here, so a match counts as typed whatever its colour (fails closed on wording; a release that rewords it only
+ * loses this guard, and the style rule still applies).
+ */
+const PLACEHOLDER = /\[(?:Pasted text|Image|\.\.\.Truncated text)[^\]]*#\d+/iu;
 
 /**
- * Whether the screen's input box (the text between the last two full-width `─` rules, as Claude Code draws
- * it) holds exactly `prompt`: a `❯`, then the text wrapped over any number of lines. A permission dialog, a
- * question or the Rewind menu replaces the box, and the prompt only in the transcript above an empty box is
- * not in it. Read in memory, never returned, logged or audited.
+ * The text in the screen's input box (between the last two full-width `─` rules, as Claude Code draws it), after the
+ * `❯`, wrapped lines joined and whitespace collapsed; `""` for an empty box. Null when there is no box: a permission
+ * dialog, a question or the Rewind menu replaces it. Read in memory, never returned to a wire, logged or audited.
  */
-export function inputBoxShows(screen: string, prompt: string): boolean {
+export function inputBoxText(screen: string): string | null {
   const lines = screen.split("\n").map((line) => line.trimEnd());
   const rules: number[] = [];
   for (const [index, line] of lines.entries()) if (RULE.test(line.trim())) rules.push(index);
   const open = rules.at(-2);
   const close = rules.at(-1);
-  if (open === undefined || close === undefined) return false;
+  if (open === undefined || close === undefined) return null;
   const box = lines
     .slice(open + 1, close)
     .join(" ")
     .replace(NORMALIZE, " ")
     .trim();
-  if (!box.startsWith("❯")) return false;
-  return box.slice("❯".length).replace(NORMALIZE, " ").trim() === prompt.replace(NORMALIZE, " ").trim();
+  if (!box.startsWith("❯")) return null;
+  return box.slice("❯".length).replace(NORMALIZE, " ").trim();
+}
+
+interface Cell {
+  readonly ch: string;
+  /** Faint (SGR 2) or a grey foreground: how Claude Code draws a prompt suggestion. */
+  readonly ghost: boolean;
+  readonly inverse: boolean;
+}
+
+/** `38;5;<n>` greys: bright black, and the 256-colour ramp's mid greys. */
+const greyIndex = (n: number): boolean => n === 8 || (n >= 240 && n <= 250);
+/** `38;2;r;g;b` greys: equal channels in a mid band, which holds Claude Code's subtle and inactive greys. */
+const greyRgb = (r: number, g: number, b: number): boolean => r === g && g === b && r >= 80 && r <= 170;
+
+/**
+ * `capture-pane -e` text as rows of cells carrying the SGR attributes that matter here. Only `m` sequences change the
+ * state; any other escape is skipped. An attribute this does not recognise leaves the cell unstyled, which reads as
+ * typed text, so a surprise fails closed.
+ */
+function styledRows(styled: string): Cell[][] {
+  const rows: Cell[][] = [[]];
+  let faint = false;
+  let inverse = false;
+  let grey = false;
+  const sgr = (params: string): void => {
+    const parts = params === "" ? ["0"] : params.split(";");
+    for (let at = 0; at < parts.length; at++) {
+      const code = parts[at] ?? "";
+      if (code.startsWith("38:")) {
+        grey = false;
+      } else if (code === "38" || code === "48" || code === "58") {
+        // 58 (underline colour) is skipped like 48 so its parameters are not read as standalone codes: `58;5;2` would
+        // otherwise switch faint on, and every typed cell after it would pass as a suggestion.
+        const kind = parts[at + 1];
+        if (code === "38") {
+          const [a = Number.NaN, b = Number.NaN, c = Number.NaN] = parts.slice(at + 2, at + 5).map(Number);
+          grey = kind === "5" ? greyIndex(a) : kind === "2" && greyRgb(a, b, c);
+        }
+        at += kind === "5" ? 2 : kind === "2" ? 4 : 1;
+      } else {
+        const n = Number(code);
+        if (n === 0) {
+          faint = false;
+          inverse = false;
+          grey = false;
+        } else if (n === 2) faint = true;
+        else if (n === 22) faint = false;
+        else if (n === 7) inverse = true;
+        else if (n === 27) inverse = false;
+        else if (n === 39 || (n >= 30 && n <= 37) || (n >= 91 && n <= 97)) grey = false;
+        else if (n === 90) grey = true;
+      }
+    }
+  };
+  const chars = [...styled];
+  for (let at = 0; at < chars.length; at++) {
+    const ch = chars[at] ?? "";
+    if (ch === "\n") rows.push([]);
+    else if (ch === "\r") continue;
+    else if (ch !== "\u001B") rows.at(-1)?.push({ ch, ghost: faint || grey, inverse });
+    else if (chars[at + 1] === "[") {
+      let end = at + 2;
+      while (end < chars.length && !/[\u0040-\u007E]/u.test(chars[end] ?? "")) end++;
+      if (chars[end] === "m") sgr(chars.slice(at + 2, end).join(""));
+      at = end;
+    } else at += chars[at + 1] === "(" || chars[at + 1] === ")" ? 2 : 1;
+  }
+  return rows;
+}
+
+/**
+ * Like `inputBoxText`, but over a `capture-pane -e` screen and without the cells Claude Code draws as a prompt
+ * suggestion: faint or grey text, its first cell often the cursor (inverse). What is left is what was typed, `""` for
+ * an empty box or one whose every non-blank cell is faint or grey, and null when there is no box. Fails closed: any
+ * cell not recognisably faint or grey counts as typed; the inverse first cell is a cursor only beside more suggestion
+ * text, so a one-character draft with the cursor moved onto it is still a draft; and a paste or image placeholder is a
+ * draft however it is drawn. Read in memory, never returned to a wire, logged or audited.
+ */
+export function inputBoxDraft(styled: string): string | null {
+  const rows = styledRows(styled);
+  const text = rows.map((row) =>
+    row
+      .map((cell) => cell.ch)
+      .join("")
+      .trimEnd(),
+  );
+  const rules: number[] = [];
+  for (const [index, line] of text.entries()) if (RULE.test(line.trim())) rules.push(index);
+  const open = rules.at(-2);
+  const close = rules.at(-1);
+  if (open === undefined || close === undefined) return null;
+  const cells = rows.slice(open + 1, close).flatMap((row) => row.concat({ ch: " ", ghost: false, inverse: false }));
+  const first = cells.findIndex((cell) => cell.ch.trim() !== "");
+  if (first === -1 || cells[first]?.ch !== "❯") return null;
+  const rest = cells.slice(first + 1);
+  const solid = rest.filter((cell) => cell.ch.trim() !== "");
+  const cursor = solid[0]?.inverse === true && solid.slice(1).some((cell) => cell.ghost) ? solid[0] : undefined;
+  const all = rest
+    .map((cell) => cell.ch)
+    .join("")
+    .replace(NORMALIZE, " ")
+    .trim();
+  if (PLACEHOLDER.test(all)) return all;
+  return rest
+    .filter((cell) => !cell.ghost && cell !== cursor)
+    .map((cell) => cell.ch)
+    .join("")
+    .replace(NORMALIZE, " ")
+    .trim();
+}
+
+/**
+ * Whether the screen's input box holds exactly `prompt`: a `❯`, then the text wrapped over any number of lines. A
+ * permission dialog, a question or the Rewind menu replaces the box, and the prompt only in the transcript above an
+ * empty box is not in it.
+ */
+export function inputBoxShows(screen: string, prompt: string): boolean {
+  return inputBoxText(screen) === prompt.replace(NORMALIZE, " ").trim();
 }
 
 /** Production `keys`: one `send-keys` with constant arguments; true when tmux accepted it. */

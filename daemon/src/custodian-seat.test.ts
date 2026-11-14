@@ -14,6 +14,7 @@ import {
   type SeatDeps,
   type SeatRecord,
 } from "./custodian-seat.ts";
+import type { RoundEntry } from "./custodian-rounds.ts";
 import type { Exclave, ExclaveScan } from "./exclaves.ts";
 import { newestReadings } from "./fleet-quota.ts";
 import type { TrackedActivity } from "./pane-activity.ts";
@@ -38,7 +39,7 @@ const baseDue = {
   lastEndedAt: undefined,
   running: false,
   draining: false,
-  panes: [pane({ state: "idle", stateSince: NOW - EVERY })],
+  panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: true })],
   untouchable: (): boolean => false,
 };
 
@@ -47,8 +48,14 @@ describe("roundDue", () => {
     expect(roundDue(baseDue)).toBe(true);
   });
 
-  test("a screen unchanged long enough does, whatever the state", () => {
-    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })] })).toBe(true);
+  test("a pane idle without a turn's end is not due: close answers it unobserved", () => {
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: false })] })).toBe(
+      false,
+    );
+  });
+
+  test("a busy pane with a long-still screen is not due until a verb can act on it", () => {
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })] })).toBe(false);
   });
 
   test("each other condition alone makes it not due", () => {
@@ -57,8 +64,15 @@ describe("roundDue", () => {
     expect(roundDue({ ...baseDue, lastEndedAt: NOW - EVERY + 1 })).toBe(false);
     expect(roundDue({ ...baseDue, lastEndedAt: NOW - EVERY })).toBe(true);
     expect(roundDue({ ...baseDue, panes: [] })).toBe(false);
-    expect(roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY + 1 })] })).toBe(false);
-    expect(roundDue({ ...baseDue, panes: [pane({ state: null, stateSince: null, screenSince: null })] })).toBe(false);
+    expect(
+      roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY + 1, turnEnded: true })] }),
+    ).toBe(false);
+  });
+
+  test("a pane with no observed state is not due, however long its screen has stood still", () => {
+    expect(roundDue({ ...baseDue, panes: [pane({ state: null, stateSince: null, screenSince: NOW - EVERY })] })).toBe(
+      false,
+    );
   });
 
   test("a long-still needs-input pane alone is not due: no verb may touch it", () => {
@@ -84,7 +98,7 @@ describe("roundDue", () => {
         ...baseDue,
         panes: [
           pane({ pane: "%1", state: "needs-input", screenSince: NOW - EVERY }),
-          pane({ pane: "%2", state: "idle", stateSince: NOW - EVERY }),
+          pane({ pane: "%2", state: "idle", stateSince: NOW - EVERY, turnEnded: true }),
         ],
       }),
     ).toBe(true);
@@ -333,8 +347,16 @@ describe("createPick", () => {
   });
 });
 
+/** The verbs' audit lines, which the seat never writes. */
+const UNUSED_AUDIT = {
+  close: (): Promise<void> => Promise.resolve(),
+  removedWorktree: (): Promise<void> => Promise.resolve(),
+  keptWorktree: (): Promise<void> => Promise.resolve(),
+};
+
 interface Rig {
   readonly seat: ReturnType<typeof createCustodianSeat>;
+  readonly rounds: RoundEntry[];
   readonly clock: { now: number };
   readonly state: { record: SeatRecord; stopped: boolean; draining: boolean };
   readonly log: string[];
@@ -358,13 +380,21 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
   const lingering = { rounds: [] as { pane: string; dead: boolean }[] };
   const fail = { launch: null as Error | null, pick: null as string | null };
   const gate = { launch: null as Promise<void> | null };
+  const rounds: RoundEntry[] = [];
   let next = 1;
   const deps: SeatDeps = {
     settings: CUSTODIAN_DEFAULTS,
     now: () => clock.now,
     checkIntervalMs: 3_600_000,
-    activity: () => [pane({ state: "idle", stateSince: clock.now - EVERY })],
+    activity: () => [pane({ state: "idle", stateSince: clock.now - EVERY, turnEnded: true })],
     untouchable: () => false,
+    // The round log's own rule (`upsertRound`, tested in custodian-rounds.test.ts): by start, never over a healthy line.
+    appendRound: (entry) => {
+      const at = rounds.findIndex((round) => round.start === entry.start);
+      if (at < 0) rounds.push(entry);
+      else if (rounds[at]?.outcome !== "healthy") rounds[at] = entry;
+      return Promise.resolve();
+    },
     draining: () => state.draining,
     stopped: () => state.stopped,
     record: () => state.record,
@@ -402,15 +432,28 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
         log.push(`kill ${p} ${reason} ${outcome}`);
         return Promise.resolve();
       },
-      end: (p, reason) => {
+      end: (p, _outcome, reason) => {
         log.push(`end ${p ?? "-"} ${reason}`);
         return Promise.resolve();
       },
+      ...UNUSED_AUDIT,
     },
     warn: (line) => warnings.push(line),
     ...over,
   };
-  return { seat: createCustodianSeat(deps), clock, state, log, warnings, live, launches, lingering, fail, gate };
+  return {
+    seat: createCustodianSeat(deps),
+    rounds,
+    clock,
+    state,
+    log,
+    warnings,
+    live,
+    launches,
+    lingering,
+    fail,
+    gate,
+  };
 }
 
 const TIMEOUT = CUSTODIAN_DEFAULTS.roundTimeoutMinutes * MIN;
@@ -578,6 +621,7 @@ describe("the seat's lifecycle", () => {
           return Promise.resolve();
         },
         end: () => Promise.resolve(),
+        ...UNUSED_AUDIT,
       },
     });
     await r.seat.start();
@@ -617,10 +661,11 @@ describe("the seat's lifecycle", () => {
           r.log.push(`kill ${p} ${reason} ${outcome}`);
           return Promise.resolve();
         },
-        end: (p, reason) => {
+        end: (p, _outcome, reason) => {
           r.log.push(`end ${p ?? "-"} ${reason}`);
           return Promise.resolve();
         },
+        ...UNUSED_AUDIT,
       },
       close: (id) => {
         closes += 1;
@@ -693,6 +738,7 @@ describe("the seat's lifecycle", () => {
           return Promise.resolve();
         },
         end: () => Promise.resolve(),
+        ...UNUSED_AUDIT,
       },
     });
     await r.seat.start();
@@ -730,5 +776,177 @@ describe("the seat's lifecycle", () => {
     await ticked.seat.tick();
     expect(ticked.log.slice(0, 3)).toEqual(["kill %1 exited exited", `rm ${TMP}`, "end %1 exited"]);
     ticked.seat.stop();
+  });
+});
+
+describe("the round's verbs reach the seat", () => {
+  const started = async (): Promise<Rig> => {
+    const r = rig();
+    await r.seat.start();
+    await r.seat.tick();
+    r.log.length = 0;
+    return r;
+  };
+
+  test("roundPane is the running round's pane, and null before one, and after a stop", async () => {
+    const r = rig();
+    expect(r.seat.roundPane()).toBeNull();
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.seat.roundPane()).toBe("%1");
+    r.state.stopped = true;
+    expect(r.seat.roundPane()).toBeNull();
+    r.seat.stop();
+  });
+
+  test("done logs a healthy entry with the summary and the verbs' tally, marks the record, and the next tick closes the pane", async () => {
+    const r = await started();
+    r.seat.count("sessions", true);
+    r.seat.count("close", true);
+    r.seat.count("close", false);
+    r.seat.countWorktree("removed");
+    r.seat.countWorktree("kept");
+    expect(await r.seat.done("closed one, kept one")).toBe("ok");
+    expect(r.rounds).toHaveLength(1);
+    expect(r.rounds[0]).toMatchObject({
+      start: NOW,
+      exclave: "default",
+      outcome: "healthy",
+      reason: "done",
+      summary: "closed one, kept one",
+      counts: {
+        sessions: { ok: 1, refused: 0 },
+        close: { ok: 1, refused: 1 },
+        notes: { ok: 0, refused: 0 },
+        done: { ok: 1, refused: 0 },
+        worktrees: { removed: 1, kept: 1 },
+      },
+    });
+    expect(r.state.record.round?.done).toBe(true);
+    expect(r.seat.isDone()).toBe(true);
+    // The pane is closed by the tick, never inside the verb whose caller is waiting on the reply.
+    expect(r.live.has("%1")).toBe(true);
+    r.clock.now += 1_000;
+    await r.seat.tick();
+    expect(r.live.size).toBe(0);
+    expect(r.log).toContain("kill %1 done exited");
+    expect(r.log).toContain("end %1 done");
+    expect(r.rounds).toHaveLength(1);
+    expect(r.state.record).toEqual({ lastEndedAt: NOW + 1_000 });
+    r.seat.stop();
+  });
+
+  test("a done the seat cannot mark writes no healthy line, and one whose log write fails still answers ok", async () => {
+    // A stop that lands after `done` read the round, before it could mark it.
+    let reads = 0;
+    let armed = false;
+    const lost = rig({ stopped: () => armed && ++reads > 1 });
+    await lost.seat.start();
+    await lost.seat.tick();
+    armed = true;
+    expect(await lost.seat.done("x")).toBe("no_round");
+    expect(lost.rounds).toEqual([]);
+    lost.seat.stop();
+
+    const broken = rig({ appendRound: () => Promise.reject(new Error("disk full")) });
+    await broken.seat.start();
+    await broken.seat.tick();
+    expect(await broken.seat.done("x")).toBe("ok");
+    expect(broken.state.record.round?.done).toBe(true);
+    expect(broken.warnings.join("\n")).toContain("writing the round log failed");
+    broken.seat.stop();
+  });
+
+  test("a second done answers ok and writes nothing", async () => {
+    const r = await started();
+    expect(await r.seat.done("first")).toBe("ok");
+    expect(await r.seat.done("second")).toBe("ok");
+    expect(r.rounds.map((entry) => entry.summary)).toEqual(["first"]);
+    r.seat.stop();
+  });
+
+  test("done at or past the deadline is too late and writes nothing", async () => {
+    const r = await started();
+    r.clock.now = NOW + TIMEOUT;
+    expect(await r.seat.done("late")).toBe("too_late");
+    expect(r.rounds).toEqual([]);
+    expect(r.state.record.round?.done).toBeUndefined();
+    r.seat.stop();
+  });
+
+  test("done with no round, or after a stop, is no_round", async () => {
+    const none = rig();
+    await none.seat.start();
+    expect(await none.seat.done("x")).toBe("no_round");
+    none.seat.stop();
+    const stopped = await started();
+    stopped.state.stopped = true;
+    expect(await stopped.seat.done("x")).toBe("no_round");
+    stopped.seat.stop();
+  });
+
+  test("a deadline appends a failed entry with the tally and no summary", async () => {
+    const r = await started();
+    r.seat.count("sessions", true);
+    r.clock.now = NOW + TIMEOUT;
+    await r.seat.tick();
+    expect(r.rounds).toHaveLength(1);
+    expect(r.rounds[0]).toMatchObject({ outcome: "failed", reason: "deadline", counts: { sessions: { ok: 1 } } });
+    expect(r.rounds[0]?.summary).toBeUndefined();
+    r.seat.stop();
+  });
+
+  test("a failing round log write is a warning, never a stuck round", async () => {
+    const r = rig({ appendRound: () => Promise.reject(new Error("disk full")) });
+    await r.seat.start();
+    await r.seat.tick();
+    r.clock.now = NOW + TIMEOUT;
+    await r.seat.tick();
+    expect(r.warnings.join("\n")).toContain("writing the round log failed");
+    expect(r.state.record).toEqual({ lastEndedAt: NOW + TIMEOUT });
+    r.seat.stop();
+  });
+
+  test("a done whose log write failed is still recorded, without its summary, when the round ends", async () => {
+    let failing = true;
+    const r = rig({
+      appendRound: (entry) => {
+        if (failing) return Promise.reject(new Error("disk full"));
+        r.rounds.push(entry);
+        return Promise.resolve();
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(await r.seat.done("lost with the failed write")).toBe("ok");
+    expect(r.rounds).toEqual([]);
+    failing = false;
+    r.clock.now += 1_000;
+    await r.seat.tick();
+    expect(r.rounds).toHaveLength(1);
+    expect(r.rounds[0]).toMatchObject({ outcome: "healthy", reason: "done", counts: { done: { ok: 1 } } });
+    expect(r.rounds[0]?.summary).toBeUndefined();
+    r.seat.stop();
+  });
+
+  test("a restart after done: a live pane is closed by the next tick, a gone one is finished at once, and each records the round", async () => {
+    const record = { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default", done: true } } as const;
+    const live = rig({}, record);
+    live.live.add("%1");
+    await live.seat.start();
+    expect(live.live.size).toBe(1);
+    await live.seat.tick();
+    expect(live.log).toContain("kill %1 done exited");
+    expect(live.log).toContain("end %1 done");
+    expect(live.rounds).toMatchObject([{ outcome: "healthy", reason: "done" }]);
+    expect(live.live.size).toBe(0);
+    live.seat.stop();
+
+    const gone = rig({}, record);
+    await gone.seat.start();
+    expect(gone.log).toContain("end %1 done");
+    expect(gone.rounds).toMatchObject([{ outcome: "healthy", reason: "done" }]);
+    expect(gone.state.record).toEqual({ lastEndedAt: NOW });
+    gone.seat.stop();
   });
 });

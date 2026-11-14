@@ -1061,8 +1061,11 @@ nothing checked it. The last is the gap they leave.
   directory and a short host list, its tools are `Bash` and `Read`, and `--permission-mode dontAsk` refuses what
   no rule allows instead of asking. The deny list (`custodian-fence.ts`) is generated from constants and the
   one `COMMANDS` table, so a new `seanced` command is denied to it by default, and it is **for a cheap model's
-  mistakes, never a boundary**: `bash -c` and interpreters get around it, and the daemon's verbs, which check
-  every act (custodian 4), are what hold under injection. The round's seed, notes and agent text never reach a
+  mistakes, never a boundary**: `bash -c` and interpreters get around it. The daemon's verbs check every act that
+  goes through them (custodian 4, built: "The custodian frame kind"), and that is all they bound: **today a round's
+  sandbox can still reach the tmux socket and the daemon's plain local ops, and read on-disk secrets with
+  github.com reachable** (2026-11-14, code review of custodian 4), so rounds stay held (`ROUNDS_LIVE`) until
+  docs/custodian.md's build item 4b contains the round. The round's seed, notes and agent text never reach a
   log or an audit line; the seat's lines name an exclave id, a pane id, a reason and an outcome.
 - **A round is never a session** (2026-11-13). It carries the tmux pane option `@seance-custodian`, and every
   pane reader skips it through its format-field parse (`listClaudeSessions`, `listPanes`, `parsePanePids`,
@@ -1078,6 +1081,17 @@ nothing checked it. The last is the gap they leave.
   before the seat closes a pane or removes a path it names, and `removeRoundTmp` re-checks the pattern and
   refuses a symlink. An unreadable record reads as none, and a round pane it no longer names is closed as a
   stray.
+- **The custodian's verbs are a local-socket frame bound to the round and to nothing a frame says** (2026-11-14,
+  Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The sixth frame kind
+  widens the socket, so any new verb or act for it is a threat-model change like the broker's. Its sender is a
+  process of the one pane the seat record names as the running round, by the kernel-reported peer pid; any other
+  sender, a host that names no peer and a pid not given are `not_custodian`. Its acts are four: list sessions (facts
+  only, no screen text), close a pane the daemon's own facts show at rest (re-read at the act, never `foreign`,
+  marked, `needs-input`, `busy` or holding a draft), store pruned notes and report done. A close removes a worktree
+  only under the nothing-lost rule, through `git worktree remove` without `--force`, under the clone's
+  `.claude/worktrees/`, never touched since the turn ended (where a live session's turn end was observed: a dead or
+  exit-prompt pane has none), never locked by anyone but a dead Claude, never with a pane in it. A frame carries no path, branch, task or session id. Nothing read from a pane, the notes or the
+  summary is logged or audited; the summary goes only into `rounds.jsonl`, and the notes into their 0600 file.
 - **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
   `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,
   "Passing to a successor"):
@@ -8610,13 +8624,13 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   missed often enough that worktrees piled up, so "Nothing lost" adds one, as a further way to pass whose
   failure only keeps.
 
-## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3)
+## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), held until docs/custodian.md item 4b
 
-The first part of the custodian (docs/custodian.md) that runs: a daemon with a `custodian` key in its
-`config.json` holds one seat, decides once a minute with no model call that a round is due, picks the exclave
-to run it in, starts a fresh Claude session behind a generated fence, closes it at its deadline, and adopts or
-closes it across a restart. The verbs a round acts through (`sessions`, `close`, `done`, `notes`) are the next
-PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions are cited as C1–C49 there.
+A daemon with a `custodian` key in its `config.json` holds one seat, decides once a minute with no model call
+that a round is due, picks the exclave to run it in, starts a fresh Claude session behind a generated fence,
+closes it at its deadline, and adopts or closes it across a restart. The verbs a round acts through
+(`sessions`, `close`, `notes`, `done`) are "The custodian frame kind", below; `docs/custodian.md` keeps the rest
+of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are cited as C1–C49 there.
 
 - **A daemon capability, not a role (C1, C2).** `custodianSeat` is the last entry of `DAEMON_CAPABILITIES`
   (`run-capabilities.ts`), so it stops first. The relay learns nothing: no nomination, term or secret.
@@ -8627,26 +8641,35 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   that is off does. One predicate, `seatEnabled` (`custodian-seat.ts`), says whether a seat exists, and both the
   capability bit (`buildInfo`) and the capability call it, so the two cannot disagree. It is true when
   `config.custodian` is set (the key lives only in the machine's own file, never in a frame, the PWA or another
-  machine), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
-  start a round in a developer's tmux), rounds are live, and the platform is macOS or Linux. WSL reports `linux`,
+  machine), rounds are live (`ROUNDS_LIVE`, below), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
+  start a round in a developer's tmux), and the platform is macOS or Linux. WSL reports `linux`,
   gets the Linux fence and is untested.
-- **Rounds are held until custodian 4: `ROUNDS_LIVE = false` (owner decision, 2026-11-13).** No verb exists
-  yet, so a round could only look at the session list and then idle to its deadline, re-running every ~25
-  minutes on any machine whose `custodian` key was set for reap's defaults (C35). In production the seat is
-  therefore off: no capability bit, no seat, no sampler, no retention (the sampler and C15's retention, once always
-  on, now run only with a seat, so a held daemon keeps no pane facts), `doctor` quiet, and the key
-  moves reap's defaults only (`CUSTODIAN_REAP_DEFAULTS`, unchanged). Custodian 4 flips the constant with `done`
-  and `close`. `CustodianSeatOpts.live` is the test seam that turns it on. The cleanup path below still runs
-  whenever the seat is not live, so a rollback from custodian 4 closes the round it left.
+- **Rounds are held: `ROUNDS_LIVE = false` (owner decisions, 2026-11-13 and 2026-11-14).** First held because no
+  verb existed; custodian 4 built the verbs, and the code review then showed they bound only what goes through
+  them: a live round's sandbox can still reach the tmux socket (it needs it for `capture-pane`) and the daemon's
+  plain local ops, and its reads are unrestricted with github.com reachable. An injected round could run code
+  outside the sandbox (`bash -c "tmux new-window '…'"`, `tmux run-shell`), `send-keys` into any pane (approving a
+  restricted session's permission prompt), send a raw `Plain` `despawn` with `force: true` that skips every
+  `close` check, and read the identity seed, `~/.ssh` and the `gh` credential and send them to GitHub. **The owner
+  decided on 2026-11-14 to hold rounds and contain the round next** (docs/custodian.md, build item 4b: a socket only
+  the round can reach, serving the verbs alone, with the daemon's main socket out of its sight; the tmux socket and
+  every other socket that acts as the user masked or accounted for; a `capture` verb; reads confined for the `Read`
+  tool as well as Bash), rejecting going live first. In production the seat is therefore off: no capability bit, no seat, no
+  sampler, no retention (they run only with a seat, so a held daemon keeps no pane facts), `doctor` quiet (one
+  `ok` line, none of its probes, the `session-events` warn included), the `custodian` frame answered
+  `unsupported`, and the key moves reap's defaults only (`CUSTODIAN_REAP_DEFAULTS`, unchanged). The verbs, the
+  notes, the round log, the round's own `seanced` and the agent's checklist are built and tested behind the seat.
+  `CustodianSeatOpts.live` is the test seam that turns it on. The cleanup path below still runs whenever the seat
+  is not live, so a round left by a daemon that had a seat is closed.
 - **The config (C2).** `model` (default `haiku`, a non-empty string of at most `TASK_REQUEST_LIMITS.model`
   characters), `effort` (default `low`, one of `EFFORTS`: `low`, `medium`, `high`, `xhigh`, `max`, now in
   `shared/src/types.ts` with `isEffort`, so the PWA, Raycast and the daemon validate against one list; Claude
   Code falls back to `medium` with user settings off, so a round always passes one), `everyMinutes` (15),
   `closeAfterMinutes` (15), `roundTimeoutMinutes` (10), `maxNudges` (3), `interruptAfterMinutes` (30), each a
   whole number of 1–1440 (`maxNudges`: 0–20, `CUSTODIAN_LIMITS`). Anything else is refused at load, naming the allowed keys (`parseCustodian`,
-  `daemon/src/config.ts`). The close, nudge and interrupt fields are read by the verbs of custodian 4 and later.
+  `daemon/src/config.ts`). `closeAfterMinutes` is read by `close` (custodian 4); `maxNudges` and `interruptAfterMinutes` by the nudge and interrupt verbs, which are not built.
 - **When a round is due (C14, `roundDue`).** Once a minute (`CHECK_INTERVAL_MS`), over the per-pane facts
-  `pane-activity.ts` keeps: some `ours` pane has stood `idle`, or unchanged on screen, for `everyMinutes`; the
+  `pane-activity.ts` keeps: some `ours` pane has stood `idle` since its turn ended for `everyMinutes`; the
   last round ended at least that long ago; none is running; the daemon is not restarting (`EndedTasks.draining`).
   **Narrowed from the spec to the panes C7 lets the custodian act on:** a pane whose last state is `needs-input`,
   or that carries a hand-off or pass mark or has a close under way (`SessionEvents.marked`) or has a live entry
@@ -8654,7 +8677,14 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   is what the ask _reads_, and does not say an entry is live; once the prompt is typed, the pane skipped or dropped
   or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
   as the machine stays closed), never counts, since no verb may
-  touch it and it would otherwise keep a round due for ever. Pause (C45) is custodian 5. A round is not held
+  touch it and it would otherwise keep a round due for ever. **So does every pane no built verb could act on**
+  (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
+  gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (the mod's `session.start`,
+  raised on a reload, an install or a hooks-worker respawn, leaves a finished session so), and one `busy` or still
+  on screen, which only the `interrupt` verb (custodian 8) can act on. `close` answers the first two `unobserved`
+  (C24) and the third `busy`, and a round they kept due would run every `everyMinutes` to do nothing. So the due
+  check is the idle-since-turn-end term alone, and custodian 8 adds the still-screen term beside it
+  (`actionable`, `custodian-seat.ts`). Pause (C45) is custodian 5. A round is not held
   back on a closed machine (`cl`): closing a machine routes work away and asks its sessions to pass, and the
   sessions it still holds are the ones a round tidies; only a restart drain stops a launch, because the daemon
   is about to go. A broken launch counts as a round that ended, so it retries after `everyMinutes`, never every
@@ -8785,9 +8815,13 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
     `python3 -c` and other interpreters, and `xargs -n1 rm` (`xargs` with a flag is not unwrapped). The sandbox
     still confines their file writes to the scratch dir, but not `kill`, `tmux send-keys`, a `gh` write or a
     `seanced` command, which act through a signal, a socket or the network. **The fence is for a cheap model's
-    mistakes, never a boundary.** What holds under injection is C19: every change to a session or a worktree is a
-    verb the daemon checks (custodian 4). On macOS `launchctl` talks to launchd over Mach, which the profile may
-    allow (not tested).
+    mistakes, never a boundary.** The intended bound under injection is C19: every change to a session or a worktree
+    is a verb the daemon checks ("The custodian frame kind"), and it holds only once the round cannot reach the tmux
+    socket or the daemon's plain ops (docs/custodian.md item 4b; rounds are held until then). 4b also has to account for
+    the sockets and signals this paragraph and "Platform keys" below list as reachable: the user systemd bus
+    (`systemd-run --user` runs outside the sandbox and the deny list does not catch it), Docker's socket, an
+    ssh-agent, and `kill` of any same-uid process, the tmux server among them. On macOS `launchctl` talks to launchd
+    over Mach, which the profile may allow (not tested; 4b's spike decides).
   - **Platform keys.** macOS runs under `caffeinate -is` (the machine must not sleep mid-round) and lists the
     tmux socket's directory (`#{socket_path}`) and `runDir()` in `network.allowUnixSockets`; without it
     `tmux capture-pane` and the daemon's local socket fail with `Operation not permitted` (a directory works as an
@@ -8824,14 +8858,14 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   closes it: a graceful `/exit` for a round whose pane registered (titled), and a straight kill for one that never
   did (stuck on a dialog), audited `outcome=exited|killed`. A round whose pane is gone ends as `exited`
   with no kill line, and one whose pane is dead (the shell exited, the window stayed) is closed with a
-  `kill reason=exited` line first; every end is `failed` until custodian 4 adds `done` (`healthy`). The tmp dir is removed at
-  every end.
+  `kill reason=exited` line first. An end is `failed` unless the round called `done` first (`healthy`, below). The tmp dir
+  is removed at every end.
 - **The seat record and adoption (C4).** `state.json` holds `custodian: { lastEndedAt?, round?: { pane, startedAt,
-  tmpDir, exclave } }`, written **ahead of the launch** (the tmp dir exists before the window does, so
+  tmpDir, exclave, done? } }`, written **ahead of the launch** (the tmp dir exists before the window does, so
   `pane` is null until it exists), and re-read only through `custodianSeatOf`, which validates each field before
   the daemon removes a path or closes a pane it names: `pane` matches `PANE_ID` or is null, `tmpDir` matches
   `ROUND_TMP`, numbers are finite and non-negative, `exclave` is `default` or an exclave name; anything unreadable
-  reads as none, and the stray sweep below still closes an orphan. `parseState` keeps unknown keys, so an older
+  reads as none (`done` is kept only as the boolean `true`), and the stray sweep below still closes an orphan. `parseState` keeps unknown keys, so an older
   daemon's rewrite keeps the field. On start (a process restart or a config reload) the seat **adopts** the
   recorded round when its pane is still there, with its original deadline, and closes any other round pane as
   `stray` (`reason=stray`; the recorded round's own pane, found dead, is `reason=exited` and the round ends `exited`);
@@ -8844,26 +8878,31 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   line or the record's write) closes that pane and counts the round as ended, `kill reason=stray`: a round no
   record names has no deadline and no reader can reach it (C10); if that close throws too, the pane is put on
   the record for its deadline. A pick that throws backs off like one that found nothing. Stopping a seat never closes its round, so a
-  reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key,
-  an unsupported platform, or rounds not live) closes whatever round is left (`reason=off`), removes its tmp
-  dir, audits `end reason=lost` and saves `{ lastEndedAt }`.
+  reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key, an unsupported platform, a host whose checks fail, or rounds held, `ROUNDS_LIVE`) closes whatever round is left (`reason=off`), removes its tmp
+  dir, audits `end reason=lost` and saves `{ lastEndedAt }`; the round log (below) gets a `failed`/`lost` entry
+  unless the round had already called `done`, whose healthy entry stands and whose end is audited `healthy`; a `done` whose log line was never written (the append failed, or the daemon died between the record and the log) gets a healthy entry without its summary from the end or the sweep, since the upsert never replaces a healthy line.
 - **Audit (C48, C49).** `custodianAudit` (`audit.ts`), origin `custodian`, through the daemon's one sink: `audit
   custodian origin=custodian op=start exclave=<quoted id> pane=<id|-> outcome=started|launch_failed`, `op=kill
-  pane=<id> reason=deadline|exited|stray|off outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=failed
-  reason=deadline|exited|lost`. A round has no task id, so none is named; **nothing read from a pane, the seed,
-  the notes or the agent's text reaches a line**, and the seat's own warnings say a reason from a fixed set
-  and exclave ids.
-- **`seanced custodian` is a stub** (`custodian-cli.ts`): it writes "not built yet — the verbs land with custodian
-  PR 4" to stderr and exits 2, so `Bash(seanced custodian *)` names a real command and a round in this PR
-  reports a clear refusal rather than the usage text. It is a static import in `main.ts`, as `session-event` and
-  `inbox` are: the verbs run many times a round. No `custodian` socket frame, no `rounds.jsonl`, no health, no PWA.
+  pane=<id> reason=deadline|exited|stray|off|done outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=healthy|failed
+  reason=done|deadline|exited|lost`, and the verbs' lines (below): `op=close pane=<id> task=<id|-> outcome=<…>` and
+  `op=worktree pane=<id> task=<id> outcome=removed how=<…>|kept why=<…>`. A round has no task id, so a start, kill and end
+  name none; **nothing read from a pane, the seed, the notes, the summary or the agent's text reaches a line**, and
+  the seat's own warnings say a reason from a fixed set and exclave ids.
+- **`seanced custodian`** (`custodian-cli.ts`) is the round's four verbs and is built (below). It is a static
+  import in `main.ts`, as `session-event` and `inbox` are: the verbs run many times a round.
 - **Doctor.** `seanced doctor` has a `custodian` section on a machine whose config carries the key
   (`custodian-checks.ts`): the platform, `bwrap`/`socat` and the sandbox probe, the weaker nested mode's warning,
   and per exclave signed out, trusted, or untrusted with the fix, through the pick's own `hostProblem` (so a
   missing root or a planted round dir is a `warn` too, and doctor never says an exclave can host while the seat
-  skips it). `fail` when no exclave can host a round. It never creates a round dir. While rounds are held (`ROUNDS_LIVE`) it is one `ok` line saying so and probes
-  nothing: the key then only sets reap's defaults, and a machine that carries it for that must not start failing
-  `doctor` (and, on Linux, running a `bwrap` probe) for rounds that cannot start.
+  skips it). `fail` when no exclave can host a round. It never creates a round dir. **A `warn` per exclave whose
+  Claude Code lacks the `session-events` mod, installed and enabled** (`modMissing`, `claude-mod.ts`: the listing
+  `seanced mod` already reads per target, `[]` where `claude` is missing or a listing unreadable, so doctor never
+  invents a finding): without
+  its frames every session there is `unobserved` and `close` never acts on it. **While rounds are held
+  (`ROUNDS_LIVE`) the section is one `ok` line saying so and none of the probes run, the `session-events` warn
+  included:** the key then only sets reap's defaults, and a machine that carries it for that must not start failing
+  `doctor` (and, on Linux, running a `bwrap` probe) for rounds that cannot start. The warn is for the day rounds go
+  live.
 - **Rejected, and why:** a registry role and relay secret as the archivist has (per machine and local: the
   relay has nothing to enforce); writing the trust entry ourselves (races `.claude.json`); counting a round as a session
   slot or skipping it when quota is tight (a full machine is when stuck sessions cost most); and growing
@@ -10334,6 +10373,9 @@ no envelope, no PSK: listing and ending sessions on the machine you are sitting 
 (Until 2026-10-25, M4, `spawn` took this path too; `spawn_session` is now a scheduler
 enqueue, so `spawn` stays on the allowlist only for a `seanced mcp` started before that
 update, and for the app's own `spawn` op, which the daemon keeps answering.)
+Beside the `Plain` ops the socket carries five frame kinds of its own: `broker`, `session-event`, `message`,
+`inbox` (each below) and, since 2026-11-14, `custodian` ("The custodian frame kind", after "Session events"),
+whose verbs act on this machine's sessions and worktrees and are bound to the round's own pane by pid alone.
 The alternative is an internet round trip to Cloudflare and back down the
 daemon's own websocket, to reach a process a few hundred microseconds away.
 
@@ -11172,7 +11214,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     A failed capture leaves the entry as it was.
   - **Read API:** `activity(paneId)` → `{state, stateSince, turnEnded, screenSince, sampledAt}`, or null for a
     pane not tracked (foreign, gone, or neither sampled nor heard from). Its readers are the seat's due check
-    (`roundDue`) and, from custodian 4, the `sessions` verb.
+    (`roundDue`) and, from custodian 4, the `sessions` and `close` verbs (the same facts, through the seat's tracker).
   - **Threat model: retention, not an act.** It gives the frame no new act: the pane is the kernel's answer
     (the frame names nothing, except on a host with no peer pid, where its `pane` decides, as above), only the state and `turnEnded` are kept, nothing is run, sent, forwarded or
     persisted, and no reply, forward, coalescing, hand-off, pass or drain behaviour depends on it (`onState`
@@ -11446,6 +11488,169 @@ Untested by hand: the macOS peer-pid call itself (documented constant; CI's macO
 leg covers it) and a real Claude Code session driving the mod end to end. The mod's
 own tests drive its hooks through `claude plugin test`, and the daemon suite drives
 the binding with real panes.
+
+### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4), held with the seat
+
+The local socket's sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the
+custodian round's four verbs, `sessions`, `close <pane>`, `notes` and `done` (docs/custodian.md §5, C23–C25,
+C31–C34, C37–C39, C40, C42). `seanced custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the
+reply as JSON. Nudge, interrupt and flag (C26–C29), the round's pause and health, and the Machines row are not
+built; the `sessions` reply carries `nudges: 0`, `interrupted: false` and `flag: null` as placeholders so its shape
+does not change when they land.
+
+**Held with the seat.** Nothing here runs in production: the verbs answer only for the round the seat names, and
+a held seat (`ROUNDS_LIVE`, "The custodian's seat") has none, so the frame answers `unsupported`. **The verbs bound
+only what goes through them.** Today a round's sandbox can still reach the tmux socket and the daemon's plain local
+ops, and read on-disk secrets with github.com reachable (docs/custodian.md, build item 4b, is the containment
+that closes these), so an injected round is not limited to the four verbs. What the checks below enforce is what a
+frame can do, not what the round can.
+
+- **The frame is bound by the kernel, to the round the seat record names, and nothing else.** `{v: 1, kind:
+  "custodian", verb, …}` with the exact key set for the verb (`parseCustodianFrame`; a `close`'s `pane` must be
+  tmux's own `%n` form; sizes are the handler's, so a round is told `too_long`). The sender is bound only by its
+  pid: `ancestorIn(peer, listRoundPanePids())` must name a live pane carrying `@seance-custodian` **and** that pane
+  must be the one the seat record names as the running round (`seat.roundPane()`: null without a seat, once the
+  seat stopped, or with no round). Anything else is `not_custodian`, as is every frame on a host that cannot name a
+  peer (`peerPidSupported`) and any pid the kernel did not give: there is no claimed-pane fallback, since the
+  frame acts. A round pane that is not the recorded round (a stray, a round the seat has not yet recorded) is
+  therefore refused too. An unreadable tmux list throws rather than answering "no round pane", and the socket
+  answers `internal`. A refusal is a warning naming the verb and a pid, and, for a `close`, an audit line with the
+  pane id the frame named (a `%n` that passed `PANE_ID`, so safe), `outcome=not_custodian`. Any same-uid process can
+  send a frame, so those lines are collapsed (code review F9): one per pid per minute, and at most 20 a minute
+  whatever the senders, then one warn when a window that dropped some rolls over, naming how many; the reply is the same. The daemon answers `unsupported` when it holds no seat, its backend has
+  no `despawn`, or the seat's checks failed (no sandbox tools, a sandbox probe failure, an unreadable agent file:
+  code review F10, since no round will ever run to be named); the verbs exist before the seat's async checks
+  finish, and answer `not_custodian` until a round is recorded.
+- **The round's own `seanced` (plan review F1).** The fence allows `Bash(seanced custodian *)` by name and nothing
+  guarantees the tmux server's `PATH` holds a `seanced` of this checkout (linking is opt-in; nothing re-points it on a
+  pull), so `launchRound` writes `<tmp>/bin/seanced`, a two-line `sh` wrapper running this process's own `bun`
+  (resolved through `PATH`, never `process.execPath`) and `main.ts`, and puts that directory first on the round's
+  `PATH`. It sits in the round's 0700 tmp dir, which the sandbox cannot write, and goes with it.
+- **`sessions` (C23)** answers per pane, from `listPanes` (every pane in the tmux server bar the round's own),
+  one `CustodianPaneView`: id, window name, cwd, `ours` or `foreign`, the pane's classification, the retained last
+  state and the whole minutes it has held, `turnEnded`, whole minutes of unchanged screen, task id, PR URL
+  (`EndedTasks.prUrl`, the one lookup hand-off and pass share), the ledger's worktree path, whether a hand-off, pass
+  or drain mark holds it, and **the verdict `close` would reach right now** (`"ok"` or its refusal code). It adds the
+  time retention began (`retainedSince`: a pane with no state before it is "unobserved after a restart", not a
+  hung one) and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
+  screen text is returned: a screen is read in memory to judge a close and dropped. Classification runs four at a
+  time.
+- **`close` (C24, `closeVerdict`)** is a pure function of the daemon's own facts, in this order: the round's own pane
+  and anything marked (hand-off, pass, drain ask, or a close already under way for that pane) are `marked`; a
+  hand-started pane is `foreign`; a `dead` task pane that registered is **harvested** (`EndedTasks.harvestExits`
+  notes its exit status, then closes it: killed first it would lose the status), any other dead pane is `too_soon`
+  while younger than reap's `DEAD_PANE_MIN_AGE_MS` (spawn's own dying pane's guard) or of unknown age, else killed
+  (`closing` first, so the leader reads a close, not a death); a
+  `shell` or `starting` pane is `unobserved`; a `background-prompt` is `waiting`; an `exit-prompt` is despawned
+  (someone already asked, and the despawn's Keep answers it); a `live` pane is `unobserved` with no retained state
+  or an `ended` one, `waiting` on `needs-input`, `busy` on `busy`, `unobserved` on an `idle` that is not a turn's
+  own end, `too_soon` before it has stood `closeAfterMinutes`, and otherwise despawned through the graceful path
+  (`despawnSession`, `force: false`, audited `origin=custodian`). The pane is **re-read at the moment of the act**
+  (`paneInfo`, then the classification), never trusted from an earlier `sessions`, and a pane id the frame names
+  that is gone is `gone`. A close holds its pane while it runs, so a second for it is `marked`.
+  For a `live` pane the daemon's facts (not the screen) are read once more after the capture and the worktree's
+  stat calls and before the despawn's first key (code review F6): a prompt the owner sent in that window, from
+  claude.ai say, turns the pane `busy` and the close is refused `busy`, so its Escape never interrupts that turn.
+- **A draft is never typed over (plan review F5).** The graceful despawn clears the input box with Escape and
+  Ctrl+C, and neither the screen hash nor a session event sees typing: an owner composing a reply in a finished
+  session would lose it. Before a `live` pane is despawned, `close` reads the screen with its attributes
+  (`capture-pane -e`, `capturePane`'s `styled`) and `inputBoxDraft` (`drain-ask.ts`; `inputBoxText` is the plain-capture
+  twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules after the `❯`,
+  **leaving out the cells Claude Code draws as a prompt suggestion** (code review F2): faint (SGR 2) or a grey
+  foreground (`90`, `38;5;8` and the mid greys of the 256 ramp, equal-channel `38;2` between 80 and 170), and the
+  cursor's inverse first cell when more suggestion text follows. **Any other text, or a box that cannot be found (a
+  dialog, a menu), is `waiting`**, as is a paste or image placeholder (`[Pasted text #1 …]`, `[Image #1]`) however it is styled (a wording match, review round 2 F6: its styling is not measured, and a box whose every cell is grey is otherwise a suggestion); a cell whose attribute is not recognised counts as typed (the underline colour `58;…` is skipped with its parameters, as `38`/`48` are, so its numbers are never read as standalone codes), so a Claude Code release
+  that restyles the suggestion costs a later round (the session is refused `waiting`), never an owner's draft. The
+  styled capture is read in memory for this check only and is never hashed, logged or audited. The grey values are
+  what Claude Code's themes use as far as is known, not measured on a release here: `daemon/test/capture-styled.test.ts`
+  proves what tmux emits for the faint attribute and for each grey form listed (`90`, `38;5;8`, `38;5;244`, `38;2;153;153;153`), not what Claude Code draws. The screen is read last, after the worktree's stat reads, so the draft check and the busy re-check are both the final reads before the despawn's keys (review round 2 F8). Not checked for `exit-prompt` panes (no box) or `dead` ones.
+- **The worktree (C31–C34, `custodian-worktree.ts`)** is decided after a successful close, for a task whose launch
+  this machine's ledger holds a worktree of (`EndedTasks.worktree`, the one authority on a path: a frame never names
+  one), and nothing is decided for a here-mode task or a worktree already gone. In order, the worktree is kept as:
+  `unscanned` (its repo is not in the cached scan set), `outside` (the path is not, by its realpath, under that
+  clone's `.claude/worktrees/`, or a symlink), `unevaluated` (git cannot list worktrees), **`touched`** (plan review
+  F3: reap's own newest-signal read, `lastTouched`, taken **before** the despawn whose `/exit` writes the
+  session's transcript, is more than `TOUCH_SLACK_MS` (120 s) past the turn's end, so a `claude` or an editor working
+  there outside tmux is not mistaken for finished; applies only where a turn end was observed), **`locked`** (a
+  worktree locked in git is someone's; only **Claude's own lock whose process is gone**, `claude agent <id> (pid N)`
+  with N dead through `staleClaudeLock`, now shared with spawn's identical check, is cleared first, plan review F2: a
+  session that was killed leaves one and reap keeps it for good), **`in-use`** (a pane's cwd is inside it, checked
+  again after the rule's network reads, which take long enough for a continuation to start there), then
+  `nothingLost` with `fetch: true` and no `merged` (the close has no `classifyTip` verdict): `dirty`, `unpushed` or
+  `unevaluated` keep it, and `safe` stops the file-system monitor and runs `git worktree remove`, **never
+  `--force`** (`remove-failed` when git refuses). The local branch is left for reap's merged-branch sweep (C34).
+  The outcome is audited (`op=worktree … outcome=removed how=<origin|pr|…>` or `outcome=kept why=<…>`, no path or
+  branch), tallied for the round log and returned in the reply. `dirty` and `unpushed`, the two the owner would
+  want told, call `onKept`, a no-op seam: flagging them is custodian 6. A worktree decision that throws is
+  `unevaluated`, never a failed close.
+- **`notes` (C37, C38, `pruneNotes`)** takes the text on stdin. Over `NOTES_MAX` (8 KiB) is `too_long`, and an empty
+  or blank text is `invalid` (a slipped heredoc must not wipe the file; C38's "a round that writes none keeps the old
+  file"). The file is sections keyed `## <key>`; a section is kept when its key is `standing`, a task id some
+  current pane carries or a pane id that exists, **once per key**, and anything else is dropped and counted: an
+  unknown key, a repeat, text before the first heading. A heading with more words after the key is body text, not a
+  section. CRLF reads as LF. The kept text is written 0600 under a 0700 dir through `writeDurable`, in a module-level
+  chain since `writeDurable` is not serialized. The reply says the kept keys and the dropped count, never the text.
+  `seanced custodian notes --clear` is **the owner's act and never the daemon's** (C39): the CLI truncates the file
+  itself, in the owner's own shell, with no frame sent, so no frame offers a round a way to wipe it (its sandbox
+  cannot write the state dir, though it can read it until item 4b (d)); a file that is not there stays absent.
+- **`done` (C40, `CustodianSeat.done`)** takes a summary of at most `SUMMARY_MAX` (1 KiB; `too_long`). It is `too_late`
+  at or past the round's deadline and `not_custodian` with no round. Accepted, it marks the seat record's round
+  `done: true` and then appends the round's **healthy** entry to the round log (code review F7: a `done` the seat could
+  not mark, because a stop landed, writes no healthy line for an end the audit calls failed; a log write that fails
+  after the mark is a warning, never an error reply); a second `done` answers `ok` and
+  writes nothing. The mark is what refuses `close` and `notes` thereafter (`round_done`; `sessions` still answers).
+  The seat **closes the pane at its next tick, never in the reply**, since the caller's `Bash` is waiting on it,
+  audits `kill reason=done` and `end outcome=healthy reason=done`, and a restart that finds a `done` round whose pane
+  is gone finishes it as `done`, not `lost`.
+- **The round log (C42, `custodian-rounds.ts`)** is `stateDir()/custodian/rounds.jsonl`, 0600 under a 0700 dir, the
+  last 20 rounds: start, end, exclave, outcome, reason, the daemon's own tally per verb (`ok` and `refused`) and of
+  worktrees removed and kept, and the summary for a healthy round. A line is read only through `parseRoundEntry`
+  (exact keys and types) and one it cannot read is not carried forward; a file that cannot be read at all (any error but
+  a missing file) rejects the write, so a transient fault never rewrites the history to one line (code review F8). A write is an **upsert on `start`**: a later
+  `failed` end replaces an earlier `failed` one (a deadline after an exit), a `healthy` entry is never replaced, and
+  writes run one at a time through a module-level chain. The summary may quote a pane, so it goes nowhere else: no
+  log, no audit line, and not the wire (C42's reading side is custodian 5). The tally is in memory: a round a
+  restart adopted counts from the restart.
+- **The CLI (`custodian-cli.ts`)** imports only `local-client.ts`, `custodian-frame.ts`, `paths.ts`, `node:fs/promises`
+  and `@seance/shared`, so a round's many calls load none of the daemon, and **nothing it reaches may call
+  `log.ts`**: its stdout is the round's data channel (`daemon/test/message-layering.test.ts` walks the import
+  closure). Timeouts: 180 s for `close` (a graceful despawn, a fetch and a `gh` read), 30 s for the rest, and a
+  restart grace only for `sessions`, which is idempotent (`close`, `notes` and `done` are not retried). Exit 0 for
+  an `ok` reply, 1 for a refusal (`seanced custodian: refused <code>` on stderr), 2 for a command line it refuses or a
+  daemon it cannot reach (`the daemon is not running`).
+- **The agent's checklist (`daemon/custodian/agent.md`)** is now the real one: `sessions`, judge each pane from its
+  facts and, where it must, its screen through `tmux capture-pane`, `close` the finished ones, write `notes` as
+  `## <pane or task id>` sections plus `## standing`, then `done` with a summary of at most 1 KiB. It nudges and
+  flags nothing yet.
+- **Threat model.** The round reads untrusted text and may call any verb with any argument; these checks bound
+  every act that goes through a verb, and nothing else (see "Held with the seat" above: until item 4b the round's
+  sandbox can reach the tmux socket and the daemon's plain ops, so rounds stay held). A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The
+  frame has four acts and takes no path, branch, session id, task id or command: a pane id (re-read and bound to
+  `ours` by the daemon), text that is stored or counted and never executed, and a summary. Notes persist
+  model-written text for the next round, the one way an injection could outlive a round, bounded by the cap, the
+  key rules, the per-key pruning, never being logged, never leaving the machine, and the owner's `--clear`. The
+  same-uid process that makes itself a descendant of the round's pane can call the verbs; it could already type into
+  any pane. A frame's `close` cannot reach a foreign pane, a marked one, the round's own, a pane whose last state
+  is `needs-input` or `busy`, or one with a draft. What no frame check can bound, and item 4b is to: the
+  round's `bash -c` reaching the tmux socket (`send-keys`, `run-shell`, `new-window`), the daemon's other frame
+  kinds from the round's process (a `Plain` `despawn` with `force: true` skips `close`'s checks), the other
+  sockets and signals that act as the user (the systemd user bus, Docker, an ssh-agent, launchd, `kill`), and the
+  round's reads, through Bash and through the `Read` tool the fence allows, of `state.json`'s identity seed,
+  `~/.ssh` and the `gh` credential with github.com reachable. 4b's bound is positive, not an ancestry refusal on
+  the main socket (a re-parented process escapes that): the round reaches one socket of its own that serves the
+  verbs only.
+- **Rejected, and why:** going live before item 4b (owner, 2026-11-14: verbs that look like a bound while the
+  round has a wider reach would make `doctor`, the docs and this threat model say the round is contained when it is
+  not); refusing the round's descendants on the main socket as 4b's bound (it inverts the verbs' safe direction: a
+  `setsid -f` or double fork re-parents the sender away and gains access, docs/custodian.md, Rejected alternatives);
+  binding by `$TMUX_PANE` or any field of the frame (an env var and a claim, both the
+  sender's own); a `close` that takes a task id (a task's pane is not unique across a continuation, and the pane id
+  is what the daemon re-reads); `rm`/`git worktree remove` left to the agent, which C19 forbids and the fence
+  only advises; `--force` on the removal, or removing a dirty worktree after a warning; clearing the notes through
+  the daemon (an injected round could then wipe them); a verb per capability bit (one frame kind, and `custodian`
+  already says a seat is configured); serializing `writeDurable` itself (the notes and the round log each chain
+  their own writes, and no other caller needs it); and a capture of the screen in `sessions`' reply (a second copy
+  of untrusted text for the round to quote into its summary, with no check it needs).
 
 ## Raycast extension (`raycast/`) — designed 2026-08-14
 

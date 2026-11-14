@@ -20,5 +20,10 @@ export interface SeatRecord {
     readonly startedAt: number;
     readonly tmpDir: string;
     readonly exclave: string;
+    /**
+     * The round's `done` was accepted: its `healthy` entry is in the round log and the seat closes the pane at its next
+     * tick. Persisted, so a restart between the call and the close ends the round `done`, never `lost`.
+     */
+    readonly done?: true;
   };
 }

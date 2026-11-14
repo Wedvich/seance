@@ -19,7 +19,7 @@ import { DEFAULT_EXCLAVE, exclaveConfigFile, exclaveSettingsFile } from "./excla
 import { canonical } from "./gitdir.ts";
 import { hardenedGit, repoConfigRefusal } from "./git-hardened.ts";
 import { log } from "./log.ts";
-import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
+import { parseWorktreeList, parseWorktreeLock, staleClaudeLock } from "./reap-git.ts";
 import { ReapBusy, withReapLock } from "./reap.ts";
 import { readDefaultBranch } from "./scan.ts";
 import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
@@ -567,27 +567,8 @@ export async function spawnSession(
  */
 const pathSpawns = new Map<string, Promise<unknown>>();
 
-/**
- * Claude Code's own lock on a worktree it made, held for its process's life: `claude session
- * <name> (pid N start <procStart>)`, the ` start …` part absent on Windows. Its own parser's
- * grammar, bounds included. The start time is not compared, so a live pid (even a reused one)
- * stays a refusal: fail closed.
- */
-const CLAUDE_LOCK = /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start .{1,255})?\)$/u;
-
 function underDir(dir: string, path: string): boolean {
   return path === dir || path.startsWith(`${dir}/`);
-}
-
-/** A pid this process may not signal (EPERM) is alive; only ESRCH says gone. */
-function pidGone(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (err) {
-    return err instanceof Error && "code" in err && err.code === "ESRCH";
-  }
 }
 
 /**
@@ -609,8 +590,7 @@ async function releaseStaleLock(repo: RepoEntry, path: string): Promise<boolean>
   if (found === undefined) return false;
   const lock = parseWorktreeLock(listed.stdout, found.path);
   if (lock === null) return true;
-  const pid = CLAUDE_LOCK.exec(lock.reason)?.[1];
-  if (pid === undefined || !pidGone(Number(pid))) {
+  if (!staleClaudeLock(lock.reason)) {
     const why = lock.reason === "" ? "no reason given" : lock.reason;
     throw new SpawnFailure("not_continuable", `its worktree is locked (${why})`);
   }

@@ -39,6 +39,7 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
       planted: () => Promise.resolve(false),
       sandboxProblem: () => Promise.resolve(null),
       weakerNested: () => Promise.resolve(false),
+      sessionEventsMissing: () => Promise.resolve([]),
       ...deps,
     },
   });
@@ -59,9 +60,13 @@ describe("custodianChecks", () => {
           probed.push("sandbox");
           return Promise.resolve("bwrap and socat must be on PATH");
         },
+        sessionEventsMissing: () => {
+          probed.push("session-events");
+          return Promise.resolve(["~/.claude-work"]);
+        },
       },
     });
-    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("held until custodian 4") }]);
+    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("held until the round is contained") }]);
     expect(probed).toEqual([]);
   });
 
@@ -86,6 +91,18 @@ describe("custodianChecks", () => {
         { level: "fail", message: "no exclave can host a round" },
       ]);
     }
+  });
+
+  test("an exclave without the session-events mod warns that close can never see a session", async () => {
+    const checks = await run({ sessionEventsMissing: () => Promise.resolve(["~/.claude-work"]) });
+    expect(checks).toEqual([
+      { level: "ok", message: "exclave work: round dir ~/work/.seance-custodian trusted" },
+      {
+        level: "warn",
+        message: expect.stringContaining("~/.claude-work: the session-events mod is not installed or enabled"),
+      },
+    ]);
+    expect(checks[1]?.message).toContain("seanced mod install");
   });
 
   test("a sandbox problem fails with its own words", async () => {

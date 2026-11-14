@@ -181,7 +181,7 @@ const PANE_PID_FORMAT = [
 /**
  * Pure parser over `list-panes -a` in `PANE_PID_FORMAT`; path last, taken as the remainder. A pane carrying
  * `@seance-custodian` is dropped (C10): the seat's round can bind no frame, take no message or drain key and is never
- * sampled. The `custodian` frame (custodian PR 4) needs its own reader that keeps these panes.
+ * sampled. The `custodian` frame binds against its own reader, `listRoundPanePids` (`custodian-launch.ts`), which keeps them.
  */
 export function parsePanePids(raw: string): readonly BoundPane[] {
   const seen = new Set<string>();
@@ -530,9 +530,7 @@ export class EndedTasks {
    */
   handoffCheck(taskId: string): "ok" | "unrecorded" | "prless" {
     if (!this.#ledger.ids().includes(taskId)) return "unrecorded";
-    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
-    const prUrl = this.#launches.get(taskId)?.prUrl ?? note?.prUrl ?? note?.continuedPr;
-    return prUrl === undefined ? "prless" : "ok";
+    return this.prUrl(taskId) === undefined ? "prless" : "ok";
   }
 
   /**
@@ -563,8 +561,13 @@ export class EndedTasks {
 
   /** Whether this launch noted a PR (`handoffCheck`'s lookup, a continuation's or successor's inherited one included), for a pass: a branch with no upstream then has to be the PR's. */
   hasPr(taskId: string): boolean {
+    return this.prUrl(taskId) !== undefined;
+  }
+
+  /** The PR URL this launch noted, a continuation's or successor's inherited one included: the one lookup `handoffCheck`, `hasPr` and the custodian's `sessions` share. */
+  prUrl(taskId: string): string | undefined {
     const note = this.#ledger.notes().find((n) => n.taskId === taskId);
-    return (this.#launches.get(taskId)?.prUrl ?? note?.prUrl ?? note?.continuedPr) !== undefined;
+    return this.#launches.get(taskId)?.prUrl ?? note?.prUrl ?? note?.continuedPr;
   }
 
   /**

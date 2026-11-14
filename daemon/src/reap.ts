@@ -47,7 +47,7 @@ const PANE_CONCURRENCY = 4;
  * with remain-on-exit while it waits to see claude register, and captures and
  * closes a dead one itself.
  */
-const DEAD_PANE_MIN_AGE_MS = 60_000;
+export const DEAD_PANE_MIN_AGE_MS = 60_000;
 /** How long an answered exit prompt gets to turn into a closed window before reap reports it still open. */
 const EXIT_WAIT_MS = 5_000;
 /**
@@ -346,7 +346,7 @@ export async function withReapLock<T>(fn: () => Promise<T>, path: string = join(
   }
 }
 
-function inside(dir: string, path: string): boolean {
+export function inside(dir: string, path: string): boolean {
   return path === dir || path.startsWith(`${dir}/`);
 }
 

@@ -1137,7 +1137,7 @@ export interface MachineInfo {
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
  * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
  * (docs/messaging.md); advertised only where the host names a socket's peer.
- * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian` and rounds are live.
+ * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian`.
  * Configured, not checked: a host that fails the sandbox or agent checks runs no round and still advertises it.
  * Nothing reads it yet; the Machines row will (custodian PR 5).
  */

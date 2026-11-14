@@ -437,6 +437,28 @@ describe("EndedTasks", () => {
     expect(ended.continuation("bare")).not.toHaveProperty("continuedPr");
   });
 
+  test("prUrl is the PR the launch noted: its own, else the one it inherited, else none", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+    await ledger.record("own");
+    await ledger.note("own", {
+      ...site,
+      prUrl: "https://github.com/a/b/pull/3",
+      continuedPr: "https://github.com/a/b/pull/2",
+    });
+    expect(ended.prUrl("own")).toBe("https://github.com/a/b/pull/3");
+    await ledger.record("inherited");
+    await ledger.note("inherited", { ...site, continuedPr: "https://github.com/a/b/pull/2" });
+    expect(ended.prUrl("inherited")).toBe("https://github.com/a/b/pull/2");
+    await ledger.record("bare");
+    await ledger.note("bare", site);
+    expect(ended.prUrl("bare")).toBeUndefined();
+    expect(ended.prUrl("never")).toBeUndefined();
+    expect(ended.hasPr("inherited")).toBe(true);
+    expect(ended.hasPr("bare")).toBe(false);
+  });
+
   test("a PR is inherited from a launch however it ended, but not from one the scheduler cancelled", async () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
