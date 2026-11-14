@@ -14,16 +14,16 @@ text here goes.
 
 Code cites the decisions by number; each is now in DESIGN.md.
 
-| Decisions                    | DESIGN.md                                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------------------------- |
-| C1–C4, C8–C14, C16–C21       | "The custodian's seat"                                                                        |
-| C5–C7, C22–C34, C37–C40, C42 | "The custodian frame kind"                                                                    |
-| C15                          | "Session events", "Per-pane retention and the screen sampler"                                 |
-| C32, C35, C36                | Reap, "Nothing lost" and "Surfaces"; Threat model, "A daemon reads a forge only for reap's …" |
+| Decisions                        | DESIGN.md                                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| C1–C4, C8–C14, C16–C21           | "The custodian's seat"                                                                        |
+| C5–C7, C22–C34, C37–C40, C42     | "The custodian frame kind"                                                                    |
+| C15                              | "Session events", "Per-pane retention and the screen sampler"                                 |
+| C32, C35, C36                    | Reap, "Nothing lost" and "Surfaces"; Threat model, "A daemon reads a forge only for reap's …" |
 | C40, C41, C43, C45, C47 (app op) | "The custodian's status and the Machines row"                                                 |
-| C44, C47 (flags and events)  | "The custodian frame kind" (its leader's-side bullet)                                         |
-| C46                          | "The custodian's seat" (the config)                                                           |
-| C48, C49                     | "The custodian's seat" (audit lines) and "The custodian frame kind"                           |
+| C44, C47 (flags and events)      | "The custodian frame kind" (its leader's-side bullet)                                         |
+| C46                              | "The custodian's seat" (the config)                                                           |
+| C48, C49                         | "The custodian's seat" (audit lines) and "The custodian frame kind"                           |
 
 ## Not built
 
