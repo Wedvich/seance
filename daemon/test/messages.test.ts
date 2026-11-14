@@ -951,6 +951,25 @@ describe("a custodian nudge", () => {
     expect(listener.lines.slice(1)).toEqual([]);
   });
 
+  test("canDeliver answers what a delivery would find, and places and audits nothing", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const receiver = await launched("candeliver");
+    const target = await pane("candeliver-target", receiver);
+    // Inside the grace: a nudge would be held.
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(true);
+    // Past it, with no listener ever: no_listener.
+    clock.now += 120_000;
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(false);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(true);
+    // Another process or task, or a pane that is not there: the delivery would not land.
+    expect(await messages.canDeliver(target.id, { pid: target.pid + 1, taskId: receiver })).toBe(false);
+    expect(await messages.canDeliver("%99999", { pid: 1, taskId: "x" })).toBe(false);
+    expect(listener.lines.slice(1)).toEqual([]);
+    expect(audits).toEqual([]);
+  });
+
   test("a pane carrying another process or task than the counts were written under is gone, nothing placed", async () => {
     const messages = setup({ graceMs: 1e9 });
     const receiver = await launched("nudgemoved");

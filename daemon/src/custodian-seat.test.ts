@@ -1051,6 +1051,23 @@ describe("pause and the owner's round request (C45)", () => {
     r.seat.stop();
   });
 
+  test("no reach is asked while paused: no round could start, so the reads are not spent", async () => {
+    const asked: number[] = [];
+    const r = rig({
+      activity: () => [pane({ state: "busy", screenSince: NOW - EVERY })],
+      busyReach: (_pane, stillMs) => {
+        asked.push(stillMs);
+        return Promise.resolve(true);
+      },
+    });
+    r.control.read = { pause: { at: 0, until: null }, unreadable: false };
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(asked).toEqual([]);
+    r.seat.stop();
+  });
+
   test("a pause with no end holds, and an unreadable control file holds with one warning", async () => {
     const r = rig();
     r.control.read = { pause: { at: 0, until: null }, unreadable: true };

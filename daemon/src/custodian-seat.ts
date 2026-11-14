@@ -626,15 +626,21 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     };
     if (round === undefined) {
       const requested = request === "fresh";
+      const paused = pausedAt(control, now);
+      const draining = d.draining();
+      // The reads are for a due check that could start a round: not while paused, draining, requested (due already) or
+      // inside the interval since the last one.
+      const asks =
+        !requested && !paused && !draining && !(record.lastEndedAt !== undefined && now - record.lastEndedAt < everyMs);
       const due = roundDue({
         now,
         everyMs,
         lastEndedAt: record.lastEndedAt,
         running: false,
-        draining: d.draining(),
-        paused: pausedAt(control, now),
+        draining,
+        paused,
         requested,
-        panes: await reachable(d.activity(), now),
+        panes: asks ? await reachable(d.activity(), now) : d.activity(),
         untouchable: d.untouchable,
       });
       if (!due || (!requested && now < pickAfter)) return;

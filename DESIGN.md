@@ -8734,7 +8734,11 @@ and an index of where each decision is recorded here.
   two terms (`actionable`, `custodian-seat.ts`): a pane idle since its turn ended for `everyMinutes`, and (custodian 8) a pane `busy` whose screen has stood still for `everyMinutes` **and that a verb could act on**
   (`CustodianVerbs.reach`, asked through `SeatDeps.busyReach` for only those panes): `nudge` on a session with a task
   this machine launched and nudges left (C26), or `interrupt` once the screen has stood still `interruptAfterMinutes`
-  and the session was not interrupted. A hand-started session on a long build is therefore not due until the
+  and the session was not interrupted. `reach` mirrors what the verbs would refuse and refund, or a round would be due
+  for good over a pane nothing can act on (second review F1): two live panes under one task id (`marked`), a screen
+  that is not `live`, and, for the nudge term, a pane messaging has no listener or grace for (`canDeliver`; the
+  interrupt needs none). The due check asks it only when a round could start (not paused, draining, requested or
+  inside `everyMinutes` of the last one). A hand-started session on a long build is therefore not due until the
   interrupt's threshold, and one whose nudges are spent is not due at all (code review F3). A healthy session on a long
   quiet command still counts: a still screen cannot tell it from a hung one, the agent is the judge, and each nudge
   costs one of `maxNudges`. A `reach` that cannot read its facts answers false, so an error never holds a round due. A pause and the owner's round request (custodian 5, "The custodian's status and
@@ -10699,16 +10703,19 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   even a harmless request. The text is this PR's own draft, the native wording not being available verbatim;
   the Linux live run's request step acted on a harmless request with it, and an adjustment toward the native
   framing stays open to later live runs. An untasked sender is named as such and the reply clause is dropped.
-- **The custodian as a sender** (custodian 8, "The custodian frame kind", `nudge`): `deliverAsCustodian(pane, text)`
-  is the daemon's own path into the same delivery, for one `request` to the task the named pane carries. It takes no
+- **The custodian as a sender** (custodian 8, "The custodian frame kind", `nudge`): `deliverAsCustodian(pane, text, expect)`
+  is the daemon's own path into the same delivery, for one `request` to the task the named pane carries. `expect` is the
+  pid and task the verb counted under: a pane carrying other ones now is `gone`. It takes no
   peer binding (the verb bound its caller) and no rate limit (the verb's counts bound it), checks the target as a
   send does (a live pane carrying a task this machine's ledger holds a launch of), and renders `custodianRequest`:
   "The custodian on `<machine>` (message `<id>`), the agent your user runs to look after this machine's sessions,
   asks you to do the following…", the request's own "do it if it fits" clause, no reply clause (nothing can answer
   the custodian), and the text fenced. Its `dir=in` line says `from=custodian`; there is no `dir=out` line, the
   custodian's own `op=nudge` line standing for it. Placement and the hold are a send's (`place`, shared): a pane
-  with no listener past the grace (`nolistener`, audited so) is answered `unsupported` to the verb, the evidence that
-  its exclave lacks the `inbox` mod. A held nudge whose listener never connects is dropped at the grace's end, as a
+  with no listener past the grace (`nolistener`, audited so) is answered `no_listener` to the verb: its exclave lacks
+  the `inbox` mod, or its listener dropped and did not come back in time. `canDeliver(pane, expect)` answers whether a
+  delivery would find one now (a listener for that pid and task, or one of the grace's holds) with nothing placed or
+  audited; the seat's due check asks it through `reach`. A held nudge whose listener never connects is dropped at the grace's end, as a
   send's is, and the verb has already counted it.
 
 **Audit**, a new origin `message`, two lines per message on this daemon, counts and ids only:
@@ -11695,7 +11702,7 @@ frame can do, not what the round can.
   `doctor` warns about, or its listener dropped and did not come back in time) and **`unsupported`** (a daemon
   stopping, or one wiring no messaging; the frame-level `unsupported` of held rounds is the same word for a
   different cause, and answers every verb). **The pane is read again after the count is written** (the write is a
-  durable file, a window): its pid and task must still be the ones counted, it must not have become marked, `needs-input`
+  durable file, a window): its pid and task must still be the ones counted, it must not have become marked or shared with a second pane, `needs-input`
   or a dialog, and `deliverAsCustodian` is handed that pid and task and answers `gone` for a pane that carries other
   ones now, so a nudge never lands on a different session than the one whose count was written. A held delivery
   (the listener not connected yet, inside the grace) is `outcome: "sent"` and **stays counted**: the hold may still
@@ -11711,17 +11718,22 @@ frame can do, not what the round can.
   not a round pane, the round's own or marked, classified `live`, whose last state is `busy` (`needs-input` is
   `waiting`: an Escape there would dismiss the owner's question or deny a permission; anything else, no state
   included, is `not_busy`), not interrupted before (`limit`: once per session), and whose screen, **as sampled by a pass taken at the act** (after the count is written, through the tracker's own
-  `sample`, and only a reading that pass made counts; within `SCREEN_FRESH_MS`, three sampler intervals, when no pass
+  `sample`, and only a reading that pass made counts, judged on the tracker's own clock (`activityNow`) so an
+  overridden `now` cannot make every reading look too old or too new; within `SCREEN_FRESH_MS`, three sampler intervals, when no pass
   is wired), has stood still for `interruptAfterMinutes` (`too_soon` otherwise, and for a failed capture or a stalled
   sampler, whose frozen `screenSince` would read as a still screen). **A typed draft, or an input box that cannot be
-  found or read, is `waiting`** (`inputBoxDraft`, as `close`'s rule): this build does not know that Escape on a busy
+  found or read, is `waiting`**, read last (after the second pane read and classification, nothing awaited between it, the verdict and the key) (`inputBoxDraft`, as `close`'s rule): this build does not know that Escape on a busy
   turn leaves a draft alone, so it refuses where it cannot show it does. It works for an untasked session too. **The count is written before the key**, so neither a failed key nor a restart after it makes a
   second; the pane and its classification are then **read again**, and the verdict taken once more from those and
   the daemon's facts with nothing awaited between it and the key, so a session that answered, asked, ended or was
   re-tagged to another task (its pid and task must be the first read's, and it must still be `ours` and alive) while
   the count was written gets no key (and its count back); two live panes under one task id are `marked`, as for `nudge`.
-  `limit` for an `interrupt` means "already interrupted" and says nothing of the nudges. A key tmux refused is `internal` and stays counted: at most
-  once is the promise, and the key may have landed. The agent follows an interrupt with a nudge in the same round.
+  `limit` for an `interrupt` means "already interrupted" and says nothing of the nudges. A key tmux refused, or a throw from the key's own call, is `internal` and stays counted: at most
+  once is the promise, and the key may have landed. A throw before the key was attempted (a failed capture or sampling
+  pass) sent nothing and gives the count back. Not verified against the pinned Claude Code release (second review F2): where it draws a
+  message queued by an earlier `nudge` while the turn is busy, and whether Escape moves queued messages back into the
+  box as a draft. If the box shows them, `interrupt` answers `waiting` and the session is flagged, the safe direction;
+  the restore case would leave a draft that `close` then refuses. Item 4b's live drill settles both. The agent follows an interrupt with a nudge in the same round.
 - **The flags file (C30, `custodian-flags.ts`)** is `stateDir()/custodian/sessions.json`, 0600 under the 0700 dir,
   through `writeDurable`, **not** `state.json`. C30's text names `state.json`, but that file is the owner CLI's alone
   (its pause; one the daemon cannot read loads as paused indefinitely), and a daemon write racing the CLI's

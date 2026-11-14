@@ -476,6 +476,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
           roundPanePids: listRoundPanePids,
           activity: paneActivity.activity,
           sample: paneActivity.sample,
+          activityNow: paneActivity.now,
           retainedSince: () => retainedSince,
           untouchable,
           tasks: ctx.endedTasks,
@@ -486,6 +487,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
           deliver: (pane, text, expect) =>
             messagesOf.get(ctx)?.deliverAsCustodian(pane, text, expect) ??
             Promise.resolve({ ok: false, code: "unsupported" }),
+          canDeliver: (pane, expect) => messagesOf.get(ctx)?.canDeliver(pane, expect) ?? Promise.resolve(false),
           keys: sendKeys,
           settings,
           flags,

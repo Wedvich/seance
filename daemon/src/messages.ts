@@ -94,6 +94,11 @@ export interface Messages {
    * back in time. `expect` is the pid and task the verb counted under: a pane carrying other ones now is `gone`.
    */
   readonly deliverAsCustodian: (pane: string, text: string, expect: CustodianTarget) => Promise<CustodianDelivery>;
+  /**
+   * Whether `deliverAsCustodian` would not answer `no_listener` for this pane now: a listener bound for this pid and
+   * task, or the grace. Reads and places nothing, so the seat's due check can ask without a nudge.
+   */
+  readonly canDeliver: (pane: string, expect: CustodianTarget) => Promise<boolean>;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
@@ -289,6 +294,19 @@ export function createMessages(deps: MessagesDeps): Messages {
     return "sent";
   };
 
+  /** What `place` would find, with nothing written: a listener for this task and pid, or one of the grace's three holds. */
+  const wouldPlace = (target: BoundPane, to: string, launched: number): boolean => {
+    const listener = listeners.get(target.id);
+    if (listener !== undefined && listener.taskId === to && listener.panePid === target.pid) return true;
+    const t = now();
+    const reconnecting = disconnects.get(target.id);
+    return (
+      t - launched <= graceMs ||
+      (reconnecting !== undefined && reconnecting.taskId === to && t - reconnecting.at <= graceMs) ||
+      t - startedAt <= graceMs
+    );
+  };
+
   const listen: Messages["listen"] = async (raw, peer, sink) => {
     const refuse = (code: Extract<InboxAck, { ok: false }>["code"]): void => {
       sink.write(JSON.stringify({ ok: false, code } satisfies InboxAck));
@@ -455,10 +473,21 @@ export function createMessages(deps: MessagesDeps): Messages {
     return { ok: true, taskId: to, outcome: placed };
   };
 
+  const canDeliver: Messages["canDeliver"] = async (paneId, expect) => {
+    if (stopped) return false;
+    const target = (await deps.panes()).find((pane) => pane.id === paneId && !pane.dead);
+    if (target === undefined || target.taskId === null) return false;
+    const launched = deps.launchedAt(target.taskId);
+    if (launched === undefined) return false;
+    if (target.pid !== expect.pid || target.taskId !== expect.taskId) return false;
+    return wouldPlace(target, target.taskId, launched);
+  };
+
   return {
     listen,
     send,
     deliverAsCustodian,
+    canDeliver,
     onEnded: (pane, taskId) => {
       if (inboxes.get(pane)?.taskId === taskId) dropInbox(pane, "ended");
       disconnects.delete(pane);

@@ -57,6 +57,8 @@ export interface PaneActivityDeps {
 export interface PaneActivityTracker {
   /** Session-event ingest's `retain`: a bound frame's state. A pane not `ours`, or dead, is ignored. */
   readonly observe: (pane: TrackedPane, state: TrackedState, turnEnded: boolean) => void;
+  /** The clock `sampledAt`, `screenSince` and `stateSince` are stamped with. */
+  readonly now: () => number;
   /** One sampling pass; a call while one runs joins it, so a slow tmux never stacks passes. */
   readonly sample: () => Promise<void>;
   /** Null for a pane not tracked: not `ours`, gone, or neither sampled nor heard from yet. */
@@ -200,6 +202,7 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
       entry.state = state;
       entry.turnEnded = turnEnded;
     },
+    now,
     sample,
     activity: (paneId): PaneActivity | null => {
       const entry = entries.get(paneId);

@@ -126,6 +126,11 @@ denied by the fence's command list, which `bash -c` gets past (C21).
   sessions a nudge answers `no_listener`. The retained state is per process, so a session already at rest
   when the daemon restarts is `unobserved` too until its next frame; `sessions` says when retention began
   (`retainedSince`), which is how the round can tell, though not why per pane.
+- **Queued nudges and Escape.** Measure, on the pinned Claude Code release, whether a message the inbox mod submits
+  to a busy session is drawn inside the input box's rules (then `interrupt` after a `nudge` answers `waiting`, safe
+  but it leaves such a session only flagged), and whether Escape moves queued messages back into the box as a draft
+  (then the interrupt turns the nudge into an unsent draft and `close` refuses that pane). If either holds, the
+  agent's "interrupt, then nudge" order needs rethinking (DESIGN.md, `interrupt`).
 - **Prompt suggestions.** `close` reads the box through `capture-pane -e` and ignores faint and grey cells
   (DESIGN.md, "The custodian frame kind"). Measure the attributes a real Claude Code release draws the suggestion
   with: a style the daemon does not list reads as a draft and the session is refused `waiting`, which is safe and

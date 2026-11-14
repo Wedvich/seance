@@ -1440,3 +1440,90 @@ describe("reach", () => {
     }
   });
 });
+
+describe("reach agrees with what the verbs would accept", () => {
+  test("a pane two sessions share a task id for, a screen that is not live, or a nudge with no listener holds no round", async () => {
+    const shared = rig();
+    shared.state.panes = [info({ taskId: "t-1" }), info({ paneId: "%2", taskId: "t-1", pid: 4343 })];
+    expect(await shared.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
+
+    const dialog = rig();
+    dialog.state.states.set("%1", "background-prompt");
+    expect(await dialog.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
+    dialog.state.states.set("%1", "starting");
+    expect(await dialog.verbs.reach("%1", 15 * MIN)).toBe(false);
+
+    let listener = false;
+    const mute = rig({ canDeliver: () => Promise.resolve(listener) });
+    // No listener: the nudge would be refunded each round, so only the interrupt's threshold makes a round worth it.
+    expect(await mute.verbs.reach("%1", 15 * MIN)).toBe(false);
+    expect(await mute.verbs.reach("%1", INTERRUPT_AFTER)).toBe(true);
+    listener = true;
+    expect(await mute.verbs.reach("%1", 15 * MIN)).toBe(true);
+  });
+});
+
+describe("the interrupt's windows", () => {
+  test("a throw before the key leaves the interrupt unspent; one from the key itself leaves it spent", async () => {
+    const before = rig({
+      activity: () => hung(),
+      capture: () => Promise.reject(new Error("EMFILE")),
+    });
+    expect(await before.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "internal" });
+    expect(before.state.keys).toEqual([]);
+    expect((await before.flags.counts("t-1", 4242)).interrupted).toBe(false);
+
+    const during = rig({
+      activity: () => hung(),
+      keys: () => Promise.reject(new Error("spawn")),
+    });
+    expect(await during.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "internal" });
+    expect((await during.flags.counts("t-1", 4242)).interrupted).toBe(true);
+  });
+
+  test("a draft typed while the pane is read again is seen: the box is read last", async () => {
+    let reads = 0;
+    const r = rig({
+      activity: () => hung(),
+      paneInfo: () => {
+        reads += 1;
+        // The owner starts typing between the first read and the second.
+        if (reads === 2) r.state.screen = boxScreen("❯ half a reply");
+        return Promise.resolve(info({ taskId: "t-1" }));
+      },
+    });
+    expect(await r.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "waiting" });
+    expect(r.state.keys).toEqual([]);
+    expect((await r.flags.counts("t-1", 4242)).interrupted).toBe(false);
+  });
+
+  test("the tracker's readings are judged on its own clock, however `now` is overridden", async () => {
+    const r = rig({
+      now: () => NOW + 5_000,
+      activityNow: () => NOW,
+      activity: () => hung(),
+      sample: () => Promise.resolve(),
+    });
+    expect(await r.verbs.handle(interrupt(), process.pid)).toMatchObject({ ok: true });
+    expect(r.state.keys).toEqual(["Escape"]);
+  });
+});
+
+describe("a nudge's last read", () => {
+  test("a second pane that took the task during the count's write refuses `marked` and gives the count back", async () => {
+    let lists = 0;
+    const r = rig({
+      listPanes: () => {
+        lists += 1;
+        return Promise.resolve(
+          lists === 1
+            ? [info({ taskId: "t-1" })]
+            : [info({ taskId: "t-1" }), info({ paneId: "%2", taskId: "t-1", pid: 4343 })],
+        );
+      },
+    });
+    expect(await r.verbs.handle(nudge("x"), process.pid)).toEqual({ ok: false, code: "marked" });
+    expect(r.state.deliveries).toEqual([]);
+    expect((await r.flags.counts("t-1", 4242)).nudges).toBe(0);
+  });
+});

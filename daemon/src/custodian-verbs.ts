@@ -215,6 +215,11 @@ export interface CustodianVerbDeps {
   readonly capture?: (pane: string) => Promise<string | null>;
   /** One screen sampling pass (`PaneActivityTracker.sample`), which `interrupt` takes at the act; absent, the sampler's last reading stands. */
   readonly sample?: () => Promise<void>;
+  /**
+   * The clock the tracker stamps its readings with (`PaneActivityTracker.now`): `interrupt` compares them only against
+   * this one, since `now` may be overridden. Absent, `now`.
+   */
+  readonly activityNow?: () => number;
   readonly activity: (pane: string) => PaneActivity | null;
   /** When this process began retaining pane state; null while no seat holds the tracker. */
   readonly retainedSince: () => number | null;
@@ -230,6 +235,8 @@ export interface CustodianVerbDeps {
    * never a key. `unsupported` when this daemon wires no messaging.
    */
   readonly deliver: (pane: string, text: string, expect: CustodianTarget) => Promise<CustodianDelivery>;
+  /** Whether `deliver` would find a listener (or its grace) now, placing nothing: `reach` asks it. Absent, it would. */
+  readonly canDeliver?: (pane: string, expect: CustodianTarget) => Promise<boolean>;
   /** One `send-keys -t <pane> ...args` (`drain-ask.ts`'s `sendKeys`); true when tmux took it. Only ever `["Escape"]`. */
   readonly keys: (pane: string, args: readonly string[]) => Promise<boolean>;
   readonly readRefusals?: () => Promise<unknown>;
@@ -680,8 +687,9 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       const counted: SessionCounts = { ...was, nudges: was.nudges + 1, round };
       await deps.flags.setCounts(taskId, counted);
       // The write was a window (a durable file): what C7 excludes, the pane and the task are read again before the text goes.
+      const allAgain = await panesNow();
       const again = await infoOf(pane);
-      const last = again === null ? "gone" : await nudgeStillOk(again, info);
+      const last = again === null ? "gone" : sharesTask(allAgain, again) ? "marked" : await nudgeStillOk(again, info);
       if (last !== null) {
         await restoreCounts(taskId, was);
         return await refuse(last, taskId);
@@ -717,6 +725,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     if (inFlight.has(pane)) return refuse("marked", null);
     inFlight.add(pane);
     let taskId: string | null = null;
+    // What the write-ahead count replaced, until the key is attempted: a throw before then sent nothing.
+    let unspent: { readonly key: string; readonly was: SessionCounts } | null = null;
     try {
       const info = await infoOf(pane);
       if (info === null || info.dead || info.pid === null) return await refuse("gone", null);
@@ -727,6 +737,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       await pruneCounts(all);
       const was = await deps.flags.counts(key, info.pid);
       let sampledAfter = 0;
+      // The tracker's own clock: its readings are compared with nothing else.
+      const clock = deps.activityNow ?? deps.now;
       const judge = (read: PaneInfo, state: PaneState, interrupted: boolean): "interrupt" | InterruptRefusal =>
         interruptVerdict({
           info: read,
@@ -734,32 +746,29 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
           activity: deps.activity(pane),
           untouchable: deps.untouchable(pane) || pane === deps.roundPane(),
           interrupted,
-          now: deps.now(),
+          now: clock(),
           interruptAfterMs,
           sampledAfter,
         });
       const first = judge(info, await classify(info), was.interrupted);
       if (first !== "interrupt") return await refuse(first, taskId);
       await deps.flags.setCounts(key, { ...was, interrupted: true });
+      unspent = { key, was };
       // The sampler's reading may be minutes old, and a command that began printing again since would still read as
       // still: take a pass now and trust only a reading it made.
       // A pass already running is joined, and may have read this pane before the call: a second pass is a new one.
       const pass = async (sampler: () => Promise<void>): Promise<boolean> => {
-        sampledAfter = deps.now();
+        sampledAfter = clock();
         await sampler();
         return (deps.activity(pane)?.sampledAt ?? -1) >= sampledAfter;
       };
       if (deps.sample !== undefined && !(await pass(deps.sample))) await pass(deps.sample);
-      // Escape on a busy turn is not known to leave a typed draft alone: `close`'s rule, the same read.
-      const screen = await capture(pane);
-      if (screen === null || inputBoxDraft(screen) !== "") {
-        await restoreCounts(key, was);
-        return await refuse("waiting", taskId);
-      }
-      // Read again now: these were windows in which the session may have answered, asked or ended.
+      // Read again now: these were windows in which the session may have answered, asked or ended. The box comes last:
+      // Escape on a busy turn is not known to leave a typed draft alone (`close`'s rule, the same read), so nothing is
+      // awaited between that read and the verdict, nor from the verdict to the key.
       const again = await infoOf(pane);
       const againState = again === null ? null : await classify(again);
-      // Nothing is awaited from this verdict to the key.
+      const screen = await capture(pane);
       const last =
         again === null ||
         againState === null ||
@@ -773,6 +782,12 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         await restoreCounts(key, was);
         return await refuse(last, taskId);
       }
+      if (screen === null || inputBoxDraft(screen) !== "") {
+        await restoreCounts(key, was);
+        return await refuse("waiting", taskId);
+      }
+      // From here a throw may follow a key that landed: the count stays, at most once being the promise.
+      unspent = null;
       if (!(await deps.keys(pane, ["Escape"]))) {
         // Counted all the same: at most once is what C27 promises, and a key tmux refused may still have landed.
         deps.warn(`custodian: tmux refused the Escape for ${pane}`);
@@ -783,6 +798,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       return { ok: true, verb: "interrupt", pane, taskId };
     } catch (err) {
       deps.warn(`custodian: interrupting ${pane} failed (${err instanceof Error ? err.name : "error"})`);
+      if (unspent !== null) await restoreCounts(unspent.key, unspent.was);
       await deps.audit.interrupt(pane, taskId, "internal").catch(() => {});
       return { ok: false, code: "internal" };
     } finally {
@@ -890,12 +906,19 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     try {
       const info = await infoOf(pane);
       if (info === null || !info.ours || info.dead || info.pid === null || info.custodian) return false;
+      // What the verbs would refuse and refund never counts, or a round would be due for good over a pane nothing can
+      // act on: two panes under one task id (`marked`), a screen that is not a live prompt, a nudge nobody can receive.
+      if (sharesTask(await panesNow(), info)) return false;
       const held = await deps.flags.counts(info.taskId ?? pane, info.pid);
-      const nudgeable =
-        info.taskId !== null &&
-        deps.tasks.launchedAt(info.taskId) !== undefined &&
-        held.nudges < deps.settings.maxNudges;
-      return nudgeable || (stillMs >= interruptAfterMs && !held.interrupted);
+      const target = info.taskId === null ? null : { pid: info.pid, taskId: info.taskId };
+      const couldNudge =
+        target !== null && deps.tasks.launchedAt(target.taskId) !== undefined && held.nudges < deps.settings.maxNudges;
+      const couldInterrupt = stillMs >= interruptAfterMs && !held.interrupted;
+      if (!couldNudge && !couldInterrupt) return false;
+      if ((await classify(info)) !== "live") return false;
+      // An interrupt needs no listener; a nudge does, and only a nudge is left to count when none could be sent.
+      if (couldInterrupt) return true;
+      return target !== null && ((await deps.canDeliver?.(pane, target)) ?? true);
     } catch {
       // An unreadable fact must not hold a round due on every tick: the owner's request still starts one.
       return false;
