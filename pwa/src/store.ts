@@ -1256,9 +1256,11 @@ export class Store {
       this.#setCustodian(deviceId, { kind: "failed", text: custodianRefusalText(parsed, machine.name, request) });
       return;
     }
-    this.#setCustodian(deviceId, { kind: "sent", act: request.act, paused: parsed.pause !== null });
+    const held: DeviceCustodian = { kind: "sent", act: request.act, paused: parsed.pause !== null };
+    this.#setCustodian(deviceId, held);
+    // Only this act's own hold: a later act's must not be cut short by this timer.
     const timer = setTimeout(() => {
-      if (this.#state.custodian[deviceId]?.kind === "sent") this.#setCustodian(deviceId, null);
+      if (this.#state.custodian[deviceId] === held) this.#setCustodian(deviceId, null);
     }, AVAILABILITY_HOLD_MS);
     // Bun's timer is an object that would hold a test run open; a browser's is a number.
     if (typeof timer === "object") timer.unref();

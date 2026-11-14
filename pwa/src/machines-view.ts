@@ -39,7 +39,13 @@ import {
 } from "@seance/shared";
 import { METRIC_LABELS } from "./chart.ts";
 import { taskTitle } from "./task-title.ts";
-import { historyRanges, type ArchiveReach, type HistoryRange, type HistoryTarget } from "./state.ts";
+import {
+  historyRanges,
+  type ArchiveReach,
+  type DeviceCustodian,
+  type HistoryRange,
+  type HistoryTarget,
+} from "./state.ts";
 import { canDrainNow, formatSeen } from "./view.ts";
 
 /**
@@ -147,6 +153,26 @@ export function custodianRow(machine: Machine, status: MachineStatus | undefined
     counts: parts.length === 0 ? null : parts.join(" · ") === "closed 0" ? "nothing closed" : parts.join(" · "),
     link: cu.s === "running" && isRemoteSessionId(cu.rc) ? `${CLAUDE_CODE_URL}${cu.rc}` : null,
     warn: cu.s === "failing",
+  };
+}
+
+/** What the card's custodian menu items and notes show: the store's `asking` entry for the device over the seat's `cu`. */
+export interface CustodianMenu {
+  /** A `sent` pause or resume shows as asked until the seat's `cu` agrees (the relay's status floor); else what `cu` says. */
+  readonly paused: boolean;
+  readonly running: boolean;
+  /** A request is out: the store takes one per machine at a time. */
+  readonly sending: boolean;
+  /** A round was asked and accepted. */
+  readonly roundRequested: boolean;
+}
+
+export function custodianMenu(card: Pick<MachineCard, "custodian">, asking: DeviceCustodian | null): CustodianMenu {
+  return {
+    paused: asking?.kind === "sent" ? asking.paused : (card.custodian?.paused ?? false),
+    running: card.custodian?.state === "running",
+    sending: asking?.kind === "sending",
+    roundRequested: asking?.kind === "sent" && asking.act === "round",
   };
 }
 

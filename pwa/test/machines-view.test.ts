@@ -19,7 +19,9 @@ import {
   accountDisplayName,
   deriveArchivist,
   deriveCloseSheet,
+  custodianMenu,
   deriveMachines,
+  type CustodianRow,
   type DrainInputs,
 } from "../src/machines-view.ts";
 import { knownAccounts } from "@seance/shared";
@@ -1038,5 +1040,28 @@ describe("the custodian row", () => {
     expect(controls(seated({ s: "idle" }))).toBe(true);
     expect(controls(seated({ s: "idle" }, ["metrics"]))).toBe(false);
     expect(controls(machine({ capabilities: [CAPABILITIES.custodian], connected: false }))).toBe(false);
+  });
+
+  test("the menu follows what was asked over what cu says, until the hold is dropped", () => {
+    const card = (cu: MachineStatus["cu"]): { readonly custodian: CustodianRow | null } => ({
+      custodian: rowOf(seated(cu)) ?? null,
+    });
+    const idle = card({ s: "idle" });
+    const paused = card({ s: "paused" });
+    expect(custodianMenu(idle, null)).toEqual({ paused: false, running: false, sending: false, roundRequested: false });
+    expect(custodianMenu(paused, null).paused).toBe(true);
+    // A sent pause or resume overrides a status that has not caught up.
+    expect(custodianMenu(idle, { kind: "sent", act: "pause", paused: true }).paused).toBe(true);
+    expect(custodianMenu(paused, { kind: "sent", act: "resume", paused: false }).paused).toBe(false);
+    expect(custodianMenu(card({ s: "running" }), null).running).toBe(true);
+    expect(custodianMenu(idle, { kind: "sending", act: "round" }).sending).toBe(true);
+    expect(custodianMenu(idle, { kind: "sent", act: "round", paused: false }).roundRequested).toBe(true);
+    expect(custodianMenu(idle, { kind: "sent", act: "pause", paused: true }).roundRequested).toBe(false);
+    expect(custodianMenu(idle, { kind: "failed", text: "x" })).toEqual({
+      paused: false,
+      running: false,
+      sending: false,
+      roundRequested: false,
+    });
   });
 });

@@ -10,6 +10,7 @@ import type {
   MachineCard,
   MachinesView,
 } from "../machines-view.ts";
+import { custodianMenu } from "../machines-view.ts";
 import {
   type AccountsState,
   type AvailabilityState,
@@ -218,8 +219,7 @@ function MachineCardView(props: {
   const switchOn = asked ?? card.openSwitch === "on";
   const closed = here?.kind === "sent" ? !here.open : card.closed;
   const asking = custodian[card.deviceId] ?? null;
-  // A pause or resume shows as asked until the seat's `cu` catches up (the relay's status floor), as the switch does.
-  const custodianPaused = asking?.kind === "sent" ? asking.paused : (card.custodian?.paused ?? false);
+  const custodianState = custodianMenu(card, asking);
   const offersMenu = card.charts || history !== null || card.openSwitch !== null || card.custodianControls;
   const target: HistoryTarget = { kind: "machine", deviceId: card.deviceId };
   const menu = useMenu();
@@ -260,9 +260,9 @@ function MachineCardView(props: {
                 <>
                   {card.openSwitch !== null && <MenuDivider />}
                   <CustodianItems
-                    paused={custodianPaused}
-                    running={card.custodian?.state === "running"}
-                    sending={asking?.kind === "sending"}
+                    paused={custodianState.paused}
+                    running={custodianState.running}
+                    sending={custodianState.sending}
                     onCustodian={onCustodian}
                   />
                 </>
@@ -304,8 +304,8 @@ function MachineCardView(props: {
           {asking.text}
         </p>
       )}
-      {asking?.kind === "sent" && asking.act === "round" && <p className="fleet-note">Round requested</p>}
-      {card.custodian !== null && <CustodianLine row={card.custodian} paused={custodianPaused} />}
+      {custodianState.roundRequested && <p className="fleet-note">Round requested</p>}
+      {card.custodian !== null && <CustodianLine row={card.custodian} paused={custodianState.paused} />}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
       {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
 
@@ -440,7 +440,6 @@ function AccountCardView(props: {
   );
 }
 
-/** A switch, so the chart can be flipped on and off with the menu still open. */
 /** Round now, then pause (for an hour or until resumed) or resume, by what the seat reports or was last asked. */
 function CustodianItems(props: {
   paused: boolean;
@@ -486,6 +485,7 @@ function CustodianItems(props: {
   );
 }
 
+/** A switch, so the chart can be flipped on and off with the menu still open. */
 function HistoryItem(props: { history: HistoryView | null; onShow: () => void; onHide: () => void }): JSX.Element {
   const { history, onShow, onHide } = props;
   return (
