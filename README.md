@@ -193,8 +193,9 @@ Edit `~/.config/seance/config.json`:
   command for `interruptAfterMinutes`, and flags for you what it cannot settle. The round runs in a sandbox that has no network and masks the machine's own directories (home, state, config, repo and exclave roots, and the other acting sockets) from it, and its containment was drilled on macOS and on Linux's weaker nested mode (docs/custodian.md, item 4b, which lists what is still unverified); each
   exclave that hosts one needs its round directory trusted once (`seanced doctor` names it:
   `mkdir -p <dir> && cd <dir> && claude`, accept the dialog), Linux needs `bubblewrap` and `socat`
-  (`apt install bubblewrap socat`; Linux that is not a container runs the sandbox in its strict mode, which has not
-  been drilled, so such a host runs no round yet and `doctor` says so), and a round only sees a session at rest when the `session-events` mod is
+  (`apt install bubblewrap socat`; Linux that is not a container, WSL included, runs the sandbox in its strict mode,
+  where the round also runs under a seccomp filter that closes `AF_VSOCK`, x64 and arm64 only, and `doctor` says so
+  on any other CPU), and a round only sees a session at rest when the `session-events` mod is
   installed in that session's Claude, and can nudge one only through its `inbox` mod (`seanced mod install`;
   `doctor` warns when either is not). The round keeps notes
   in `custodian/notes.md` in the daemon's state dir (`seanced custodian notes --clear` empties it) and its last 20

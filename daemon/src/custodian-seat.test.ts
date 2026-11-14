@@ -258,10 +258,12 @@ describe("seatEnabled", () => {
 });
 
 describe("sandboxDrilled", () => {
-  test("macOS and a read-only /proc/sys (the weaker nested mode) were drilled; Linux's strict mode was not", () => {
-    expect(sandboxDrilled("darwin", false)).toBe(true);
-    expect(sandboxDrilled("linux", true)).toBe(true);
-    expect(sandboxDrilled("linux", false)).toBe(false);
+  test("macOS and the weaker nested mode were drilled; Linux's strict mode only on an arch the vsock filter covers", () => {
+    expect(sandboxDrilled("darwin", false, "riscv64")).toBe(true);
+    expect(sandboxDrilled("linux", true, "riscv64")).toBe(true);
+    expect(sandboxDrilled("linux", false, "x64")).toBe(true);
+    expect(sandboxDrilled("linux", false, "arm64")).toBe(true);
+    expect(sandboxDrilled("linux", false, "riscv64")).toBe(false);
   });
 });
 

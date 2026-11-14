@@ -4,6 +4,7 @@ import { basename, dirname, join, relative, sep } from "node:path";
 import type { CustodianConfig } from "./config.ts";
 import { roundSeed, NOTES_MAX } from "./custodian-agent.ts";
 import { custodianFence, procSysReadOnly, type ReadDeny } from "./custodian-fence.ts";
+import { vsockFilter } from "./custodian-seccomp.ts";
 import { LaunchRefused } from "./custodian-seat.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { resolvedBun, resolvedMain } from "./link.ts";
@@ -625,11 +626,14 @@ const PROXY_URLS = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as
  * the window's shell has them (the sandbox's network is empty regardless). Every value goes through `shq` but `claude`,
  * which is the owner's own `SEANCE_CLAUDE_BIN`, and `args`, which the caller has quoted. `${X+X="$X"}` is POSIX: unset
  * gives nothing and set gives one word, whatever the value holds. A proxy URL with `user:pass@` is unset first: a
- * match on `://…@` also drops one with an `@` in its path, which fails closed.
+ * match on `://…@` also drops one with an `@` in its path, which fails closed. With `seccomp` (strict-mode Linux) the
+ * whole command runs under an outer `bwrap --seccomp` reading that filter file on fd 3 (`vsockFilter`): it binds `/`
+ * whole, so the round sees the host as before, and the filter outlives every exec under it, srt's bwrap included.
  */
 export function roundScript(o: {
   readonly claude: string;
   readonly caffeinate: boolean;
+  readonly seccomp?: string;
   readonly env: readonly (readonly [string, string])[];
   readonly binDir: string;
   readonly args: string;
@@ -648,7 +652,9 @@ export function roundScript(o: {
     o.claude,
     o.args,
   ];
-  return `#!/bin/sh\n${dropped.join("\n")}\nexec ${o.caffeinate ? "caffeinate -is " : ""}${words.join(" ")} < ${shq(o.seed)}\n`;
+  const wrap = o.caffeinate ? "caffeinate -is " : o.seccomp === undefined ? "" : "bwrap --dev-bind / / --seccomp 3 -- ";
+  const fd3 = o.seccomp === undefined ? "" : ` 3< ${shq(o.seccomp)}`;
+  return `#!/bin/sh\n${dropped.join("\n")}\nexec ${wrap}${words.join(" ")} < ${shq(o.seed)}${fd3}\n`;
 }
 
 /**
@@ -776,9 +782,16 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
     });
     const fencePath = join(tmpDir, "fence.json");
     const seedPath = join(tmpDir, "seed.txt");
+    // Strict-mode Linux only (`sandboxDrilled`): the weaker mode was drilled without it, and a change there wants its
+    // own drill. Like the fence, the file is not writable from the round's sandbox.
+    const strict = o.platform === "linux" && !o.weakerNested;
+    const filter = strict ? vsockFilter(process.arch) : null;
+    if (strict && filter === null) throw new LaunchRefused("toolchain", `no vsock filter for ${process.arch}`);
+    const seccompPath = filter === null ? undefined : join(tmpDir, "seccomp.bpf");
     await Promise.all([
       writeFile(fencePath, JSON.stringify(fence), { mode: 0o600 }),
       writeFile(seedPath, roundSeed(o.notes), { mode: 0o600 }),
+      ...(filter === null || seccompPath === undefined ? [] : [writeFile(seccompPath, filter, { mode: 0o600 })]),
     ]);
     // The fence allows `Bash(seanced custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
     // `seanced` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
@@ -797,6 +810,7 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
       roundScript({
         claude,
         caffeinate: o.platform === "darwin",
+        ...(seccompPath === undefined ? {} : { seccomp: seccompPath }),
         env: roundEnv({ home, user: loginName(), tmpDir, socket: o.custodianSocket, exclave: o.exclave }),
         binDir,
         args:

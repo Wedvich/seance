@@ -151,9 +151,18 @@ describe("custodianChecks", () => {
     expect((await run({})).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(false);
   });
 
-  test("the real drilled test: strict Linux fails, a read-only /proc/sys passes", async () => {
-    const real = { drilled: sandboxDrilled };
+  test("the real drilled test: strict Linux on an arch with no vsock filter fails, a read-only /proc/sys passes", async () => {
+    const real = {
+      drilled: (platform: "darwin" | "linux", nested: boolean) => sandboxDrilled(platform, nested, "riscv64"),
+    };
     expect((await run(real)).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(true);
+    expect(
+      (
+        await run({
+          drilled: (platform: "darwin" | "linux", nested: boolean) => sandboxDrilled(platform, nested, "x64"),
+        })
+      ).some((c) => c.message === SANDBOX_UNDRILLED),
+    ).toBe(false);
     expect(
       (await run({ ...real, weakerNested: () => Promise.resolve(true) })).some((c) => c.message === SANDBOX_UNDRILLED),
     ).toBe(false);
