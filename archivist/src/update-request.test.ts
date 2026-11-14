@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUpdateRequester, readRequestOrigin, runWhileRequested } from "./update-request.ts";
@@ -31,6 +31,27 @@ describe("update requests", () => {
     expect(await Bun.file(path).exists()).toBe(false);
     await requester.announce("b".repeat(40));
     expect(await readFile(path, "utf8")).toBe(`announce ${"b".repeat(40)}\n`);
+  });
+
+  // `PathChanged=` fires on the file's create, so a reader can open it at any instant of a write: it must
+  // get a whole request, never the empty file a create-then-write leaves between its two syscalls.
+  test("a request replaces the file whole, so a reader that opened the last one never sees it truncated", async () => {
+    const path = fresh();
+    const requester = createUpdateRequester({ path, debounceMs: 0 });
+    await requester.registered();
+    const reader = await open(path, "r");
+    try {
+      await requester.announce("c".repeat(40));
+      expect(await reader.readFile("utf8")).toBe("register\n");
+    } finally {
+      await reader.close();
+    }
+    expect(await readFile(path, "utf8")).toBe(`announce ${"c".repeat(40)}\n`);
+
+    // Two at once share the one `.part`: each lands whole, in the order asked.
+    await Promise.all([requester.announce("d".repeat(40)), requester.registered()]);
+    expect(await readFile(path, "utf8")).toBe("register\n");
+    expect(await Bun.file(`${path}.part`).exists()).toBe(false);
   });
 
   test("a sha that is not hex is never written into the file", async () => {
