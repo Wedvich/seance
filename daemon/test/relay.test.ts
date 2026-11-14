@@ -831,6 +831,7 @@ describe("daemon ↔ relay integration", () => {
         "drainPass",
         "messageRoute",
         "messages",
+        "messageReply",
         "drainAsk",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand

@@ -3,7 +3,7 @@ import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { CAPABILITIES, isRecord, type Task } from "@seance/shared";
 import { tmuxOk } from "../daemon/src/tmux.ts";
-import { pollUntil } from "../daemon/test/fixtures.ts";
+import { linkClaudeNamed, pollUntil, underClaude } from "../daemon/test/fixtures.ts";
 import {
   cancelTask,
   PSK,
@@ -26,6 +26,8 @@ import { fixtureOrigin, q, startSuite, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
 let base: string;
+/** A process named `claude`, linked and run once in `beforeAll` so no test's timed window pays a first-exec scan. */
+let claudeBin: string;
 let stack: Stack;
 let second: SecondDaemon | undefined;
 let app: AppHandle | undefined;
@@ -65,6 +67,7 @@ const bootBox = (): Promise<SecondDaemon> =>
 beforeAll(async () => {
   suite = await startSuite("e2e-messages");
   ({ base, stack } = suite);
+  claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
   // Seeded first: `seedTask` restarts the suite's daemon, which must not be a second machine's takeover to survive.
   await stack.seedTask({
     id: PREDECESSOR,
@@ -159,14 +162,35 @@ async function paneOf(taskId: string): Promise<string> {
   return found;
 }
 
+interface InboxEntry {
+  readonly push: string;
+  readonly messageKind: string;
+  readonly id?: string;
+  /** The daemon's mark that this answers a question the session itself sent. */
+  readonly wake?: true;
+}
+
+interface SendOpts {
+  readonly kind?: "note" | "question" | "request";
+  readonly inReplyTo?: string;
+}
+
 interface Session {
-  readonly taskId: string;
+  /** The session's task, or null for one started by hand. */
+  readonly taskId: string | null;
   readonly pane: string;
   /** Lines the session's inbox listener wrote, parsed. */
-  readonly inbox: () => Promise<{ push: string; messageKind: string }[]>;
-  /** The sender's answers, one per `send`. */
-  readonly send: (to: string, text: string) => Promise<{ ok: boolean; text: string; id?: string }>;
+  readonly inbox: () => Promise<InboxEntry[]>;
+  /** The sender's answers, one per `send`. `to` is left out to reply by `inReplyTo` alone. */
+  readonly send: (
+    to: string | undefined,
+    text: string,
+    opts?: SendOpts,
+  ) => Promise<{ ok: boolean; text: string; id?: string }>;
 }
+
+/** Puts a session's two commands in a pane: the task's own (through its stub), or a hand-started one's new window. */
+type Launch = (command: string) => Promise<string>;
 
 /**
  * The stand-in session for a task: in its pane, a `seanced inbox` listener against its machine's daemon (what the inbox
@@ -175,7 +199,41 @@ interface Session {
  */
 async function session(taskId: string, box: "suite" | "box"): Promise<Session> {
   const pane = await paneOf(taskId);
-  const dir = join(base, `session-${taskId}`);
+  return sessionIn(taskId, taskId, box, async (command) => {
+    await stack.stub.runInPane(pane, command);
+    return pane;
+  });
+}
+
+/**
+ * A session with no task: a window in the box's tmux session running a shell, whose child is a process named `claude`
+ * (the daemon finds a session by that name) with the listener and the sender as its own children, as a hand-started
+ * session's `seanced inbox` and `seanced mcp` are. Bound to the process under the pane's, not the pane's own.
+ */
+async function untaskedSession(label: string, box: "suite" | "box"): Promise<Session> {
+  const tmuxSession = box === "suite" ? stack.config.tmuxSession : (second?.tmuxSession ?? "");
+  return sessionIn(label, null, box, async (command) =>
+    (
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        `${tmuxSession}:`,
+        "-n",
+        label,
+        "sh",
+        "-c",
+        `${underClaude(claudeBin, { body: command })}; exec sleep 600`,
+      ])
+    ).trim(),
+  );
+}
+
+async function sessionIn(label: string, taskId: string | null, box: "suite" | "box", launch: Launch): Promise<Session> {
+  const dir = join(base, `session-${label}`);
   const out = join(dir, "inbox.out");
   const stateDir = stateDirOf(box);
   const socket = join(stateDir, "run", "seanced.sock");
@@ -211,9 +269,13 @@ for (let i = 0; ; i++) {
   );
   const listener = `SEANCE_STATE_DIR=${q(stateDir)} ${q(process.execPath)} ${q(MAIN)} inbox > ${q(out)}`;
   // `exec sleep` keeps the pane up; the listener and the sender are its children, so each binds by its parent walk.
-  await stack.stub.runInPane(pane, `${listener} & ${q(process.execPath)} ${q(script)} & exec sleep 600`);
+  const pane = await launch(
+    taskId === null
+      ? `${listener} & ${q(process.execPath)} ${q(script)} & wait`
+      : `${listener} & ${q(process.execPath)} ${q(script)} & exec sleep 600`,
+  );
   let sent = 0;
-  const inbox = async (): Promise<{ push: string; messageKind: string }[]> => {
+  const inbox = async (): Promise<InboxEntry[]> => {
     const text = (await Bun.file(out).exists()) ? await Bun.file(out).text() : "";
     return text.split("\n").flatMap((line) => {
       if (line === "") return [];
@@ -222,26 +284,41 @@ for (let i = 0; ; i++) {
       if (!isRecord(parsed) || typeof parsed["push"] !== "string" || typeof parsed["messageKind"] !== "string") {
         return [];
       }
-      return [{ push: parsed["push"], messageKind: parsed["messageKind"] }];
+      return [
+        {
+          push: parsed["push"],
+          messageKind: parsed["messageKind"],
+          ...(typeof parsed["id"] === "string" ? { id: parsed["id"] } : {}),
+          ...(parsed["wake"] === true ? { wake: true as const } : {}),
+        },
+      ];
     });
   };
   // Acked, so a message sent now is delivered, not held: the ack is the listener's first line.
   await pollUntil(
     async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()).includes('"ok":true'),
-    `${taskId}'s inbox listener to be acked`,
+    `${label}'s inbox listener to be acked`,
     20_000,
   );
   return {
     taskId,
     pane,
     inbox,
-    send: async (to, text) => {
+    send: async (to, text, opts = {}) => {
       const n = sent;
       sent += 1;
-      await Bun.write(join(dir, `cmd-${n}.json.tmp`), JSON.stringify({ to, kind: "note", text }));
+      await Bun.write(
+        join(dir, `cmd-${n}.json.tmp`),
+        JSON.stringify({
+          ...(to === undefined ? {} : { to }),
+          kind: opts.kind ?? "note",
+          text,
+          ...(opts.inReplyTo === undefined ? {} : { inReplyTo: opts.inReplyTo }),
+        }),
+      );
       await rename(join(dir, `cmd-${n}.json.tmp`), join(dir, `cmd-${n}.json`));
       const res = join(dir, `res-${n}.json`);
-      await pollUntil(() => Bun.file(res).exists(), `the send ${n} from ${taskId} to answer`, 30_000);
+      await pollUntil(() => Bun.file(res).exists(), `the send ${n} from ${label} to answer`, 30_000);
       const answer: unknown = JSON.parse(await Bun.file(res).text());
       if (!isRecord(answer) || typeof answer["ok"] !== "boolean" || typeof answer["text"] !== "string") {
         throw new Error(`not a send result: ${JSON.stringify(answer)}`);
@@ -258,6 +335,11 @@ for (let i = 0; ; i++) {
 /** A line the session's inbox has received that contains `needle`. */
 async function received(s: Session, needle: string): Promise<string | undefined> {
   return (await s.inbox()).find((line) => line.push.includes(needle))?.push;
+}
+
+/** As `received`, with the line's own fields: its id and whether it woke the session. */
+async function receivedEntry(s: Session, needle: string): Promise<InboxEntry | undefined> {
+  return (await s.inbox()).find((line) => line.push.includes(needle));
 }
 
 describe("session messages across machines: sender ↔ leader ↔ target daemon ↔ receipt", () => {
@@ -401,6 +483,67 @@ describe("session messages across machines: sender ↔ leader ↔ target daemon 
     } finally {
       await cancelTask(client(), sender);
       if (successorCreated) await cancelTask(client(), SUCCESSOR);
+    }
+  }, 150_000);
+
+  test("a session with no task asks a task on another machine, is answered by the id alone with a wake, and the exchange carries on both ways", async () => {
+    const target = await runTask("suite");
+    let untasked: Session | undefined;
+    try {
+      const t = await session(target, "suite");
+      untasked = await untaskedSession("e2e-untasked", "box");
+      const u = untasked;
+
+      const asked = await u.send(target, `${SECRET}-question`, { kind: "question" });
+      expect(asked.ok).toBe(true);
+      expect(asked.text).toContain("sent through the scheduler");
+      const question = asked.id ?? "no id";
+      await pollUntil(
+        async () => (await received(t, `${SECRET}-question`)) !== undefined,
+        "the question to reach the task's pane",
+        20_000,
+      );
+      // The untasked sender is named as such and told to answer by the id alone.
+      const push = (await received(t, `${SECRET}-question`)) ?? "";
+      expect(push).toContain("an untasked session on `MsgBox`");
+      expect(push).toContain(`inReplyTo ${question}, and no \`to\``);
+      // Its receipt reaches it too: its own daemon's table finds the pane, there being no task to name.
+      await pollUntil(
+        async () => (await received(u, "was delivered")) !== undefined,
+        "the receipt in the untasked session's pane",
+        20_000,
+      );
+
+      // The task answers with no `to`: the handle is the address, and the answer wakes the asker.
+      const answered = await t.send(undefined, `${SECRET}-answer`, { inReplyTo: question });
+      expect(answered.ok).toBe(true);
+      expect(answered.text).toContain("sent through the scheduler to the session that sent message");
+      await pollUntil(
+        async () => (await receivedEntry(u, `${SECRET}-answer`)) !== undefined,
+        "the answer to reach the untasked session",
+        20_000,
+      );
+      const woken = await receivedEntry(u, `${SECRET}-answer`);
+      expect(woken?.wake).toBe(true);
+      expect(woken?.push).toContain(target);
+      await pollUntil(
+        async () => (await received(t, "your reply")) !== undefined,
+        "the receipt for the reply in the task's pane",
+        20_000,
+      );
+
+      // And back: the untasked session answers the answer, which was a note it had not asked, so it wakes nobody.
+      const thanks = await u.send(undefined, `${SECRET}-thanks`, { inReplyTo: answered.id ?? "no id" });
+      expect(thanks.ok).toBe(true);
+      await pollUntil(
+        async () => (await receivedEntry(t, `${SECRET}-thanks`)) !== undefined,
+        "the thanks to reach the task",
+        20_000,
+      );
+      expect((await receivedEntry(t, `${SECRET}-thanks`))?.wake).toBeUndefined();
+    } finally {
+      if (untasked !== undefined) await tmuxOk(["kill-pane", "-t", untasked.pane]).catch(() => "");
+      await cancelTask(client(), target);
     }
   }, 150_000);
 

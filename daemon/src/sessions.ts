@@ -11,7 +11,7 @@ import { capturePane, CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, PANE_TITLE
 // dev server, and under a title-setting shell such a pane would list as a
 // session. Hand-started npm claudes are the cost; séance's own are covered
 // below regardless of what the process is called.
-const CLAUDE_COMMAND = /^(?:claude|\d+\.\d+\.\d+)$/u;
+export const CLAUDE_COMMAND = /^(?:claude|\d+\.\d+\.\d+)$/u;
 
 /**
  * The one registration predicate, shared by the session list and the spawn

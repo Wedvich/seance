@@ -3156,12 +3156,16 @@ describe("send_message", () => {
   });
 
   describe("messageRouteGate", () => {
-    async function gate(machines: readonly Machine[], leading: boolean): Promise<Awaited<ReturnType<RouteGate>>> {
+    async function gate(
+      machines: readonly Machine[],
+      leading: boolean,
+      need: Parameters<RouteGate>[0] = "route",
+    ): Promise<Awaited<ReturnType<RouteGate>>> {
       const fake = fakeRelay(machines, () => new Error("unexpected op"));
       if (leading) fake.setState({ scheduler: LEADING });
       const lazy = new LazyRelay({ create: () => fake });
       try {
-        return await messageRouteGate(relayFleet(lazy))();
+        return await messageRouteGate(relayFleet(lazy))(need);
       } finally {
         lazy.stop();
       }
@@ -3185,11 +3189,54 @@ describe("send_message", () => {
       }
     });
 
+    test("a reply needs messageReply, which messageRoute alone does not give, and the refusal says replies", async () => {
+      const [leader, box] = autoMachines();
+      const routeOnly = await gate(capable(), true, "reply");
+      expect(routeOnly.ok).toBe(false);
+      if (!routeOnly.ok) {
+        expect(routeOnly.text).toContain("route replies");
+        expect(routeOnly.text).toContain("`seanced update`");
+      }
+      const both = [
+        machine({ ...leader, capabilities: [CAPABILITIES.messageRoute, CAPABILITIES.messageReply] }),
+        machine({ ...box }),
+      ];
+      expect(await gate(both, true, "reply")).toEqual({ ok: true });
+      expect(await gate(both, true, "route")).toEqual({ ok: true });
+      // A leader with only messageReply still cannot route a message by task.
+      const replyOnly = [machine({ ...leader, capabilities: [CAPABILITIES.messageReply] }), machine({ ...box })];
+      expect((await gate(replyOnly, true, "route")).ok).toBe(false);
+    });
+
     test("no verified leader is its own refusal, and a capable machine that is not leading counts for nothing", async () => {
       const result = await gate(capable(), false);
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.text).toContain("no verified scheduler is leading");
     });
+  });
+
+  test("`to` is optional, so a reply by handle is passed on with no `to` and a gate that asks for it", async () => {
+    const seen: unknown[] = [];
+    const { client: c, stop } = await client((message) => {
+      seen.push(message);
+      return Promise.resolve({ ok: true, text: "sent" });
+    });
+    try {
+      const { tools } = await c.listTools();
+      const tool = tools.find((t) => t.name === "send_message");
+      expect(JSON.stringify(tool?.inputSchema)).toContain("inReplyTo");
+      expect(tool?.inputSchema.required).not.toContain("to");
+      expect(tool?.description).toContain("by `inReplyTo` alone");
+      expect(tool?.description).not.toContain("only when this session has a task");
+      const reply = await c.callTool({
+        name: "send_message",
+        arguments: { kind: "note", text: "src/a.ts", inReplyTo: "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11" },
+      });
+      expect(reply.isError).not.toBe(true);
+      expect(seen).toEqual([{ kind: "note", text: "src/a.ts", inReplyTo: "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11" }]);
+    } finally {
+      stop();
+    }
   });
 
   test("the strict schema refuses an unknown key, an unknown kind and empty text", async () => {

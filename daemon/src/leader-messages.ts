@@ -38,9 +38,13 @@ export interface MessageRouter {
   readonly onSessionMessage: (message: SessionMessage, from: string) => boolean;
 }
 
-function advertisesRouting(machine: Machine): boolean {
+function advertisesRouting(machine: Machine, reply: boolean): boolean {
   const capabilities = machine.capabilities ?? [];
-  return capabilities.includes(CAPABILITIES.messages) && capabilities.includes(CAPABILITIES.messageRoute);
+  return (
+    capabilities.includes(CAPABILITIES.messages) &&
+    capabilities.includes(CAPABILITIES.messageRoute) &&
+    (!reply || capabilities.includes(CAPABILITIES.messageReply))
+  );
 }
 
 /**
@@ -58,6 +62,31 @@ function senderLabel(name: string, deviceId: string): string {
 }
 
 export function createMessageRouter(deps: MessageRouterDeps): MessageRouter {
+  /** Forwards one `deliver-message` to a machine, or says why not: the receipt's outcome and reason. */
+  const forward = async (
+    deviceId: string,
+    reply: boolean,
+    request: DeliverMessageRequest,
+    about: string,
+  ): Promise<{ readonly outcome: ReceiptOutcome; readonly reason?: "nolistener" }> => {
+    const self = deviceId === deps.selfDeviceId;
+    const target = deps.machines().find((m) => m.deviceId === deviceId);
+    if (!self && (target === undefined || !target.connected)) return { outcome: "offline" };
+    // Every PR 1 daemon advertises `messages` and none handles `deliver-message`, whose unknown-op branch never
+    // replies: forwarding would read as `offline` and invite a retry that can never land. A reply is the same for a
+    // daemon that predates `messageReply`.
+    if (target !== undefined && !advertisesRouting(target, reply)) return { outcome: "unsupported" };
+    const answer = await deps.deliver(deviceId, request);
+    if ("outcome" in answer)
+      return { outcome: answer.outcome, ...(answer.reason === undefined ? {} : { reason: answer.reason }) };
+    // `unsupported` says "needs `seanced update`", so only a refusal of the frame itself is worded so; a handler
+    // that crashed or a reply that did not parse is an answer that did not come, which `offline` says.
+    if (answer.code !== "unreachable" && answer.code !== "undelivered") {
+      deps.warn(`scheduler: session-message ${about} machine=${quote(deviceId)} refused code=${answer.code}`);
+    }
+    return { outcome: answer.code === "unsupported" || answer.code === "invalid_request" ? "unsupported" : "offline" };
+  };
+
   const route = async (
     message: SessionMessage,
     from: string,
@@ -67,62 +96,57 @@ export function createMessageRouter(deps: MessageRouterDeps): MessageRouter {
     /** What the receipt names: the task the sealer's own daemon bound, which only that daemon places a note for. */
     receiptTask: string | undefined,
   ): Promise<void> => {
-    const resolved = deps.resolve(message.to);
-    let outcome: ReceiptOutcome;
-    let reason: "nolistener" | undefined;
-    if (resolved.kind !== "forward") {
-      outcome = resolved.kind;
+    const common = {
+      id: message.id,
+      kind: message.kind,
+      text: message.text,
+      fromMachine: senderName,
+      origin: from,
+      ...(message.inReplyTo === undefined ? {} : { inReplyTo: message.inReplyTo }),
+      ...(fromTask === undefined ? {} : { fromTask }),
+      ...(fromTask === undefined || message.fromTitle === undefined ? {} : { fromTitle: message.fromTitle }),
+    };
+    let result: { readonly outcome: ReceiptOutcome; readonly reason?: "nolistener" };
+    let resolvedTask: string | undefined;
+    if (message.replyTo !== undefined) {
+      // A reply names the machine whose daemon holds the asker's handle: nothing is resolved, that daemon decides.
+      result = await forward(message.replyTo.deviceId, true, { ...common, replyTo: message.replyTo.id }, "reply");
     } else {
-      const self = resolved.deviceId === deps.selfDeviceId;
-      const target = deps.machines().find((m) => m.deviceId === resolved.deviceId);
-      if (!self && (target === undefined || !target.connected)) {
-        outcome = "offline";
-      } else if (target !== undefined && !advertisesRouting(target)) {
-        // Every PR 1 daemon advertises `messages` and none handles `deliver-message`, whose unknown-op branch never
-        // replies: forwarding would read as `offline` and invite a retry that can never land.
-        outcome = "unsupported";
+      const resolved = deps.resolve(message.to);
+      if (resolved.kind === "unknown") {
+        result = { outcome: "unknown" };
       } else {
-        const reply = await deps.deliver(resolved.deviceId, {
-          id: message.id,
-          taskId: resolved.taskId,
-          addressed: message.to,
-          kind: message.kind,
-          text: message.text,
-          fromMachine: senderName,
-          ...(message.inReplyTo === undefined ? {} : { inReplyTo: message.inReplyTo }),
-          ...(fromTask === undefined ? {} : { fromTask }),
-          ...(fromTask === undefined || message.fromTitle === undefined ? {} : { fromTitle: message.fromTitle }),
-          ...(resolved.settled ? { settled: true as const } : {}),
-        } satisfies DeliverMessageRequest);
-        if ("outcome" in reply) {
-          outcome = reply.outcome;
-          reason = reply.reason;
-        } else {
-          // `unsupported` says "needs `seanced update`", so only a refusal of the frame itself is worded so; a handler
-          // that crashed or a reply that did not parse is an answer that did not come, which `offline` says.
-          if (reply.code !== "unreachable" && reply.code !== "undelivered") {
-            deps.warn(
-              `scheduler: session-message to=${quote(resolved.taskId)} machine=${quote(resolved.deviceId)} refused code=${reply.code}`,
-            );
-          }
-          outcome = reply.code === "unsupported" || reply.code === "invalid_request" ? "unsupported" : "offline";
-        }
+        resolvedTask = resolved.taskId;
+        result =
+          resolved.kind === "forward"
+            ? await forward(
+                resolved.deviceId,
+                false,
+                {
+                  ...common,
+                  taskId: resolved.taskId,
+                  addressed: message.to,
+                  ...(resolved.settled ? { settled: true as const } : {}),
+                },
+                `to=${quote(resolved.taskId)}`,
+              )
+            : { outcome: resolved.kind };
       }
     }
-    if (receiptTask === undefined) return;
-    const taskId = resolved.kind === "unknown" ? undefined : resolved.taskId;
+    // Every admitted message is answered, an untasked sender's included: the sealer's own `sent` table finds the pane.
+    // A daemon that predates replies drops a receipt it has no task for, which costs nothing.
     const receipt = {
       id: message.id,
-      to: message.to,
       kind: message.kind,
-      outcome,
-      fromTask: receiptTask,
-      ...(taskId === undefined ? {} : { taskId }),
-      ...(reason === undefined ? {} : { reason }),
+      outcome: result.outcome,
+      ...(message.to === undefined ? {} : { to: message.to }),
+      ...(receiptTask === undefined ? {} : { fromTask: receiptTask }),
+      ...(resolvedTask === undefined ? {} : { taskId: resolvedTask }),
+      ...(result.reason === undefined ? {} : { reason: result.reason }),
     } satisfies MessageReceiptRequest;
-    const reply = await deps.receipt(from, receipt);
+    const answered = await deps.receipt(from, receipt);
     // A receipt is a courtesy: its failure is one line and nothing else (the sender's `routed` stands).
-    if (!reply.ok) deps.warn(`scheduler: message-receipt to=${quote(from)} failed code=${reply.code}`);
+    if (!answered.ok) deps.warn(`scheduler: message-receipt to=${quote(from)} failed code=${answered.code}`);
   };
 
   return {

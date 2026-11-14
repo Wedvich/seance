@@ -772,6 +772,15 @@ Séance's noise is cover for a real intruder.
    withhold or delay a message (the accepted availability class) or replay it inside the window to a second
    leader (de-duplicated at the target for `REPLAY_RETAIN_MS`); it cannot read one (sealed) or forge a sender
    (AAD-bound `from`). The relay sees one more envelope class and logs none per message.
+   A reply by handle (built 2026-11-14, "Replies by handle") adds one bearer: a message id, `crypto.randomUUID`, is the
+   only address a session with no task has. It is unguessable and appears in no audit line, log line or warning, and it
+   is bound twice: at the replier's daemon to the pane, pid, task and **`claude` process** the message was placed for
+   (not the pane and pid alone, which a hand-started session's shell outlives across a `claude` restart), and at the
+   asker's daemon to the pane, pid, task and process that sent it, while that process runs. A holder of the id who is
+   not that session gets `unknown`, in the sender's own rate bucket, and a cross-machine reply names only a device id
+   the leader forwards to (never a pane); the leader keeps no table of handles. The new party, a session that is
+   answered without being addressable, gets only the answer to what it sent, 1 h at most, and a `wake` only for a
+   question it asked itself.
    An attachment (built 2026-10-28) is one more thing a PSK holder hands the
    session, read under the same permission mode as the prompt. Its name reaches the seed only
    as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
@@ -1996,22 +2005,26 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   except `record`, the session's claim: at most `SUCCESSOR_RECORD_MAX` (7 168) UTF-16 units, never
   logged (built 2026-11-12). `drain` is `true` only, set while the sending daemon's machine is closed; the
   leader reads it only beside a status of that machine carrying `cl` (Daemon, "The drain's session ask").
-- `session-message { id, to, kind, text, fromTask?, fromTitle?, inReplyTo? }` (`SessionMessage`), an `EventOp`
+- `session-message { id, to | replyTo, kind, text, fromTask?, fromTitle?, inReplyTo? }` (`SessionMessage`), an `EventOp`
   daemon → scheduler, fire-and-forget like `session-pass` (built 2026-11-14; Local op socket, "Session messages",
   "Cross-machine"). `id` is the sending daemon's own `isMessageId` mint; `text` is at most `MESSAGE_ROUTE_MAX` of JSON
   and is never logged anywhere; `fromTask` is the sending pane's task as its daemon bound it and is honoured only for
-  a task the leader places or reserves on the sealer. Never from `"app"`.
-- `deliver-message { id, taskId, addressed, kind, text, inReplyTo?, fromTask?, fromTitle?, fromMachine, settled? }`
+  a task the leader places or reserves on the sealer. Never from `"app"`. `replyTo { id, deviceId }` stands in place of
+  `to` for a reply by handle (exactly one of the two): the leader resolves no task for it and forwards it to
+  `replyTo.deviceId` only (built 2026-11-14, "Replies by handle").
+- `deliver-message { id, (taskId, addressed | replyTo), kind, text, inReplyTo?, fromTask?, fromTitle?, fromMachine, settled?, origin? }`
   (`DeliverMessageRequest`) → `{ ok: true, outcome: "delivered" | "sent" | "held" | "ended" | "unknown", reason? }` or
   `invalid_request` / `unsupported` / a transport code (`DeliverMessageResponse`), scheduler → daemon, 10 s timeout.
   Sealed `from: "scheduler"` only; any other `from` is `invalid_request`. `reason: "nolistener"` only beside `ended`.
+  `taskId` and `addressed` are replaced by `replyTo` for a reply (never both); `origin` is the sealing daemon's device
+  id, set by the leader only on a message that came from one, the id a reply to it routes back to.
   A daemon without messaging answers `unsupported`; a daemon that predates the op never replies, which is why the
   leader forwards only to a machine advertising both `messages` and `messageRoute`.
-- `message-receipt { id, to, taskId?, kind, outcome, reason?, fromTask? }` (`MessageReceiptRequest`) →
+- `message-receipt { id, to?, taskId?, kind, outcome, reason?, fromTask? }` (`MessageReceiptRequest`) →
   `{ ok: true, outcome: "delivered" | "sent" | "dropped" }` or `invalid_request` / `unsupported` / a transport code
   (`MessageReceiptResponse`), scheduler → daemon, 10 s timeout. `outcome` is the deliver outcomes plus `offline` and
   `unsupported` (`ReceiptOutcome`). No text; sealed `from: "scheduler"` only. `fromTask` is optional so that a receipt
-  for an untasked sender parses on an older daemon and is dropped there.
+  for an untasked sender parses on an older daemon and is dropped there; `to` is optional for a reply's receipt.
 - `custodian-event { kind: "flag" | "unflag" | "failing", taskId?, reason?, note?, at }` (`CustodianEvent`), an
   `EventOp` daemon → scheduler, fire-and-forget like `session-event` (built 2026-11-14, custodian 6). `flag` carries a
   `taskId`, a `reason` from `FLAG_REASONS` and an optional `note` of at most `FLAG_NOTE_MAX` (200) UTF-16 units
@@ -2260,6 +2273,11 @@ an old peer's frames parse as before. Mixed versions:
     receiving a forward binds no peer, unlike `messages`); as a leader it routes a `session-message`. `send_message`
     sends `route: "send"` only against the verified leader advertising it, and the leader forwards only to a
     machine advertising `messages` and `messageRoute` (Local op socket, "Session messages", "Cross-machine").
+  - `CAPABILITIES.messageReply` (2026-11-14): an unknown string to an older reader, which keeps the machine. As a
+    daemon it acks untasked inbox listeners, keeps the `sent` and `received` handle tables and answers a
+    `deliver-message` carrying `replyTo`; as a leader it forwards one. A client sends a reply to another machine only
+    against the verified leader advertising it, and the leader forwards one only to a machine advertising it ("Replies
+    by handle"). It needs `messages` (peer binding), and is advertised beside it.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -10664,7 +10682,7 @@ executors further, but `origin=cli` should keep meaning "typed at this machine")
 a `rescan` op, or `availability`; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
 
-### Session messages (`daemon/src/messages.ts`) — built 2026-11-13 (PR 1) and 2026-11-14 (PR 2), docs/messaging.md
+### Session messages (`daemon/src/messages.ts`) — built 2026-11-13 (PR 1) and 2026-11-14 (PR 2, and replies by handle), docs/messaging.md
 
 Two sessions Séance spawned can message each other, across Claude accounts (exclaves share the machine's
 daemon) and, through the leader, across machines (below, "Cross-machine"). The sender's MCP `send_message`
@@ -10679,7 +10697,8 @@ session's messages. On a host that names no peer a listener is told `unsupported
 retry can ever bind there, so the mod waits it out for minutes. `parseMessageFrame` and `parseInboxFrame` (`daemon/src/message-frame.ts`) accept exactly
 their fields and no `pane`.
 
-- **`message`** (`{ v: 1, kind: "message", to, messageKind, text, inReplyTo? }`), sent by `seanced mcp`'s
+- **`message`** (`{ v: 1, kind: "message", to?, messageKind, text, inReplyTo? }`; `to` or `inReplyTo` is required, and
+  `to` left out is a reply by handle, "Replies by handle" below), sent by `seanced mcp`'s
   `send_message` (`daemon/src/send-message.ts`, silent: nothing reachable from `seanced mcp` calls `log.ts`,
   which is why the grace constant lives in `message-frame.ts`). One reply line:
   `{ ok: true, id, outcome: "delivered" | "sent" }` or `{ ok: false, code, reason? }`. The sender's task is
@@ -10695,13 +10714,15 @@ their fields and no `pane`.
   pane is gone, dead, re-tagged or whose pid changed (`sweep`, lazily at every send and listen, not on a
   timer).
 
-**The ack** is `{ ok: true, keep: { messages, bytes } }`,
-and only for a pane that carries a task this machine's ledger holds a launch of: nothing is ever addressed to
-any other pane, so its listener would only idle (**decided here**: a hand-started session, or a pane tagged
-with an id this machine never launched, is refused `untasked` instead, one bun process saved per such
-session). A refusal is `{ ok: false, code }` with `invalid`, `unbound`, `unsupported`, `stopping` or
+**The ack** is `{ ok: true, keep: { messages, bytes } }`, for **every bound pane** (amended 2026-11-14, D3). It was
+only for a pane that carried a task this machine's ledger held a launch of, since nothing was addressed to any
+other pane (a hand-started session, or a pane tagged with an id this machine never launched, was refused `untasked`,
+one bun process saved per such session). A session with no task is now reached as a reply, by the id of a message it
+sent ("Replies by handle"), so its listener is acked and holds the connection, the one bun process that costs. A
+daemon that predates replies still answers `untasked`, which is why the code and exit 4 stay. A refusal is
+`{ ok: false, code }` with `invalid`, `unbound`, `unsupported`, `stopping` or
 `untasked`. Exit codes of the CLI: 0 after an ack, 3 for an explicit `unsupported` and 4 for `untasked`
-(nothing a retry changes soon: the mod waits five minutes after either), 5 for `unbound` (**decided here**:
+(an old daemon only: the mod waits five minutes after either), 5 for `unbound` (**decided here**:
 mostly permanent, a claude in another tmux server, but also what a failed `tmux list-panes`, a null peer pid or
 a failed `/proc` read answers for a moment, so the mod waits a minute, under the 120 s listener grace, where
 five minutes would cost a message held for that session), 2 otherwise (a connection closed with no reply is what an old daemon dropping the frame
@@ -10740,8 +10761,8 @@ task X", not "not running"), and its own sends are an untasked session's. That i
 `assignment.window`: nothing routes on it.
 
 **The inbox in the daemon** is memory only, per pane: at most 32 messages and `4 × MESSAGE_MAX` bytes. A
-message is held only while the pane is bound to a task and its listener has not yet connected; any other goes
-to the listener at once, and the mod keeps it. Past either cap the oldest is dropped and the next push says
+message is held only while its listener has not yet connected and the pane is bound to a task, or the message is a
+reply held for its own session ("Replies by handle"); any other goes to the listener at once, and the mod keeps it. Past either cap the oldest is dropped and the next push says
 how many were. Each held message has its own grace timer, from when it was held (never one per inbox, which
 would age a later message by an earlier one's clock). A flush whose write fails (the connection closed, or its
 unread output passed the cap) leaves the unwritten messages held with their timers, for the next listener,
@@ -10781,7 +10802,10 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   user's instructions …"), because the Linux spike showed an information-only frame makes the model refuse
   even a harmless request. The text is this PR's own draft, the native wording not being available verbatim;
   the Linux live run's request step acted on a harmless request with it, and an adjustment toward the native
-  framing stays open to later live runs. An untasked sender is named as such and the reply clause is dropped.
+  framing stays open to later live runs. An untasked sender is named as such, and its reply clause says to answer with
+  `kind note`, `inReplyTo <id>` and no `to`; a tasked sender's names `to task X` beside the same two, the one address every
+  daemon and leader reads. A message a leader that predates replies forwarded carries no `origin`, so no handle is kept for
+  it: the wrapper (`byHandle: false`) then offers an untasked sender no reply clause and says it cannot be answered.
 - **The custodian as a sender** (custodian 8, "The custodian frame kind", `nudge`): `deliverAsCustodian(pane, text, expect)`
   is the daemon's own path into the same delivery, for one `request` to the task the named pane carries. `expect` is the
   pid and task the verb counted under: a pane carrying other ones now is `gone`. It takes no
@@ -10805,7 +10829,8 @@ audit message origin=message dir=in  from=<…> to="<task>" kind=<…> bytes=<n>
 ```
 
 `from=-` is a sender no pane could be found for, `from=custodian` the custodian's nudge. Never text, titles, message ids or pane ids (rejected:
-logging message ids beside the line; they join nothing the task ids do not).
+logging message ids beside the line; they join nothing the task ids do not). A reply's `to` is the constant
+`"reply"`: its recipient may have no task id, and the id it answers is a bearer handle, so it is in no line.
 
 **What a request may not do** (by construction): arrive as the user (never `asUser`, never a tmux key);
 answer or approve a dialog (`$.prompt.submit` waits a dialog out and nothing else types); change the
@@ -10816,8 +10841,8 @@ instructions is bounded only by the model, through the wrapper's "if it fits …
 **Standing instruction: the spawn's command line only** (decided by the owner 2026-11-13; the mod's
 `prompt.compose` section, once "layer 1", is dropped). Every tasked spawn's command line carries
 `--append-system-prompt <STANDING_INSTRUCTION>` through `shq()`: a constant, never wire text, only on spawns
-with a `taskId` (**decided here**: hand-started sessions are not addressable, so they get no standing
-instruction and need none; D3). Why layer 1 went: both spikes found the managed `cc-plugin-sec-default`
+with a `taskId` (**decided here**: hand-started sessions have no task id to address, so they get no standing
+instruction and need none; a reply to one names its handle in its own wrapper; D3, amended). Why layer 1 went: both spikes found the managed `cc-plugin-sec-default`
 plugin skips another mod's `prompt.compose` hook (Linux 2.1.323 and macOS 2.1.323), so the section never
 reached the model, and each skip prints "inbox: its prompt.compose hook was skipped…" in every session that
 loads the mod. Re-adding it is a small change if an org without the managed plugin wants it: a
@@ -10825,10 +10850,11 @@ loads the mod. Re-adding it is a small change if an org without the managed plug
 mod holds no wording of its own). Rejected: a line in the seed (lost at `/compact`, absent after `--resume`,
 and the seed is the prompt `forgetPrompt` and the record's size budget govern).
 
-**What each kind of session gets.** A spawned (tasked) session is addressable, can send and receives. A
-hand-started session in a tmux pane can send (the message says `from` an untasked session on `<machine>`);
-it is not addressable, so its listener is refused `untasked`. `claude --bg` has no `TMUX_PANE`, so the mod starts
-no listener and `send_message` answers `unbound`.
+**What each kind of session gets.** A spawned (tasked) session is addressable by task id, can send and receives. A
+hand-started session in a tmux pane can send (the message says `from` an untasked session on `<machine>`) and
+**receives the answers to what it sent**, by the id of the message answered, on this machine or another; nothing
+else reaches it, and it has no task id to address. Its listener is acked (an old daemon refuses it `untasked`).
+`claude --bg` has no `TMUX_PANE`, so the mod starts no listener and `send_message` answers `unbound`.
 
 **Rejected** for the listener: a `$.process.run` per check (a Bun start, tmux and ps calls per tick per
 session); `$.http.fetch({ socketPath })` polling (verified on macOS to bind the right pane, but
@@ -10885,8 +10911,8 @@ nothing:
    local send (`fromTask` only for a task its own ledger holds, `fromTitle` the display-only window name) and
    sends a `session-message` event (`SessionMessage`) sealed `from` its own device id to `SCHEDULER_ID`, or in
    process on the leader's machine (`MessagesDeps.route`, `run-capabilities.ts`). It answers
-   `{ ok: true, id, outcome: "routed" }` (with `receipt: false` for an untasked sender: the leader has nobody to
-   send a receipt to), or `no_leader` when there is no leg to send on, and `unsupported` for a daemon wired with
+   `{ ok: true, id, outcome: "routed" }` (an untasked sender's receipt reaches it too, through the daemon's own
+   `sent` table, "Replies by handle"; `receipt: false` is no longer emitted, though `seanced mcp` still parses it), or `no_leader` when there is no leg to send on, and `unsupported` for a daemon wired with
    no `route`. Nothing waits for the leader.
 3. **The leader admits** (`onEvent`, `daemon/src/leader.ts`, then `createMessageRouter`,
    `daemon/src/leader-messages.ts`) only a message sealed from a daemon and never `from: "app"`, parsed by
@@ -10943,11 +10969,12 @@ nothing:
    would otherwise deliver twice. Its `dir=in` audit line is a local message's.
 7. **The receipt.** Events are fire-and-forget, so the leader reports back with `message-receipt`
    (`MessageReceiptRequest`: id, the addressed `to`, the resolved `taskId`, `kind`, `outcome`, `reason?`, `fromTask`;
-   never text) to the sealing machine, and only when the sealer named a `fromTask` (one the leader has pruned
-   included, see step 3). The sender's daemon
-   (`Messages.receipt`) acts only on one sealed `from` the scheduler (or in process) and hands it only to a live
-   pane carrying the sending task its ledger holds a launch of (`dropped` otherwise: the sender's session ended, and
-   nothing is kept for it). The note is one fixed line per outcome, `receiptNote` (`shared/src/messages.ts`), never
+   never text) to the sealing machine, for every admitted message, `fromTask` or not (amended 2026-11-14; before it, only
+   when the sealer named one, a pruned one included, see step 3). The sender's daemon
+   (`Messages.receipt`) acts only on one sealed `from` the scheduler (or in process) and hands it only to the pane and
+   session its own `sent` table says sent that message while it still stands there (an untasked sender's only way) or
+   else a live pane carrying the sending task its ledger holds a launch of (`dropped` otherwise: the sender's session
+   ended, and nothing is kept for it). The note is one fixed line per outcome, `receiptNote` (`shared/src/messages.ts`), never
    message text:
    `delivered` ("… was delivered to its session", with "(now carried by task `X`)" when a chain moved it), `sent`
    ("… is waiting for its session's inbox listener (up to 120 s)"), `held` ("the task has not started yet, and
@@ -11009,6 +11036,108 @@ become a mailbox) and **at the sender's daemon with retries** (a second queue pe
 and duplicate rules). A target that is offline is dropped and answered `offline`; a message that landed whose
 reply was lost reads `offline` too, so a retry can duplicate it, and the wrapper names the message id so the
 receiver can tell.
+
+#### Replies by handle (built 2026-11-14, docs/messaging.md D3, amended)
+
+**The problem.** A session started by hand has no task id, so nothing could be addressed to it: the owner's
+2026-11-14 smoke test had an untasked session ask a task a question and the answer had nowhere to go. A reply is
+addressed by the id of the message it answers, the **handle**, whatever the replier's session is.
+
+**The two tables** (`Messages`, `daemon/src/messages.ts`, memory only, never at rest or on the wire): `sent`, the ids
+this daemon minted for a session (so an answer finds its asker), and `received`, the ids placed in a session's pane
+(so only that session can answer them). Each holds `REPLY_HANDLE_TTL_MS` (1 h) and `REPLY_HANDLE_MAX` (256) entries;
+past the cap the oldest entry of the pane holding the most goes, so one busy sender's notes cannot push a quiet
+session's open question out, and within that pane a `sent` entry for a note goes before one for a question or request
+(a note's serves an optional receipt, a question's carries the reply and its wake); a restart drops both. An entry binds
+**pane id, pane pid, task (null stays null) and `session`**. A handle also dies when its pane is gone, re-tagged or
+respawned (swept at every send and listen; an empty pane list is a failed tmux read and costs no handle), and a
+listener's bind drops every handle of its pane made for another pane process or task, or for a session that no longer
+runs; a handle of another `claude` still running there (a nested one) stays, since each is bound to its own session.
+
+**The binding is to the `claude` process (`Bound.session`), not to the pane and its pid alone.** A hand-started
+session's pane process is its shell, which outlives a restarted `claude` (`claude`, `^C`, `claude` again) and fires
+no `ended`, so a handle bound to the pane pid would answer a stranger: the second `claude` would read the first's
+replies and could answer its questions. `session` is the `claude` process itself, read off the process tree, never the pane's start command
+(`sessionOf`, `daemon/src/messages.ts`): the **innermost** process on the peer's chain (`ancestorBelow`,
+`daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
+`processNames`: argv[0] and comm on Linux, `pbi_comm` and `pbi_name` from `proc_pidinfo` on macOS, `ps` only where
+libproc will not load), with its **start time** (`processStart`: `/proc/<pid>/stat` field 22, or `pbi_start_tvsec` and
+`pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seanced inbox` or `seanced mcp`, is the child
+of the `claude` that started it: a shell script named `claude` above it that runs `claude` twice (`claude "$@" || claude
+--continue`, a restart loop; its comm is the script's name) is never the session, the real `claude` under it is, and a
+`claude` a tool started under another is its own session, not the outer one's. A pane that `exec`s `claude` is that
+process (every child binds to it), and a séance spawn is the same (its launch `exec`s `claude`; a macOS `caffeinate`
+wrapper is the pane process and `claude` its child, the one found). **A name is a hint, not a proof**: any process can
+take it (`exec -a claude`), but only the innermost counts, so one that does is its own session and holds none of
+another's handles. The executable's own path is not read: the native install's is a version
+(`…/versions/2.1.325`), not `claude`. The start time tells claude #2 from a claude #1 whose pid the kernel recycled
+(macOS wraps at 99 999) inside the handles' hour; a session whose start time cannot be read (gone, a zombie, macOS
+without libproc) has none. **No `claude` on the chain is no session, not no peer**: the binding then carries
+`session: null`, and only what needs a handle is refused or skipped. Such a peer (a bare shell's child, a `claude`
+that runs as `node` from an npm install; `sessions.ts` lists the same cost) still sends to a task by its id, as in Part
+A, and still listens in a pane whose task this machine launched; it is refused `unbound` as a listener in any other
+pane; it gets no `sent` entry (its message carries no handle, so a question of its own cannot be answered by one and
+its wrapper on a local receiver says so), no `received` entry (a message placed for its listener is not answerable by
+handle) and no `wake`, and a reply by handle from it is `unknown`. The pane's start command (`ours`,
+`#{m:*--remote-control*,…}`) is deliberately not evidence: `claude --remote-control; exec $SHELL` matches it and its
+pane process is the shell that outlives every `claude` in it. A reply is accepted only from the pane, pid, task and session the message was
+placed for (`unknown` otherwise, in the sender's own send rate bucket: a refused probe costs the same as a send); it reaches the asker only at the pane, pid, task
+and session the `sent` entry names, **while that `claude` still runs** (`kill(pid, 0)`: a dead one is `ended` at
+once, and a receipt for it is dropped, rather than waiting a grace for a reconnect that cannot come). A reply held
+for a listener is `only` for its session: it meets that session's listener or reconnect and no other, and the launch
+and restart graces, which a stranger's listener could meet, do not apply, so a reply to an asker with no listener
+answers `ended` (`nolistener`), never a false `sent`.
+
+**One id mints and the other binds.** A message id is `crypto.randomUUID` (`isMessageId`): unguessable, so it works
+as a **bearer handle**, and it stays out of every audit line, log line and warning (a reply's recipient is the
+constant `reply`). A message UUID also passes `isTaskId`, so `sendMessage` reads `to` equal to `inReplyTo` as the
+reply it is.
+
+**Same machine.** `inReplyTo` and no `to`: the `received` table says whether this session got that message and where
+it came from; `origin` null is a local sender, delivered to the `sent` entry's pane by the listener write or hold a task message takes.
+
+**Across machines.** A reply to a message that arrived routed (its `received` entry carries `origin`, the sealing
+daemon's id, set by the leader on `deliver-message`) goes `route: "ask"` then `route: "send"` like a task message,
+as a `session-message` carrying `replyTo { id, deviceId }` **in place of** `to` (`SessionMessage` and
+`DeliverMessageRequest` are unions: `to` or `replyTo`, never both, and the parser refuses neither or both). The
+leader resolves nothing: it forwards a `deliver-message` carrying `replyTo` and `origin` to `replyTo.deviceId` only,
+a connected machine advertising `CAPABILITIES.messageReply` (`unsupported` otherwise, `offline` when it is not
+connected), and the target daemon's own `sent` table decides what, if anything, the id names. A reply to a reply
+needs no new state: the target places it with the same `origin`, so the next one routes back. The receipt carries no
+`to` (`MessageReceiptRequest.to` is optional; `receiptNote` words it "your reply `<id>`") and goes to the sealer, whose
+`sent` table finds the replier's pane and session; for an asker whose **task this machine's ledger holds** the launch and
+restart graces hold it as they always held a task-addressed receipt (its `claude` is the pane's own process), and any
+other asker's (untasked, or tagged with a task the ledger does not hold, where a shell's later `claude` could be) is
+pinned to its session. The gate is the same two-frame one, now asking the verified leader
+for `messageReply` (`messageRouteGate("reply")`): a refusal names `seanced update` and says nothing was sent.
+
+**`wake`.** A reply to a **question or request** the receiving session itself sent is an answer, and an idle session
+that never reads its inbox would never see it. The daemon sets `wake: true` on that inbox line, only on the listener
+of the session that sent the question (its own `sent` table, never a field of a frame), and the mod then delivers even
+a `note` with `$.prompt.submit`, as it does a question. It is no wider than a question's delivery: no `asUser`,
+no `$.prompt.fill`, no key, no dialog answered. A note that answers nothing the session asked does not wake it, so
+two sessions cannot wake each other by replying to replies for ever, and the rate limit still bounds a loop.
+
+**Skew.** `CAPABILITIES.messageReply` is advertised by a daemon that acks untasked listeners, keeps both tables and
+answers a reply's `deliver-message`; an old reader keeps the machine. A new `seanced mcp` against a daemon without it
+sends a frame the old parser refuses `invalid`, worded as "it may predate replies by message id (`seanced update`)",
+nothing sent. A leader without it is refused at the gate. A new leader forwards a reply only to a machine advertising
+it. A frame that carries the handle as `to` can only come from a caller that predates replies (a current
+`sendMessage` leaves `to` out), which gated on routing alone: for a handle that came from another machine it is
+answered `unknown` and nothing is routed, since the leader it checked may drop a reply it cannot read. A handle
+whose origin is this machine (the leader returned a message to its sender's own machine) is answered locally,
+through the `sent` table. An old daemon answering a new receipt with no `to` drops it as unparseable, which is the courtesy lost, not the
+message.
+
+**Rejected** (docs/messaging.md D3, amended): **machine id plus pane id as a general address** (a pane id outlives the
+session in it and names no session, so it is a guess the daemon cannot check, and a hand-started session's pane is
+re-used by the next `claude`); **a synthetic task id, or a queue entry, for a hand-started session** (it would put a
+session Séance never spawned in the leader's record and the Queue screen, with a lifecycle nothing ends); **a
+leader-held reply table** (the leader would keep a map of who talked to whom, a mailbox's worth of metadata, to
+answer a question the asker's own daemon can: it keeps the minting table already); **the Claude session id** (a
+`$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the peer-pid binding
+exists to avoid); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
+question is the common case).
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
@@ -12612,8 +12741,9 @@ Local op socket, "Session messages"):
   and given up, and the next main `turn.start` of a live session begins a new loop. The mod reads each stdout line (a piece is not a line: it reassembles), takes the ack's
   `keep`, and pushes each message's `push` text verbatim; it holds no wording of its own.
 - **Which call delivers.** A question or a request is `$.prompt.submit` (never awaited by the reader: it stays
-  pending until a running turn ends), which wakes an idle session, waits a dialog out and never answers it.
-  A note is `$.session.append`, a row the model reads at its next turn without waking the session, mid-turn or
+  pending until a running turn ends), which wakes an idle session, waits a dialog out and never answers it, and so
+  is a note whose line carries `wake` (the daemon's mark that it answers a question or request this session sent,
+  "Replies by handle"). Any other note is `$.session.append`, a row the model reads at its next turn without waking the session, mid-turn or
   idle (the Evidence rows say neither wakes it), held in the mod only while a dialog is open and flushed when the
   last one closes or the main loop's turn starts or completes. **Never `asUser`, never `$.prompt.fill`,
   never tmux keys:** the person's draft is never touched and no delivery can answer a dialog. A request is

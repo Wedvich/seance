@@ -255,6 +255,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     windowName: paneWindowName,
     launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
     machine: ctx.config.name,
+    deviceId: ctx.deviceId,
     audit: messageAudit(daemonSink),
     // In process when this machine leads (false while its term is still taking over), else sealed to the scheduler.
     route: (message) =>

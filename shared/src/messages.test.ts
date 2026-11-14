@@ -44,15 +44,32 @@ describe("renderMessage", () => {
     );
   });
 
-  test("a sender with no title omits it, and an untasked sender is named as such and cannot be replied to", () => {
+  test("a sender with no title omits it, and an untasked sender is named as such and replied to by handle alone", () => {
     const head = (m: MessageSender, kind: "note" | "question" | "request"): string =>
       renderMessage({ kind, id: ID, from: m, text: "t" }).split("\n\n")[0] ?? "";
     expect(head(untitled, "note")).toContain("(task `t-0123456789abcdef`, on `boxy`, message `" + ID + "`)");
     expect(head(untasked, "note")).toContain("(an untasked session on `boxy`, message `" + ID + "`)");
-    expect(head(untasked, "question")).toContain("It came from a session with no task, so it cannot be replied to.");
-    expect(head(untasked, "question")).not.toContain("send_message");
-    expect(head(untasked, "request")).toMatch(/your user's instructions\.$/u);
-    expect(head(untasked, "request")).not.toContain("send_message");
+    for (const kind of ["question", "request"] as const) {
+      expect(head(untasked, kind)).toContain("kind note, inReplyTo " + ID + ", and no `to`");
+      expect(head(untasked, kind)).not.toContain("to task");
+      expect(head(untasked, kind)).not.toContain("cannot be replied to");
+    }
+  });
+
+  test("a tasked sender is answered by its task id alone, which every leader reads", () => {
+    for (const kind of ["question", "request"] as const) {
+      const head = renderMessage({ kind, id: ID, from: tasked, text: "t" }).split("\n\n")[0] ?? "";
+      expect(head).toContain(`to task t-0123456789abcdef, kind note, inReplyTo ${ID}`);
+      expect(head).not.toContain("no `to`");
+    }
+  });
+
+  test("an untasked sender's message that carries no handle says it cannot be answered, rather than offering a reply that would fail", () => {
+    for (const kind of ["question", "request"] as const) {
+      const head = renderMessage({ kind, id: ID, from: untasked, text: "t", byHandle: false }).split("\n\n")[0] ?? "";
+      expect(head).toContain("no handle");
+      expect(head).not.toContain("inReplyTo");
+    }
   });
 });
 
@@ -102,6 +119,8 @@ describe("stub, dropped notice, standing instruction and ids", () => {
   test("the standing instruction is plain text that cannot be taken for a Remote Control pane's flag", () => {
     expect(STANDING_INSTRUCTION).toContain("read_messages");
     expect(STANDING_INSTRUCTION).toContain("send_message");
+    // The one place a session with no task to name learns that its answer is addressed by the message id.
+    expect(STANDING_INSTRUCTION).toContain("inReplyTo");
     expect(STANDING_INSTRUCTION).not.toContain("--remote-control");
     expect(STANDING_INSTRUCTION).not.toContain("`");
   });

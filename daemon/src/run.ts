@@ -370,7 +370,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.messageRoute,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
         // so it could not receive.
-        ...(peerPidSupported() && (await peerBindingProblem()) === null ? [CAPABILITIES.messages] : []),
+        // `messageReply` beside it: the handle tables and the untasked ack bind by the same peer pid, and one gate
+        // is simpler than two (a leader whose host cannot bind refuses replies, which no host in the fleet is).
+        ...(peerPidSupported() && (await peerBindingProblem()) === null
+          ? [CAPABILITIES.messages, CAPABILITIES.messageReply]
+          : []),
         // Only where an ask is wired (`sessionEvents` wires none without a despawn): the clients' wording and
         // "Drain now" promise an action.
         ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),

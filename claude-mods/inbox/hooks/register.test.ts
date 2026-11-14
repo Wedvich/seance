@@ -11,8 +11,8 @@ const KEEP = { messages: 32, bytes: 262_144 };
 const ACK = `${JSON.stringify({ ok: true, keep: KEEP })}\n`;
 const READ = "mcp__inbox__read_messages";
 
-const line = (id: string, messageKind: string, push: string, body?: string): string =>
-  `${JSON.stringify({ v: 1, id, messageKind, push, ...(body === undefined ? {} : { body }) })}\n`;
+const line = (id: string, messageKind: string, push: string, body?: string, wake?: unknown): string =>
+  `${JSON.stringify({ v: 1, id, messageKind, push, ...(body === undefined ? {} : { body }), ...(wake === undefined ? {} : { wake }) })}\n`;
 
 interface Child {
   readonly argvs: readonly (readonly string[])[];
@@ -389,6 +389,23 @@ describe("delivery", () => {
     await until(() => child.appended().length === 1, "the appended note");
     expect(child.appended()).toEqual(["A note: schema v2 landed"]);
     expect(child.submitted).toEqual([]);
+  });
+
+  test("a note the daemon marked wake is submitted, since it answers a question this session sent; any other value of the mark is not one", async ($, on) => {
+    const child = await acked($, on);
+    child.say(line("m1", "note", "A note: it is src/a.ts", undefined, true));
+    await until(() => child.submitted.length === 1, "the woken note");
+    expect(child.submitted).toEqual(["A note: it is src/a.ts"]);
+    expect(child.appended()).toEqual([]);
+    for (const [id, wake] of [
+      ["m2", false],
+      ["m3", "true"],
+      ["m4", 1],
+    ] as const) {
+      child.say(line(id, "note", `A note: ${id}`, undefined, wake));
+    }
+    await until(() => child.appended().length === 3, "the plain notes");
+    expect(child.submitted).toHaveLength(1);
   });
 
   test("a note mid-turn is appended at once too", async ($, on) => {

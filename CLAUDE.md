@@ -50,12 +50,13 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — spec, PR 1 and PR 2 built: local delivery (the `inbox` mod, the `inbox` and
-  `message` frames, `send_message`) and cross-machine routing through the leader (`session-message`,
-  `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`), recorded in DESIGN.md (Local op socket,
-  "Session messages" and its "Cross-machine" subsection; Claude Code mods; MCP server; Threat model item 6).
-  What is left in the file is the adapter seam (PR 3), the open questions and the spike evidence.
-  Read it before adding a leader event op or an adapter.
+- **docs/messaging.md** — spec, PR 1, PR 2 and the reply by handle built: local delivery (the `inbox` mod, the `inbox`
+  and `message` frames, `send_message`), cross-machine routing through the leader (`session-message`,
+  `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`) and replies to a session with no task, by the id of
+  the message answered, on one machine or across (`replyTo`, `CAPABILITIES.messageReply`, `wake`; D3 amended), recorded
+  in DESIGN.md (Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections; Claude
+  Code mods; MCP server; Threat model item 6). What is left in the file is the adapter seam (PR 3), the open questions
+  and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/custodian.md** — what is left of the custodian spec: build item 4b (contain the round's sandbox, then
   remove `ROUNDS_LIVE`), the open build-time details, and an
   index of where each decision (C1–C49) is recorded in DESIGN.md. Everything else is built and recorded there: the
@@ -426,9 +427,9 @@ green:
   listener there is told `unsupported`, not `unbound`, since no retry can bind) or the pid came back null, never
   falling back to a claimed pane. `inbox` is the first frame that hands text
   out, and binds once at accept; there is one listener per pane, closed (lazily, at the next send or listen)
-  when the pane's task changes, and only a pane carrying a task this machine launched is acked.
-  The daemon's inbox is memory only (32 messages, `4 × MESSAGE_MAX`), cleared on `ended`, rebind and
-  restart. A message is delivered only to a live pane carrying a task this machine's launch ledger
+  when the pane's task changes. Every bound pane is acked, an untasked one included: no task id reaches it, but a reply
+  by handle (below) can. The daemon's inbox is memory only (32 messages, `4 × MESSAGE_MAX`), cleared on `ended`, rebind and
+  restart. A message addressed by task id is delivered only to a live pane carrying a task this machine's launch ledger
   holds, and a sender counts as tasked only when the ledger holds its pane's task. Text is never
   logged and never in argv: `--append-system-prompt` carries only the constant `STANDING_INSTRUCTION`,
   on tasked spawns. The mod delivers only by `$.prompt.submit` or `$.session.append`, never `asUser`,
@@ -439,6 +440,29 @@ green:
   Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
+  **A session with no task is reached only as a reply, by the id of a message it sent** (DESIGN.md, "Session messages",
+  "Replies by handle"; docs/messaging.md D3, amended). A `message` frame carries `inReplyTo` and no `to` (or the same id as
+  `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each (past the cap the oldest entry of the busiest pane goes, a note's before a question's), hold a handle:
+  `sent` (ids this daemon minted, for the asker) and `received` (ids placed in a pane, for the replier). A message id is
+  `crypto.randomUUID`, so the id is a bearer handle and no audit line, log line or warn carries one (the audit names the
+  recipient as the constant `reply`). **Every entry binds the `claude` process, not the pane and its pid alone**
+  (`Bound.session`: `<pid>:<start time>` of the innermost process on the peer's chain, peer first, that is called `claude`
+  (`sessionOf`, read by `processNames`; a name is a hint any process can take, and only the innermost counts, so a
+  wrapper script named `claude` is never the session), never from the pane's start command, `BoundPane.ours`, nor the
+  executable's path; none on the chain is no session: that peer still sends by task id and listens where its task was
+  launched here, but holds no handle, `sent` entry, `received` entry or `wake`), since a hand-started
+  session's pane process is the shell, which outlives a restarted `claude`, and no `ended` fires for an untasked pane. A reply is accepted only from the pane, pid, task (null staying
+  null) and session the message was placed for (`unknown` otherwise, in the sender's own rate bucket), and reaches the
+  asker only at the pane, pid, task and session the `sent` entry names, while that `claude` still runs, the same
+  process by start time as well as pid (`ended` otherwise): held for no other session, never given to the next `claude`
+  in the same pane, and a held reply meets a listener of its own session only (`only`). A listener's bind drops every
+  handle of its pane made for another pane process or task, or for a session that no longer runs. A reply to an asker on another machine goes through the leader as a `session-message` carrying
+  `replyTo` (`{id, deviceId}`) and no `to`; the leader resolves nothing for it, forwards it to `replyTo.deviceId` only
+  while that machine advertises `CAPABILITIES.messageReply` (`unsupported` otherwise), with `origin` the sealer's id
+  (what a later reply routes back to), and the target daemon's own `sent` table decides. `wake` is on an inbox line only
+  when the daemon's own `sent` table says the message answers a question or request that this pane's session sent (never
+  from a frame), and only on that session's listener; the mod then submits even a note. A client sends a reply to
+  another machine only after the same verified-leader gate, now for `messageReply` (`messageRouteGate("reply")`).
   **A message to a task not deliverable on its machine goes through the leader, which keeps nothing**
   (DESIGN.md, "Session messages", "Cross-machine"). A `message` frame carries `route` only as `"ask"` or
   `"send"`: `ask` is answered `remote` (in a rate bucket of its own, same limits, so a loop of asks is bounded
@@ -462,9 +486,11 @@ green:
   nothing and logs no line per message, title or id, only a drop or a failed forward or receipt that names a task
   or machine id. A daemon acts on `deliver-message` and `message-receipt` only sealed `from` the scheduler (or in
   process), through their own parsers; delivers only to a live pane carrying a task its own launch ledger holds
-  (a `deliver-message` for another is `unknown`); de-duplicates a forward by message id, and a receipt by id and
-  outcome, for `REPLAY_RETAIN_MS`; and hands a receipt only to the pane carrying the sending task, as the one fixed line `receiptNote` makes per
-  outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
+  (a `deliver-message` for another is `unknown`), or, for a `replyTo`, to the pane and session its own `sent` table
+  names; de-duplicates a forward by message id, and a receipt by id and
+  outcome, for `REPLAY_RETAIN_MS`; and hands a receipt only to the pane its own `sent` table says sent that message
+  (an untasked sender's only way, to its session alone) or else the pane carrying the sending task, as the one fixed line
+  `receiptNote` makes per outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
 - **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
   "The custodian frame kind"): the round's seven verbs `sessions`, `close <pane>`, `flag <pane>`, `nudge <pane>`, `interrupt <pane>`, `notes` and `done`, and no other
   act, built but held with the seat (`ROUNDS_LIVE`: no round runs, so the frame answers `unsupported`). The verbs

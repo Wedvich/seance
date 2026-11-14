@@ -1,5 +1,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { exec } from "./exec.ts";
 
 /**
@@ -96,10 +98,46 @@ export function parsePsParents(text: string): ReadonlyMap<number, number> {
   return parents;
 }
 
-/** `proc_pidinfo`'s flavor for struct proc_bsdinfo (<sys/proc_info.h>): 136 bytes, `pbi_ppid` a uint32 at 16. */
+/**
+ * `proc_pidinfo`'s flavor for struct proc_bsdinfo (<sys/proc_info.h>): 136 bytes. `pbi_ppid` is a uint32 at 16,
+ * `pbi_comm[16]` at 48 (the kernel's p_comm), `pbi_name[32]` at 64, and `pbi_start_tvsec`/`pbi_start_tvusec` uint64s
+ * at 120 and 128 (the process's start time).
+ */
 const PROC_PIDTBSDINFO = 3;
 const BSDINFO_BYTES = 136;
 const BSDINFO_PPID_OFFSET = 16;
+const BSDINFO_COMM_OFFSET = 48;
+const BSDINFO_COMM_BYTES = 16;
+const BSDINFO_NAME_OFFSET = 64;
+const BSDINFO_NAME_BYTES = 32;
+const BSDINFO_START_SEC_OFFSET = 120;
+const BSDINFO_START_USEC_OFFSET = 128;
+
+export interface BsdInfo {
+  readonly ppid: number;
+  /** `pbi_comm` and `pbi_name`, without their NULs: what the kernel calls the process. */
+  readonly names: readonly string[];
+  /** Start time as `<sec>.<usec>`: with the pid, who the process is. */
+  readonly start: string;
+}
+
+function cString(bytes: Uint8Array): string {
+  const end = bytes.indexOf(0);
+  return new TextDecoder().decode(end === -1 ? bytes : bytes.subarray(0, end));
+}
+
+/** The fields of a `proc_bsdinfo` struct this module reads. Null for a buffer that is not one. */
+export function parseBsdInfo(info: Uint8Array): BsdInfo | null {
+  if (info.byteLength !== BSDINFO_BYTES) return null;
+  const view = new DataView(info.buffer, info.byteOffset, info.byteLength);
+  const names = [
+    cString(info.subarray(BSDINFO_COMM_OFFSET, BSDINFO_COMM_OFFSET + BSDINFO_COMM_BYTES)),
+    cString(info.subarray(BSDINFO_NAME_OFFSET, BSDINFO_NAME_OFFSET + BSDINFO_NAME_BYTES)),
+  ].filter((name, at, all) => name !== "" && all.indexOf(name) === at);
+  const sec = view.getBigUint64(BSDINFO_START_SEC_OFFSET, true);
+  const usec = view.getBigUint64(BSDINFO_START_USEC_OFFSET, true);
+  return { ppid: view.getUint32(BSDINFO_PPID_OFFSET, true), names, start: `${sec}.${usec}` };
+}
 
 function loadProcPidInfo() {
   if (process.platform !== "darwin") return null;
@@ -120,11 +158,10 @@ function loadProcPidInfo() {
 let procPidInfo: ReturnType<typeof loadProcPidInfo> | undefined;
 
 /**
- * macOS's parent of `pid` from the kernel's own record, exec-free — what `ps`
- * reads too, for one process instead of all. Null when gone or unreadable, and
- * undefined where the call will not load, so the caller falls back to `ps`.
+ * macOS's record of `pid` from the kernel itself, exec-free — what `ps` reads too, for one process instead of all.
+ * Null when gone or unreadable, and undefined where the call will not load, so the caller falls back to `ps`.
  */
-export function bsdParent(pid: number): number | null | undefined {
+export function bsdInfo(pid: number): BsdInfo | null | undefined {
   if (procPidInfo === undefined) procPidInfo = loadProcPidInfo();
   if (procPidInfo === null) return undefined;
   const info = new Uint8Array(BSDINFO_BYTES);
@@ -134,7 +171,43 @@ export function bsdParent(pid: number): number | null | undefined {
   } catch {
     return null;
   }
-  return new DataView(info.buffer).getUint32(BSDINFO_PPID_OFFSET, true);
+  return parseBsdInfo(info);
+}
+
+/** The kernel's parent of `pid`: see `bsdInfo` for the null and undefined. */
+export function bsdParent(pid: number): number | null | undefined {
+  const info = bsdInfo(pid);
+  return info === undefined ? undefined : (info?.ppid ?? null);
+}
+
+/**
+ * `/proc/<pid>/stat` after `comm`'s closing paren: field 3 (state) first, so the start time, field 22, is index 19.
+ * Null for a zombie or a dead process, which is no process for anything that asks who runs.
+ */
+export function parseProcStatStart(stat: string): string | null {
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  const state = fields[0];
+  const start = fields[19];
+  if (state === undefined || state === "Z" || state === "X" || state === "x") return null;
+  return start !== undefined && /^\d+$/u.test(start) ? start : null;
+}
+
+/**
+ * What tells one process from a later one with the same pid: its start time (clock ticks after boot on Linux, the
+ * kernel's `sec.usec` on macOS). Null when the process is gone, a zombie or unreadable, and where nothing reads it
+ * (macOS without libproc), so a caller binds nothing to a process it cannot tell apart. Synchronous on purpose: the
+ * read is a few microseconds and callers check it in the middle of a sweep.
+ */
+export function processStart(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      return parseProcStatStart(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+  return bsdInfo(pid)?.start ?? null;
 }
 
 /** Bounded: a pid reused mid-walk could close a loop. */
@@ -147,15 +220,54 @@ const MAX_DEPTH = 32;
  * fixed-argv `ps` lists every parent at once. Nothing a peer sent reaches any.
  */
 export async function ancestorIn<T>(pid: number, targets: ReadonlyMap<number, T>): Promise<T | null> {
+  return (await ancestorBelow(pid, targets))?.hit ?? null;
+}
+
+/**
+ * `ancestorIn` plus the chain under the hit: the pids from the peer up to, not including, the target, peer first (empty
+ * when the peer is the target itself). Messaging looks for the `claude` process on it, since a hand-started session's
+ * pane process is the shell, which outlives the `claude` that is its child.
+ */
+export async function ancestorBelow<T>(
+  pid: number,
+  targets: ReadonlyMap<number, T>,
+): Promise<{ readonly hit: T; readonly below: readonly number[] } | null> {
   const parentOf = await parentLookup();
   let current: number | null = pid;
+  const below: number[] = [];
   for (let depth = 0; current !== null && current > 1 && depth < MAX_DEPTH; depth++) {
     const hit = targets.get(current);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) return { hit, below };
+    below.push(current);
     // oxlint-disable-next-line no-await-in-loop -- each hop needs the one before it
     current = await parentOf(current);
   }
   return null;
+}
+
+/**
+ * What a process is called to tmux and `ps`, as `CLAUDE_COMMAND` (`sessions.ts`) expects it. Linux: argv[0]'s basename
+ * (the symlink name `claude`) and the kernel's comm (the versioned filename, or a script's own name). macOS: the
+ * kernel's `pbi_comm` and `pbi_name` from `proc_pidinfo`, exec-free, else (libproc will not load, or the process is
+ * another user's) `ps -o comm=`, which prints argv[0] as exec'd. Either way a name is something the process or its exec
+ * caller chose: a hint where to look on the process tree, never proof of a claude. Empty when the process is gone.
+ */
+export async function processNames(pid: number): Promise<readonly string[]> {
+  if (process.platform === "linux") {
+    const names: string[] = [];
+    const argv0 = (await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "")).split("\0")[0] ?? "";
+    if (argv0 !== "") names.push(basename(argv0));
+    const comm = (await readFile(`/proc/${pid}/comm`, "utf8").catch(() => "")).trim();
+    if (comm !== "") names.push(comm);
+    return names;
+  }
+  const info = bsdInfo(pid);
+  if (info !== undefined && info !== null) return info.names;
+  // A pid gone is gone to `ps` too: only a refused or unloadable read is worth the exec.
+  if (info === null && !exists(pid)) return [];
+  const listed = await exec(["ps", "-o", "comm=", "-p", String(pid)], { timeoutMs: 5_000 }).catch(() => null);
+  const path = listed?.exitCode === 0 ? listed.stdout.trim() : "";
+  return path === "" ? [] : [basename(path)];
 }
 
 export async function parentLookup(): Promise<(pid: number) => Promise<number | null>> {
