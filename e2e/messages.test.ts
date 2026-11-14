@@ -55,6 +55,13 @@ const ROUTING_READY =
     state.relay.machines.find((m) => m.deviceId === suiteId)?.capabilities?.includes(CAPABILITIES.messageRoute) ===
       true;
 
+/** The second machine; on the same state dir it boots again as the same device, as the other e2e files rely on. */
+const bootBox = (): Promise<SecondDaemon> =>
+  stack.startSecondDaemon({
+    name: "MsgBox",
+    exclaves: [{ id: "default", observedAtMs: Date.now(), fiveHourPct: 10 }],
+  });
+
 beforeAll(async () => {
   suite = await startSuite("e2e-messages");
   ({ base, stack } = suite);
@@ -69,10 +76,7 @@ beforeAll(async () => {
   await stack.restartDaemon();
   await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
   await stack.daemon.leader.settled();
-  second = await stack.startSecondDaemon({
-    name: "MsgBox",
-    exclaves: [{ id: "default", observedAtMs: Date.now(), fiveHourPct: 10 }],
-  });
+  second = await bootBox();
   app = startApp(stack);
   const ready = await app.waitForApp(
     ROUTING_READY(stack.deviceId, second.deviceId),
@@ -350,7 +354,7 @@ describe("session messages across machines: sender ↔ leader ↔ target daemon 
   test("a message to a superseded task follows its chain: no such task while the successor is missing, then the successor's session", async () => {
     // The predecessor was seeded superseded naming a successor the queue does not hold yet, so the chain breaks.
     const sender = await runTask("box");
-    let successorRunning = false;
+    let successorCreated = false;
     try {
       const s = await session(sender, "box");
       const first = await s.send(PREDECESSOR, SECRET);
@@ -366,6 +370,8 @@ describe("session messages across machines: sender ↔ leader ↔ target daemon 
         spec: {
           repo: origin,
           mode: "worktree",
+          // Routing ignores `succeeds.at`, and both machines list the fixture repo: pinned, the session is where `session` looks.
+          pin: { deviceId: stack.deviceId },
           succeeds: {
             task: PREDECESSOR,
             account: "org:e2e",
@@ -377,8 +383,8 @@ describe("session messages across machines: sender ↔ leader ↔ target daemon 
         createdAt: Date.now(),
       });
       expect(created).toEqual({ ok: true, landedEarlier: false });
-      await running(SUCCESSOR);
-      successorRunning = true;
+      successorCreated = true;
+      await running(SUCCESSOR, "suite");
       const t = await session(SUCCESSOR, "suite");
       const again = await s.send(PREDECESSOR, `${SECRET}-again`);
       expect(again.ok).toBe(true);
@@ -394,7 +400,7 @@ describe("session messages across machines: sender ↔ leader ↔ target daemon 
       );
     } finally {
       await cancelTask(client(), sender);
-      if (successorRunning) await cancelTask(client(), SUCCESSOR);
+      if (successorCreated) await cancelTask(client(), SUCCESSOR);
     }
   }, 150_000);
 
@@ -420,8 +426,17 @@ describe("session messages across machines: sender ↔ leader ↔ target daemon 
       );
     } finally {
       await cancelTask(client(), sender);
-      // The target's machine is gone: its record settles when it returns, and the file's afterAll stops what is left.
-      if (!stopped) await cancelTask(client(), target);
+      if (stopped) {
+        // Same device, back up: the target's session lives in its tmux server and its record is the machine's to settle,
+        // so the machine returns for the cancel instead of leaving a running task holding a slot.
+        second = await bootBox();
+        const boxId = machineId("box");
+        await app?.waitForApp(
+          (state) => state.relay.machines.find((m) => m.deviceId === boxId)?.connected === true,
+          "the second machine to return",
+        );
+      }
+      await cancelTask(client(), target);
     }
   }, 120_000);
 });
