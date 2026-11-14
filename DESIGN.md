@@ -11833,7 +11833,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   - **What counts as unchanged** (`normaliseScreen`). A busy Claude repaints its own chrome with no work
     behind it, and a session hung inside a command is a ticking spinner, so hashing the screen verbatim would
     never read it as still (C14's "unchanged for `everyMinutes`", C27's interrupt). The hash is of the screen
-    minus: everything from the input box's top edge down (the last-but-one line made only of `─`/`━`: the
+    minus: everything from the input box's top edge down (the last-but-one rule line, `INPUT_BOX_RULE`: a line made only of `─`/`━`, or with one
+    label cut into it, as a named session's top edge is since Claude Code 2.1.325, `──── fix-the-thing (thad) ─`: the
     box, status line and hint lines, whose cost, context and clock readings move, and which change when
     someone types); any parenthesised elapsed time with the counters beside it (`(2m 14s · ↑ 3.1k tokens ·
     esc to interrupt)`, a running tool's `(12s)`), masked; and the spinner's animated glyph, masked. The
@@ -12221,7 +12222,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   Ctrl+C, and neither the screen hash nor a session event sees typing: an owner composing a reply in a finished
   session would lose it. Before a `live` pane is despawned, `close` reads the screen with its attributes
   (`capture-pane -e`, `capturePane`'s `styled`) and `inputBoxDraft` (`drain-ask.ts`; `inputBoxText` is the plain-capture
-  twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules after the `❯`,
+  twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules (`INPUT_BOX_RULE`, the top one labelled for a named session,
+  which every séance spawn is: found by the go-live on Thad, 2026-11-14, where every close of a finished task session
+  answered `waiting`) after the `❯`,
   **leaving out the cells Claude Code draws as a prompt suggestion** (code review F2): faint (SGR 2) or a grey
   foreground (`90`, `38;5;8` and the mid greys of the 256 ramp, equal-channel `38;2` between 80 and 170), and the
   cursor's inverse first cell when more suggestion text follows. **Any other text, or a box that cannot be found (a

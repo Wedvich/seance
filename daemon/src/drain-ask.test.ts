@@ -838,6 +838,16 @@ describe("inputBoxDraft", () => {
     expect(inputBoxDraft([RULE, " Bash command", " Do you want to proceed?", RULE].join("\n"))).toBeNull();
   });
 
+  test("a named session's box, its top edge labelled with the name, is found", () => {
+    // Claude Code 2.1.325 cuts a `-n` session's name into the top edge; séance names every session it spawns.
+    const named = (...box: string[]): string =>
+      ["transcript", `${"─".repeat(50)} fix-the-thing (thad) ─`, ...box, RULE, "  ? for shortcuts"].join("\n");
+    expect(inputBoxDraft(named("❯ "))).toBe("");
+    expect(inputBoxDraft(named("❯ half a reply"))).toBe("half a reply");
+    expect(inputBoxText(named("❯ "))).toBe("");
+    expect(inputBoxDraft(`${RULE}\n─── a label then too short ─\n❯ \n${RULE}`)).toBeNull();
+  });
+
   test("a suggestion drawn faint is no draft, with or without the cursor on its first cell", () => {
     expect(inputBoxDraft(screen(`❯ ${FAINT}commit and push the changes${RESET}`))).toBe("");
     expect(inputBoxDraft(screen(`❯ ${INVERSE}c${RESET}${FAINT}ommit and push${RESET}`))).toBe("");
