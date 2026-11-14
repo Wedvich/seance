@@ -1,16 +1,12 @@
 // Apart from `messages.ts` so `seanced mcp` (`send-message.ts`) and `seanced inbox` (`inbox-cli.ts`) load only these
 // and not the daemon's side (tmux, the launch ledger, the FFI parent walk), and neither reaches `log.ts`: one is
 // the MCP server's JSON-RPC channel, the other the inbox mod's data channel.
-import { isMessageId, isRecord, isTaskId, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
+import { isMessageId, isRecord, isTaskId, LISTENER_GRACE_MS, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
 
 export const MESSAGE_FRAME_VERSION = 1;
 
-/**
- * How long a session may still be starting, or a listener reconnecting, before a missing listener means the
- * session has no inbox mod. Measured from the ledger's launch record or from the listener's disconnect. Here, not
- * in `messages.ts`, because `send_message` words it and must not load a module that logs.
- */
-export const LISTENER_GRACE_MS = 120_000;
+// In `shared` (a receipt's note words it too); re-exported for the daemon's modules that already import it from here.
+export { LISTENER_GRACE_MS };
 
 /** A session's message to another task on this machine, sent by `seanced mcp`'s `send_message`. */
 export const MESSAGE_FRAME_KIND = "message";
@@ -36,14 +32,27 @@ export const MESSAGE_REPLY_CODES = [
   "rate_limited",
   /** Non-terminal: the task is launched here but has no pane yet. Nothing was kept; send again shortly. */
   "held",
+  /** Only for `route: "ask"`: the task is not deliverable here, so the caller checks the leader and resends as `send`. */
+  "remote",
+  /** The message could not be handed to a scheduler leader (none, or its leg is down). Nothing was kept. */
+  "no_leader",
 ] as const;
 
 export type MessageReplyCode = (typeof MESSAGE_REPLY_CODES)[number];
 
 export type MessageReply =
-  /** `delivered`: written to a live listener. `sent`: held in the daemon's inbox until the listener connects. */
-  | { readonly ok: true; readonly id: string; readonly outcome: "delivered" | "sent" }
-  | { readonly ok: false; readonly code: MessageReplyCode; readonly reason?: "nolistener" };
+  /**
+   * `delivered`: written to a live listener. `sent`: held in the daemon's inbox until the listener connects.
+   * `routed`: handed to the scheduler leader, which reports back with a receipt note, unless `receipt` is false (the
+   * sending pane has no task, so there is nowhere to deliver one).
+   */
+  | {
+      readonly ok: true;
+      readonly id: string;
+      readonly outcome: "delivered" | "sent" | "routed";
+      readonly receipt?: false;
+    }
+  | { readonly ok: false; readonly code: MessageReplyCode; readonly reason?: "nolistener" | "route" };
 
 /**
  * `unsupported`: no message delivery here, or a host that can name no peer. `unbound` and `untasked`: this pane
@@ -80,27 +89,44 @@ export function isInboxFrameKind(raw: unknown): boolean {
   return isRecord(raw) && raw["kind"] === INBOX_FRAME_KIND;
 }
 
+/**
+ * `ask`: the caller can check the verified leader and resend, so a task not deliverable here is answered `remote`.
+ * `send`: the caller has checked, so it is routed. Absent: the caller predates routing, and is answered as before
+ * (`unknown` or `ended`), never a code it would not know.
+ */
+export const MESSAGE_ROUTES = ["ask", "send"] as const;
+export type MessageFrameRoute = (typeof MESSAGE_ROUTES)[number];
+
 export interface MessageFrame {
   readonly to: string;
   readonly messageKind: MessageKind;
   readonly text: string;
   readonly inReplyTo?: string;
+  readonly route?: MessageFrameRoute;
 }
 
-const MESSAGE_FIELDS: ReadonlySet<string> = new Set(["v", "kind", "to", "messageKind", "text", "inReplyTo"]);
+const MESSAGE_FIELDS: ReadonlySet<string> = new Set(["v", "kind", "to", "messageKind", "text", "inReplyTo", "route"]);
 
 /** No `pane` field, on purpose: the sender is bound by the kernel's peer pid and nothing it claims. */
 export function parseMessageFrame(raw: unknown): MessageFrame | null {
   if (!isRecord(raw)) return null;
   if (Object.keys(raw).some((key) => !MESSAGE_FIELDS.has(key))) return null;
   if (raw["v"] !== MESSAGE_FRAME_VERSION || raw["kind"] !== MESSAGE_FRAME_KIND) return null;
-  const { to, messageKind, text, inReplyTo } = raw;
+  const { to, messageKind, text, inReplyTo, route: rawRoute } = raw;
   if (!isTaskId(to)) return null;
   const kind = MESSAGE_KINDS.find((k) => k === messageKind);
   if (kind === undefined) return null;
   if (typeof text !== "string" || text === "") return null;
   if (inReplyTo !== undefined && !isMessageId(inReplyTo)) return null;
-  return { to, messageKind: kind, text, ...(inReplyTo === undefined ? {} : { inReplyTo }) };
+  const route = MESSAGE_ROUTES.find((r) => r === rawRoute);
+  if (rawRoute !== undefined && route === undefined) return null;
+  return {
+    to,
+    messageKind: kind,
+    text,
+    ...(inReplyTo === undefined ? {} : { inReplyTo }),
+    ...(route === undefined ? {} : { route }),
+  };
 }
 
 /** Exactly `{v:1, kind:"inbox"}`: the frame carries no `pane`, so there is no claimed pane to fall back to. */

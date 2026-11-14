@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { RequestFailure, type RelayState, type SessionsResponse, type Task } from "@seance/shared";
+import {
+  RequestFailure,
+  type DeliverMessageRequest,
+  type MessageReceiptRequest,
+  type RelayState,
+  type SessionsResponse,
+  type Task,
+} from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
 import type { LocalOps } from "./handlers.ts";
-import { successorCreate, termFleet } from "./leader-adapters.ts";
+import { successorCreate, termFleet, termMessages } from "./leader-adapters.ts";
 
 const unused = (): Promise<never> => Promise.reject(new Error("unexpected relay call"));
 
@@ -27,7 +34,15 @@ const relay: AppRelay = {
 };
 
 function fleetOver(sessions: () => Promise<SessionsResponse>, sessionsTimeoutMs?: number) {
-  const local: LocalOps = { sessions, spawn: unused, despawn: unused, pushBranch: unused, passClose: unused };
+  const local: LocalOps = {
+    sessions,
+    spawn: unused,
+    despawn: unused,
+    pushBranch: unused,
+    passClose: unused,
+    deliverMessage: unused,
+    messageReceipt: unused,
+  };
   return termFleet({
     relay,
     selfDeviceId: "self",
@@ -91,7 +106,15 @@ describe("a push-branch from the leader", () => {
     const fleet = termFleet({
       relay: wire,
       selfDeviceId: "self",
-      local: { sessions: unused, spawn: unused, despawn: unused, pushBranch: opts.local ?? unused, passClose: unused },
+      local: {
+        sessions: unused,
+        spawn: unused,
+        despawn: unused,
+        pushBranch: opts.local ?? unused,
+        passClose: unused,
+        deliverMessage: unused,
+        messageReceipt: unused,
+      },
       live: () => opts.live ?? true,
       demote: () => {},
     });
@@ -167,7 +190,15 @@ describe("a pass-close from the leader", () => {
     const fleet = termFleet({
       relay: wire,
       selfDeviceId: "self",
-      local: { sessions: unused, spawn: unused, despawn: unused, pushBranch: unused, passClose: opts.local ?? unused },
+      local: {
+        sessions: unused,
+        spawn: unused,
+        despawn: unused,
+        pushBranch: unused,
+        passClose: opts.local ?? unused,
+        deliverMessage: unused,
+        messageReceipt: unused,
+      },
       live: () => opts.live ?? true,
       demote: () => {},
     });
@@ -217,6 +248,124 @@ describe("a pass-close from the leader", () => {
     for (const device of ["self", "other"]) {
       // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
       expect(await fleet.passClose?.(device, request)).toMatchObject({ ok: false, code: "unreachable" });
+    }
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a message op from the leader", () => {
+  const ID = "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11";
+  const deliver: DeliverMessageRequest = {
+    id: ID,
+    taskId: "t-0123456789abcdef",
+    addressed: "t-0123456789abcdef",
+    kind: "note",
+    text: "hi",
+    fromMachine: "MsgBox",
+  };
+  const receipt: MessageReceiptRequest = {
+    id: ID,
+    to: "t-0123456789abcdef",
+    kind: "note",
+    outcome: "delivered",
+  };
+
+  function messageFleet(opts: {
+    readonly local?: Partial<Pick<LocalOps, "deliverMessage" | "messageReceipt">>;
+    readonly remote?: () => Promise<unknown>;
+    readonly live?: boolean;
+    readonly demoted?: string[];
+  }) {
+    const asked: { deviceId: string; op: string; payload: unknown }[] = [];
+    const wire: AppRelay = {
+      ...relay,
+      request: (<T>(deviceId: string, op: string, payload: unknown) => {
+        asked.push({ deviceId, op, payload });
+        return (opts.remote ?? unused)() as Promise<T>;
+      }) as AppRelay["request"],
+    };
+    const messages = termMessages({
+      relay: wire,
+      selfDeviceId: "self",
+      local: {
+        sessions: unused,
+        spawn: unused,
+        despawn: unused,
+        pushBranch: unused,
+        passClose: unused,
+        deliverMessage: opts.local?.deliverMessage ?? unused,
+        messageReceipt: opts.local?.messageReceipt ?? unused,
+      },
+      live: () => opts.live ?? true,
+      demote: (reason) => void opts.demoted?.push(reason),
+    });
+    return { messages, asked };
+  }
+
+  test("this machine's own is answered in process, never over the relay", async () => {
+    const { messages, asked } = messageFleet({
+      local: {
+        deliverMessage: () => Promise.resolve({ ok: true, outcome: "delivered" }),
+        messageReceipt: () => Promise.resolve({ ok: true, outcome: "dropped" }),
+      },
+    });
+    expect(await messages.deliverMessage("self", deliver)).toEqual({ ok: true, outcome: "delivered" });
+    expect(await messages.messageReceipt("self", receipt)).toEqual({ ok: true, outcome: "dropped" });
+    expect(asked).toEqual([]);
+  });
+
+  test("another machine's goes over the relay under its own op, and the reply is parsed before it is believed", async () => {
+    const d = messageFleet({ remote: () => Promise.resolve({ ok: true, outcome: "sent" }) });
+    expect(await d.messages.deliverMessage("other", deliver)).toEqual({ ok: true, outcome: "sent" });
+    expect(d.asked).toEqual([{ deviceId: "other", op: "deliver-message", payload: deliver }]);
+    const r = messageFleet({ remote: () => Promise.resolve({ ok: true, outcome: "dropped" }) });
+    expect(await r.messages.messageReceipt("other", receipt)).toEqual({ ok: true, outcome: "dropped" });
+    expect(r.asked).toEqual([{ deviceId: "other", op: "message-receipt", payload: receipt }]);
+  });
+
+  test("a malformed reply is internal_error, whatever it claims", async () => {
+    for (const bad of [{ ok: true, outcome: "offline" }, { ok: false, code: "new_code", message: "m" }, "nope", null]) {
+      // oxlint-disable-next-line no-await-in-loop -- one malformed reply at a time
+      const reply = await messageFleet({ remote: () => Promise.resolve(bad) }).messages.deliverMessage(
+        "other",
+        deliver,
+      );
+      expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+    }
+    const reply = await messageFleet({
+      remote: () => Promise.resolve({ ok: true, outcome: "held" }),
+    }).messages.messageReceipt("other", receipt);
+    expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+  });
+
+  test("a machine that did not answer is unreachable, or undelivered when nothing can have run", async () => {
+    const failing = (reason: "timeout" | "offline") =>
+      messageFleet({ remote: () => Promise.reject(new RequestFailure(reason, "no")) }).messages.deliverMessage(
+        "other",
+        deliver,
+      );
+    expect(await failing("timeout")).toMatchObject({ ok: false, code: "unreachable" });
+    expect(await failing("offline")).toMatchObject({ ok: false, code: "undelivered" });
+  });
+
+  test("not_leader from the relay demotes the term, and the failure is never a message error", async () => {
+    const demoted: string[] = [];
+    const { messages } = messageFleet({
+      demoted,
+      remote: () => Promise.reject(new RequestFailure("not_leader", "no")),
+    });
+    expect(await messages.deliverMessage("other", deliver)).toMatchObject({ ok: false });
+    expect(demoted).toHaveLength(1);
+    expect(demoted[0]).toContain("not_leader");
+  });
+
+  test("an ended term sends nothing, to this machine or another", async () => {
+    const { messages, asked } = messageFleet({ live: false });
+    for (const device of ["self", "other"]) {
+      // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
+      expect(await messages.deliverMessage(device, deliver)).toMatchObject({ ok: false, code: "unreachable" });
+      // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
+      expect(await messages.messageReceipt(device, receipt)).toMatchObject({ ok: false, code: "unreachable" });
     }
     expect(asked).toEqual([]);
   });

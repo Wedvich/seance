@@ -1,15 +1,16 @@
 # Session messaging — spec
 
-**Status: PR 1 (local delivery) built 2026-11-13; PR 2 (cross-machine) and PR 3 (adapter seam) not
-built.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
+**Status: PR 1 (local delivery) built 2026-11-13 and PR 2 (cross-machine) built 2026-11-14; PR 3
+(adapter seam) not built.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
 Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
 macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
 pre-PR 1 checks on Linux and on macOS (`origin/worktree-messaging-spike-2-macos`, `spike/REPORT-macos-2.md`). Like docs/drain.md,
 this file is the working record until the code lands; each part folds into DESIGN.md as it is built,
-and its text here goes. PR 1's record is in DESIGN.md: Local op socket, "Session messages" (the
-frames, the daemon's inbox, the outcomes, the wrappers, the audit), Claude Code mods (the `inbox`
-mod), MCP server (`send_message`) and Threat model item 6. What stays here is the evidence, PR 2 and
-PR 3, and the open questions.
+and its text here goes. PR 1's and PR 2's record is in DESIGN.md: Local op socket, "Session messages"
+(the frames, the daemon's inbox, the outcomes, the wrappers, the audit) and its "Cross-machine"
+subsection (the gate, the leader's resolve, forward and receipt, the size budget, the skew table),
+Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. What stays
+here is the evidence, PR 3, and the open questions.
 
 ## Problem
 
@@ -86,26 +87,30 @@ and this spec gives them none (§3).
 Built in PR 1 (DESIGN.md, Local op socket, "Session messages"): the first eight rows, `CAPABILITIES.messages`, the
 caps, the audit origin `message`, and the outcomes `delivered`, `held` (in PR 1's meaning: a launched task with
 no pane yet), `ended`, `unknown`, `unsupported`, `too_long` and `rate_limited`, plus `sent`, `dropped`,
-`nolistener`, `unbound`, `invalid`, `stopping` and `internal`. The rest (`offline`, `no_leader`) is PR 2 and PR 3.
+`nolistener`, `unbound`, `invalid`, `stopping` and `internal`. PR 2 added `routed`, `remote` (a `route: "ask"`
+frame's answer for a task not deliverable here), `no_leader`, `offline` and, in a receipt, `unsupported` from the
+leader (DESIGN.md, "Cross-machine"). The audit gained `dir=receipt`.
 
-| Concept                                     | Name                                                                                                       |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| The thing sent                              | **message**                                                                                                |
-| Its kind                                    | **note** (information), **question** (may answer), **request** (act on it)                                 |
-| A pane's held messages                      | **inbox** (daemon memory only)                                                                             |
-| MCP tool, send                              | `send_message`                                                                                             |
-| Mod tool, read                              | `read_messages` (mod-registered, `mcp__inbox__read_messages`)                                              |
-| The mod                                     | `inbox` (`claude-mods/inbox/`)                                                                             |
-| Local-socket frame, a session sends         | `message` (frame kind)                                                                                     |
-| Local-socket frame, a session's mod listens | `inbox` (frame kind)                                                                                       |
-| Daemon → leader event op                    | `session-message`                                                                                          |
-| Leader → daemon request op, deliver         | `deliver-message`                                                                                          |
-| Leader → daemon request op, receipt         | `message-receipt`                                                                                          |
-| Capability, a daemon that receives          | `CAPABILITIES.messages`                                                                                    |
-| Capability, a leader that routes            | `CAPABILITIES.messageRoute`                                                                                |
-| Caps                                        | `MESSAGE_PUSH_MAX` (8 KiB), `MESSAGE_MAX` (64 KiB)                                                         |
-| Audit origin                                | `message` (and `adapter` for the seam)                                                                     |
-| Outcomes                                    | `delivered`, `held`, `offline`, `ended`, `unknown`, `unsupported`, `too_long`, `rate_limited`, `no_leader` |
+| Concept                                     | Name                                                                                                                           |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| The thing sent                              | **message**                                                                                                                    |
+| Its kind                                    | **note** (information), **question** (may answer), **request** (act on it)                                                     |
+| A pane's held messages                      | **inbox** (daemon memory only)                                                                                                 |
+| MCP tool, send                              | `send_message`                                                                                                                 |
+| Mod tool, read                              | `read_messages` (mod-registered, `mcp__inbox__read_messages`)                                                                  |
+| The mod                                     | `inbox` (`claude-mods/inbox/`)                                                                                                 |
+| Local-socket frame, a session sends         | `message` (frame kind)                                                                                                         |
+| Local-socket frame, a session's mod listens | `inbox` (frame kind)                                                                                                           |
+| Daemon → leader event op                    | `session-message`                                                                                                              |
+| Leader → daemon request op, deliver         | `deliver-message`                                                                                                              |
+| Leader → daemon request op, receipt         | `message-receipt`                                                                                                              |
+| Capability, a daemon that receives          | `CAPABILITIES.messages`                                                                                                        |
+| Capability, a leader that routes            | `CAPABILITIES.messageRoute`                                                                                                    |
+| Caps                                        | `MESSAGE_PUSH_MAX` (8 KiB), `MESSAGE_MAX` (64 KiB)                                                                             |
+| Audit origin                                | `message` (and `adapter` for the seam)                                                                                         |
+| Outcomes                                    | `delivered`, `held`, `offline`, `ended`, `unknown`, `unsupported`, `too_long`, `rate_limited`, `no_leader`, `routed`, `remote` |
+| Cross-machine size budget                   | `MESSAGE_ROUTE_MAX` (40 000 bytes of JSON-escaped text)                                                                        |
+| The gate on a `message` frame               | `route: "ask"` then `route: "send"`                                                                                            |
 
 ## Decided by the owner
 
@@ -141,24 +146,27 @@ pane ids, a session can be resumed in another pane, and a window name is display
 "Claude Code mods": "nothing routes, binds or places on the window").
 
 **Resolution follows the task's chain**, as dependents already do (DESIGN.md, "Passing to a
-successor"):
+successor"). Built (PR 2) as `resolveMessageTarget` (`scheduler/src/message-route.ts`):
 
-| Target task state                                                             | Resolves to                                                                                                                                |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `running` / `needs-input`                                                     | its pane                                                                                                                                   |
-| `superseded`                                                                  | its `successor`, followed to the end of the chain; delivered once that one runs. A successor still `blocked` on the pass is `held` (below) |
-| finished, and a later task carries `continues: { task: <id> }` and is running | that continuation, which resumes the same Claude conversation in the same worktree                                                         |
-| `queued`, `ready`, `reserved`, `blocked`                                      | `held`: answered at once, not queued (D2's rule applies; nothing is held at rest)                                                          |
-| finished with no successor or continuation                                    | `ended`                                                                                                                                    |
-| not in the queue                                                              | `unknown`                                                                                                                                  |
+| Target task state                                                                       | Resolves to                                                                                                                            |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `running` / `needs-input` / `lost`                                                      | forward to the machine its `assignment` names                                                                                          |
+| `superseded`                                                                            | its `successor`, followed to the end of the chain (`holder`). A successor still `blocked` or otherwise waiting is `held` (below)       |
+| finished, and a later task carries `continues: { task: <id> }` and has landed           | that continuation, which resumes the same Claude conversation in the same worktree                                                     |
+| finished, a continuation exists but has not landed                                      | `held`                                                                                                                                 |
+| finished, with an `assignment`                                                          | forward, `settled`: that machine delivers to a live pane and answers `ended` for none, since a session can outlive its record's `done` |
+| finished, no `assignment`                                                               | `ended`                                                                                                                                |
+| `queued`, `ready`, `reserved`, `blocked`, or placed with no `assignment` yet            | `held`: answered at once, not queued (D2's rule applies; nothing is held at rest)                                                      |
+| not in the queue, or a chain that breaks (a cycle, a successor the queue does not hold) | `unknown`                                                                                                                              |
 
 "Held" here is an answer, not storage. The sender reads "the target has not started yet" and
 decides whether to retry. The word is kept for the adapter seam's boundary delivery (§6).
 
 **Who resolves.** The leader, whose queue holds the chain (§3). PR 1's local path, which needs no
 leader, is built (DESIGN.md, "Session messages", Resolution): the daemon resolves a task id against its
-own panes checked against its launch ledger. Anything else goes to the leader from PR 2 on, and in PR 1
-answers `unknown`.
+own panes checked against its launch ledger, and **a live local pane wins over the leader's record**:
+the leader is asked only for what the sender's own daemon cannot deliver. Anything else goes to the leader
+(PR 2, built: DESIGN.md, "Cross-machine", where the built table is the record).
 
 Rejected:
 
@@ -173,83 +181,14 @@ Rejected:
 
 ### 3. Cross-machine: through the leader, no hold
 
-**The path** (D1).
-
-1. **Sender's daemon → leader.** The sender's daemon, having bound the `message` frame to its
-   pane's task (§4), sends a daemon→scheduler event `session-message`, sealed `from` its
-   `deviceId` to `SCHEDULER_ID`, fire-and-forget like `session-event` and `session-pass`
-   (`sendToScheduler` in `relay-client.ts`, or in process on the leader's own machine).
-2. **The leader admits it** only when sealed `from` a daemon (never `from: "app"`, as `branch-state`
-   and `session-pass`), parsed by `parseSessionMessage` into a fresh value, past the one
-   `schedulerGuard`, and only when the sending task is placed on the sealing machine: the
-   `session-pass` rule. An untasked sender is the daemon's word for its own machine, `fromTask`
-   absent.
-3. **The leader resolves** the target (§2) and **forwards** a scheduler→daemon request
-   `deliver-message` to the machine the resolved task is placed on, or delivers in process if
-   that is the leader's own machine.
-4. **The target daemon** accepts `deliver-message` only sealed `from` the scheduler (or the leader
-   in process), parsed by its own parser, and delivers only to the pane carrying that task id with
-   a launch in its own ledger (§1). It answers `delivered`, `ended` (no live pane carries it) or
-   `unsupported`.
-5. **Receipt.** Events are fire-and-forget, so the leader sends the sender's machine a
-   `message-receipt` request (message id, target task id, outcome; never text). The sender's daemon
-   hands it to the sending pane's listener only when that pane still carries the sending task,
-   and the mod appends it as a one-line note ("your message `<id>` to `<task>`: delivered").
-   `send_message` itself answers at once with `sent` (accepted by its own daemon) or a refusal it
-   can make locally (`too_long`, `rate_limited`, `unsupported`, `no_leader`).
-
-**Offline or asleep target** (D2). The leader knows presence from the registry. It answers
-`offline` in the receipt and drops the message. An asleep machine whose socket the relay still
-lists (until the 90 s sweep) takes the forward without a reply. The leader's request times out and
-the receipt says `offline`. A message that did land and whose reply was lost reads `offline`, so a
-retry can duplicate it, and the wrapper names the message id so the receiver can tell (§4).
-
-Rejected, for D1:
-
-- **Direct to the target `deviceId`, sealed `from: "app"`.** The sender is only a claim, since any
-  PSK holder seals as `app`. The sender must find the placement itself and races a pass. It needs
-  an app-role client in every daemon: today only the broker has one, and only on credential-keyed
-  daemons (`run-capabilities.ts`).
-- **Daemon-to-daemon, sealed `from` the sender's `deviceId`.** It needs a relay change: the relay
-  sends daemons no `undeliverable`, and `relay-client.ts` says no route is meant to carry
-  daemon→daemon traffic. It also adds a pairwise trust rule, and every daemon would have to resolve
-  chains it does not hold.
-
-Rejected, for D2:
-
-- **Hold in the relay store.** The reasons a board does not belong there (Problem), plus message
-  text would sit at rest in the Durable Object for as long as it waited.
-- **Hold in leader memory.** Lost on failover or restart, invisible to the sender, and the leader
-  would become a mailbox it was never meant to be.
-- **Hold at the sender's daemon with retries.** A second queue per machine, with its own expiry and
-  its own duplicate rules.
-
-**Replay.** The scheduler leg's guard (±60 s, `REPLAY_WINDOW_MS`) covers `session-message`,
-`deliver-message` and `message-receipt`. A frame older than that is dropped, which is acceptable
-because nothing waits for it to be retried. A compromised relay can withhold a message (the
-accepted availability class) or replay it within the window to a second leader (Threat model item
-4's "hand one app request to two leaders in turn"). The receiving daemon de-duplicates by message
-id for 120 s (`REPLAY_RETAIN_MS`), and the wrapper carries the id.
-
-**Capabilities and skew.**
-
-- A daemon that can receive advertises `CAPABILITIES.messages`.
-- A leader that can route advertises `CAPABILITIES.messageRoute`.
-- `send_message` to a task not on this machine needs a verified leader advertising `messageRoute`,
-  and otherwise answers `no_leader` or `unsupported`.
-- The leader forwards only to a machine advertising `messages`, and answers `unsupported`
-  otherwise.
-
-| Combination                            | Behaviour                                                                                                                            |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| New daemon, old leader                 | `send_message` sees no `messageRoute` and answers `unsupported` for remote targets; local works                                      |
-| Old daemon (target), new leader        | The leader answers `unsupported` and forwards nothing                                                                                |
-| Old daemon (sender), new leader        | Sends nothing; no tool                                                                                                               |
-| Old leader receiving `session-message` | Drops it with one `dropped op=… — not a session event` warning (`leader.ts` `onEvent`); the sender is gated on `messageRoute` anyway |
-| No `inbox` mod in the target's exclave | The daemon has no listener for the pane: `deliver-message` answers `ended` with `nolistener`; a new spawn says so in `doctor`        |
-
-Deploy order: daemons, then the leader's build (it is a daemon), then the mod by `git pull`. No
-relay or PWA change.
+**Built (PR 2, 2026-11-14); the record moved to DESIGN.md**: Local op socket, "Session messages",
+"Cross-machine" (the two-frame gate `route: "ask"` then `"send"`, the leader's admit, resolve, forward and
+receipt, `settled`, the de-dup by message id for `REPLAY_RETAIN_MS`, the outcomes `routed`, `no_leader`,
+`offline` and `unsupported`, the receipt's fixed texts, the size budget `MESSAGE_ROUTE_MAX`, the skew
+table, and the rejected alternatives: a direct `from: "app"` send, daemon-to-daemon, and the three holds
+for D2), Wire protocol (`session-message`, `deliver-message`, `message-receipt`) and Threat model item 6.
+D1 and D2 stand as decided above: through the leader, and a target that is offline or asleep is dropped
+and answered `offline`, nothing held anywhere.
 
 ### 4. MCP surface and the frames a receiver reads
 
@@ -257,7 +196,7 @@ relay or PWA change.
 `read_messages` on the mod), Local op socket, "Session messages" (the `message` frame, the rejected
 broker, direct app-role client and `Plain` op, the wrappers, what a request may not do) and Threat
 model item 6 (the prompt-injection path a request opens between accounts). PR 2 reuses the same
-`send_message` and wrappers: a target on another machine goes to the leader (`"sent"`, §3) where PR 1
+`send_message` and wrappers: a target on another machine goes to the leader (`routed`, §3) where PR 1
 answers `unknown`. The text of a request's wrapper names the sender as task id, title and machine;
 the leader binds `fromTask` to the sealing machine (§3), so the receiver's wrapper names the real task.
 
@@ -327,13 +266,15 @@ Small PRs, each landing on its own:
      fixtures), covering binding, refusal on a null pid, one listener per pane, inbox caps and
      clear-on-rebind; the mod via `claude plugin test` (local only, skipped in CI); one live run
      per platform.
-2. **Cross-machine.** `session-message`, the leader's resolve, forward and receipt,
-   `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute` and the chain resolution in
-   the scheduler library.
+2. **Cross-machine. Built 2026-11-14; the record is DESIGN.md, "Cross-machine".** `session-message`, the
+   leader's resolve, forward and receipt, `deliver-message`, `message-receipt`,
+   `CAPABILITIES.messageRoute` and the chain resolution in the scheduler library.
    - Tested by: `scheduler/` unit tests for resolution over successor and continuation chains;
-     leader tests for the admit rule (wrong machine, `from: "app"`); and an e2e test with the
-     claude stub across two daemons, covering delivered, offline, ended and a target superseded
-     mid-flight.
+     leader tests for the admit rule (wrong machine, `from: "app"`); and an e2e test
+     (`e2e/messages.test.ts`) with the claude stub across two daemons, covering delivered both ways,
+     ended, offline, and a superseded predecessor whose chain breaks and is then completed. The held
+     phase (a successor still waiting) is covered in `scheduler/` and the leader's unit tests only: a
+     successor placed through `succeeds` dispatches at once and ignores `deps`, so the e2e cannot hold one.
 3. **Adapter seam.** `config.json` `adapters`, the supervised child and fd protocol, state out,
    delivery in, and audit origin `adapter`.
    - Tested by: daemon tests with a `scriptStub` adapter (`daemon/test/fixtures.ts`), covering
@@ -344,7 +285,8 @@ Small PRs, each landing on its own:
 PR 1's part is built and recorded in DESIGN.md (Threat model item 6; Local op socket, "Session
 messages"; and CLAUDE.md's local-socket bullet): the `inbox` frame is the first on the local socket
 that _reads_ something a session did not write itself, so a reader is bound by kernel peer pid, never
-by a field, and refused where the host cannot name a peer. What PR 2 and PR 3 add, each to be kept:
+by a field, and refused where the host cannot name a peer. PR 2's part is built too (DESIGN.md, Threat
+model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will add, each to be kept:
 
 - **The leader honours a request only sealed by the right sender, through its own parser and the one
   `schedulerGuard`.** `session-message` is from a daemon only, `parseSessionMessage`, the same guard.

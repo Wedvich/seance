@@ -39,6 +39,29 @@ function daemon(name: string, answer: string | null): { path: string; frames: un
   return { path, frames, stop: () => server.stop(true) };
 }
 
+/** As `daemon`, but answering each frame with the next line, so a two-frame exchange can be scripted. */
+function scripted(name: string, answers: readonly string[]): { path: string; frames: unknown[]; stop: () => void } {
+  const path = join(dir, name);
+  const frames: unknown[] = [];
+  const server = Bun.listen<{ buf: string }>({
+    unix: path,
+    socket: {
+      open: (sock) => {
+        sock.data = { buf: "" };
+      },
+      data: (sock, chunk) => {
+        sock.data.buf += chunk.toString("utf8");
+        const end = sock.data.buf.indexOf("\n");
+        if (end === -1) return;
+        frames.push(JSON.parse(sock.data.buf.slice(0, end)));
+        sock.data.buf = "";
+        sock.write(`${answers[frames.length - 1] ?? JSON.stringify({ ok: false, code: "internal" })}\n`);
+      },
+    },
+  });
+  return { path, frames, stop: () => server.stop(true) };
+}
+
 const note = { to: TO, kind: "note", text: "schema v2 landed" } as const;
 
 describe("sendMessage", () => {
@@ -88,6 +111,8 @@ describe("sendMessage", () => {
       too_long: "too long",
       rate_limited: "20 a minute and 200 an hour per task",
       held: "is starting on this machine and has no session yet; nothing was kept",
+      remote: "cannot route through the scheduler",
+      no_leader: "could not reach a scheduler leader",
     } as const;
     expect(Object.keys(wording).toSorted()).toEqual([...MESSAGE_REPLY_CODES].toSorted());
     for (const [code, text] of Object.entries(wording)) {
@@ -152,6 +177,143 @@ describe("sendMessage", () => {
     } finally {
       fake.stop();
     }
+  });
+
+  describe("routing across machines", () => {
+    const remote = JSON.stringify({ ok: false, code: "remote" });
+    const routed = JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "routed" });
+    const gateOk = (): Promise<{ readonly ok: true }> => Promise.resolve({ ok: true });
+
+    test("with a gate the first frame asks, a remote answer runs the gate once and the resend says send", async () => {
+      const fake = scripted("route.sock", [remote, routed]);
+      let asked = 0;
+      try {
+        const result = await sendMessage(note, {
+          path: fake.path,
+          routeGate: () => {
+            asked += 1;
+            return gateOk();
+          },
+        });
+        expect(result.ok).toBe(true);
+        expect(result.id).toBe(MESSAGE_ID);
+        expect(result.text).toContain("sent through the scheduler");
+        expect(result.text).toContain("receipt note");
+        expect(asked).toBe(1);
+        expect(fake.frames).toEqual([
+          { v: 1, kind: "message", to: TO, messageKind: "note", text: "schema v2 landed", route: "ask" },
+          { v: 1, kind: "message", to: TO, messageKind: "note", text: "schema v2 landed", route: "send" },
+        ]);
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("a local delivery never runs the gate, and no gate sends no route key", async () => {
+      const local = scripted("local.sock", [JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "delivered" })]);
+      let asked = 0;
+      try {
+        const result = await sendMessage(note, {
+          path: local.path,
+          routeGate: () => {
+            asked += 1;
+            return gateOk();
+          },
+        });
+        expect(result.text).toContain("delivered to task");
+        expect(asked).toBe(0);
+      } finally {
+        local.stop();
+      }
+      const bare = scripted("bare.sock", [remote]);
+      try {
+        const result = await sendMessage(note, { path: bare.path });
+        expect(bare.frames).toEqual([{ v: 1, kind: "message", to: TO, messageKind: "note", text: "schema v2 landed" }]);
+        expect(result.ok).toBe(false);
+        expect(result.text).toContain("cannot route through the scheduler");
+      } finally {
+        bare.stop();
+      }
+    });
+
+    test("a gate refusal returns its text and sends no second frame", async () => {
+      const fake = scripted("refused.sock", [remote, routed]);
+      try {
+        const result = await sendMessage(note, {
+          path: fake.path,
+          routeGate: () => Promise.resolve({ ok: false, text: "the leader needs an update" }),
+        });
+        expect(result).toEqual({ ok: false, text: "the leader needs an update" });
+        expect(fake.frames.length).toBe(1);
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("an invalid answer to an ask resends once without the route key", async () => {
+      const fake = scripted("old.sock", [
+        JSON.stringify({ ok: false, code: "invalid" }),
+        JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "delivered" }),
+      ]);
+      let asked = 0;
+      try {
+        const result = await sendMessage(note, {
+          path: fake.path,
+          routeGate: () => {
+            asked += 1;
+            return gateOk();
+          },
+        });
+        expect(result.ok).toBe(true);
+        expect(asked).toBe(0);
+        expect(fake.frames).toEqual([
+          { v: 1, kind: "message", to: TO, messageKind: "note", text: "schema v2 landed", route: "ask" },
+          { v: 1, kind: "message", to: TO, messageKind: "note", text: "schema v2 landed" },
+        ]);
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("after the fallback, a task the old daemon does not hold is worded as that daemon predating routing", async () => {
+      for (const code of ["unknown", "ended"] as const) {
+        const fake = scripted(`old-${code}.sock`, [
+          JSON.stringify({ ok: false, code: "invalid" }),
+          JSON.stringify({ ok: false, code }),
+        ]);
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- one double per code
+          const result = await sendMessage(note, { path: fake.path, routeGate: gateOk });
+          expect(result.ok).toBe(false);
+          expect(result.text).toContain("predates cross-machine messages (`seanced update`)");
+          expect(result.text).not.toContain("no scheduler route was asked");
+        } finally {
+          fake.stop();
+        }
+      }
+    });
+
+    test("an untasked sender is told no receipt follows, and a route-budget refusal is worded as one", async () => {
+      const untasked = scripted("untasked.sock", [
+        remote,
+        JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "routed", receipt: false }),
+      ]);
+      try {
+        const result = await sendMessage(note, { path: untasked.path, routeGate: gateOk });
+        expect(result.text).toContain("no receipt follows");
+      } finally {
+        untasked.stop();
+      }
+      const long = scripted("long.sock", [remote, JSON.stringify({ ok: false, code: "too_long", reason: "route" })]);
+      try {
+        const result = await sendMessage(note, { path: long.path, routeGate: gateOk });
+        expect(result.ok).toBe(false);
+        expect(result.text).toContain("another machine");
+        expect(result.text).toContain("40000 bytes");
+      } finally {
+        long.stop();
+      }
+    });
   });
 
   test("no daemon, a daemon that hangs up, and a reply it cannot read each say what happened", async () => {

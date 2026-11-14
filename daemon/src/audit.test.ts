@@ -211,6 +211,19 @@ describe("message audit lines", () => {
       'audit message origin=message dir=out from=- to="t\\"3" kind=question bytes=0 outcome=unbound',
     ]);
   });
+
+  test("a routed send, a refused route and a receipt each have a line; a receipt carries no byte count", async () => {
+    const out: string[] = [];
+    const audit = messageAudit((line) => void out.push(line));
+    await audit({ dir: "out", from: "t-1", to: "t-2", kind: "note", bytes: 12, outcome: "routed" });
+    await audit({ dir: "out", from: "t-1", to: "t-2", kind: "note", bytes: 12, outcome: "no_leader" });
+    await audit({ dir: "receipt", from: "t-1", to: "t-2", kind: "note", outcome: "offline" });
+    expect(out).toEqual([
+      'audit message origin=message dir=out from="t-1" to="t-2" kind=note bytes=12 outcome=routed',
+      'audit message origin=message dir=out from="t-1" to="t-2" kind=note bytes=12 outcome=no_leader',
+      'audit message origin=message dir=receipt from="t-1" to="t-2" kind=note bytes=- outcome=offline',
+    ]);
+  });
 });
 
 describe("enqueue audit lines", () => {

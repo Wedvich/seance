@@ -15,4 +15,5 @@ export {
 } from "./route.ts";
 export * from "./scheduler.ts";
 export * from "./memory-store.ts";
+export * from "./message-route.ts";
 export type { SchedulerAlert } from "./alerts.ts";

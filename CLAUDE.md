@@ -50,10 +50,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — spec, PR 1 built: local delivery (the `inbox` mod, the `inbox` and
-  `message` frames, `send_message` for tasks on this machine), recorded in DESIGN.md (Local op socket,
-  "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
-  cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
+- **docs/messaging.md** — spec, PR 1 and PR 2 built: local delivery (the `inbox` mod, the `inbox` and
+  `message` frames, `send_message`) and cross-machine routing through the leader (`session-message`,
+  `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`), recorded in DESIGN.md (Local op socket,
+  "Session messages" and its "Cross-machine" subsection; Claude Code mods; MCP server; Threat model item 6).
+  What is left in the file is the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
 - **docs/custodian.md** — what is left of the custodian spec: build item 4b (contain the round's sandbox, then
   remove `ROUNDS_LIVE`), the open build-time details, and an
@@ -192,7 +193,7 @@ green:
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
   `custodian` for the daemon's seat starting, closing or ending a custodian round and for a round's `close` and the worktree it decides, its `flag`, `nudge` and `interrupt`,
-  `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text; a custodian nudge writes only its `dir=in` line, `from=custodian`),
+  `message` for a session's message to another task, on this machine or routed through the leader (one `dir=out` and one `dir=in` line per message, and a `dir=receipt` line for the leader's receipt: task ids, kind, byte count and outcome, never text; a custodian nudge writes only its `dir=in` line, `from=custodian`),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
   `leader` for the scheduler loop dispatching to its own machine in
@@ -282,7 +283,7 @@ green:
   permission, never grant one), re-checking the pane, its task, `cl`, its last frame and that its input box shows
   exactly the prompt before Enter, audited `origin=drain` with the task id and outcome, never the text; a
   `session-pass` carries `drain` only while its machine is closed, and the leader writes `trigger: "drain"` for it only
-  while that machine's status carries `cl`, and a pass is offered, by the PWA, `seanced pass` and MCP `pass_task`, only through `passOffer` (`shared/src/successor.ts`) to a verified leader and a task machine that advertise `CAPABILITIES.successor`, and is sent once and never retried, and a session's own pass (`pass_to_successor`) is offered only to a verified leader advertising `CAPABILITIES.successorSelf` (a 2a leader would drop its `session-pass` after the push) and checks the record's length before any push, and the leader acts on a `session-pass` only when it is sealed `from` the machine the task is placed on, never logging its `record` (the successor's prompt) or the branch, and sends `pass-close` only after the successor's commit write, and a daemon sends no pass for a caller whose connection has closed (an interrupted call: checked before and after the push) and marks a pane for one close only (a pass outranks a hand-off), and a `branch-state` is never accepted from an app, and a `custodian-event` (`flag`, `unflag`, `failing`: daemon to leader, sealed, no capability and no sentinel) writes
+  while that machine's status carries `cl`, and a pass is offered, by the PWA, `seanced pass` and MCP `pass_task`, only through `passOffer` (`shared/src/successor.ts`) to a verified leader and a task machine that advertise `CAPABILITIES.successor`, and is sent once and never retried, and a session's own pass (`pass_to_successor`) is offered only to a verified leader advertising `CAPABILITIES.successorSelf` (a 2a leader would drop its `session-pass` after the push) and checks the record's length before any push, and the leader acts on a `session-pass` only when it is sealed `from` the machine the task is placed on, never logging its `record` (the successor's prompt) or the branch, and sends `pass-close` only after the successor's commit write, and a daemon sends no pass for a caller whose connection has closed (an interrupted call: checked before and after the push) and marks a pane for one close only (a pass outranks a hand-off), and a `branch-state` is never accepted from an app, nor a `session-message` (from a daemon only), and a `custodian-event` (`flag`, `unflag`, `failing`: daemon to leader, sealed, no capability and no sentinel) writes
   `Task.flag` only when the task's `assignment.deviceId` is the machine that sealed it, in any task state (a finish keeps
   the flag, a move back to `ready` drops it), through the one task sealer, a repeat a no-op and a changed note keeping `at`;
   the leader never acts on one sealed `from: "app"`, never logs, audits or pushes the note, and a `failing` event only
@@ -438,6 +439,32 @@ green:
   Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
+  **A message to a task not deliverable on its machine goes through the leader, which keeps nothing**
+  (DESIGN.md, "Session messages", "Cross-machine"). A `message` frame carries `route` only as `"ask"` or
+  `"send"`: `ask` is answered `remote` (in a rate bucket of its own, same limits, so a loop of asks is bounded
+  and a routed message is one count in each bucket) and `seanced mcp` sends `send` only after it found the
+  **verified** leader advertising `CAPABILITIES.messageRoute` (`messageRouteGate`), never on the daemon's own
+  word. That gate is the client's: the daemon routes any `send` a bound pane makes, and what binds the message is
+  the leader's admit rule below, never an assumption that the sender was gated. A frame with no `route` is
+  answered as before (`unknown`/`ended`), never `remote`.
+  A routed text is held to `MESSAGE_ROUTE_MAX` of JSON-escaped bytes. The daemon sends `session-message` only
+  sealed `from` its own device id (or in process), with `fromTask` only for a task its own ledger holds. The leader
+  honours it only when it is not sealed `from: "app"`, parsed by `parseSessionMessage` into a fresh value, past
+  the one `schedulerGuard`, and sealed by a registered machine; a `fromTask` only when the leader's own list places
+  or reserves that task on the sealer (`elsewhere` is dropped with no receipt; `absent`, a pruned task, is
+  forwarded without naming `fromTask`, its receipt still going to the sealer, whose own ledger bound it). The
+  sender's machine name reaches the receiver's wrapper only through `displayTitle`'s scrub, cut to
+  `ROUTING_ID_MAX_LENGTH`. It resolves the target only through its own list
+  (`resolveMessageTarget`), forwards `deliver-message` only to a connected machine advertising both `messages`
+  and `messageRoute` (this leader's own machine, when the registry lacks it, is delivered to in process: the
+  leader is that daemon), for the task its own resolution chose (`settled` only for a finished record), sends
+  `message-receipt` (ids, kind and an outcome; never text) only to the machine that sealed the message, keeps
+  nothing and logs no line per message, title or id, only a drop or a failed forward or receipt that names a task
+  or machine id. A daemon acts on `deliver-message` and `message-receipt` only sealed `from` the scheduler (or in
+  process), through their own parsers; delivers only to a live pane carrying a task its own launch ledger holds
+  (a `deliver-message` for another is `unknown`); de-duplicates a forward by message id, and a receipt by id and
+  outcome, for `REPLAY_RETAIN_MS`; and hands a receipt only to the pane carrying the sending task, as the one fixed line `receiptNote` makes per
+  outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
 - **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
   "The custodian frame kind"): the round's seven verbs `sessions`, `close <pane>`, `flag <pane>`, `nudge <pane>`, `interrupt <pane>`, `notes` and `done`, and no other
   act, built but held with the seat (`ROUNDS_LIVE`: no round runs, so the frame answers `unsupported`). The verbs

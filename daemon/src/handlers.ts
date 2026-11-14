@@ -11,6 +11,8 @@ import type {
   AvailabilityResponse,
   CustodianRequest,
   CustodianResponse,
+  DeliverMessageResponse,
+  MessageReceiptResponse,
   Plain,
   PushBranchErrorCode,
   PushBranchResponse,
@@ -30,6 +32,8 @@ import {
   httpsUrl,
   isTaskId,
   parseAttachmentManifest,
+  parseDeliverMessageRequest,
+  parseMessageReceiptRequest,
   parsePassCloseRequest,
   parseAvailabilityRequest,
   parseCustodianRequest,
@@ -67,6 +71,7 @@ import {
 import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
+import type { Messages } from "./messages.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 import { isUpdateAvailable } from "./update-notice.ts";
@@ -101,6 +106,12 @@ export interface HandlerContext {
    * written, so the pane carrying the task may close at its turn's end. Absent, answered `unsupported`.
    */
   readonly armPassClose?: (taskId: string) => Promise<PassCloseResponse>;
+  /**
+   * The leader's `deliver-message` and `message-receipt` (`Messages.deliverRouted`, `Messages.receipt`): a routed
+   * session message placed in a pane's inbox here, and the receipt for one a task here sent. Absent, answered
+   * `unsupported`.
+   */
+  readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
   /** Closed-to-new-work state (docs/drain.md); absent, `availability` answers `unsupported` and no spawn is gated. */
   readonly availability?: MachineAvailability;
   /**
@@ -731,6 +742,36 @@ async function handlePassClose(
 }
 
 /**
+ * `deliver-message`: only the scheduler may forward a session message here. The pane is found through this
+ * daemon's own pane map and launch ledger (`Messages.deliverRouted`), never from the wire, and the text is audited
+ * nowhere.
+ */
+async function handleDeliverMessage(
+  ctx: HandlerContext,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<DeliverMessageResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler delivers messages" };
+  const request = parseDeliverMessageRequest(payload);
+  if (request === null) return { ok: false, code: "invalid_request", message: "malformed deliver-message request" };
+  if (ctx.messages === undefined) return { ok: false, code: "unsupported", message: "this daemon runs no messaging" };
+  return ctx.messages.deliverRouted(request);
+}
+
+/** `message-receipt`: only the scheduler may say what became of a message this machine's task sent. */
+async function handleMessageReceipt(
+  ctx: HandlerContext,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<MessageReceiptResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler sends receipts" };
+  const request = parseMessageReceiptRequest(payload);
+  if (request === null) return { ok: false, code: "invalid_request", message: "malformed message-receipt request" };
+  if (ctx.messages === undefined) return { ok: false, code: "unsupported", message: "this daemon runs no messaging" };
+  return ctx.messages.receipt(request);
+}
+
+/**
  * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
  * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
  * machine's own sticky `closed` and refreshes `status`; `now` moves the drain ask's interrupt deadline to now (ignored on an open).
@@ -921,12 +962,15 @@ export interface LocalOps {
   readonly despawn: (payload: unknown) => Promise<DespawnResponse | ErrorResponse>;
   readonly pushBranch: (payload: unknown) => Promise<PushBranchResponse | ErrorResponse>;
   readonly passClose: (payload: unknown) => Promise<PassCloseResponse | ErrorResponse>;
+  readonly deliverMessage: (payload: unknown) => Promise<DeliverMessageResponse | ErrorResponse>;
+  readonly messageReceipt: (payload: unknown) => Promise<MessageReceiptResponse | ErrorResponse>;
 }
 
 /**
  * The leader reaching its own machine (`termFleet` in `leader-adapters.ts`): the same validation,
  * backend and audit lines as `createHandler`, under the caller's origin. No
- * `Plain` goes in, so nothing but these three ops can be asked for.
+ * `Plain` goes in, so nothing but these ops (spawn, despawn, push-branch, pass-close, deliver-message, message-receipt)
+ * can be asked for.
  */
 export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalOps {
   const audit = spawnAudit(origin, ctx.auditSink);
@@ -955,6 +999,10 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
       run("push-branch", crypto.randomUUID(), () => handlePushBranch(ctx, pushTrail, payload, true)),
     passClose: (payload) =>
       run("pass-close", crypto.randomUUID(), () => handlePassClose(ctx, passCloseTrail, payload, true)),
+    deliverMessage: (payload) =>
+      run("deliver-message", crypto.randomUUID(), () => handleDeliverMessage(ctx, payload, true)),
+    messageReceipt: (payload) =>
+      run("message-receipt", crypto.randomUUID(), () => handleMessageReceipt(ctx, payload, true)),
   };
 }
 
@@ -1010,6 +1058,10 @@ export function createHandler(
           return { payload: await handlePushBranch(ctx, pushTrail, plain.payload, from === SCHEDULER_ID) };
         case "pass-close":
           return { payload: await handlePassClose(ctx, passCloseTrail, plain.payload, from === SCHEDULER_ID) };
+        case "deliver-message":
+          return { payload: await handleDeliverMessage(ctx, plain.payload, from === SCHEDULER_ID) };
+        case "message-receipt":
+          return { payload: await handleMessageReceipt(ctx, plain.payload, from === SCHEDULER_ID) };
         case "availability":
           return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
         case "custodian":

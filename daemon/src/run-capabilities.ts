@@ -140,6 +140,8 @@ export interface Started {
   readonly local?: LocalSurfaces;
   /** The leader's `pass-close`, once session events run: the handler context reads it late (`run.ts`). */
   readonly armPassClose?: SessionEvents["armPassClose"];
+  /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
+  readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
   /** The drain's session ask, once session events run: `run.ts`'s availability reads it late. */
   readonly drainAsk?: DrainAsk;
   /** The custodian seat's view for the status's `cu`, read late by `run.ts`; absent where no seat is enabled. */
@@ -254,6 +256,11 @@ const sessionEvents: DaemonCapability = (ctx) => {
     launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
     machine: ctx.config.name,
     audit: messageAudit(daemonSink),
+    // In process when this machine leads (false while its term is still taking over), else sealed to the scheduler.
+    route: (message) =>
+      ctx.leader.term() !== null
+        ? Promise.resolve(ctx.leader.onSessionMessage(message, ctx.deviceId))
+        : ctx.client.sendSessionMessage(message),
   });
   const events = createSessionEvents({
     panes: listPanePids,
@@ -335,6 +342,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     },
     local: { sessionEvents: events.handle, messages },
     armPassClose: events.armPassClose,
+    messages,
     ...(drainAsk === undefined ? {} : { drainAsk }),
   };
 };
@@ -734,6 +742,8 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
 
 export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
+  /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
+  readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
   readonly drainAsk?: DrainAsk;
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
   readonly custodianPoke?: () => void;
@@ -755,6 +765,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
   try {
     let local: LocalSurfaces = {};
     let armPassClose: Started["armPassClose"];
+    let messages: Started["messages"];
     let drainAsk: Started["drainAsk"];
     let custodianStatus: Started["custodianStatus"];
     let custodianPoke: Started["custodianPoke"];
@@ -764,6 +775,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       started.push(entry);
       local = mergeSurfaces(local, entry);
       armPassClose ??= entry.armPassClose;
+      messages ??= entry.messages;
       drainAsk ??= entry.drainAsk;
       custodianStatus ??= entry.custodianStatus;
       custodianPoke ??= entry.custodianPoke;
@@ -773,6 +785,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       local,
       stop,
       ...(armPassClose === undefined ? {} : { armPassClose }),
+      ...(messages === undefined ? {} : { messages }),
       ...(drainAsk === undefined ? {} : { drainAsk }),
       ...(custodianStatus === undefined ? {} : { custodianStatus }),
       ...(custodianPoke === undefined ? {} : { custodianPoke }),

@@ -760,6 +760,18 @@ Séance's noise is cover for a real intruder.
    and rate-capped; audited per message; and the sender's task bound by its own daemon to its own pane
    and ledger, so B's wrapper names the real task, though a session can still lie in the text. One bound
    rests on the model: the wrapper's "if it fits your user's instructions".
+   A message can now cross machines (built 2026-11-14, "Cross-machine"), and the new party is the leader, which
+   is already trusted with the queue and is not made a reader of anything it did not already hold: it opens the
+   `session-message` only because it is sealed to it, keeps the text nowhere (not at rest, not in a log, not in
+   `queue` or `status`) and drops it after the forward. It binds `fromTask` to the sealing daemon (a daemon
+   cannot speak for a task placed on another machine, and a `from: "app"` message is dropped, since any PSK
+   holder seals as `app`), resolves the target only through its own list, and forwards only to the machine
+   that list names; the target daemon acts only on a `deliver-message` sealed from the scheduler, delivers
+   only to a pane its own ledger holds, and de-duplicates by message id. The receipt carries ids, kind and
+   an outcome and is a fixed line per outcome, so a message's text never travels back. A compromised relay can
+   withhold or delay a message (the accepted availability class) or replay it inside the window to a second
+   leader (de-duplicated at the target for `REPLAY_RETAIN_MS`); it cannot read one (sealed) or forge a sender
+   (AAD-bound `from`). The relay sees one more envelope class and logs none per message.
    An attachment (built 2026-10-28) is one more thing a PSK holder hands the
    session, read under the same permission mode as the prompt. Its name reaches the seed only
    as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
@@ -1517,6 +1529,9 @@ Who owns each frame in code — the place to change when a frame changes:
 | frame `inbox` (local socket, built 2026-11-13)                      | `daemon/src/inbox-cli.ts`, the `inbox` mod's child (`seanced inbox`)                                                                                                                                                                                                                                                                                                               | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
 | frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
 | op `session-pass` (→`"scheduler"`, built 2026-11-12)                | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                     | `daemon/src/leader.ts` `onSessionPass`                                                                                                                                                                                                                                                                                                                                                                  |
+| op `session-message` (→`"scheduler"`, built 2026-11-14)             | `daemon/src/messages.ts` (`route`), once per `route: "send"` frame for a task not deliverable here, through `run-capabilities.ts`; in process on the leader's machine                                                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent` → `daemon/src/leader-messages.ts` `onSessionMessage`                                                                                                                                                                                                                                                                                                                   |
+| op `deliver-message` (scheduler→daemon, built 2026-11-14)           | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
+| op `message-receipt` (scheduler→daemon, built 2026-11-14)           | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
 | op `custodian-event` (→`"scheduler"`, built 2026-11-14)             | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                       | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
@@ -1981,6 +1996,22 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   except `record`, the session's claim: at most `SUCCESSOR_RECORD_MAX` (7 168) UTF-16 units, never
   logged (built 2026-11-12). `drain` is `true` only, set while the sending daemon's machine is closed; the
   leader reads it only beside a status of that machine carrying `cl` (Daemon, "The drain's session ask").
+- `session-message { id, to, kind, text, fromTask?, fromTitle?, inReplyTo? }` (`SessionMessage`), an `EventOp`
+  daemon → scheduler, fire-and-forget like `session-pass` (built 2026-11-14; Local op socket, "Session messages",
+  "Cross-machine"). `id` is the sending daemon's own `isMessageId` mint; `text` is at most `MESSAGE_ROUTE_MAX` of JSON
+  and is never logged anywhere; `fromTask` is the sending pane's task as its daemon bound it and is honoured only for
+  a task the leader places or reserves on the sealer. Never from `"app"`.
+- `deliver-message { id, taskId, addressed, kind, text, inReplyTo?, fromTask?, fromTitle?, fromMachine, settled? }`
+  (`DeliverMessageRequest`) → `{ ok: true, outcome: "delivered" | "sent" | "held" | "ended" | "unknown", reason? }` or
+  `invalid_request` / `unsupported` / a transport code (`DeliverMessageResponse`), scheduler → daemon, 10 s timeout.
+  Sealed `from: "scheduler"` only; any other `from` is `invalid_request`. `reason: "nolistener"` only beside `ended`.
+  A daemon without messaging answers `unsupported`; a daemon that predates the op never replies, which is why the
+  leader forwards only to a machine advertising both `messages` and `messageRoute`.
+- `message-receipt { id, to, taskId?, kind, outcome, reason?, fromTask? }` (`MessageReceiptRequest`) →
+  `{ ok: true, outcome: "delivered" | "sent" | "dropped" }` or `invalid_request` / `unsupported` / a transport code
+  (`MessageReceiptResponse`), scheduler → daemon, 10 s timeout. `outcome` is the deliver outcomes plus `offline` and
+  `unsupported` (`ReceiptOutcome`). No text; sealed `from: "scheduler"` only. `fromTask` is optional so that a receipt
+  for an untasked sender parses on an older daemon and is dropped there.
 - `custodian-event { kind: "flag" | "unflag" | "failing", taskId?, reason?, note?, at }` (`CustodianEvent`), an
   `EventOp` daemon → scheduler, fire-and-forget like `session-event` (built 2026-11-14, custodian 6). `flag` carries a
   `taskId`, a `reason` from `FLAG_REASONS` and an optional `note` of at most `FLAG_NOTE_MAX` (200) UTF-16 units
@@ -2224,6 +2255,11 @@ an old peer's frames parse as before. Mixed versions:
     `isSpawnRequest` has no closed key set and ignores it, so the successor's `hand_off_task` answers
     `prless`, whose text says to keep watching the PR. No capability and no sentinel, and the record
     shape is unchanged (see "Passing to a successor", the hand-off).
+  - `CAPABILITIES.messageRoute` (2026-11-14): an unknown string to an older reader, which keeps the machine. As a
+    daemon it answers `deliver-message` and `message-receipt` (advertised unconditionally: any daemon may lead, and
+    receiving a forward binds no peer, unlike `messages`); as a leader it routes a `session-message`. `send_message`
+    sends `route: "send"` only against the verified leader advertising it, and the leader forwards only to a
+    machine advertising `messages` and `messageRoute` (Local op socket, "Session messages", "Cross-machine").
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -10125,14 +10161,26 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
 - **`send_message { to, kind, text, inReplyTo? }`** (built 2026-11-13; Local op socket, "Session messages").
-  Messages another Séance session's task on this machine: `kind` is `note` (information), `question` (may be
+  Messages another Séance session's task, on this machine or (2026-11-14, "Cross-machine") on any machine in the
+  fleet through the scheduler leader: `kind` is `note` (information), `question` (may be
   answered) or `request` (act on it if it fits). It reaches the daemon as the `message` frame, bound by the
   peer pid of `seanced mcp` (a child of `claude` in the pane) exactly as `report_task_done` is, never by a
   field, over the local socket and never the broker; the text is never in argv and `seanced mcp` logs nothing.
-  It checks no capability: it sends the frame, and an old daemon that drops it as malformed shows as a
-  connection closed with no answer, worded "may predate send_message" (as `invalid` is); a handler crash
-  answers `internal`, worded as a daemon error, since an update would not help. A task on another machine
-  answers `unknown` in this version (PR 2 routes it). There is no
+  A task the daemon can deliver is delivered with no capability check; a daemon that drops the frame as malformed
+  shows as a connection closed with no answer, worded "may predate send_message" (as `invalid` is); a handler
+  crash answers `internal`, worded as a daemon error, since an update would not help. Any other task is
+  the **two-frame gate**: the first frame carries `route: "ask"` and is answered `remote`, `seanced mcp` then
+  checks the verified leader advertises `CAPABILITIES.messageRoute` (`messageRouteGate`) and only then sends the
+  same message as `route: "send"`. A refusal at the gate says nothing was sent. An old daemon that rejects the
+  `route` key as `invalid` is sent the frame once more without it and answers as PR 1 did. A routed send answers
+  `routed` with a note that a receipt will arrive in this session's inbox (no receipt for an untasked sender, and
+  the answer says it will not be told whether it landed: that includes a task that ran and ended on the sender's own
+  machine, which PR 1 answered `ended` at once and routing now hands to the leader, since the leader may hold a
+  continuation or successor the machine does not; decided, because the machine cannot know, and a tasked sender
+  gets the outcome in its receipt). After the fallback to an old daemon (above), an `unknown` or `ended` answer is
+  worded as that daemon predating cross-machine messages, not as a route nobody asked for; the text is held to `MESSAGE_ROUTE_MAX` of JSON-escaped bytes and `too_long` says which
+  budget. The tool's description states all of this, so a model reads "through the scheduler", not "never leaves
+  the machine". There is no
   list tool: `get_queue` names every task by id, title, machine and state. `read_messages` lives on the inbox
   mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
   binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
@@ -10616,12 +10664,12 @@ executors further, but `origin=cli` should keep meaning "typed at this machine")
 a `rescan` op, or `availability`; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
 
-### Session messages (`daemon/src/messages.ts`) — built 2026-11-13, docs/messaging.md PR 1
+### Session messages (`daemon/src/messages.ts`) — built 2026-11-13 (PR 1) and 2026-11-14 (PR 2), docs/messaging.md
 
-Two sessions Séance spawned, on one machine, can message each other, across Claude accounts (exclaves
-share the machine's daemon). The sender's MCP `send_message` reaches the daemon over this socket; the
-receiver's `inbox` mod holds a listener connection open and delivers by Claude mod calls only. Cross-machine
-routing through the leader (PR 2) and the adapter seam (PR 3) are not built; docs/messaging.md keeps them.
+Two sessions Séance spawned can message each other, across Claude accounts (exclaves share the machine's
+daemon) and, through the leader, across machines (below, "Cross-machine"). The sender's MCP `send_message`
+reaches the daemon over this socket; the receiver's `inbox` mod holds a listener connection open and delivers
+by Claude mod calls only. The adapter seam (PR 3) is not built; docs/messaging.md keeps it.
 
 **Two frame kinds beside `Plain`**, both bound to a pane only by the kernel-reported peer pid (`peerPid`,
 `ancestorIn`) and refused `unbound` where the host cannot name a peer (`peerPidSupported()`; a `message`, a
@@ -10717,7 +10765,10 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   `read_messages`. `MESSAGE_MAX` (64 KiB) is the hard cap. The spike found no cap on Claude's side (300 KB
   cost 300k tokens), so the cap is ours, far under the socket's 1 MiB frame cap.
 - **Rate limit** 20 a minute and 200 an hour per sending task, held in memory in the daemon. An untasked
-  sender's key is its pane (`pane:<id>`), so ids it makes up share one bucket.
+  sender's key is its pane (`pane:<id>`), so ids it makes up share one bucket. A `route: "ask"` frame that is
+  answered `remote` counts in a bucket of its own with the same limits (each costs a pane listing and a peer
+  walk, and a gate that refuses ends there), so one routed message is one count in the ask bucket and one in the
+  send bucket; the 21st ask in a minute is `rate_limited`.
 - **A session handling a request may itself send requests** (**decided here**, docs/messaging.md's open
   question 1): bounded by the rate limit above, and the wrapper names the message id a reply answers.
   Rejected: notes only until the turn ends, which the mod could enforce but which would stop a legitimate
@@ -10812,6 +10863,152 @@ The mod is installed by `seanced mod install` on each machine (self-update does 
 daemon: the old daemon drops the `inbox` frame as malformed and warns, the child exits 2, and the mod backs off
 to 15 s. Advertised as `CAPABILITIES.messages` only where the host names peers and the peer-binding probe
 (`peerBindingProblem`, run once per process) passed.
+
+#### Cross-machine (built 2026-11-14, docs/messaging.md PR 2)
+
+**The path.** A task not deliverable on the sender's machine goes through the scheduler leader, which keeps
+nothing:
+
+1. **The two-frame gate.** The `message` frame gained `route?: "ask" | "send"` (`MESSAGE_ROUTES`,
+   `message-frame.ts`). `seanced mcp` sends `route: "ask"` first. The daemon answers as before for a task it can
+   deliver (a launch in its ledger and a live pane, or inside the grace), and `remote` (`ok: false`) for any other,
+   before the rate limit counts the frame, so one routed message is one count. On `remote`, `seanced mcp` checks
+   the **verified** leader advertises `CAPABILITIES.messageRoute` (`messageRouteGate`, `mcp.ts`, over the same
+   `relayFleet` the other leader-gated tools use) and only then sends `route: "send"`. A refusal at the gate sends
+   no second frame and names `seanced update` or the missing leader, with "nothing was sent". The two frames are
+   one `sendMessage` call, so the check runs where the fleet is known (`seanced mcp`) and the daemon never decides
+   for itself that a leader can route. Rejected: the daemon checking the leader on the first frame (it would
+   have to hold the verified-leader logic `seanced mcp` already has, and a keyless box reaches the fleet only
+   through the broker), and a `route: "send"` straight away (a message to a leader that cannot route would be
+   dropped with one warn line and the sender told `routed`).
+2. **Sender's daemon → leader.** On `route: "send"` the daemon mints the message id, binds the sender as it does a
+   local send (`fromTask` only for a task its own ledger holds, `fromTitle` the display-only window name) and
+   sends a `session-message` event (`SessionMessage`) sealed `from` its own device id to `SCHEDULER_ID`, or in
+   process on the leader's machine (`MessagesDeps.route`, `run-capabilities.ts`). It answers
+   `{ ok: true, id, outcome: "routed" }` (with `receipt: false` for an untasked sender: the leader has nobody to
+   send a receipt to), or `no_leader` when there is no leg to send on, and `unsupported` for a daemon wired with
+   no `route`. Nothing waits for the leader.
+3. **The leader admits** (`onEvent`, `daemon/src/leader.ts`, then `createMessageRouter`,
+   `daemon/src/leader-messages.ts`) only a message sealed from a daemon and never `from: "app"`, parsed by
+   `parseSessionMessage` into a fresh value, past the one `schedulerGuard` (a replayed `session-message` is
+   dropped there), and sealed by a machine in the registry. A `fromTask` is honoured only for a task the leader's
+   list places on the sealer or reserves there (`sentFrom` is three-state: `here`; `elsewhere`, which drops the
+   message with one warn line and no receipt, since a receipt would tell the sealer about a task it does not
+   hold; and `absent`, a task the leader has pruned whose session may still live, which forwards without naming
+   `fromTask`, so the receiver's wrapper never names a task the leader cannot bind, and still sends the receipt to
+   the sealer: its own ledger bound that task, and its daemon places the note only in the pane carrying it, so a
+   sender is never left waiting on a note for a message that landed). The sender's machine name is the registry's,
+   any string, so the leader runs it through `displayTitle`'s scrub (it sits in backticks in the wrapper) and cuts
+   it to `ROUTING_ID_MAX_LENGTH`, which the target's parser holds `fromMachine` to; a name nothing survives of is
+   the device id. Without that, a machine with a long name could message no one.
+4. **The leader resolves** the target in the scheduler library (`resolveMessageTarget`,
+   `scheduler/src/message-route.ts`, pure, over the leader's own task list):
+
+   | Target task state                                                                         | Resolves to                                                                                    |
+   | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+   | `running`, `needs-input`, `lost`                                                          | forward to the machine its `assignment` names                                                  |
+   | `superseded`                                                                              | its `successor`, followed to the end of the chain (`holder`, as dependents follow it)          |
+   | finished, a later task carries `continues` and has landed                                 | that continuation                                                                              |
+   | finished, a continuation exists but has not landed                                        | `held`                                                                                         |
+   | finished (or `awaiting-merge`), with an `assignment`                                      | **forward, `settled`**: the machine it ran on answers a live pane `delivered` and none `ended` |
+   | finished, no `assignment`                                                                 | `ended`                                                                                        |
+   | `queued`, `ready`, `blocked`, `reserved`, or placed with no `assignment` yet              | `held`: answered at once, nothing kept                                                         |
+   | not in the list, or a chain that cannot be read to its end (a cycle, a missing successor) | `unknown`                                                                                      |
+
+   A finished task that held a placement is forwarded, not answered `ended`, because a session often outlives
+   its record's `done` and the same-machine path already delivers to it: the machine it ran on decides, and a
+   local live pane wins over the leader's record on the sender's own machine (the gate only runs for what the
+   sender's daemon cannot deliver). `settled` exists because a daemon's launch grace (a spawn with no pane yet
+   is `held`) must not apply to a record the leader knows is finished.
+
+5. **The leader forwards** `deliver-message` (`DeliverMessageRequest`: the resolved `taskId`, the `addressed` id the
+   sender named, `fromMachine` the sender's machine name, `settled?`) to the machine holding the resolved task, in
+   process when that is its own. It forwards only to a connected machine advertising both `messages` and
+   `messageRoute` (the one exception is this leader's own machine when the registry lacks its entry: the leader
+   cannot read its own capabilities there, and it is that very daemon, which has `messageRoute` and answers for
+   its own panes), for the task its own resolution chose: an offline or unregistered target is `offline`, and a
+   machine advertising `messages` without `messageRoute` is `unsupported` rather than forwarded, since every PR 1
+   daemon advertises `messages` and none answers `deliver-message` (an unknown op never replies), so a forward
+   would read as `offline` and invite a retry that can never land. A target that answers `undelivered` or
+   `unreachable` is `offline`; one that refuses the frame (`unsupported`, `invalid_request`) is `unsupported`, with
+   one warn line; any other error (a handler that crashed, an oversized reply, a reply that did not parse) is
+   `offline` with the same line, since "needs `seanced update`" would be wrong for a daemon that is up to date.
+6. **The target daemon** (`handlers.ts` → `Messages.deliverRouted`) acts only on a `deliver-message` sealed `from`
+   the scheduler (or the leader in process), parsed by `parseDeliverMessageRequest`, and delivers only to a live
+   pane carrying the resolved task **that its own ledger holds a launch of**, by the listener write or hold a local
+   message takes. It answers `delivered`, `sent`, `held`, `ended` (with `reason: "nolistener"` for a pane with no
+   listener past the grace) or `unknown` (no launch record), as an `ok: true` reply: the outcome is the answer.
+   It **de-duplicates by message id for `REPLAY_RETAIN_MS`** (120 s), holding the reply as a promise so a replay
+   racing the first is answered by it: a second leader handed the same envelope inside the relay's replay window
+   would otherwise deliver twice. Its `dir=in` audit line is a local message's.
+7. **The receipt.** Events are fire-and-forget, so the leader reports back with `message-receipt`
+   (`MessageReceiptRequest`: id, the addressed `to`, the resolved `taskId`, `kind`, `outcome`, `reason?`, `fromTask`;
+   never text) to the sealing machine, and only when the sealer named a `fromTask` (one the leader has pruned
+   included, see step 3). The sender's daemon
+   (`Messages.receipt`) acts only on one sealed `from` the scheduler (or in process) and hands it only to a live
+   pane carrying the sending task its ledger holds a launch of (`dropped` otherwise: the sender's session ended, and
+   nothing is kept for it). The note is one fixed line per outcome, `receiptNote` (`shared/src/messages.ts`), never
+   message text:
+   `delivered` ("… was delivered to its session", with "(now carried by task `X`)" when a chain moved it), `sent`
+   ("… is waiting for its session's inbox listener (up to 120 s)"), `held` ("the task has not started yet, and
+   nothing was kept; send again later"), `ended` ("the task has no live session", or with `nolistener`, "its
+   session has no inbox listener (its account lacks the inbox mod)"), `unknown` ("the scheduler holds no such
+   task"), `unsupported` ("the target machine's daemon cannot receive messages (it needs `seanced update`)")
+   and `offline` ("the target machine is offline or did not answer; if it did land, a retry may duplicate it").
+   It is placed as a note, which does not wake an idle session, and is not itself audited as a message: its record
+   is the one `dir=receipt` line. The sender's daemon **de-duplicates receipts by message id and outcome for
+   `REPLAY_RETAIN_MS`**, as the target does forwards: a second leader handed the same envelope would otherwise send a
+   second note. A receipt is a courtesy and the answer says so: without one, whether the message landed is unknown.
+
+**The size budget.** The relay's `ENVELOPE_MAX_CT_LENGTH` (64 KiB of base64) carries about 48 KiB of JSON, so
+`MESSAGE_MAX` (64 KiB) cannot cross it. A message that crosses machines is held to `MESSAGE_ROUTE_MAX` (40 000
+bytes) of its **JSON-escaped** text (`routeBytes`, a `TextEncoder`, since shared is also loaded by the PWA and
+Raycast): headroom for the `Plain` wrapper and the leader's `from` fields, as `REPLY_JSON_BUDGET` does. The
+daemon refuses an over-budget `send` `too_long` with `reason: "route"`, and `seanced mcp` words it as the
+route budget, not `MESSAGE_MAX`. A message that fits the local cap and not the route budget still delivers locally.
+Rejected: a lower `MESSAGE_MAX` everywhere (it would cut local messages for a limit only the relay has) and
+chunking (a second protocol for a rare case).
+
+**Outcomes added** (`send_message` result, audit): `routed` (handed to the leader; the receipt follows),
+`no_leader` (nothing was sent), and, in a receipt only, `offline` and `unsupported`. The audit gained one
+direction, a third line on the sender's daemon, ids and counts only:
+
+```
+audit message origin=message dir=receipt from="<sending task>" to="<addressed task>" kind=<…> bytes=- outcome=<receipt outcome>
+```
+
+`dir=out` for a routed send reads `outcome=routed` (or `no_leader`), `bytes` its text's UTF-8 length. The leader
+audits and logs **no line per message**, as it logs no line per `#route` (Threat model item 3's timeline
+rule): only a message it drops, a forward its target refused and a receipt that failed, each naming a task or
+machine id and never the text, a title or a message id.
+
+**Skew**, all of it resolved at a daemon or at `seanced mcp`, none at the relay:
+
+| Combination                                | Behaviour                                                                                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Old `seanced mcp` (no `route`), new daemon | PR 1's answers: `unknown` or `ended` for a task not deliverable here, never `remote`                                                             |
+| New `seanced mcp`, old daemon              | the old `parseMessageFrame` rejects the unknown `route` key as `invalid`: `seanced mcp` resends the frame once without it and gets PR 1's answer |
+| New daemon, old leader                     | the gate finds no `messageRoute` and the message is refused with nothing sent                                                                    |
+| New leader, old target daemon              | `unsupported` at the leader (no `messageRoute`), forwarded to no one                                                                             |
+| Old leader receiving `session-message`     | one `dropped op=… — not a session event` warning; unreachable in practice, since the sender is gated on `messageRoute`                           |
+
+`messageRoute` is advertised by every daemon, since any may lead and receiving a forward needs no peer binding
+of its own. The relay sees one more sealed envelope class (`msg`, to `SCHEDULER_ID` and to a device id) of the
+shape of `session-event` and changes nothing: no relay or PWA deploy. Deploy order: daemons first, then the
+leader's build (it is a daemon), then the mod by `git pull`.
+
+**Rejected**, for sending through the leader (docs/messaging.md D1): **direct to the target `deviceId`, sealed
+`from: "app"`** (the sender is only a claim, since any PSK holder seals as `app`; the sender would resolve the
+placement itself and race a pass; every daemon would need an app-role client, which only credential-keyed
+daemons have); **daemon-to-daemon, sealed `from` the sender's `deviceId`** (a relay change, since the relay
+sends daemons no `undeliverable`, plus a pairwise trust rule, and every daemon would resolve chains it does not
+hold). For a target that cannot be reached now (D2), **three holds, all rejected**: **in the relay store** (the
+reasons a board does not belong there, and message text would sit at rest in the Durable Object for as long as
+it waited), **in leader memory** (lost on failover or restart, invisible to the sender, and the leader would
+become a mailbox) and **at the sender's daemon with retries** (a second queue per machine with its own expiry
+and duplicate rules). A target that is offline is dropped and answered `offline`; a message that landed whose
+reply was lost reads `offline` too, so a retry can duplicate it, and the wrapper names the message id so the
+receiver can tell.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 

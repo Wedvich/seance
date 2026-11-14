@@ -128,6 +128,8 @@ const noLocalOps: LocalOps = {
   despawn: () => Promise.reject(new Error("unexpected local despawn")),
   pushBranch: () => Promise.reject(new Error("unexpected local push-branch")),
   passClose: () => Promise.reject(new Error("unexpected local pass-close")),
+  deliverMessage: () => Promise.reject(new Error("unexpected local deliver-message")),
+  messageReceipt: () => Promise.reject(new Error("unexpected local message-receipt")),
 };
 
 /**
@@ -3504,5 +3506,151 @@ describe("amend", () => {
       leader.stop();
       relay.stop();
     }
+  });
+});
+
+describe("session-message ↔ the leader's admit rule", () => {
+  const ID = "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11";
+  const TEXT = "SECRET-MESSAGE-TEXT";
+  const TITLE = "SECRET-SENDER-TITLE";
+  const ROUTING = [CAPABILITIES.messages, CAPABILITIES.messageRoute];
+
+  /** Answers the leg's next request, whichever machine it is for, after checking what it asked. */
+  async function answerNext(
+    relay: TestRelay,
+    reply: (device: string, request: Plain) => unknown,
+  ): Promise<{ readonly device: string; readonly request: Plain }> {
+    const asked = await nextRequest(relay, 5_000);
+    const device = asked.env.to;
+    expect(asked.env.from).toBe(SCHEDULER_ID);
+    const request = await open(key, asked.env);
+    const env = await seal(
+      key,
+      { to: SCHEDULER_ID, from: device },
+      { id: crypto.randomUUID(), ts: Date.now(), op: request.op, re: request.id, payload: reply(device, request) },
+    );
+    relay.sendToApps({ t: "msg", env });
+    return { device, request };
+  }
+
+  /** `s` running on `b`, `t` running on `c`, both advertising routing; the leader has taken over. */
+  async function scenario(
+    body: (ctx: { relay: TestRelay; send: (from: string, payload?: object) => Promise<void> }) => Promise<void>,
+  ): Promise<string[]> {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    relay.setRegistry([await routableEntry("b", true, {}, ROUTING), await routableEntry("c", true, {}, ROUTING)]);
+    const store = new MemoryQueueStore();
+    await store.put(
+      "s",
+      0,
+      task("s", { state: "running", assignment: { deviceId: "b", ...target, window: "ws", pane: "%1" } }),
+    );
+    await store.put(
+      "t",
+      0,
+      task("t", { state: "running", assignment: { deviceId: "c", ...target, window: "wt", pane: "%2" } }),
+    );
+    const { leader } = leaderOver(relay, store);
+    return captureLog(async () => {
+      try {
+        leader.lead(1);
+        const sessions = (device: string): SessionsResponse => ({
+          sessions: [
+            device === "b"
+              ? { id: "%1", window: "ws", repo: "app", path: "/wt/s", taskId: "s" }
+              : { id: "%2", window: "wt", repo: "app", path: "/wt/t", taskId: "t" },
+          ],
+          at: Date.now(),
+        });
+        await answerNext(relay, (device) => sessions(device));
+        await answerNext(relay, (device) => sessions(device));
+        await leader.settled();
+        const send = async (from: string, payload: object = {}): Promise<void> => {
+          const env = await seal(
+            key,
+            { to: SCHEDULER_ID, from },
+            {
+              id: crypto.randomUUID(),
+              ts: Date.now(),
+              op: "session-message",
+              payload: { id: ID, to: "t", kind: "note", text: TEXT, fromTask: "s", fromTitle: TITLE, ...payload },
+            },
+          );
+          relay.sendToApps({ t: "msg", env });
+        };
+        await body({ relay, send });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+  }
+
+  test("a message sealed from the machine its fromTask is placed on is forwarded, then receipted to that machine; the receipt carries no text", async () => {
+    const lines = await scenario(async ({ relay, send }) => {
+      await send("b");
+      const deliver = await answerNext(relay, () => ({ ok: true, outcome: "delivered" }));
+      expect(deliver.device).toBe("c");
+      expect(deliver.request.op).toBe("deliver-message");
+      expect(deliver.request.payload).toMatchObject({
+        taskId: "t",
+        addressed: "t",
+        fromTask: "s",
+        fromMachine: "b",
+        text: TEXT,
+      });
+      const receipt = await answerNext(relay, () => ({ ok: true, outcome: "delivered" }));
+      expect(receipt.device).toBe("b");
+      expect(receipt.request.op).toBe("message-receipt");
+      expect(receipt.request.payload).toMatchObject({ to: "t", outcome: "delivered", fromTask: "s", taskId: "t" });
+      expect(JSON.stringify(receipt.request.payload)).not.toContain(TEXT);
+      expect(receipt.request.payload).not.toHaveProperty("text");
+    });
+    for (const line of lines) {
+      expect(line).not.toContain(TEXT);
+      expect(line).not.toContain(TITLE);
+    }
+  });
+
+  test("a message naming a fromTask placed on another machine is dropped: nothing forwarded, no receipt, one line", async () => {
+    let pending = -1;
+    const lines = await scenario(async ({ relay, send }) => {
+      await send("c");
+      // A non-event cannot be polled for.
+      await Bun.sleep(300);
+      pending = (await queuedRequests(relay)).length;
+    });
+    expect(pending).toBe(0);
+    expect(lines.filter((line) => line.includes('session-message task="s" from="c" dropped'))).toHaveLength(1);
+    for (const line of lines) expect(line).not.toContain(TEXT);
+  });
+
+  test("a session-message sealed by an app is dropped, never forwarded", async () => {
+    let pending = -1;
+    const lines = await scenario(async ({ relay, send }) => {
+      await send(APP_ID);
+      await Bun.sleep(300);
+      pending = (await queuedRequests(relay)).length;
+    });
+    expect(pending).toBe(0);
+    expect(lines.filter((line) => line.includes('dropped op="session-message"'))).toHaveLength(1);
+  });
+
+  test("a malformed message from a daemon is dropped as one, and an unregistered sealer is dropped by the router", async () => {
+    let pending = -1;
+    const lines = await scenario(async ({ relay, send }) => {
+      await send("b", { id: "nope" });
+      await send("d", {});
+      await Bun.sleep(300);
+      pending = (await queuedRequests(relay)).length;
+    });
+    expect(pending).toBe(0);
+    expect(
+      lines.filter((line) => line.includes('dropped op="session-message" from="b" — not a session message')),
+    ).toHaveLength(1);
+    expect(
+      lines.filter((line) => line.includes('session-message from="d" dropped — not a registered machine')),
+    ).toHaveLength(1);
   });
 });

@@ -7,9 +7,19 @@ import {
   MESSAGE_MAX,
   MESSAGE_PUSH_MAX,
   MESSAGE_RATE,
+  MESSAGE_ROUTE_MAX,
   messageStub,
+  receiptNote,
   renderMessage,
+  REPLAY_RETAIN_MS,
+  routeBytes,
+  type DeliverMessageRequest,
+  type DeliverMessageResponse,
   type MessageKind,
+  type MessageReceiptRequest,
+  type MessageReceiptResponse,
+  type MessageSender,
+  type SessionMessage,
 } from "@seance/shared";
 import { CUSTODIAN_SENDER, type CustodianSender, type MessageAudit } from "./audit.ts";
 import { log } from "./log.ts";
@@ -65,6 +75,11 @@ export interface MessagesDeps {
   readonly hostNamesPeers?: () => boolean;
   readonly graceMs?: number;
   readonly mintId?: () => string;
+  /**
+   * Hands a message for a task not deliverable here to the scheduler leader (in process when this daemon leads); false
+   * when it could not be sent. Absent, this daemon never routes and answers `unsupported` to a `send`.
+   */
+  readonly route?: (message: SessionMessage) => Promise<boolean>;
 }
 
 /** What became of a custodian nudge (`deliverAsCustodian`). */
@@ -99,6 +114,17 @@ export interface Messages {
    * task, or the grace. Reads and places nothing, so the seat's due check can ask without a nudge.
    */
   readonly canDeliver: (pane: string, expect: CustodianTarget) => Promise<boolean>;
+  /**
+   * The leader's forward of a message routed here (`deliver-message`): to the live pane carrying the resolved task, by
+   * the same listener write or hold a local message takes. De-duplicated by message id for `REPLAY_RETAIN_MS`, since a
+   * second leader could be sent the same envelope inside the relay's replay window.
+   */
+  readonly deliverRouted: (request: DeliverMessageRequest) => Promise<DeliverMessageResponse>;
+  /**
+   * The leader's receipt for a message this machine's task sent (`message-receipt`): one fixed-text note into the sending
+   * task's pane, never message text. `dropped`: no live pane carries the task, or it can no longer take one.
+   */
+  readonly receipt: (request: MessageReceiptRequest) => Promise<MessageReceiptResponse>;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
@@ -118,6 +144,8 @@ interface Held {
   /** The sender's task, null when untasked, or the custodian: for the audit line only. */
   readonly from: string | null | CustodianSender;
   readonly bytes: number;
+  /** A leader's receipt note: it has no outcome of its own to audit, the `receipt` line is its record. */
+  readonly receipt?: true;
   /** Its own grace, from the moment it was held: one timer per inbox would age a later message by an earlier one's clock. */
   timer: ReturnType<typeof setTimeout> | null;
 }
@@ -148,6 +176,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     void deps.audit(line).catch((err: unknown) => log.warn(`messages: audit write failed: ${String(err)}`));
   };
   const auditHeld = (to: string, item: Held, outcome: "delivered" | "ended" | "nolistener" | "dropped"): void => {
+    if (item.receipt === true) return;
     audit({ dir: "in", from: item.from, to, kind: item.messageKind, bytes: item.bytes, outcome });
   };
 
@@ -307,6 +336,34 @@ export function createMessages(deps: MessagesDeps): Messages {
     );
   };
 
+  /** The wrapper and what is pushed: the text itself when it fits `MESSAGE_PUSH_MAX`, else a stub the model pulls. */
+  const itemOf = (m: {
+    readonly id: string;
+    readonly kind: MessageKind;
+    readonly text: string;
+    readonly bytes: number;
+    readonly from: MessageSender;
+    readonly inReplyTo: string | undefined;
+  }): Held => {
+    const full = renderMessage({
+      kind: m.kind,
+      id: m.id,
+      from: m.from,
+      text: m.text,
+      ...(m.inReplyTo === undefined ? {} : { inReplyTo: m.inReplyTo }),
+    });
+    const pushed = m.bytes <= MESSAGE_PUSH_MAX;
+    return {
+      id: m.id,
+      messageKind: m.kind,
+      push: pushed ? full : messageStub({ kind: m.kind, id: m.id, from: m.from, bytes: m.bytes }),
+      ...(pushed ? {} : { body: full }),
+      from: m.from.task,
+      bytes: m.bytes,
+      timer: null,
+    };
+  };
+
   const listen: Messages["listen"] = async (raw, peer, sink) => {
     const refuse = (code: Extract<InboxAck, { ok: false }>["code"]): void => {
       sink.write(JSON.stringify({ ok: false, code } satisfies InboxAck));
@@ -385,47 +442,80 @@ export function createMessages(deps: MessagesDeps): Messages {
       out("too_long");
       return { ok: false, code: "too_long" };
     }
-    if (!admit(from === null ? `pane:${sender.id}` : `task:${from}`)) {
+    // Local when this machine launched the task and a live pane carries it, or the launch is still inside the grace
+    // (a held answer). Anything else is not deliverable here: a caller that can check the leader is told to (`remote`)
+    // before the send bucket counts the frame, so one routed message is one count there, not two. The ask has a bucket
+    // of its own (same limits), since each costs a pane listing and a peer walk and a gate that refuses ends there.
+    const launched = deps.launchedAt(to);
+    const candidates = panes.filter((pane) => !pane.dead && pane.taskId === to);
+    const local = launched !== undefined && (candidates.length > 0 || now() - launched <= graceMs);
+    const bucket = from === null ? `pane:${sender.id}` : `task:${from}`;
+    if (!local && frame.route === "ask") {
+      if (!admit(`ask:${bucket}`)) {
+        out("rate_limited");
+        return { ok: false, code: "rate_limited" };
+      }
+      return { ok: false, code: "remote" };
+    }
+
+    if (!admit(bucket)) {
       out("rate_limited");
       return { ok: false, code: "rate_limited" };
     }
 
-    const launched = deps.launchedAt(to);
-    if (launched === undefined) {
-      out("unknown");
-      return { ok: false, code: "unknown" };
+    if (!local) {
+      if (frame.route !== "send") {
+        // PR 1's answers, for a caller that never asked to route.
+        if (launched === undefined) {
+          out("unknown");
+          return { ok: false, code: "unknown" };
+        }
+        out("ended");
+        return { ok: false, code: "ended" };
+      }
+      if (routeBytes(text) > MESSAGE_ROUTE_MAX) {
+        out("too_long");
+        return { ok: false, code: "too_long", reason: "route" };
+      }
+      if (deps.route === undefined) {
+        out("unsupported");
+        return { ok: false, code: "unsupported" };
+      }
+      const title = from === null ? null : displayTitle((await deps.windowName(sender.id)) ?? "");
+      const id = mintId();
+      const routed = await deps.route({
+        id,
+        to,
+        kind,
+        text,
+        ...(from === null ? {} : { fromTask: from }),
+        ...(title === null ? {} : { fromTitle: title }),
+        ...(frame.inReplyTo === undefined ? {} : { inReplyTo: frame.inReplyTo }),
+      });
+      if (!routed) {
+        out("no_leader");
+        return { ok: false, code: "no_leader" };
+      }
+      out("routed");
+      return { ok: true, id, outcome: "routed", ...(from === null ? { receipt: false as const } : {}) };
     }
-    const candidates = panes.filter((pane) => !pane.dead && pane.taskId === to);
+
     const target = candidates.find((pane) => listeners.has(pane.id)) ?? candidates[0];
     if (target === undefined) {
-      if (now() - launched <= graceMs) {
-        out("held");
-        return { ok: false, code: "held" };
-      }
-      out("ended");
-      return { ok: false, code: "ended" };
+      out("held");
+      return { ok: false, code: "held" };
     }
 
     const title = from === null ? null : displayTitle((await deps.windowName(sender.id)) ?? "");
     const id = mintId();
-    const sendersView = { task: from, title, machine: deps.machine };
-    const full = renderMessage({
+    const item = itemOf({
+      id,
       kind,
-      id,
-      from: sendersView,
       text,
-      ...(frame.inReplyTo === undefined ? {} : { inReplyTo: frame.inReplyTo }),
-    });
-    const pushed = bytes <= MESSAGE_PUSH_MAX;
-    const item: Held = {
-      id,
-      messageKind: kind,
-      push: pushed ? full : messageStub({ kind, id, from: sendersView, bytes }),
-      ...(pushed ? {} : { body: full }),
-      from,
       bytes,
-      timer: null,
-    };
+      from: { task: from, title, machine: deps.machine },
+      inReplyTo: frame.inReplyTo,
+    });
 
     const placed = place(target, to, launched, item);
     out(placed);
@@ -483,11 +573,119 @@ export function createMessages(deps: MessagesDeps): Messages {
     return wouldPlace(target, target.taskId, launched);
   };
 
+  /** Replies to forwards by message id, held as promises so a replay racing the first is answered by it. */
+  const forwards = new Map<string, { readonly reply: Promise<DeliverMessageResponse>; readonly at: number }>();
+  /** Receipts placed, by message id and outcome: a second leader sent the same message answers it again. */
+  const receipts = new Map<string, { readonly reply: Promise<MessageReceiptResponse>; readonly at: number }>();
+
+  const placeRouted = async (request: DeliverMessageRequest): Promise<DeliverMessageResponse> => {
+    const { taskId: to, kind, id } = request;
+    const bytes = Buffer.byteLength(request.text, "utf8");
+    const from = request.fromTask ?? null;
+    const inLine = (outcome: Parameters<MessageAudit>[0]["outcome"]): void =>
+      audit({ dir: "in", from, to, kind, bytes, outcome });
+
+    const launched = deps.launchedAt(to);
+    if (launched === undefined) {
+      inLine("unknown");
+      return { ok: true, outcome: "unknown" };
+    }
+    const panes = await deps.panes();
+    sweep(panes);
+    const candidates = panes.filter((pane) => !pane.dead && pane.taskId === to);
+    const target = candidates.find((pane) => listeners.has(pane.id)) ?? candidates[0];
+    if (target === undefined) {
+      // `settled`: the leader's record is finished, so a session that never showed a pane is not still starting.
+      if (request.settled !== true && now() - launched <= graceMs) {
+        inLine("held");
+        return { ok: true, outcome: "held" };
+      }
+      inLine("ended");
+      return { ok: true, outcome: "ended" };
+    }
+    const item = itemOf({
+      id,
+      kind,
+      text: request.text,
+      bytes,
+      from: {
+        task: from,
+        title: request.fromTitle === undefined ? null : displayTitle(request.fromTitle),
+        machine: request.fromMachine,
+      },
+      inReplyTo: request.inReplyTo,
+    });
+    const placed = place(target, to, launched, item);
+    // `sent` is audited when its hold resolves, as a local message's is.
+    if (placed === "delivered") auditHeld(to, item, "delivered");
+    if (placed === "nolistener") {
+      auditHeld(to, item, "nolistener");
+      return { ok: true, outcome: "ended", reason: "nolistener" };
+    }
+    return { ok: true, outcome: placed };
+  };
+
+  const deliverRouted: Messages["deliverRouted"] = (request) => {
+    if (stopped) return Promise.resolve({ ok: false, code: "unsupported", message: "stopping" });
+    const t = now();
+    for (const [id, entry] of forwards) {
+      if (t - entry.at >= REPLAY_RETAIN_MS) forwards.delete(id);
+    }
+    const known = forwards.get(request.id);
+    if (known !== undefined) return known.reply;
+    const reply = placeRouted(request);
+    forwards.set(request.id, { reply, at: t });
+    return reply;
+  };
+
+  const placeReceipt = async (request: MessageReceiptRequest, to: string): Promise<MessageReceiptResponse> => {
+    const launched = deps.launchedAt(to);
+    if (launched === undefined) return { ok: true, outcome: "dropped" };
+    const panes = await deps.panes();
+    sweep(panes);
+    const candidates = panes.filter((pane) => !pane.dead && pane.taskId === to);
+    const target = candidates.find((pane) => listeners.has(pane.id)) ?? candidates[0];
+    if (target === undefined) return { ok: true, outcome: "dropped" };
+    const push = receiptNote(request);
+    const item: Held = {
+      id: mintId(),
+      messageKind: "note",
+      push,
+      from: null,
+      bytes: Buffer.byteLength(push, "utf8"),
+      receipt: true,
+      timer: null,
+    };
+    const placed = place(target, to, launched, item);
+    if (placed === "nolistener") return { ok: true, outcome: "dropped" };
+    audit({ dir: "receipt", from: to, to: request.to, kind: request.kind, outcome: request.outcome });
+    return { ok: true, outcome: placed };
+  };
+
+  const receipt: Messages["receipt"] = (request) => {
+    if (stopped) return Promise.resolve({ ok: false, code: "unsupported", message: "stopping" });
+    const to = request.fromTask;
+    // A receipt for an untasked sender: nothing here can address it yet.
+    if (to === undefined) return Promise.resolve({ ok: true, outcome: "dropped" });
+    const t = now();
+    for (const [key, entry] of receipts) {
+      if (t - entry.at >= REPLAY_RETAIN_MS) receipts.delete(key);
+    }
+    const key = `${request.id}:${request.outcome}`;
+    const known = receipts.get(key);
+    if (known !== undefined) return known.reply;
+    const reply = placeReceipt(request, to);
+    receipts.set(key, { reply, at: t });
+    return reply;
+  };
+
   return {
     listen,
     send,
     deliverAsCustodian,
     canDeliver,
+    deliverRouted,
+    receipt,
     onEnded: (pane, taskId) => {
       if (inboxes.get(pane)?.taskId === taskId) dropInbox(pane, "ended");
       disconnects.delete(pane);

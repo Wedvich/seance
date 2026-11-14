@@ -3,6 +3,14 @@ import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
 import { isTraitName, TRAIT_LIMITS } from "./traits.ts";
 import { isPromptBasis } from "./amend.ts";
 import {
+  isMessageId,
+  MESSAGE_KINDS,
+  MESSAGE_MAX,
+  MESSAGE_PUSH_MAX,
+  MESSAGE_ROUTE_MAX,
+  routeBytes,
+} from "./messages.ts";
+import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
   ARCHIVE_INGEST_SOURCES,
@@ -39,6 +47,14 @@ import {
   PR_STATES,
   PUSH_ALERT_MAX_BYTES,
   PASS_CLOSE_ERROR_CODES,
+  DELIVER_OUTCOMES,
+  MESSAGE_ROUTE_ERROR_CODES,
+  RECEIPT_OUTCOMES,
+  type DeliverMessageRequest,
+  type DeliverMessageResponse,
+  type MessageReceiptRequest,
+  type MessageReceiptResponse,
+  type SessionMessage,
   PUSH_BRANCH_ERROR_CODES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_LABEL_MAX_LENGTH,
@@ -2414,6 +2430,107 @@ export function parsePassCloseResponse(value: unknown): PassCloseResponse | null
   if (!isRecord(value)) return null;
   if (value["ok"] === true) return { ok: true };
   const code = PASS_CLOSE_ERROR_CODES.find((c) => c === value["code"]);
+  if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
+}
+
+const MESSAGE_TITLE_MAX = 200;
+
+/**
+ * The fields a `session-message` and a `deliver-message` share, each re-validated. `text` is held to the byte caps the
+ * sender holds it to, the route budget included: a sender that did not enforce them is skew or a bug, and cutting the
+ * text here would hide it.
+ */
+function parseRoutedBody(value: Readonly<Record<string, unknown>>): {
+  readonly id: string;
+  readonly kind: (typeof MESSAGE_KINDS)[number];
+  readonly text: string;
+  readonly fromTask?: string;
+  readonly fromTitle?: string;
+  readonly inReplyTo?: string;
+} | null {
+  const { id, kind: rawKind, text, fromTask, fromTitle, inReplyTo } = value;
+  const kind = MESSAGE_KINDS.find((k) => k === rawKind);
+  if (!isMessageId(id) || kind === undefined) return null;
+  if (typeof text !== "string" || text === "") return null;
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MESSAGE_MAX || routeBytes(text) > MESSAGE_ROUTE_MAX) return null;
+  if (kind === "request" && bytes > MESSAGE_PUSH_MAX) return null;
+  if (fromTask !== undefined && !isTaskId(fromTask)) return null;
+  if (fromTitle !== undefined && (typeof fromTitle !== "string" || fromTitle.length > MESSAGE_TITLE_MAX)) return null;
+  if (inReplyTo !== undefined && !isMessageId(inReplyTo)) return null;
+  return {
+    id,
+    kind,
+    text,
+    ...(fromTask === undefined ? {} : { fromTask }),
+    ...(fromTitle === undefined ? {} : { fromTitle }),
+    ...(inReplyTo === undefined ? {} : { inReplyTo }),
+  };
+}
+
+/** `session-message`, at the leader: a daemon's, so skew and bug hygiene plus the bounds the forward must fit. */
+export function parseSessionMessage(value: unknown): SessionMessage | null {
+  if (!isRecord(value) || !isTaskId(value["to"])) return null;
+  const body = parseRoutedBody(value);
+  return body === null ? null : { ...body, to: value["to"] };
+}
+
+/** `deliver-message`, at the daemon holding the resolved task. `settled` is kept only as `true`. */
+export function parseDeliverMessageRequest(value: unknown): DeliverMessageRequest | null {
+  if (!isRecord(value)) return null;
+  const { taskId, addressed, fromMachine, settled } = value;
+  if (!isTaskId(taskId) || !isTaskId(addressed)) return null;
+  if (typeof fromMachine !== "string" || fromMachine === "" || fromMachine.length > ROUTING_ID_MAX_LENGTH) return null;
+  const body = parseRoutedBody(value);
+  if (body === null) return null;
+  return { ...body, taskId, addressed, fromMachine, ...(settled === true ? { settled: true as const } : {}) };
+}
+
+/** A `deliver-message` answer at the leader: an outcome it knows, or a failure it words as `unsupported`. */
+export function parseDeliverMessageResponse(value: unknown): DeliverMessageResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === true) {
+    const outcome = DELIVER_OUTCOMES.find((o) => o === value["outcome"]);
+    if (outcome === undefined) return null;
+    const { reason } = value;
+    if (reason !== undefined && !(reason === "nolistener" && outcome === "ended")) return null;
+    return { ok: true, outcome, ...(reason === undefined ? {} : { reason }) };
+  }
+  const code = MESSAGE_ROUTE_ERROR_CODES.find((c) => c === value["code"]);
+  if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
+}
+
+/** `message-receipt`, at the sealing daemon: ids, kind and outcome, never text. */
+export function parseMessageReceiptRequest(value: unknown): MessageReceiptRequest | null {
+  if (!isRecord(value)) return null;
+  const { id, to, taskId, kind: rawKind, outcome: rawOutcome, reason, fromTask } = value;
+  const kind = MESSAGE_KINDS.find((k) => k === rawKind);
+  const outcome = RECEIPT_OUTCOMES.find((o) => o === rawOutcome);
+  if (!isMessageId(id) || !isTaskId(to) || kind === undefined || outcome === undefined) return null;
+  if (taskId !== undefined && !isTaskId(taskId)) return null;
+  if (fromTask !== undefined && !isTaskId(fromTask)) return null;
+  if (reason !== undefined && reason !== "nolistener") return null;
+  return {
+    id,
+    to,
+    kind,
+    outcome,
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(reason === undefined ? {} : { reason }),
+    ...(fromTask === undefined ? {} : { fromTask }),
+  };
+}
+
+/** A `message-receipt` answer at the leader, which only warns on a failure. */
+export function parseMessageReceiptResponse(value: unknown): MessageReceiptResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === true) {
+    const { outcome } = value;
+    return outcome === "delivered" || outcome === "sent" || outcome === "dropped" ? { ok: true, outcome } : null;
+  }
+  const code = MESSAGE_ROUTE_ERROR_CODES.find((c) => c === value["code"]);
   if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
   return { ok: false, code, message: value["message"] };
 }

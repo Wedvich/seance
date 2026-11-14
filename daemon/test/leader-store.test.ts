@@ -80,6 +80,8 @@ const noLocalOps: LocalOps = {
   despawn: () => Promise.reject(new Error("unexpected local despawn")),
   pushBranch: () => Promise.reject(new Error("unexpected local push-branch")),
   passClose: () => Promise.reject(new Error("unexpected local pass-close")),
+  deliverMessage: () => Promise.reject(new Error("unexpected local deliver-message")),
+  messageReceipt: () => Promise.reject(new Error("unexpected local message-receipt")),
 };
 
 /**

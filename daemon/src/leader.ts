@@ -14,6 +14,7 @@ import {
   parseBranchState,
   parseCustodianEvent,
   parseSessionEvent,
+  parseSessionMessage,
   parseSessionPass,
   QUEUE_MAX_TASKS,
   QUOTA_KEY,
@@ -26,6 +27,7 @@ import {
   type PushAlert,
   type QueueChanged,
   type SchedulerEventHandler,
+  type SessionMessage,
   type SessionPass,
   type SessionState,
 } from "@seance/shared";
@@ -33,7 +35,8 @@ import type { AppRelay } from "./app-relay.ts";
 import { admitAudit, daemonSink } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
 import { createMachineAlertWatch } from "./machine-alerts.ts";
-import { fencedStore, successorCreate, termFleet } from "./leader-adapters.ts";
+import { fencedStore, successorCreate, termFleet, termMessages, type TermFleetOpts } from "./leader-adapters.ts";
+import { createMessageRouter, type MessageRouter } from "./leader-messages.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
 import { readPrHead, startPrPoller, type PrPollerOpts } from "./pr-status.ts";
@@ -217,6 +220,13 @@ export interface Leader {
    */
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
   /**
+   * A `session-message` from this machine, in process (`run-capabilities.ts`), as `onSessionPass` is; other machines'
+   * arrive through the term's leg. `from` is the sealing daemon: only a task placed (or reserved) on it may be named as
+   * the sender. True when taken, false (with a warn line, never the text) when dropped or no term runs, so the sending
+   * session is told nothing was handed over. A taken message's outcome reaches the sender as a receipt.
+   */
+  readonly onSessionMessage: (message: SessionMessage, from: string) => boolean;
+  /**
    * A `custodian-event` from this machine, in process (`run-capabilities.ts`), as `onSession` is; other
    * machines' arrive through the term's leg. `from` is the sealing daemon: a `flag` or `unflag` moves only a
    * task placed on it (`Scheduler.onFlag`), and a `failing` is pushed under its id. Dropped outside a
@@ -248,6 +258,7 @@ interface TermRun {
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   readonly onBranchState: (state: BranchState, from: string) => void;
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
+  readonly onSessionMessage: (message: SessionMessage, from: string) => boolean;
   readonly onCustodianEvent: (event: CustodianEvent, from: string) => Promise<boolean>;
   readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
@@ -476,6 +487,16 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       .catch(fail);
     return true;
   };
+  // A session's message to a task not deliverable on its own machine (`leader-messages.ts`). Built with the scheduler
+  // below, which it reads; a message before that is dropped like one outside a running term. Never logged by text.
+  let messageRouter: MessageRouter | undefined;
+  const onSessionMessage = (message: SessionMessage, from: string): boolean => {
+    if (!live || !running || messageRouter === undefined) {
+      log.warn(`scheduler: session-message from=${quote(from)} dropped — no running term`);
+      return false;
+    }
+    return messageRouter.onSessionMessage(message, from);
+  };
   // Task ids a `store-changed` named while the term was still taking over, or
   // whose refresh failed: takeover's `load` replaces the held view, so a refresh
   // before it ends would be overwritten, and one that failed must not be lost —
@@ -553,6 +574,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       plain.op !== "branch-state" &&
       plain.op !== "session-event" &&
       plain.op !== "session-pass" &&
+      plain.op !== "session-message" &&
       plain.op !== "custodian-event"
     ) {
       log.warn(`scheduler: refused op=${quote(plain.op)} from=${quote(from)} — not an op this leader handles`);
@@ -581,6 +603,17 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         return;
       }
       onSessionPass(pass, from);
+      return;
+    }
+    // Only a daemon's, as `session-pass`: the sender is bound by its own daemon, and an app's would let any PSK
+    // holder speak as a task.
+    if (plain.op === "session-message" && from !== APP_ID) {
+      const message = parseSessionMessage(plain.payload);
+      if (message === null) {
+        log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session message`);
+        return;
+      }
+      onSessionMessage(message, from);
       return;
     }
     // Only a daemon's, as `branch-state`: it moves a task's record on the strength of what its machine saw.
@@ -720,18 +753,19 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     now,
     minGapMs: opts.tickIntervalMs ?? TICK_INTERVAL_MS,
   });
+  const termFleetOpts: TermFleetOpts = {
+    relay,
+    selfDeviceId: opts.selfDeviceId,
+    local: opts.local,
+    live: isLive,
+    demote: (why) => demote({ why, resign: false }),
+  };
   const scheduler = new Scheduler({
     store: watched(
       fencedStore(opts.floor === undefined ? store : flooredStore(store, opts.floor), term, isLive),
       nudge.note,
     ),
-    fleet: termFleet({
-      relay,
-      selfDeviceId: opts.selfDeviceId,
-      local: opts.local,
-      live: isLive,
-      demote: (why) => demote({ why, resign: false }),
-    }),
+    fleet: termFleet(termFleetOpts),
     now,
     onError: fail,
     // A pass's successor is created through the leader's own app leg (an `expect: 0` create the relay answers
@@ -750,6 +784,16 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     onTraitHeld: (taskId, trait, why) =>
       log.info(`scheduler: task held by trait: task=${taskId} trait=${trait} why=${why}`),
     ...(opts.config === undefined ? {} : { config: opts.config }),
+  });
+  const messageOps = termMessages(termFleetOpts);
+  messageRouter = createMessageRouter({
+    resolve: (to) => scheduler.resolveMessage(to),
+    sentFrom: (taskId, deviceId) => scheduler.sentFrom(taskId, deviceId),
+    machines: () => relay.getState().machines,
+    selfDeviceId: opts.selfDeviceId,
+    deliver: messageOps.deliverMessage,
+    receipt: messageOps.messageReceipt,
+    warn: (line) => log.warn(line),
   });
 
   const tick = (): void => {
@@ -886,6 +930,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     onSession,
     onBranchState,
     onSessionPass,
+    onSessionMessage,
     onCustodianEvent,
     onStoreChanged,
     end: () => {
@@ -953,6 +998,11 @@ export function createLeader(options: LeaderOpts): Leader {
     onSession: async (taskId, state, from, prUrl) => current?.onSession(taskId, state, from, prUrl),
     onBranchState: (state, from) => current?.onBranchState(state, from),
     onSessionPass: (pass, from) => current?.onSessionPass(pass, from) ?? false,
+    onSessionMessage: (message, from) => {
+      if (current !== null) return current.onSessionMessage(message, from);
+      log.warn(`scheduler: session-message from=${quote(from)} dropped — no running term`);
+      return false;
+    },
     onCustodianEvent: (event, from) => {
       if (current !== null) return current.onCustodianEvent(event, from);
       log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
