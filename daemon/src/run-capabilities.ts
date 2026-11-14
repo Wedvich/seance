@@ -137,6 +137,8 @@ export interface Started {
   readonly drainAsk?: DrainAsk;
   /** The custodian seat's view for the status's `cu`, read late by `run.ts`; absent where no seat is enabled. */
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
+  /** The seat reads the owner's control files now (`CustodianSeat.poke`), read late by `run.ts`'s `custodian` op. */
+  readonly custodianPoke?: () => void;
 }
 
 /** One optional subsystem `startDaemon` wires once the relay client exists. */
@@ -560,6 +562,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     },
     custodianStatus: (now) =>
       seatFailed ? { s: "failing", ...failedLast } : seat?.ready() === true ? seat.view(now) : null,
+    custodianPoke: () => seat?.poke(),
     ...(verbs === null
       ? {}
       : {
@@ -692,6 +695,7 @@ export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
   readonly drainAsk?: DrainAsk;
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
+  readonly custodianPoke?: () => void;
   readonly local: LocalSurfaces;
   readonly stop: () => void;
 }
@@ -711,6 +715,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
     let armPassClose: Started["armPassClose"];
     let drainAsk: Started["drainAsk"];
     let custodianStatus: Started["custodianStatus"];
+    let custodianPoke: Started["custodianPoke"];
     for (const capability of capabilities) {
       const entry = capability(ctx);
       started.push(entry);
@@ -718,6 +723,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       armPassClose ??= entry.armPassClose;
       drainAsk ??= entry.drainAsk;
       custodianStatus ??= entry.custodianStatus;
+      custodianPoke ??= entry.custodianPoke;
     }
     return {
       local,
@@ -725,6 +731,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       ...(armPassClose === undefined ? {} : { armPassClose }),
       ...(drainAsk === undefined ? {} : { drainAsk }),
       ...(custodianStatus === undefined ? {} : { custodianStatus }),
+      ...(custodianPoke === undefined ? {} : { custodianPoke }),
     };
   } catch (err) {
     // Already-started ones hold timers and sockets nothing else will stop.
