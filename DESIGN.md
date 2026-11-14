@@ -11287,8 +11287,15 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   Remote Control names each session `session_<base62>`, and claude.ai opens it at
   `https://claude.ai/code/<id>`. Claude Code sets it as `$CLAUDE_CODE_BRIDGE_SESSION_ID` once
   the bridge connects, and `$.process.run` inherits it, so `seanced session-event` adds it to
-  every frame as `remoteSession`, as it adds `pane`. The mod reads nothing new. An event raised
-  before the bridge connects has none, and a later one fills it in. It is the session's claim,
+  every frame as `remoteSession`, as it adds `pane`. An event raised before the bridge connects
+  has none, and a later one fills it in. The bridge connects a second or so after the seeded
+  prompt's turn starts (measured 2026-11-14: absent at `session.start` and `turn.start`, present
+  at the first `tool.call`), and a busy turn changes no state until it ends, so the mod also reads
+  the variable (`$.env.get`, live) at each `tool.call` and sends the unchanged state once when the
+  id is new to it: the link appears within the first tool call, not at the first turn's end. The
+  same read corrects a session that inherited another's id (a tmux server booted from inside a
+  Claude session) once its own bridge replaces it. The mod's read only decides that a report goes;
+  the id itself is still the CLI's, from the env it inherits. It is the session's claim,
   and a display-only one: it binds nothing and moves no state, and the task is still the pane's
   `@seance-task`. It is kept only as `isRemoteSessionId` (`shared/src/parse.ts`) passes it, at
   ingest, at the leader's `parseSessionEvent` and at `parseTask`: `session_` and base62 alone,
