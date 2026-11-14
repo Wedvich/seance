@@ -5,7 +5,7 @@ custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session
 seat and the round, now DESIGN.md, "The custodian's seat") and 4 (the `custodian` frame with `sessions`,
 `close`, `notes` and `done`, the round log, now DESIGN.md, "The custodian frame kind") and 5 (`MachineStatus.cu`, the Machines row and the shell's `status`, `log`, `round`,
 `pause` and `resume`, now DESIGN.md, "The custodian's status and the Machines row") and 6 (the `flag` verb, `custodian-event`,
-`Task.flag`, the card's flag and the `stuck` and `failing` pushes, now DESIGN.md, "The custodian frame kind", "The leader's side" and "The custodian's status and the Machines row") built and folded
+`Task.flag`, the card's flag and the `stuck` and `failing` pushes, now DESIGN.md, "The custodian frame kind" (its leader's-side bullet) and "The custodian's status and the Machines row") built and folded
 into DESIGN.md. Rounds are held behind `ROUNDS_LIVE` (owner decision, 2026-11-14): the verbs bound only
 what goes through them, and a round's sandbox can still reach the tmux socket and the daemon's plain ops
 and read on-disk secrets, so item 4b (contain the round) comes before any round runs. What is left is 4b,
@@ -169,11 +169,15 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
   stops. No verb force-closes a busy session, and none requeues or continues a task.
 - **C29. `flag`** _(built, custodian 6: DESIGN.md, "The custodian frame kind")_ records a reason from the fixed set and an optional note of at most 200
   characters. `dirty` and `unpushed` are also set by the daemon itself when a close keeps a
-  worktree (§6). A flag clears when the session next goes `busy`, or closes with nothing kept.
+  worktree (§6). `stuck` and `look` are about the session: they clear when it starts a new turn (a `busy` after an
+  `idle`, or with no state retained), when it closes with nothing kept, and when its session is gone. `dirty` and
+  `unpushed` are about the worktree, which a new turn or the session's end leaves as it is, so they stay on the
+  record, the round's as the daemon's (only a close that removes the worktree, or a re-assignment, lifts one).
 - **C30.** _Derived._ Nudge and interrupt counts and open flags are the daemon's, persisted in
-  `stateDir()/custodian/state.json` (0600) keyed by task id, or by pane for an untasked session,
-  and dropped when the session ends. The agent cannot reset them, and they survive a daemon
-  restart.
+  `stateDir()/custodian/sessions.json` (0600; not `state.json`, the owner CLI's alone) keyed by task id, or by pane for
+  an untasked session, and dropped when the session ends. The agent cannot reset them, and they survive a daemon
+  restart. An entry is the daemon's record of what the leader's task record holds, so it is cleared only once the
+  event that settles the record was taken (DESIGN.md, "When a flag lifts").
 
 ### 6. Worktrees, and what "nothing would be lost" means
 
@@ -188,7 +192,7 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
   flags it `dirty` or `unpushed`. When the rule cannot be evaluated, the worktree is kept and
   nothing is flagged; `reap` tries again later. _Built:_ the rule's three-way verdict and `reap`'s
   keeping (DESIGN.md, Reap, "Nothing lost"), and the close's keeping and its reply and audit line
-  (`kept why=dirty|unpushed|…`). _Built (custodian 6):_ the `dirty` and `unpushed` flags, set through `onKept`
+  (`kept why=dirty|unpushed|…`). _Built (custodian 6):_ the `dirty` and `unpushed` flags, set by `settleWorktree`
   (DESIGN.md, "The custodian frame kind").
 - **C34.** The local branch is left for `reap`'s merged-branch sweep. A later `continue` of the
   task re-adds the worktree at its old path from that branch (DESIGN.md, "Continuing a session",
@@ -452,7 +456,7 @@ delivery); nothing else here does.
 
 **Milestone 2 — flags and controls**
 
-6. _Built_ (DESIGN.md, "The custodian frame kind", "The leader's side"): `flag`, `custodian-event`, the flag on
+6. _Built_ (DESIGN.md, "The custodian frame kind", its leader's-side bullet): `flag`, `custodian-event`, the flag on
    the task record and card, the `stuck` push, and the `failing` push (C29, C41, C44, C47). The flags live in
    `custodian/sessions.json`, the daemon's own file beside the owner CLI's `state.json`, not in `state.json`
    as C30 first said; the nudge and interrupt counts join it at item 8.

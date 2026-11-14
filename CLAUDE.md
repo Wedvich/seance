@@ -60,7 +60,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
   and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind";
   the `flag` verb, the flags file, `custodian-event`, `Task.flag`, the card's flag and the `stuck` and `failing` pushes,
-  C29, C33's flags, C41's push, C44 and C47's event, in DESIGN.md, "The custodian frame kind" and "The leader's side"; `MachineStatus.cu`, the Machines row and the owner's
+  C29, C33's flags, C41's push, C44 and C47's event, in DESIGN.md, "The custodian frame kind" (its leader's-side bullet); `MachineStatus.cu`, the Machines row and the owner's
   shell verbs `status`, `log`, `round`, `pause` and `resume`, C40, C43, C45 and C47's status, in DESIGN.md, "The
   custodian's status and the Machines row";
   rounds are held behind `ROUNDS_LIVE` until build item 4b, which contains the round's sandbox — the verbs bound
@@ -395,8 +395,9 @@ green:
   `get_queue`).
   While this machine is closed, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
-  A bound `busy` following that pane's `idle` carrying `turnEnded` (`isNewTurn`) also lifts the pane's own flag, in the
-  flags file and, by one `unflag`, at the leader: an act on the pane's own entry only, never one a frame names.
+  A bound `busy` following that pane's `idle` or with no state retained (`isNewTurn`) also lifts the pane's own
+  `stuck` or `look` flag, by one `unflag` at the leader and then in the flags file: an act on the pane's own entry
+  only, never one a frame names.
   Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, only while a
   custodian seat runs) is retention of what ingest bound, not an act: nothing there is run, sent or persisted, no reply
   depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text.
@@ -440,11 +441,14 @@ green:
   or a live pane, once each) within `NOTES_MAX`, and `seanced custodian notes --clear` is the owner's shell's act,
   never a frame. `flag` takes a reason from the fixed `FLAG_REASONS` (the daemon itself also sets `dirty` and
   `unpushed` when a close keeps a worktree) and an optional note of at most `FLAG_NOTE_MAX`
-  characters, a printable-text rule applied before anything is stored; it acts only on a session `closeVerdict` would
-  not call `foreign` or `marked`, stores `{reason, note, at}` only in `custodian/sessions.json` (0600, the daemon's own
+  characters, a printable-text rule applied before anything is stored; it acts only on a session of séance's own that is
+  not the round's pane (`foreign` is refused; `marked` is not, since a flag acts on no pane), stores `{reason, note, at}` only in `custodian/sessions.json` (0600, the daemon's own
   file, never the owner CLI's `state.json`, keyed by task id or pane id, pane keys dropped at load) and tells the leader
-  by one sealed, fire-and-forget `custodian-event`. A flag lifts on the session's next turn (a bound `busy` after an
-  `idle` carrying `turnEnded`), on a close that kept nothing, or when no live session holds it; the note is
+  by one sealed, fire-and-forget `custodian-event`. `stuck` and `look` lift on the session's next turn (a bound `busy` after an
+  `idle`, or with no state retained), on a close that kept nothing, or when no live session holds it, and `dirty` and
+  `unpushed` only when a close removes the worktree: each only after the leader's `unflag` was taken, or the entry
+  stays for the next try; the flags file is denied to the round's `Read` and sandbox (a mistake guard until item
+  4b); the note is
   display-only and never logged, audited, pushed, archived, put in `get_queue` or returned by `sessions`. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
   `seanced` is its own `<tmp>/bin/seanced`, first on its `PATH`. Nothing a pane, the notes or the summary held is
   logged or audited (the `custodian` origin's lines are `op=close`, `op=worktree` and `op=flag` with ids, outcomes and
