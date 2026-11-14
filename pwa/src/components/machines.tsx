@@ -1,7 +1,15 @@
 import type { JSX } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
-import type { AccountCard, ArchivistCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
+import type {
+  AccountCard,
+  ArchivistCard,
+  CustodianRow,
+  Gauge,
+  GaugeIcon,
+  MachineCard,
+  MachinesView,
+} from "../machines-view.ts";
 import {
   type AccountsState,
   type AvailabilityState,
@@ -266,6 +274,7 @@ function MachineCardView(props: {
           ))}
         </div>
       )}
+      {card.custodian !== null && <CustodianLine row={card.custodian} />}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
       {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
 
@@ -699,5 +708,27 @@ function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] })
         <path key={line.key} className={`chart-line chart-c${index % PALETTE_SIZE}`} d={line.d} />
       ))}
     </svg>
+  );
+}
+
+const CUSTODIAN_STATE_WORDS = { idle: "Idle", running: "Running", paused: "Paused", failing: "Failing" } as const;
+
+/** Each part is one unbreakable span, so a narrow card wraps between parts, never inside one. */
+function CustodianLine({ row }: { readonly row: CustodianRow }): JSX.Element {
+  return (
+    <p className={`fleet-note custodian-row${row.warn ? " fleet-warn" : ""}`}>
+      <span>
+        Custodian · {row.state === null ? "no report yet" : CUSTODIAN_STATE_WORDS[row.state]}
+      </span>
+      {row.ended !== null && <span>{row.ended}</span>}
+      {row.counts !== null && <span>{row.counts}</span>}
+      {row.link !== null && (
+        <span>
+          <a href={row.link} target="_blank" rel="noreferrer">
+            Open round
+          </a>
+        </span>
+      )}
+    </p>
   );
 }
