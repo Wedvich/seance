@@ -492,7 +492,8 @@ green:
   (an untasked sender's only way, to its session alone) or else the pane carrying the sending task, as the one fixed line
   `receiptNote` makes per outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
 - **The `custodian` frame kind is served only on the round's own socket** (`custodian-socket.ts`,
-  `/tmp/seance-cu-s-<hash of the state dir>/c.sock`: a 0700 directory checked with `lstat`, a 0600 socket, 64 KiB
+  `/tmp/seance-cu-s-<mkdtemp>/c.sock`, the directory kept in the seat record's `socketDir` and reused only while `lstat`
+  shows it the daemon's own, else made fresh: a 0700 directory checked with `lstat`, a 0600 socket, 64 KiB
   inbound, every other kind answered `unsupported`; the daemon's main socket answers `custodian` `unsupported` too).
   Its verbs (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md, "The custodian frame kind") are `sessions`,
   `close <pane>`, `capture <pane>` (a pane of ours's screen as plain text, to the round only, never logged, audited or

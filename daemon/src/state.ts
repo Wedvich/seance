@@ -14,7 +14,7 @@ import { DEFAULT_EXCLAVE, EXCLAVE_NAME } from "./exclaves.ts";
 import { log } from "./log.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { runtimePath, statePath } from "./paths.ts";
-import { ROUND_TMP, type SeatRecord } from "./seat-record.ts";
+import { CUSTODIAN_SOCKET_DIR, ROUND_TMP, type SeatRecord } from "./seat-record.ts";
 
 /**
  * Owner-only, like the audit log: state.json lists every repo path this machine
@@ -132,8 +132,11 @@ const finiteMs = (value: unknown): value is number => typeof value === "number" 
 export function custodianSeatOf(state: State): SeatRecord {
   const raw: unknown = state.custodian;
   if (!isRecord(raw)) return {};
-  const { lastEndedAt, round } = raw;
-  const ended = finiteMs(lastEndedAt) ? { lastEndedAt } : {};
+  const { lastEndedAt, round, socketDir } = raw;
+  const ended = {
+    ...(finiteMs(lastEndedAt) ? { lastEndedAt } : {}),
+    ...(typeof socketDir === "string" && CUSTODIAN_SOCKET_DIR.test(socketDir) ? { socketDir } : {}),
+  };
   if (!isRecord(round)) return ended;
   const { pane, startedAt, tmpDir, exclave, done } = round;
   if (

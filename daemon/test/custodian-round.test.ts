@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { APP_ID, CAPABILITIES, importPsk, open as openSealed, parseMachineInfo, seal, toBase64 } from "@seance/shared";
@@ -16,7 +16,7 @@ import {
   removeRoundTmp,
 } from "../src/custodian-launch.ts";
 import type { PrView } from "../src/custodian-frame.ts";
-import { custodianSocketPath, startCustodianSocket } from "../src/custodian-socket.ts";
+import { CUSTODIAN_SOCKET_NAME, startCustodianSocket } from "../src/custodian-socket.ts";
 import { createCustodianFlags } from "../src/custodian-flags.ts";
 import { createCustodianVerbs } from "../src/custodian-verbs.ts";
 import { createWorktreeRule } from "../src/custodian-worktree.ts";
@@ -38,7 +38,8 @@ import { despawnRound, despawnSession } from "../src/despawn.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import type { TrackedActivity } from "../src/pane-activity.ts";
 import { startDaemon } from "../src/run.ts";
-import { ROUND_TMP } from "../src/seat-record.ts";
+import { CUSTODIAN_SOCKET_DIR_PREFIX, ROUND_TMP } from "../src/seat-record.ts";
+import { custodianSeatOf, loadOrInitState, readState, saveState } from "../src/state.ts";
 import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { listClaudeSessions, listPanes, paneInfo } from "../src/sessions.ts";
 import { capturePane, resolveTargetSession, tmux, tmuxOk } from "../src/tmux.ts";
@@ -67,6 +68,8 @@ let session = "";
 let roundDir = "";
 let agents = "";
 let savedClaudeBin: string | undefined;
+/** The round socket the seats built here without a daemon serve: a daemon chooses and records its own. */
+let testSocket = "";
 
 const exclave = (): Exclave => ({
   id: "default",
@@ -84,6 +87,7 @@ beforeAll(async () => {
   roundDir = await ensureRoundDir(join(base, "round"));
   agents = await loadAgent();
   savedClaudeBin = process.env["SEANCE_CLAUDE_BIN"];
+  testSocket = join(await mkdtemp(CUSTODIAN_SOCKET_DIR_PREFIX), CUSTODIAN_SOCKET_NAME);
 });
 
 afterAll(async () => {
@@ -93,6 +97,7 @@ afterAll(async () => {
   if (savedClaudeBin === undefined) delete process.env["SEANCE_CLAUDE_BIN"];
   else process.env["SEANCE_CLAUDE_BIN"] = savedClaudeBin;
   await rm(base, { recursive: true, force: true });
+  await rm(dirname(testSocket), { recursive: true, force: true });
 });
 
 /** Round sockets a test started: closed after it, so a failed assertion cannot leave the path held for the next one. */
@@ -104,7 +109,7 @@ afterEach(() => {
 async function roundSocket(
   handle: Parameters<typeof startCustodianSocket>[0]["handle"],
 ): Promise<{ readonly stop: () => void }> {
-  const started = await startCustodianSocket({ path: custodianSocketPath(), handle, warn: () => {} });
+  const started = await startCustodianSocket({ path: testSocket, handle, warn: () => {} });
   if ("problem" in started) throw new Error(`round socket did not start: ${started.problem}`);
   sockets.push(started);
   return started;
@@ -178,7 +183,7 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
         tmuxSession: "main",
         weakerNested: false,
         platform,
-        custodianSocket: custodianSocketPath(),
+        custodianSocket: testSocket,
         rootMasks: [],
         onTmp,
       }),
@@ -254,7 +259,7 @@ describe("a round, with the stubs for claude", () => {
       };
     } = JSON.parse(await readFile(fencePath, "utf8"));
     expect(fence.sandbox.filesystem.denyWrite).toEqual([roundDir]);
-    const socketDir = await realpath(dirname(custodianSocketPath()));
+    const socketDir = await realpath(dirname(testSocket));
     expect(fence.sandbox.filesystem.allowRead).toEqual(
       expect.arrayContaining([roundDir, await realpath(tmpDir), socketDir]),
     );
@@ -528,47 +533,122 @@ describe("the capability bit", () => {
       restartGraceMs: 0,
     }).catch(() => null);
 
-  test("a host whose seat cannot start has no round socket, and the main socket answers the verbs unsupported", async () => {
+  const exists = (path: string): Promise<boolean> =>
+    stat(path).then(
+      () => true,
+      () => false,
+    );
+  const seatRecordNow = async (): Promise<SeatRecord> => {
+    const state = await readState();
+    return state === null ? {} : custodianSeatOf(state);
+  };
+  const socketIn = (dir: string): string => join(dir, CUSTODIAN_SOCKET_NAME);
+
+  test("a host whose seat cannot start records no round socket dir, and the main socket answers the verbs unsupported", async () => {
     const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve("test: no sandbox") });
     try {
       await pollUntil(async () => (await askVerb(socketPath())) !== null, "the daemon's local socket to answer");
       expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
-      // The seat's checks ran before the socket would have been bound: give a wrongly bound one time to appear.
+      // The seat's checks ran before a socket dir would have been chosen: give a wrongly recorded one time to appear.
       await Bun.sleep(100);
-      expect(
-        await stat(custodianSocketPath()).then(
-          () => true,
-          () => false,
-        ),
-      ).toBe(false);
+      expect((await seatRecordNow()).socketDir).toBeUndefined();
     } finally {
       booted.stop();
     }
   });
 
-  test("a started seat listens on the round's own socket, which refuses a caller that is no round; stop removes it", async () => {
+  test("a started seat records its socket dir and listens there, refusing a caller that is no round; a restart serves the same dir, and a seat turned off removes it", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
-    const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+    let socketDir = "";
     try {
-      await pollUntil(async () => (await askVerb(custodianSocketPath())) !== null, "the round's socket to answer");
-      // Only a process under the running round's pane is the custodian; this test process is not.
-      expect(await askVerb(custodianSocketPath())).toEqual({ ok: false, code: "not_custodian" });
-      expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
+      const first = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(async () => {
+          socketDir = (await seatRecordNow()).socketDir ?? "";
+          return socketDir !== "" && (await askVerb(socketIn(socketDir))) !== null;
+        }, "the round's socket to be recorded and answer");
+        // Only a process under the running round's pane is the custodian; this test process is not.
+        expect(await askVerb(socketIn(socketDir))).toEqual({ ok: false, code: "not_custodian" });
+        expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
+      } finally {
+        first.stop();
+      }
+      // The socket goes with the seat; its dir stays, so an adopted round's environment still names a live path.
+      expect(await exists(socketIn(socketDir))).toBe(false);
+      expect(await exists(socketDir)).toBe(true);
+
+      const second = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(
+          async () => (await askVerb(socketIn(socketDir))) !== null,
+          "the restarted seat to serve the recorded dir",
+        );
+        expect((await seatRecordNow()).socketDir).toBe(socketDir);
+      } finally {
+        second.stop();
+      }
     } finally {
-      booted.stop();
+      const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(async () => !(await exists(socketDir)), "the seat turned off to remove its socket dir");
+        await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
+      } finally {
+        off.stop();
+      }
     }
-    expect(
-      await stat(custodianSocketPath()).then(
-        () => true,
-        () => false,
-      ),
-    ).toBe(false);
-    expect(
-      await stat(dirname(custodianSocketPath())).then(
-        () => true,
-        () => false,
-      ),
-    ).toBe(false);
+  });
+
+  /**
+   * Boots a seat over a record holding a round whose socket dir is `socketDir` (or none), and checks the round is
+   * closed unreachable and lost, and the seat serves a fresh dir of its own.
+   */
+  async function expectRoundUnreachable(socketDir: string | undefined): Promise<void> {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+    const stray = await strayRound();
+    const state = await loadOrInitState();
+    const round = { pane: stray, startedAt: Date.now(), tmpDir: "/tmp/seance-cu-abc123", exclave: "default" };
+    await saveState({ ...state, custodian: { round, ...(socketDir === undefined ? {} : { socketDir }) } });
+    let booted: Awaited<ReturnType<typeof boot>> | undefined;
+    try {
+      const lines = await captureLog(async () => {
+        booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+        await pollUntil(async () => (await paneInfo(stray)) === null, "the unreachable round pane to close");
+        await pollUntil(async () => (await seatRecordNow()).round === undefined, "the round to end");
+      });
+      const audit = lines.filter((line) => line.includes("audit custodian"));
+      expect(audit.some((line) => line.includes(`op=kill pane=${stray} reason=unreachable`))).toBe(true);
+      expect(audit.some((line) => line.includes(`op=end pane=${stray} outcome=failed reason=lost`))).toBe(true);
+      const served = (await seatRecordNow()).socketDir;
+      expect(served).toMatch(/^\/tmp\/seance-cu-s-/u);
+      expect(served).not.toBe(socketDir);
+    } finally {
+      booted?.stop();
+      // A seat turned off removes the dir, so no test leaves one in /tmp.
+      const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
+      } finally {
+        off.stop();
+      }
+    }
+  }
+
+  test("a round an older daemon left, its record naming no socket dir, is closed and lost, never adopted", async () => {
+    await expectRoundUnreachable(undefined);
+  });
+
+  test("a round whose recorded socket dir is a planted link is closed and lost, and the link's target left alone", async () => {
+    const target = await mkdtemp(join(base, "planted-"));
+    const planted = `${CUSTODIAN_SOCKET_DIR_PREFIX}Plant1`;
+    await rm(planted, { force: true });
+    await symlink(target, planted);
+    try {
+      await expectRoundUnreachable(planted);
+      expect((await lstat(planted)).isSymbolicLink()).toBe(true);
+      expect(await exists(target)).toBe(true);
+    } finally {
+      await rm(planted, { force: true });
+    }
   });
 
   test("a daemon with the key and a live seat advertises custodian", async () => {
@@ -770,7 +850,7 @@ describe("the verbs, over the round's own socket, from the round's own pane", ()
       // From this process, which is no pane at all.
       const frame = { v: 1, kind: "custodian", verb: "close", pane: target };
       const fromHere = await exchange(frame, {
-        path: custodianSocketPath(),
+        path: testSocket,
         timeoutMs: 5_000,
         timeoutText: "no answer",
         restartGraceMs: 0,
@@ -793,7 +873,7 @@ describe("the verbs, over the round's own socket, from the round's own pane", ()
             name,
             "-c",
             base,
-            `: --remote-control; SEANCE_CUSTODIAN_SOCKET=${shq(custodianSocketPath())} ${shim} custodian close ${target} > ${out}/${name}.out 2> ${out}/${name}.err; echo $? > ${out}/${name}.rc; exec sleep 600`,
+            `: --remote-control; SEANCE_CUSTODIAN_SOCKET=${shq(testSocket)} ${shim} custodian close ${target} > ${out}/${name}.out 2> ${out}/${name}.err; echo $? > ${out}/${name}.rc; exec sleep 600`,
           ])
         ).trim();
         if (tagged) await tmuxOk(["set-option", "-p", "-t", pane, "@seance-custodian", "1"]);
@@ -872,7 +952,7 @@ describe("the verbs, over the round's own socket, from the round's own pane", ()
 
       // The environment is built, not inherited.
       const env = await readFile(join(out, "env.txt"), "utf8");
-      expect(env).toContain(`SEANCE_CUSTODIAN_SOCKET=${custodianSocketPath()}\n`);
+      expect(env).toContain(`SEANCE_CUSTODIAN_SOCKET=${testSocket}\n`);
       expect(env).toContain(`TMPDIR=${tmpDir}\n`);
       expect(env).toContain(`CLAUDE_CODE_TMPDIR=${tmpDir}\n`);
       for (const leaked of ["SSH_AUTH_SOCK", "GH_TOKEN", "SEANCE_STATE_DIR", "TMUX="]) {

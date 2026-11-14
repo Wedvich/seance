@@ -186,6 +186,24 @@ describe("custodianSeatOf", () => {
     expect(await seatOf({ lastEndedAt: -1 })).toEqual({});
   });
 
+  test("the socket dir is kept only in its own mkdtemp shape, and alone: a bad one drops nothing else", async () => {
+    const socketDir = "/tmp/seance-cu-s-aB3dE9";
+    expect(await seatOf({ lastEndedAt: 9, socketDir, round })).toEqual({ lastEndedAt: 9, socketDir, round });
+    expect(await seatOf({ socketDir })).toEqual({ socketDir });
+    for (const bad of [
+      "/tmp/seance-cu-abc123",
+      "/tmp/seance-cu-s-0123456789ab",
+      "/tmp/seance-cu-s-aB3dE9/../x",
+      "/private/tmp/seance-cu-s-aB3dE9",
+      "/tmp/seance-cu-s-aB3dE9/c.sock",
+      7,
+      null,
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- one file, rewritten per case
+      expect(await seatOf({ lastEndedAt: 9, socketDir: bad, round })).toEqual({ lastEndedAt: 9, round });
+    }
+  });
+
   test("a round with a bad pane, tmp dir, exclave or time is dropped whole and keeps the end time", async () => {
     for (const bad of [
       { ...round, pane: "3" },

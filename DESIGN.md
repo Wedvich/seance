@@ -9144,16 +9144,20 @@ decision is recorded here.
   with no kill line, and one whose pane is dead (the shell exited, the window stayed) is closed with a
   `kill reason=exited` line first. An end is `failed` unless the round called `done` first (`healthy`, below). The tmp dir
   is removed at every end.
-- **The seat record and adoption (C4).** `state.json` holds `custodian: { lastEndedAt?, round?: { pane, startedAt,
+- **The seat record and adoption (C4).** `state.json` holds `custodian: { lastEndedAt?, socketDir?, round?: { pane, startedAt,
   tmpDir, exclave, done? } }`, written **ahead of the launch** (the tmp dir exists before the window does, so
   `pane` is null until it exists), and re-read only through `custodianSeatOf`, which validates each field before
   the daemon removes a path or closes a pane it names: `pane` matches `PANE_ID` or is null, `tmpDir` matches
-  `ROUND_TMP`, numbers are finite and non-negative, `exclave` is `default` or an exclave name; anything unreadable
+  `ROUND_TMP`, `socketDir` matches `CUSTODIAN_SOCKET_DIR` (the round socket's directory, below; seat-wide, since one
+  socket serves every round of a seat), numbers are finite and non-negative, `exclave` is `default` or an exclave name; anything unreadable
   reads as none (`done` is kept only as the boolean `true`), and the stray sweep below still closes an orphan. `parseState` keeps unknown keys, so an older
   daemon's rewrite keeps the field. On start (a process restart or a config reload) the seat **adopts** the
   recorded round when its pane is still there, with its original deadline, and closes any other round pane as
   `stray` (`reason=stray`; the recorded round's own pane, found dead, is `reason=exited` and the round ends `exited`);
-  a recorded round whose pane is not there ends `lost`, and a record with no pane that a later tick still finds
+  a recorded round whose pane is not there ends `lost`. A recorded round the seat's socket cannot reach — the record
+  names no `socketDir` (an older daemon's, whose round's environment names the old derived path) or its dir was not
+  the daemon's own and a fresh one is served — is **not adopted**: it could call no verb until its deadline, so its
+  live pane is closed `reason=unreachable` and it ends `lost` (`SeatDeps.roundReachable`). A record with no pane that a later tick still finds
   (adoption failed to clear it) sweeps every round pane as `stray` and ends `lost` there. **Never save after `stopped()`**: a
   reload starts the next `startDaemon` while the old one is stopping, and the outgoing instance writing over the
   incoming one's state is the race `reapSchedule` already guards; a launch finishing after the stop closes its
@@ -9163,11 +9167,12 @@ decision is recorded here.
   record names has no deadline and no reader can reach it (C10); if that close throws too, the pane is put on
   the record for its deadline. A pick that throws backs off like one that found nothing. Stopping a seat never closes its round, so a
   reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key, an unsupported platform, a host whose checks fail, or a host the seat refuses, `sandbox_undrilled` or `toolchain`) closes whatever round is left (`reason=off`), removes its tmp
-  dir, audits `end reason=lost` and saves `{ lastEndedAt }`; the round log (below) gets a `failed`/`lost` entry
+  dir and the round socket's directory, audits `end reason=lost` and saves `{ lastEndedAt }` (with no round to close,
+  it drops `socketDir` alone); the round log (below) gets a `failed`/`lost` entry
   unless the round had already called `done`, whose healthy entry stands and whose end is audited `healthy`; a `done` whose log line was never written (the append failed, or the daemon died between the record and the log) gets a healthy entry without its summary from the end or the sweep, since the upsert never replaces a healthy line.
 - **Audit (C48, C49).** `custodianAudit` (`audit.ts`), origin `custodian`, through the daemon's one sink: `audit
   custodian origin=custodian op=start exclave=<quoted id> pane=<id|-> outcome=started|launch_failed`, `op=kill
-  pane=<id> reason=deadline|exited|stray|off|done outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=healthy|failed
+  pane=<id> reason=deadline|exited|stray|off|done|unreachable outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=healthy|failed
   reason=done|deadline|exited|lost|start_failed`, and the verbs' lines (below): `op=close pane=<id> task=<id|-> outcome=<…>`,
   `op=worktree pane=<id> task=<id> outcome=removed how=<…>|kept why=<…>`, `op=flag …`, `op=nudge pane=<id> task=<id|->
   outcome=<…>` and `op=interrupt pane=<id> task=<id|-> outcome=<…>`, and `op=refused reason=sandbox_undrilled|toolchain`
@@ -9181,15 +9186,28 @@ decision is recorded here.
   verbs (`status`, `log`, `round`, `pause`, `resume`) are a separate module loaded by `import()` that works from files
   and dials no socket (custodian 5, below).
 - **The round's socket (4b, `custodian-socket.ts`).** The one socket the round's sandbox can reach that acts, and it
-  serves the `custodian` frame kind and nothing else. Path `/tmp/seance-cu-s-<12 hex of a hash of the state dir>/c.sock`
-  (`custodianSocketPath`: stable across a reload and a restart, since an adopted round's environment still names it, one per
-  test daemon; a literal `/tmp` because a unix socket path is 104 bytes on macOS and `tmpdir()` is long there; it cannot
-  match `ROUND_TMP`, so the tmp sweep never touches it). The directory is 0700 and checked with `lstat` (a symlink or a
-  directory that is not the daemon's own is refused, nothing is created through it), the socket is 0600, a second daemon on
-  a live socket is refused, a stale socket file from a killed daemon is replaced, and `stop` unlinks both. **Known, accepted for now:** the name is derivable, so on a shared box another user can create
-  `/tmp/seance-cu-s-<hash>` first; the seat then refuses it (another uid), warns and runs no round, a local denial of
-  the custodian and nothing more. A per-boot random name needs the path persisted for an adopted round, which is a
-  change to the seat record's shape, and is left for its own change. A line over
+  serves the `custodian` frame kind and nothing else. Path `<dir>/c.sock`, `<dir>` a `mkdtemp` of `/tmp/seance-cu-s-`
+  (`custodianSocketDir`, `CUSTODIAN_SOCKET_DIR`; a literal `/tmp` because a unix socket path is 104 bytes on macOS and
+  `tmpdir()` is long there; it cannot match `ROUND_TMP`, so the tmp sweep never touches it). The name is random so no
+  other user can derive it and create it first (an earlier, hash-derived name let one do exactly that and hold every
+  round off). The seat record keeps it (`socketDir`), since an adopted round's environment and sandbox allow list name
+  it: a seat starting (a restart or a reload) reuses the recorded directory when `lstat` shows a real directory of the
+  daemon's own (made again at that name if it is gone, put back to 0700), and otherwise makes a fresh one with a warning, so a
+  name taken in `/tmp` costs that recorded round (closed `unreachable`, above) and never the seat. With no round
+  recorded the new directory is saved before any launch; every later seat write carries it. The directory is 0700 and
+  checked with `lstat` (a symlink or a directory that is not the daemon's own is refused, nothing is created through
+  it), the socket is 0600, a second daemon on a live socket is refused, and a stale socket file from a killed daemon is
+  replaced. `stop` unlinks the socket and **keeps the directory**: a `/tmp` listing shows the name once it exists, and a
+  directory removed at every stop could be taken by another user before the next start. It is removed only where the
+  seat is off (the sweep, above), which drops `socketDir` too, so a state dir leaves at most one empty 0700 directory
+  behind. **Upgrade and downgrade:** a round an older daemon left (no `socketDir`) is closed and ends `lost` at the
+  upgrade, and the older daemon removed its own hash-named directory at its stop. An older daemon after a newer one
+  ignores `socketDir` and serves the hash path, so a round the newer one left runs unreachable until its deadline
+  closes it, and its whole-record writes drop the field, so the next upgrade makes a fresh directory and the old empty
+  one stays until `/tmp` is cleaned; accepted. **Not re-drilled (2026-11-14, the owner's call):** the random name
+  changed only the directory's name and lifetime; the round still reaches one 0700 directory, named in its allow list
+  and environment as before, through the same masks, fence and built environment, so the 4b drill's "contained" stands.
+  A change to what the round can reach still needs one. A line over
   64 KiB drops the connection. Any other frame kind (`Plain`, `session-event`, `message`, `inbox`, `broker`) is answered
   `unsupported`, with one warn a minute, and never reaches a handler. The binding is unchanged: the verbs bind by the
   kernel-reported peer pid alone. The daemon's **main** socket now answers the `custodian` kind `unsupported`, and its
