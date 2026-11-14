@@ -116,8 +116,11 @@ describe("archive.sqlite", () => {
     `);
     // Schema 1 kept a successor's raw `succeeds.account`.
     const succeeds = { task: "t-full", account: RAW_ACCOUNT, at: { deviceId: "dev-a", exclave: "x", clone: "c" } };
+    // And an older or foreign write could leave a quota stamp, whose `accountId` is one too.
+    const quotaExhausted = { accountId: RAW_ACCOUNT, window: "5h", reset: 0, at: 1, since: 1 };
     const successor = {
       id: "t-succ",
+      quotaExhausted,
       spec: { repo: "seance", mode: "worktree", succeeds: { ...succeeds, trigger: "pass" } },
     };
     old
@@ -144,8 +147,9 @@ describe("archive.sqlite", () => {
       }
       const record = records.get("t-succ") ?? "";
       expect(record).not.toContain(RAW_ACCOUNT);
+      const { quotaExhausted: _quota, ...kept } = successor;
       expect(JSON.parse(record)).toEqual({
-        ...successor,
+        ...kept,
         spec: { ...successor.spec, succeeds: { ...successor.spec.succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } },
       });
     } finally {
@@ -155,6 +159,25 @@ describe("archive.sqlite", () => {
       rows<{ name: string; tbl_name: string }>("SELECT name, tbl_name FROM sqlite_schema WHERE type = 'index'"),
     ).toContainEqual({ name: "tasks_created", tbl_name: "tasks" });
     expect(rows<{ name: string }>("SELECT name FROM sqlite_schema WHERE name = 'tasks_v2'")).toEqual([]);
+    // The rebuilt tables are the ones a fresh archive makes (STRICT, the CHECK and every column included).
+    const schemaSql = "SELECT name, sql FROM sqlite_schema WHERE name IN ('tasks', 'tasks_created') ORDER BY name";
+    const fresh = await Archive.open(join(dir, "fresh.sqlite"));
+    fresh.close();
+    const freshDb = new Database(join(dir, "fresh.sqlite"), { readonly: true });
+    try {
+      expect(rows(schemaSql)).toEqual(freshDb.query(schemaSql).all());
+    } finally {
+      freshDb.close();
+    }
+    // The freed pages and the WAL no longer hold the raw id either (`secure_delete`, then a checkpoint).
+    archive.close();
+    for (const file of [path, `${path}-wal`]) {
+      const bytes = await Bun.file(file)
+        .bytes()
+        .catch(() => new Uint8Array());
+      expect(Buffer.from(bytes).includes(RAW_ACCOUNT)).toBe(false);
+    }
+    archive = await Archive.open(path);
     expect(rows<{ n: number }>("SELECT count(*) AS n FROM events")[0]?.n).toBe(1);
     const superseded = taskRow(task({ id: "t-passed", state: "superseded" }), 2, context);
     if (superseded === null) throw new Error("superseded refused");
@@ -203,6 +226,10 @@ describe("task rows", () => {
     const kept = archivedTask(task());
     expect(kept.spec.pin).toEqual({ deviceId: "dev-a" });
     expect(kept.spillAlert).toBeUndefined();
+    const stamped = archivedTask(
+      task({ quotaExhausted: { accountId: RAW_ACCOUNT, window: "5h", reset: 0, at: 1, since: 1 } }),
+    );
+    expect(stamped.quotaExhausted).toBeUndefined();
     expect(archivedTask(task({ spec: { repo: "r", mode: "here", pin: { account: RAW_ACCOUNT } } })).spec.pin).toBe(
       undefined,
     );

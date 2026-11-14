@@ -245,11 +245,14 @@ export function startCollector(opts: CollectorOpts): Collector {
       let archived = 0;
       const seenAt = Date.now();
       const refused = refusals();
-      for (const record of answer.tasks) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
-        if (await refused.archive(record, seenAt)) archived += 1;
+      try {
+        for (const record of answer.tasks) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
+          if (await refused.archive(record, seenAt)) archived += 1;
+        }
+      } finally {
+        refused.report();
       }
-      refused.report();
       clock.note("store");
       if (archived > 0 || answer.unreadable.length > 0) {
         log.info(`tasks: archived ${archived}, skipped ${answer.unreadable.length} unreadable`);

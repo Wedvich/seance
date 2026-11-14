@@ -130,13 +130,19 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
       ALTER TABLE tasks_v2 RENAME TO tasks;
       CREATE INDEX tasks_created ON tasks (created_at);
     `);
-    // A successor's `succeeds.account` is a raw account id, which schema 1 kept (A15): rewritten to the placeholder
-    // `archivedTask` now writes, as a literal here so this entry stays frozen. A record that is not JSON (a hand edit)
+    // A successor's `succeeds.account` and a stray `quotaExhausted` (its `accountId`) are raw account ids, which schema 1
+    // kept (A15): rewritten to the placeholder `archivedTask` now writes and dropped, as literals here so this entry stays frozen. A record that is not JSON (a hand edit)
     // is left alone rather than failing the open: `CASE` keeps the JSON functions off it.
     db.exec(`
-      UPDATE tasks SET record = json_set(record, '$.spec.succeeds.account', '-')
-      WHERE (CASE WHEN json_valid(record) THEN json_type(record, '$.spec.succeeds.account') END) IS NOT NULL
-        AND (CASE WHEN json_valid(record) THEN json_extract(record, '$.spec.succeeds.account') END) IS NOT '-';
+      UPDATE tasks SET record = json_remove(
+          CASE WHEN json_type(record, '$.spec.succeeds.account') IS NULL THEN record
+            ELSE json_set(record, '$.spec.succeeds.account', '-') END,
+          '$.quotaExhausted')
+      WHERE CASE WHEN json_valid(record) THEN
+          json_type(record, '$.quotaExhausted') IS NOT NULL
+          OR (json_type(record, '$.spec.succeeds.account') IS NOT NULL
+            AND json_extract(record, '$.spec.succeeds.account') IS NOT '-')
+        ELSE 0 END;
     `);
   },
 ];
@@ -178,9 +184,16 @@ export interface TaskContext {
 }
 
 /**
+ * What an archived successor's `succeeds.account` reads instead of the predecessor's raw account id. Kept, not
+ * dropped, so the record still parses as a successor; never a real `org:account` id. Migration 2 writes the same
+ * text as a literal.
+ */
+export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
+
+/**
  * A task as the archive may hold it: `forgetPrompt` (prompt and attachment
  * manifest gone, A14), and the fields that carry a raw account id
- * (`spec.pin.account`, `spillAlert`) dropped, and `spec.succeeds.account`
+ * (`spec.pin.account`, `spillAlert`, `quotaExhausted`) dropped, and `spec.succeeds.account`
  * replaced by `ARCHIVED_SUCCEEDS_ACCOUNT`, since the archive names an account
  * only by its store key (A15). Also gone is everything the daemon or
  * the router derives from prompt text, which the store prunes and the archive
@@ -189,16 +202,10 @@ export interface TaskContext {
  * may name the worktree) and `decision` (a `skill_absent` reason carries a
  * `/skill` read off the prompt). `failure.code` and the placement stay.
  */
-/**
- * What an archived successor's `succeeds.account` reads instead of the predecessor's raw account id. Kept, not
- * dropped, so the record still parses as a successor; never a real `org:account` id. Migration 2 writes the same
- * text as a literal.
- */
-export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
-
 export function archivedTask(task: Task): Task {
   const {
     spillAlert: _spill,
+    quotaExhausted: _quota,
     decision: _decision,
     branch: _branch,
     spec,
@@ -328,6 +335,11 @@ export class Archive {
     db.exec("PRAGMA busy_timeout = 2000");
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
+    // A migration that rewrites raw account ids must not leave them in freed pages or the WAL: `secure_delete` (set before the
+    // transaction) zeroes what the rebuild frees, and the checkpoint after folds the WAL into the file. Only a migrating open pays for it.
+    const from = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+    const migrating = from > 0 && from < ARCHIVE_SCHEMA_VERSION;
+    if (migrating) db.exec("PRAGMA secure_delete = ON");
     db.transaction(() => {
       const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
       // An older build would write rows a newer schema reads differently: refuse rather than guess.
@@ -339,6 +351,9 @@ export class Archive {
       for (const migrate of MIGRATIONS.slice(version)) migrate(db);
       if (version < ARCHIVE_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${ARCHIVE_SCHEMA_VERSION}`);
     })();
+    if (!migrating) return;
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    db.exec("PRAGMA secure_delete = OFF");
   }
 
   /**

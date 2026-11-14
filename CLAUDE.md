@@ -296,7 +296,7 @@ green:
   reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
   holds no prompt text, no attachment manifest and no raw account id: a task row is written only
   through `taskRow`, only for a finished task read through `listTasks`/`getTask`, after
-  `forgetPrompt` and with `pin.account`, `spillAlert`, `assignment.window`, `branch`,
+  `forgetPrompt` and with `pin.account`, `spillAlert`, `quotaExhausted`, `assignment.window`, `branch`,
   `failure.message` and `decision` dropped (the daemon slugs a title-less task's window and branch
   from its prompt) and `succeeds.account` replaced by the constant `ARCHIVED_SUCCEEDS_ACCOUNT`, its account only as the
   `account:` store key, and only over a row at a lower store version; an account row only from

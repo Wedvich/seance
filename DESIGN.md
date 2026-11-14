@@ -12210,7 +12210,7 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   so it rebuilds `tasks`: a new table, every row copied, the copy's count checked against the old
   (a mismatch throws and the open rolls back to schema 1), then the old table dropped, the new one
   renamed and `tasks_created` recreated — the archive's one `DROP`, a move that removes nothing.
-  The same transaction rewrites a stored successor's `succeeds.account` to `-` (A15). Entries are
+  The same transaction rewrites a stored successor's `succeeds.account` to `-` and drops a stray `quotaExhausted` (A15); a migrating open runs with `secure_delete` on and checkpoints the WAL after, so the freed pages and the log no longer hold the raw ids either (only a migrating open pays for it). Entries are
   frozen: each writes its schema as literals, never from a constant that later moves. Schema 2,
   every time in ms:
   - `tasks` — one row per finished task, `id` its key: `version` (the store version it was read
@@ -12235,8 +12235,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   then `bindTaskRecord`; one they cannot read is counted in a log line and skipped, never deleted
   or written over. Only a `finished`-phase task gets a row, through `taskRow`: `forgetPrompt`
   first (prompt and attachment manifest gone even if a record still carries them), then
-  `spec.pin.account` and `spillAlert` dropped and `spec.succeeds.account` set to `-` (kept, so
-  the record still parses as a successor), the three fields that hold a raw account id, and
+  `spec.pin.account`, `spillAlert` and `quotaExhausted` dropped and `spec.succeeds.account` set to `-` (kept, so
+  the record still parses as a successor), the four fields that hold a raw account id (`quotaExhausted` is already cleared by the scheduler on a finish; the archive drops it anyway), and
   everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
   (a title-less task's window and worktree branch are slugged from the prompt's first words),
   `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its

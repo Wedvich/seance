@@ -228,9 +228,10 @@ describe("collector", () => {
       await pollUntil(() => archive.taskVersion("t-c") === 1, "the task after the refused one archived");
       expect(archive.taskVersion("t-a")).toBe(1);
       expect(archive.taskVersion("t-b")).toBeNull();
-      expect(warnings.filter((line) => line.startsWith("tasks: "))).toEqual([
-        "tasks: 1 not archived: cannot store REAL value in INTEGER column tasks.created_at",
-      ]);
+      // SQLite's wording of the datatype error differs by build (bundled vs a system library): pin the shape, not the text.
+      const taskWarnings = warnings.filter((line) => line.startsWith("tasks: "));
+      expect(taskWarnings).toHaveLength(1);
+      expect(taskWarnings[0]).toMatch(/^tasks: 1 not archived: .*tasks\.created_at/u);
       expect(clock.snapshot().store).not.toBeNull();
     } finally {
       collector.stop();

@@ -171,8 +171,10 @@ export function forbiddenCalls(source: string): string[] {
   return [...source.matchAll(FORBIDDEN_CALLS)].map((m) => m[0]);
 }
 
-function removing(source: string): RegExpMatchArray | null {
-  return source.match(/\b(?:DELETE|DROP|TRUNCATE|REPLACE\s+INTO|INSERT\s+OR\s+REPLACE)\b/giu);
+const REMOVING = String.raw`\b(?:DELETE|DROP|TRUNCATE|REPLACE\s+INTO|INSERT\s+OR\s+REPLACE)\b`;
+
+function removing(source: string, tail = ""): RegExpMatchArray | null {
+  return source.match(new RegExp(REMOVING + tail, "giu"));
 }
 
 async function archivistSources(): Promise<string[]> {
@@ -278,10 +280,9 @@ describe("archivist layering", () => {
     const [archive = "", metrics = ""] = sources;
     expect(removing(metrics)).toBeNull();
     // The one exception: migration 2's rebuild drops the old `tasks` only after copying every row and checking the
-    // count (SQLite cannot alter a CHECK), so it moves history and removes none. Pinned to that exact statement.
-    expect(archive.match(/\b(?:DELETE|DROP|TRUNCATE|REPLACE\s+INTO|INSERT\s+OR\s+REPLACE)\b[^;`"]*/giu)).toEqual([
-      "DROP TABLE tasks",
-    ]);
+    // count (SQLite cannot alter a CHECK), so it moves history and removes none. Pinned to that exact statement,
+    // beside the `wal_checkpoint(TRUNCATE)` that follows a migrating open (it empties the log file, no row).
+    expect(removing(archive, '[^;`"]*')).toEqual(["DROP TABLE tasks", "TRUNCATE)"]);
     // And an event is never rewritten, whatever else UPDATE touches.
     expect(sources.join("\n").match(/\bUPDATE\s+events\b/giu)).toBeNull();
   });
