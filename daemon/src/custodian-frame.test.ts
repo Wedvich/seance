@@ -11,6 +11,19 @@ describe("parseCustodianFrame", () => {
       verb: "close",
       pane: "%12",
     });
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%12", reason: "stuck" })).toEqual({
+      ...base,
+      verb: "flag",
+      pane: "%12",
+      reason: "stuck",
+    });
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%12", reason: "look", note: "a line" })).toEqual({
+      ...base,
+      verb: "flag",
+      pane: "%12",
+      reason: "look",
+      note: "a line",
+    });
     expect(parseCustodianFrame({ ...base, verb: "notes", text: "## standing\nx\n" })).toEqual({
       ...base,
       verb: "notes",
@@ -27,6 +40,18 @@ describe("parseCustodianFrame", () => {
     const big = "x".repeat(100_000);
     expect(parseCustodianFrame({ ...base, verb: "notes", text: big })).not.toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "done", summary: big })).not.toBeNull();
+    // Nor is a reason's membership of the set or a note's length: the verb answers `bad_reason` and `too_long`.
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1", reason: "nope", note: big })).not.toBeNull();
+  });
+
+  test("a flag frame is exactly pane and reason, or pane, reason and note", () => {
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "flag", reason: "look" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1", reason: "look", extra: 1 })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1", reason: "look", note: 5 })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "1", reason: "look" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1", reason: 3 })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1", reason: "look", taskId: "t-1" })).toBeNull();
   });
 
   test("an extra key, a missing key, another version or verb, a bad pane, a non-string text", () => {

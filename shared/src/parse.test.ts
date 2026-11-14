@@ -137,6 +137,7 @@ import {
   type SettingsRecord,
   type WebPushSubscription,
   type Reason,
+  type CustodianEvent,
   type SchedulerError,
   type StoreRecord,
   type StoreReplyFrame,
@@ -1521,12 +1522,13 @@ describe("flags and custodian events", () => {
   });
 
   test("parseCustodianEvent accepts each kind as built", () => {
-    for (const event of [
+    const events: readonly CustodianEvent[] = [
       flag,
       { kind: "flag", taskId: "t-1", reason: "dirty", at: 5 },
       { kind: "unflag", taskId: "t-1", at: 5 },
       { kind: "failing", at: 5 },
-    ]) {
+    ];
+    for (const event of events) {
       expect(parseCustodianEvent(event)).toEqual(event);
     }
   });

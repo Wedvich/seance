@@ -15,6 +15,7 @@ import {
   listRoundPanes,
   removeRoundTmp,
 } from "../src/custodian-launch.ts";
+import { createCustodianFlags } from "../src/custodian-flags.ts";
 import { createCustodianVerbs } from "../src/custodian-verbs.ts";
 import { createWorktreeRule } from "../src/custodian-worktree.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
@@ -587,6 +588,7 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       seat: {
         count: (verb, ok) => r.seat.count(verb, ok),
         countWorktree: (kind) => r.seat.countWorktree(kind),
+        countFlagged: () => r.seat.countFlagged(),
         done: (summary) => r.seat.done(summary),
         isDone: () => r.seat.isDone(),
       },
@@ -595,7 +597,12 @@ describe("the verbs, over the socket, from the round's own pane", () => {
         audit.push(line.replaceAll(/ pane=%\d+/gu, " pane=%N"));
         return Promise.resolve();
       }),
-      onKept: (): void => {},
+      flags: createCustodianFlags({
+        path: join(process.env["SEANCE_STATE_DIR"] ?? "", "custodian-flags.json"),
+        now: () => turnEnded + 2 * closeAfter,
+        warn: () => {},
+      }),
+      sendEvent: () => Promise.resolve(true),
       warn: () => {},
     });
     const socket = await startLocalSocket({ handle: () => Promise.resolve(null), custodian: verbs.handle });
@@ -708,6 +715,7 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       seat: {
         count: (verb, ok) => r.seat.count(verb, ok),
         countWorktree: (kind) => r.seat.countWorktree(kind),
+        countFlagged: () => r.seat.countFlagged(),
         done: (summary) => r.seat.done(summary),
         isDone: () => r.seat.isDone(),
       },
@@ -716,7 +724,12 @@ describe("the verbs, over the socket, from the round's own pane", () => {
         audit.push(line.replaceAll(/ pane=%\d+/gu, " pane=%N"));
         return Promise.resolve();
       }),
-      onKept: (): void => {},
+      flags: createCustodianFlags({
+        path: join(process.env["SEANCE_STATE_DIR"] ?? "", "custodian-flags.json"),
+        now: () => turnEnded + 2 * closeAfter,
+        warn: () => {},
+      }),
+      sendEvent: () => Promise.resolve(true),
       warn: () => {},
     });
     const socket = await startLocalSocket({ handle: () => Promise.resolve(null), custodian: verbs.handle });

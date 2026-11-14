@@ -2859,6 +2859,7 @@ describe("get_queue", () => {
             task({
               id: "t-4",
               state: "ready",
+              flag: { reason: "stuck", note: "the same error four times, SECRET-NOTE", at: 4_000 },
               spec: { repo: ORIGIN, mode: "worktree", pin: { account: "org-c:acct-2" } },
             }),
           ],
@@ -2908,6 +2909,10 @@ describe("get_queue", () => {
     // The closed kind only: a tool name is not carried into another agent's context.
     expect(stuck).not.toHaveProperty("inputTool");
     expect(manual).not.toHaveProperty("inputReason");
+    // The custodian's flag by its closed reason only: the note is model-written from pane text.
+    expect(pinned.flag).toBe("stuck");
+    expect(JSON.stringify(parsed)).not.toContain("SECRET-NOTE");
+    expect(manual).not.toHaveProperty("flag");
     expect(manual.doneBy).toBe("manual");
     expect(finished.doneBy).toBe("session");
     expect(pinned.pin).toEqual({ account: "me@pengefix.no (org org-c)", accountId: "org-c:acct-2" });

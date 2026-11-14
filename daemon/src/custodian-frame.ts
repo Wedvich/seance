@@ -2,7 +2,7 @@
 // and not the daemon's side (tmux, the launch ledger, git), and never reaches `log.ts` (the CLI's stdout is the
 // round's data channel). The codes are local-socket codes, not wire codes, so they live here as the session-event
 // frame's do.
-import { isRecord } from "@seance/shared";
+import { isRecord, type FlagReason } from "@seance/shared";
 import { PANE_ID } from "./pane-id.ts";
 
 export const CUSTODIAN_FRAME_VERSION = 1;
@@ -10,7 +10,7 @@ export const CUSTODIAN_FRAME_VERSION = 1;
 /** The local socket's sixth frame kind: the custodian round's verbs, bound to the round's own pane. */
 export const CUSTODIAN_FRAME_KIND = "custodian";
 
-export const CUSTODIAN_VERBS = ["sessions", "close", "notes", "done"] as const;
+export const CUSTODIAN_VERBS = ["sessions", "close", "flag", "notes", "done"] as const;
 export type CustodianVerb = (typeof CUSTODIAN_VERBS)[number];
 
 /** C40: the round's summary is at most this many bytes. */
@@ -25,7 +25,8 @@ export const CUSTODIAN_REPLY_CODES = [
   "unsupported",
   /** A bug in the daemon's handling of the frame. */
   "internal",
-  // A `close`'s refusals (`CloseRefusal`): the pane's state, per docs/custodian.md C24.
+  // A `close`'s refusals (`CloseRefusal`): the pane's state, per docs/custodian.md C24. `flag` answers `gone` and
+  // `foreign` the same way.
   "gone",
   "foreign",
   "marked",
@@ -33,11 +34,13 @@ export const CUSTODIAN_REPLY_CODES = [
   "busy",
   "too_soon",
   "unobserved",
-  /** A `notes` or `done` text over its cap. */
+  /** A `notes` or `done` text, or a `flag` note, over its cap. */
   "too_long",
+  /** A `flag` reason outside `FLAG_REASONS`. */
+  "bad_reason",
   /** A `done` at or past the round's deadline. */
   "too_late",
-  /** A `close` or `notes` after the round's `done`. */
+  /** A `close`, `flag` or `notes` after the round's `done`. */
   "round_done",
 ] as const;
 
@@ -67,6 +70,15 @@ export type KeptWhy =
 export type CustodianFrame =
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "sessions" }
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "close"; readonly pane: string }
+  | {
+      readonly v: 1;
+      readonly kind: "custodian";
+      readonly verb: "flag";
+      readonly pane: string;
+      /** A string at parse time: the handler answers `bad_reason`, so the round learns why. */
+      readonly reason: string;
+      readonly note?: string;
+    }
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "notes"; readonly text: string }
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "done"; readonly summary: string };
 
@@ -87,10 +99,11 @@ export interface CustodianPaneView {
   readonly prUrl: string | null;
   readonly worktree: string | null;
   readonly marked: boolean;
-  /** Placeholders until nudge and flag exist (custodian 6). */
+  /** Placeholders until nudge exists (custodian 8). */
   readonly nudges: 0;
   readonly interrupted: false;
-  readonly flag: null;
+  /** The pane's open flag, its reason and when; never the note, which is model-written from pane text. */
+  readonly flag: { readonly reason: FlagReason; readonly at: number } | null;
   /** `"ok"`, or the refusal `close` would answer. */
   readonly close: "ok" | CloseRefusal;
 }
@@ -114,6 +127,15 @@ export type CustodianReply =
       readonly outcome: "exited" | "killed" | "harvested";
       readonly worktree: { readonly removed: true; readonly how: string } | { readonly kept: KeptWhy } | null;
     }
+  | {
+      readonly ok: true;
+      readonly verb: "flag";
+      readonly pane: string;
+      readonly taskId: string | null;
+      readonly reason: FlagReason;
+      /** Whether the event reached a leader or the relay: false for an untasked pane, or when not connected. */
+      readonly sent: boolean;
+    }
   | { readonly ok: true; readonly verb: "notes"; readonly kept: readonly string[]; readonly dropped: number }
   | { readonly ok: true; readonly verb: "done" }
   | { readonly ok: false; readonly code: CustodianReplyCode };
@@ -122,11 +144,16 @@ export function isCustodianFrameKind(raw: unknown): boolean {
   return isRecord(raw) && raw["kind"] === CUSTODIAN_FRAME_KIND;
 }
 
-const KEYS: Record<CustodianVerb, readonly string[]> = {
-  sessions: ["v", "kind", "verb"],
-  close: ["v", "kind", "verb", "pane"],
-  notes: ["v", "kind", "verb", "text"],
-  done: ["v", "kind", "verb", "summary"],
+// Each verb's accepted key sets: a flag's `note` is optional, so it takes two.
+const KEYS: Record<CustodianVerb, readonly (readonly string[])[]> = {
+  sessions: [["v", "kind", "verb"]],
+  close: [["v", "kind", "verb", "pane"]],
+  flag: [
+    ["v", "kind", "verb", "pane", "reason"],
+    ["v", "kind", "verb", "pane", "reason", "note"],
+  ],
+  notes: [["v", "kind", "verb", "text"]],
+  done: [["v", "kind", "verb", "summary"]],
 };
 
 /**
@@ -138,8 +165,10 @@ export function parseCustodianFrame(raw: unknown): CustodianFrame | null {
   const verb = CUSTODIAN_VERBS.find((candidate) => candidate === raw["verb"]);
   if (verb === undefined) return null;
   const keys = Object.keys(raw);
-  const expected = KEYS[verb];
-  if (keys.length !== expected.length || !expected.every((key) => keys.includes(key))) return null;
+  const exact = KEYS[verb].some(
+    (expected) => keys.length === expected.length && expected.every((key) => keys.includes(key)),
+  );
+  if (!exact) return null;
   const base = { v: CUSTODIAN_FRAME_VERSION, kind: CUSTODIAN_FRAME_KIND } as const;
   switch (verb) {
     case "sessions":
@@ -147,6 +176,12 @@ export function parseCustodianFrame(raw: unknown): CustodianFrame | null {
     case "close": {
       const pane = raw["pane"];
       return typeof pane === "string" && PANE_ID.test(pane) ? { ...base, verb, pane } : null;
+    }
+    case "flag": {
+      const { pane, reason, note } = raw;
+      if (typeof pane !== "string" || !PANE_ID.test(pane) || typeof reason !== "string") return null;
+      if (note === undefined) return { ...base, verb, pane, reason };
+      return typeof note === "string" ? { ...base, verb, pane, reason, note } : null;
     }
     case "notes": {
       const text = raw["text"];

@@ -1,10 +1,18 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { isTaskId } from "@seance/shared";
+import {
+  FLAG_NOTE_MAX,
+  isFlagNote,
+  isFlagReason,
+  isTaskId,
+  type CustodianEvent,
+  type FlagReason,
+} from "@seance/shared";
 import type { CustodianAudit } from "./audit.ts";
 import { DespawnFailure, type SessionBackend } from "./backend.ts";
 import type { CustodianConfig } from "./config.ts";
 import { NOTES_MAX } from "./custodian-agent.ts";
+import type { CustodianFlags } from "./custodian-flags.ts";
 import {
   parseCustodianFrame,
   SUMMARY_MAX,
@@ -134,6 +142,8 @@ export function pruneNotes(
 export interface VerbSeat {
   readonly count: (verb: CustodianVerb, ok: boolean) => void;
   readonly countWorktree: (kind: "removed" | "kept") => void;
+  /** A flag counted for the round: one a `flag` verb took as new, or one the daemon set after a close kept a worktree. */
+  readonly countFlagged: () => void;
   readonly done: (summary: string) => Promise<"ok" | "too_late" | "no_round">;
   readonly isDone: () => boolean;
 }
@@ -166,8 +176,13 @@ export interface CustodianVerbDeps {
   readonly settings: Pick<CustodianConfig, "closeAfterMinutes">;
   readonly now: () => number;
   readonly audit: CustodianAudit;
-  /** Custodian 6's seam: a worktree kept because it holds work that exists only there (`dirty`, `unpushed`). */
-  readonly onKept: (pane: string, taskId: string, why: "dirty" | "unpushed") => void;
+  /** Open flags: the round's own and the daemon's. Read by `sessions`, written by `flag` and a close. */
+  readonly flags: CustodianFlags;
+  /**
+   * Sends a `custodian-event` to the leader (in process when this daemon leads, else through the relay). True when it
+   * was handed on, false when nothing could take it; fire-and-forget, so a false is never an error to the round.
+   */
+  readonly sendEvent: (event: CustodianEvent) => Promise<boolean>;
   readonly warn: (line: string) => void;
 }
 
@@ -212,6 +227,41 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       closeAfterMs,
     });
 
+  /** Fire-and-forget: whatever goes wrong, the round's verb does not fail for it. */
+  const send = async (event: CustodianEvent): Promise<boolean> => {
+    try {
+      return await deps.sendEvent(event);
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * An entry whose session no longer exists is dropped, and its task's flag is lifted on the record: a finished task's
+   * `stuck` or `look` must not outlive the session it was about. A failure is a warning, never the verb's failure.
+   */
+  const pruneFlags = async (panes: readonly PaneInfo[]): Promise<void> => {
+    try {
+      const dropped = await deps.flags.prune({
+        taskIds: new Set(panes.flatMap((pane) => (pane.taskId === null ? [] : [pane.taskId]))),
+        panes: new Set(panes.map((pane) => pane.paneId)),
+      });
+      await Promise.all(dropped.map((taskId) => send({ kind: "unflag", taskId, at: deps.now() })));
+    } catch (err) {
+      deps.warn(`custodian: pruning the flags failed (${err instanceof Error ? err.name : "error"})`);
+    }
+  };
+
+  /** A session closed with nothing to keep, or nothing worth a flag: its entry goes, and the record's flag with it. */
+  const lift = async (key: string, taskId: string | null): Promise<void> => {
+    try {
+      await deps.flags.clear(key);
+    } catch (err) {
+      deps.warn(`custodian: clearing a flag failed (${err instanceof Error ? err.name : "error"})`);
+    }
+    if (taskId !== null) await send({ kind: "unflag", taskId, at: deps.now() });
+  };
+
   const sessions = async (): Promise<CustodianReply> => {
     let panes: readonly PaneInfo[];
     try {
@@ -220,8 +270,11 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       return { ok: false, code: "internal" };
     }
     const now = deps.now();
+    await pruneFlags(panes);
     const views = await mapLimit(panes, SESSIONS_CONCURRENCY, async (info): Promise<CustodianPaneView> => {
       const state = await classify(info);
+      // Reason and time only: the note is model-written from untrusted pane text and is not fed back to later rounds.
+      const open = info.ours ? await deps.flags.get(info.taskId ?? info.paneId) : null;
       const seen = info.ours ? deps.activity(info.paneId) : null;
       const site = info.taskId === null ? null : deps.tasks.worktree(info.taskId);
       const verdict = verdictOf(info, state);
@@ -241,7 +294,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         marked: deps.untouchable(info.paneId),
         nudges: 0,
         interrupted: false,
-        flag: null,
+        flag: open === null ? null : { reason: open.reason, at: open.at },
         close: verdict === "despawn" || verdict === "harvest" || verdict === "kill" ? "ok" : verdict,
       };
     });
@@ -265,11 +318,23 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     if ("removed" in outcome) {
       await deps.audit.removedWorktree(pane, taskId, outcome.how);
       deps.seat.countWorktree("removed");
+      await lift(taskId, taskId);
       return outcome;
     }
     await deps.audit.keptWorktree(pane, taskId, outcome.kept);
     deps.seat.countWorktree("kept");
-    if (outcome.kept === "dirty" || outcome.kept === "unpushed") deps.onKept(pane, taskId, outcome.kept);
+    if (outcome.kept === "dirty" || outcome.kept === "unpushed") {
+      // The daemon's own flag (C33): work that exists only in that worktree. The record's flag becomes this one, so the
+      // session's earlier entry goes without an `unflag`, which a later prune would otherwise send over it.
+      await send({ kind: "flag", taskId, reason: outcome.kept, at: deps.now() });
+      deps.seat.countFlagged();
+      await deps.audit.flag(pane, taskId, outcome.kept, "ok", "daemon");
+      try {
+        await deps.flags.clear(taskId);
+      } catch (err) {
+        deps.warn(`custodian: clearing a flag failed (${err instanceof Error ? err.name : "error"})`);
+      }
+    }
     return outcome;
   };
 
@@ -330,6 +395,10 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
               info.taskId,
               await decideWorktree(pane, info.taskId, { turnEndedAt, touchedAt }),
             );
+      // A pane with no task, or a task whose worktree there was none to decide on (here mode, or gone): nothing was
+      // kept, so nothing stays flagged. A kept worktree for any other reason leaves the entry to the prune.
+      if (info.taskId === null) await lift(pane, null);
+      else if (worktree === null) await lift(info.taskId, info.taskId);
       return { ok: true, verb: "close", pane, taskId: info.taskId, outcome: act.outcome, worktree };
     } catch (err) {
       if (err instanceof DespawnFailure && err.code === "session_not_found")
@@ -378,6 +447,49 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     throw new Error("kill-pane failed");
   };
 
+  /** C29: the round's flag. Every call, taken or refused, is one audit line, and the note is in none. */
+  const flag = async (pane: string, reason: string, note: string | undefined): Promise<CustodianReply> => {
+    const refuse = async (
+      code: "round_done" | "bad_reason" | "too_long" | "invalid" | "gone" | "foreign",
+      taskId: string | null,
+      known: FlagReason | "-",
+    ): Promise<CustodianReply> => {
+      await deps.audit.flag(pane, taskId, known, code, "round");
+      return { ok: false, code };
+    };
+    if (deps.seat.isDone()) return refuse("round_done", null, "-");
+    if (!isFlagReason(reason)) return refuse("bad_reason", null, "-");
+    // The length first, so an over-long note learns `too_long` rather than `invalid`.
+    if (note !== undefined && note.length > FLAG_NOTE_MAX) return refuse("too_long", null, reason);
+    if (note !== undefined && !isFlagNote(note)) return refuse("invalid", null, reason);
+    try {
+      const info = await infoOf(pane);
+      if (info === null) return await refuse("gone", null, reason);
+      if (!info.ours || pane === deps.roundPane()) return await refuse("foreign", info.taskId, reason);
+      await pruneFlags(await panesNow());
+      const changed = await deps.flags.set(info.taskId ?? pane, reason, note);
+      // Every accepted call is sent again, also a repeat: it is the only retry a lost event gets, and the leader writes
+      // and pushes nothing for what the record already holds.
+      const sent =
+        info.taskId === null
+          ? false
+          : await send({
+              kind: "flag",
+              taskId: info.taskId,
+              reason,
+              ...(note === undefined ? {} : { note }),
+              at: deps.now(),
+            });
+      if (changed === "new") deps.seat.countFlagged();
+      await deps.audit.flag(pane, info.taskId, reason, "ok", "round");
+      return { ok: true, verb: "flag", pane, taskId: info.taskId, reason, sent };
+    } catch (err) {
+      deps.warn(`custodian: flagging ${pane} failed (${err instanceof Error ? err.name : "error"})`);
+      await deps.audit.flag(pane, null, reason, "internal", "round").catch(() => {});
+      return { ok: false, code: "internal" };
+    }
+  };
+
   const notes = async (text: string): Promise<CustodianReply> => {
     if (deps.seat.isDone()) return { ok: false, code: "round_done" };
     if (Buffer.byteLength(text) > NOTES_MAX) return { ok: false, code: "too_long" };
@@ -422,6 +534,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         return sessions();
       case "close":
         return close(frame.pane);
+      case "flag":
+        return flag(frame.pane, frame.reason, frame.note);
       case "notes":
         return notes(frame.text);
       case "done":
@@ -478,6 +592,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         if (worthWriting(peer)) {
           deps.warn(`custodian: refused a ${frame.verb} frame from pid ${peer ?? "-"} (not the round)`);
           if (frame.verb === "close") await deps.audit.close(frame.pane, null, "not_custodian");
+          if (frame.verb === "flag") await deps.audit.flag(frame.pane, null, "-", "not_custodian", "round");
         }
         return { ok: false, code: "not_custodian" };
       }

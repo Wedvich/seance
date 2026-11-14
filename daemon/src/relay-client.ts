@@ -23,6 +23,7 @@ import {
   seal,
   signRegister,
   type BranchState,
+  type CustodianEvent,
   type DaemonFrame,
   type DaemonRole,
   type Envelope,
@@ -285,9 +286,14 @@ export class RelayClient {
     return this.#toScheduler("session-pass", pass);
   }
 
+  /** Fire-and-forget like `sendToScheduler`, for the `custodian-event` op; false when it was not sent. */
+  sendCustodianEvent(event: CustodianEvent): Promise<boolean> {
+    return this.#toScheduler("custodian-event", event);
+  }
+
   async #toScheduler(
-    op: "session-event" | "branch-state" | "session-pass",
-    payload: SessionEvent | BranchState | SessionPass,
+    op: "session-event" | "branch-state" | "session-pass" | "custodian-event",
+    payload: SessionEvent | BranchState | SessionPass | CustodianEvent,
   ): Promise<boolean> {
     if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };

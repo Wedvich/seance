@@ -1,4 +1,4 @@
-import type { CustodianStatus, QuotaReading, RepoEntry } from "@seance/shared";
+import type { CustodianEvent, CustodianStatus, QuotaReading, RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
 import { custodianAudit, daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
 import { DespawnFailure, type SessionBackend } from "./backend.ts";
@@ -7,6 +7,7 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
+import { createCustodianFlags, isNewTurn, type CustodianFlags } from "./custodian-flags.ts";
 import { dropRoundRequest, peekRoundRequest, readControl, writeSeatView } from "./custodian-control.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
@@ -47,7 +48,7 @@ import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { createMessages } from "./messages.ts";
-import { custodianRoundsPath, pruneLogPath, reapRefusalsPath } from "./paths.ts";
+import { custodianRoundsPath, custodianSessionsPath, pruneLogPath, reapRefusalsPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import type { RelayClient } from "./relay-client.ts";
@@ -173,6 +174,30 @@ const paneRetention = createPaneRetention(paneActivity);
 const eventsOf = new WeakMap<WiringCtx, SessionEvents>();
 /** The drain ask's `holds`: a pane it has a live entry for, which `SessionEvents.marked` does not know. */
 const drainHoldsOf = new WeakMap<WiringCtx, DrainAsk["holds"]>();
+/**
+ * The seat's flag store and event sender, for the session-events capability's new-turn clear (C30): set once the seat's
+ * own capability passes `seatEnabled`, read lazily at each frame, so the order the two capabilities start in is moot.
+ */
+const flagsOf = new WeakMap<WiringCtx, CustodianFlags>();
+const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
+
+/**
+ * The session started a new turn: its flag was about the last one, so the entry and the record's flag go. A failure is
+ * a warning; the next `sessions` prune or the re-assignment lifts what this missed.
+ */
+const clearOnNewTurn = async (
+  ctx: WiringCtx,
+  flags: CustodianFlags,
+  key: string,
+  taskId: string | null,
+): Promise<void> => {
+  try {
+    if (!(await flags.clear(key)) || taskId === null) return;
+    await sendEventOf.get(ctx)?.({ kind: "unflag", taskId, at: ctx.now() });
+  } catch (err) {
+    log.warn(`custodian: clearing a flag on a new turn failed (${err instanceof Error ? err.name : "error"})`);
+  }
+};
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -272,7 +297,15 @@ const sessionEvents: DaemonCapability = (ctx) => {
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     onEnded: messages.onEnded,
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
-    retain: paneRetention.observe,
+    retain: (pane, state, turnEnded): void => {
+      // Read before `observe` replaces it: a new turn is a `busy` after an `idle` that ended one, which only the prior
+      // retained state says. `needs-input` to `busy` (a permission answered) and `busy` to `busy` are the same turn.
+      const before = pane.ours ? paneActivity.activity(pane.id) : null;
+      paneRetention.observe(pane, state, turnEnded);
+      const flags = flagsOf.get(ctx);
+      if (flags === undefined || !isNewTurn(before, state)) return;
+      void clearOnNewTurn(ctx, flags, pane.taskId ?? pane.id, pane.taskId);
+    },
   });
   late.events = events;
   eventsOf.set(ctx, events);
@@ -348,6 +381,22 @@ const custodianSeat: DaemonCapability = (ctx) => {
     return { stop: (): void => {} };
   }
 
+  const flags = createCustodianFlags({
+    path: custodianSessionsPath(),
+    now: ctx.now,
+    warn: (line) => log.warn(line),
+  });
+  // In process when this machine leads, else sealed to the scheduler; false when neither could take it.
+  const sendEvent = (event: CustodianEvent): Promise<boolean> => {
+    if (ctx.leader.term() !== null) {
+      ctx.leader.onCustodianEvent(event, ctx.deviceId);
+      return Promise.resolve(true);
+    }
+    return ctx.client.sendCustodianEvent(event);
+  };
+  flagsOf.set(ctx, flags);
+  sendEventOf.set(ctx, sendEvent);
+
   // The checks are async and `Started` is sync: the seat starts once they pass, and `stop` before that cancels it.
   let seat: CustodianSeat | null = null;
   let cancelled = false;
@@ -404,16 +453,17 @@ const custodianSeat: DaemonCapability = (ctx) => {
           despawn,
           killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
           settings,
+          flags,
+          sendEvent,
           seat: {
             count: (verb, ok) => seat?.count(verb, ok),
             countWorktree: (kind) => seat?.countWorktree(kind),
+            countFlagged: () => seat?.countFlagged(),
             done: async (summary) => (await seat?.done(summary)) ?? "no_round",
             isDone: () => seat?.isDone() ?? false,
           },
           now: ctx.now,
           audit,
-          // Custodian 6's seam: where a kept `dirty` or `unpushed` worktree will be flagged to the owner.
-          onKept: (): void => {},
           warn: (line) => log.warn(line),
         });
   const begin = async (): Promise<void> => {
@@ -451,6 +501,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
         return roundRemoteId(exclave.configDir, { panePid, startedAt: round.startedAt });
       },
       publishView: (view) => publish(view, false),
+      onFailing: () => sendEvent({ kind: "failing", at: ctx.now() }),
       ...(ctx.refreshStatus === undefined ? {} : { onView: ctx.refreshStatus }),
       draining: () => ctx.endedTasks.draining,
       stopped: ctx.stopped,

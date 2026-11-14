@@ -20,8 +20,11 @@ export interface VerbCount {
 export interface RoundCounts {
   readonly sessions: VerbCount;
   readonly close: VerbCount;
+  readonly flag: VerbCount;
   readonly notes: VerbCount;
   readonly done: VerbCount;
+  /** Flags the round's verb took plus the ones the daemon set itself after a close kept a worktree. */
+  readonly flagged: number;
   readonly worktrees: { readonly removed: number; readonly kept: number };
 }
 
@@ -40,7 +43,15 @@ export interface RoundEntry {
 
 export function emptyCounts(): RoundCounts {
   const zero = { ok: 0, refused: 0 };
-  return { sessions: zero, close: zero, notes: zero, done: zero, worktrees: { removed: 0, kept: 0 } };
+  return {
+    sessions: zero,
+    close: zero,
+    flag: zero,
+    notes: zero,
+    done: zero,
+    flagged: 0,
+    worktrees: { removed: 0, kept: 0 },
+  };
 }
 
 /** `counts` with one verb's tally moved by one. */
@@ -62,12 +73,17 @@ function countsOf(raw: unknown): RoundCounts | null {
   if (!isRecord(raw)) return null;
   const sessions = verbCountOf(raw["sessions"]);
   const close = verbCountOf(raw["close"]);
+  // Lines written before custodian 6 have neither key: absent is zero, present and malformed rejects the line.
+  const flag = raw["flag"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["flag"]);
+  const flagged = raw["flagged"] === undefined ? 0 : raw["flagged"];
   const notes = verbCountOf(raw["notes"]);
   const done = verbCountOf(raw["done"]);
   const worktrees = raw["worktrees"];
   if (
     sessions === null ||
     close === null ||
+    flag === null ||
+    !wholeNumber(flagged) ||
     notes === null ||
     done === null ||
     !isRecord(worktrees) ||
@@ -76,7 +92,15 @@ function countsOf(raw: unknown): RoundCounts | null {
   ) {
     return null;
   }
-  return { sessions, close, notes, done, worktrees: { removed: worktrees["removed"], kept: worktrees["kept"] } };
+  return {
+    sessions,
+    close,
+    flag,
+    notes,
+    done,
+    flagged,
+    worktrees: { removed: worktrees["removed"], kept: worktrees["kept"] },
+  };
 }
 
 /** One line, strictly: a line it cannot read is not carried forward. */
