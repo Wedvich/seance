@@ -521,6 +521,13 @@ is picked up by the next register's check (at most 30 minutes) or announce. A ch
 root re-runs `install --system`; `update` prints a warning, and the update unit's journal
 carries it, when the installed units differ from what the checkout would write.
 
+An update may migrate `archive.sqlite` when the service next starts, in one transaction:
+a failed migration leaves the file as it was. Migrations go one way only, because an
+older build refuses a file at a newer schema, so pinning an older checkout is no way
+back. An archivist that cannot start (a migration that keeps failing) restarts in a loop
+and never takes its seat, so it never hears the next announce: once a fix is pushed, run
+`… main.ts update` as `archivist` on the box.
+
 **Moving the seat** to another box is manual. The TPM blob is machine-bound and the seat
 is one id:
 
@@ -561,10 +568,12 @@ sqlite3 -readonly ~archivist/.local/state/seance-archivist/archive.sqlite
 `archive.sqlite` (times in Unix milliseconds):
 
 - `tasks`: one row per finished task, upserted by store `version`. `state` is `done`,
-  `failed` or `cancelled`, plus `repo`, `title`, `created_at`, `device_id`, `machine`
-  (name), `account` (the `account:<hex>` key, never the raw id), `pr_url`, `pr_state`,
-  `done_by`, `failure` (a code), `first_archived_at`, `archived_at`. `record` is the
-  whole task as JSON, minus the prompt, the attachments and anything derived from them.
+  `failed`, `cancelled` or `superseded` (passed to a successor), plus `repo`, `title`,
+  `created_at`, `device_id`, `machine` (name), `account` (the `account:<hex>` key, never
+  the raw id), `pr_url`, `pr_state`, `done_by`, `failure` (a code), `first_archived_at`,
+  `archived_at`. `record` is the whole task as JSON, minus the prompt, the attachments,
+  anything derived from them and any raw account id (a successor's `succeeds.account`
+  reads `-`).
 - `accounts`: `key`, the display-only `alias`, `version`, `first_seen_at`, `updated_at`.
 - `machines`: `device_id`, `name`, `platform`, `build`, `connected`, `in_registry`,
   `first_seen_at`, `updated_at`.

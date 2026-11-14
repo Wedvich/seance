@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, SQLiteError } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
 import {
   forgetPrompt,
@@ -12,7 +12,8 @@ import {
 /**
  * `archive.sqlite`: the fleet's long-term history (DESIGN.md, Archivist, A16, A18,
  * A21, A23, A24). Append-only by construction — no statement here removes a row
- * (archivist/test/layering.test.ts holds that), none lowers a task's version or
+ * (archivist/test/layering.test.ts holds that, and pins migration 2's one rebuild
+ * drop, which moves rows), none lowers a task's version or
  * rewrites an event; a purge is SQL on the box. Times are ms since the epoch, as
  * the task record's own.
  */
@@ -30,7 +31,9 @@ const kindList = FLEET_EVENT_KINDS.map((kind) => `'${kind}'`).join(", ");
 /**
  * Entry `n` takes an archive at `PRAGMA user_version` n to n + 1, all in the
  * one transaction that opens it. History is never dropped by a migration: the
- * archive is the only copy of what the store has pruned.
+ * archive is the only copy of what the store has pruned. A table rebuild moves
+ * its rows, count-checked, before the old table goes. Entries are frozen: each
+ * builds the schema of its own version, never from a constant that moves later.
  */
 const MIGRATIONS: readonly ((db: Database) => void)[] = [
   // 0 → 1: tasks, accounts, machines, fleet events, and the last verified term.
@@ -86,9 +89,73 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
       CREATE INDEX events_at ON events (at);
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
     `),
+  // 1 → 2: `superseded` joins `state`'s CHECK. SQLite cannot alter a CHECK, so the table is rebuilt: every row copied,
+  // the count checked before the old table goes (a throw rolls the whole open back to schema 1), so the drop moves
+  // rows and never removes one.
+  (db) => {
+    db.exec(`
+      CREATE TABLE tasks_v2 (
+        id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('done', 'failed', 'cancelled', 'superseded')),
+        repo TEXT NOT NULL,
+        title TEXT,
+        created_at INTEGER NOT NULL,
+        device_id TEXT,
+        machine TEXT,
+        account TEXT,
+        pr_url TEXT,
+        pr_state TEXT,
+        done_by TEXT,
+        failure TEXT,
+        record TEXT NOT NULL,
+        first_archived_at INTEGER NOT NULL,
+        archived_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO tasks_v2 (id, version, state, repo, title, created_at, device_id, machine, account, pr_url, pr_state,
+          done_by, failure, record, first_archived_at, archived_at)
+        SELECT id, version, state, repo, title, created_at, device_id, machine, account, pr_url, pr_state,
+          done_by, failure, record, first_archived_at, archived_at
+        FROM tasks;
+    `);
+    const count = (table: "tasks" | "tasks_v2"): number =>
+      db.query<{ n: number }, []>(`SELECT count(*) AS n FROM ${table}`).get()?.n ?? 0;
+    const held = count("tasks");
+    const copied = count("tasks_v2");
+    if (copied !== held) {
+      throw new Error(`archive.sqlite migration 2 copied ${copied} of ${held} task rows — left at schema 1`);
+    }
+    db.exec(`
+      DROP TABLE tasks;
+      ALTER TABLE tasks_v2 RENAME TO tasks;
+      CREATE INDEX tasks_created ON tasks (created_at);
+    `);
+    // A successor's `succeeds.account` and a stray `quotaExhausted` (its `accountId`) are raw account ids, which schema 1
+    // kept (A15): rewritten to the placeholder `archivedTask` now writes and dropped, as literals here so this entry stays frozen. A record that is not JSON (a hand edit)
+    // is left alone rather than failing the open: `CASE` keeps the JSON functions off it.
+    db.exec(`
+      UPDATE tasks SET record = json_remove(
+          CASE WHEN json_type(record, '$.spec.succeeds.account') IS NULL THEN record
+            ELSE json_set(record, '$.spec.succeeds.account', '-') END,
+          '$.quotaExhausted')
+      WHERE CASE WHEN json_valid(record) THEN
+          json_type(record, '$.quotaExhausted') IS NOT NULL
+          OR (json_type(record, '$.spec.succeeds.account') IS NOT NULL
+            AND json_extract(record, '$.spec.succeeds.account') IS NOT '-')
+        ELSE 0 END;
+    `);
+  },
 ];
 
 export const ARCHIVE_SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * SQLite refused this one row (a constraint, a datatype, a size): the next row may still land. Anything else — busy,
+ * I/O, a full disk, a closed database — fails every write after it too, and `busy_timeout` blocks the thread on each.
+ */
+export function isRowRefusal(err: unknown): err is SQLiteError {
+  return err instanceof SQLiteError && /^SQLITE_(?:CONSTRAINT|MISMATCH|TOOBIG)/u.test(err.code ?? "");
+}
 
 /** One task as the archive keeps it. `record` is `archivedTask`'s JSON. */
 export interface TaskRow {
@@ -117,10 +184,18 @@ export interface TaskContext {
 }
 
 /**
+ * What an archived successor's `succeeds.account` reads instead of the predecessor's raw account id. Kept, not
+ * dropped, so the record still parses as a successor; never a real `org:account` id. Migration 2 writes the same
+ * text as a literal.
+ */
+export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
+
+/**
  * A task as the archive may hold it: `forgetPrompt` (prompt and attachment
- * manifest gone, A14), and the two fields that carry a raw account id
- * (`spec.pin.account`, `spillAlert`) dropped, since the archive names an
- * account only by its store key (A15). Also gone is everything the daemon or
+ * manifest gone, A14), and the fields that carry a raw account id
+ * (`spec.pin.account`, `spillAlert`, `quotaExhausted`) dropped, and `spec.succeeds.account`
+ * replaced by `ARCHIVED_SUCCEEDS_ACCOUNT`, since the archive names an account
+ * only by its store key (A15). Also gone is everything the daemon or
  * the router derives from prompt text, which the store prunes and the archive
  * would keep for good: `assignment.window` and `branch` (a title-less task's
  * slug is the prompt's first words), `failure.message` (a daemon's text, which
@@ -130,6 +205,7 @@ export interface TaskContext {
 export function archivedTask(task: Task): Task {
   const {
     spillAlert: _spill,
+    quotaExhausted: _quota,
     decision: _decision,
     branch: _branch,
     spec,
@@ -138,11 +214,15 @@ export function archivedTask(task: Task): Task {
     ...rest
   } = forgetPrompt(task);
   // Dropped again whatever the phase: `forgetPrompt` leaves an unfinished record's spec whole, and a stored row's JSON is not held to its `state` column.
-  const { pin, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
+  const { pin, succeeds, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
   const deviceId = pin?.deviceId;
   return {
     ...rest,
-    spec: { ...specRest, ...(deviceId === undefined ? {} : { pin: { deviceId } }) },
+    spec: {
+      ...specRest,
+      ...(deviceId === undefined ? {} : { pin: { deviceId } }),
+      ...(succeeds === undefined ? {} : { succeeds: { ...succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } }),
+    },
     ...(assignment === undefined ? {} : { assignment: withoutWindow(assignment) }),
     ...(failure === undefined ? {} : { failure: { ...failure, message: "" } }),
   };
@@ -255,6 +335,11 @@ export class Archive {
     db.exec("PRAGMA busy_timeout = 2000");
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
+    // A migration that rewrites raw account ids must not leave them in freed pages or the WAL: `secure_delete` (set before the
+    // transaction) zeroes what the rebuild frees, and the checkpoint after folds the WAL into the file. Only a migrating open pays for it.
+    const from = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+    const migrating = from > 0 && from < ARCHIVE_SCHEMA_VERSION;
+    if (migrating) db.exec("PRAGMA secure_delete = ON");
     db.transaction(() => {
       const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
       // An older build would write rows a newer schema reads differently: refuse rather than guess.
@@ -266,6 +351,9 @@ export class Archive {
       for (const migrate of MIGRATIONS.slice(version)) migrate(db);
       if (version < ARCHIVE_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${ARCHIVE_SCHEMA_VERSION}`);
     })();
+    if (!migrating) return;
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    db.exec("PRAGMA secure_delete = OFF");
   }
 
   /**

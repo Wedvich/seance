@@ -67,8 +67,10 @@ import {
 } from "./parse.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { taskRecordAtRest } from "./task-record.ts";
+import { statesIn } from "./task-phase.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  ARCHIVE_TASK_OUTCOMES,
   ARCHIVE_STATUS_ERROR_CODES,
   ARCHIVE_TASKS_ERROR_CODES,
   ARCHIVE_MACHINES_MAX,
@@ -3003,6 +3005,11 @@ describe("archive-tasks", () => {
     expect(parsed?.before).not.toBe(cursor);
     expect(parseArchiveTasksRequest({})).toEqual({});
     expect(parseArchiveTasksRequest(null)).toBeNull();
+  });
+
+  test("every finished state is an outcome filter, so the archive's list cannot fall behind the phases", () => {
+    expect(statesIn("finished").toSorted()).toEqual(ARCHIVE_TASK_OUTCOMES.toSorted());
+    for (const outcome of ARCHIVE_TASK_OUTCOMES) expect(parseArchiveTasksRequest({ outcome })).toEqual({ outcome });
   });
 
   test("each bound refuses the whole request", () => {

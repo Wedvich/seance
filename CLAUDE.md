@@ -296,12 +296,13 @@ green:
   reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
   holds no prompt text, no attachment manifest and no raw account id: a task row is written only
   through `taskRow`, only for a finished task read through `listTasks`/`getTask`, after
-  `forgetPrompt` and with `pin.account`, `spillAlert`, `assignment.window`, `branch`,
+  `forgetPrompt` and with `pin.account`, `spillAlert`, `quotaExhausted`, `assignment.window`, `branch`,
   `failure.message` and `decision` dropped (the daemon slugs a title-less task's window and branch
-  from its prompt), its account only as the
+  from its prompt) and `succeeds.account` replaced by the constant `ARCHIVED_SUCCEEDS_ACCOUNT`, its account only as the
   `account:` store key, and only over a row at a lower store version; an account row only from
   `openAccountRecord` or a key `accountStoreKey` made; and no statement there removes a row
-  (`archivist/test/layering.test.ts`), and its `metrics.sqlite` (`archivist/src/metrics-archive.ts`)
+  (`archivist/test/layering.test.ts`) — its one `DROP`, migration 2's pinned `DROP TABLE tasks`,
+  runs only after every row was copied into the rebuilt table and the count checked — and its `metrics.sqlite` (`archivist/src/metrics-archive.ts`)
   labels an account only by the `account:` store key and removes rows only through the shared
   tiers' two horizon prunes (`daemon/src/metrics-tiers.ts`, the daemon's own rollup, imported,
   never copied). Don't let changes drift from them.

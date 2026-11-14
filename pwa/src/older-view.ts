@@ -42,6 +42,7 @@ export const OUTCOME_LABELS: Record<ArchiveTaskOutcome, string> = {
   done: "Done",
   failed: "Failed",
   cancelled: "Cancelled",
+  superseded: "Passed on",
 };
 
 const SHEET_TITLES: Record<OlderSheet, string> = {
@@ -153,6 +154,7 @@ function machineName(row: ArchivedTask, state: AppState): string | null {
 function outcomePhrase(task: Task): string {
   if (task.state === "cancelled") return "Cancelled";
   if (task.state === "failed") return "It failed";
+  if (task.state === "superseded") return "Passed to a successor";
   if (task.doneBy === "merged") return "Its PR merged";
   if (task.doneBy === "reported") return "It reported done";
   if (task.doneBy === "manual") return "Marked done";

@@ -13,7 +13,7 @@ import {
   type TaskLookup,
   type TaskRecord,
 } from "@seance/shared";
-import { taskRow, type Archive, type Fleet } from "./archive.ts";
+import { isRowRefusal, taskRow, type Archive, type Fleet } from "./archive.ts";
 import type { IngestClock } from "./ingest-clock.ts";
 
 /**
@@ -195,6 +195,34 @@ export function startCollector(opts: CollectorOpts): Collector {
     return archive.upsertTask(row, seenAt);
   };
 
+  /**
+   * A row SQLite refuses skips that task and the pass goes on, counted in one warning per pass: a schema refusal
+   * does not heal on retry, and one record must not keep every later one out. Any other failure ends the pass.
+   * The warning carries SQLite's message (schema text) and a count, nothing of a record.
+   */
+  const refusals = (): {
+    readonly archive: (record: TaskRecord, seenAt: number) => Promise<boolean>;
+    readonly report: () => void;
+  } => {
+    let count = 0;
+    let first = "";
+    return {
+      archive: async (record, seenAt) => {
+        try {
+          return await archiveTask(record, seenAt);
+        } catch (err) {
+          if (!isRowRefusal(err)) throw err;
+          count += 1;
+          if (count === 1) first = err.message;
+          return false;
+        }
+      },
+      report: () => {
+        if (count > 0 && !stopped) log.warn(`tasks: ${count} not archived: ${first}`);
+      },
+    };
+  };
+
   /** One read, its failure logged; false asks the pacer to retry. Never throws. */
   const guarded = async (what: string, read: () => Promise<boolean>): Promise<boolean> => {
     try {
@@ -216,9 +244,14 @@ export function startCollector(opts: CollectorOpts): Collector {
       if (answer === null || !answer.ok) return refusal("task listing", answer);
       let archived = 0;
       const seenAt = Date.now();
-      for (const record of answer.tasks) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
-        if (await archiveTask(record, seenAt)) archived += 1;
+      const refused = refusals();
+      try {
+        for (const record of answer.tasks) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
+          if (await refused.archive(record, seenAt)) archived += 1;
+        }
+      } finally {
+        refused.report();
       }
       clock.note("store");
       if (archived > 0 || answer.unreadable.length > 0) {
@@ -245,21 +278,26 @@ export function startCollector(opts: CollectorOpts): Collector {
   const readNamed = async (ids: readonly string[]): Promise<void> => {
     const ok = await guarded("task read", async () => {
       let archived = 0;
-      for (const id of ids) {
-        if (stopped) return true;
-        // oxlint-disable-next-line no-await-in-loop -- one store-get at a time, by design
-        const answer = await source.getTask(id);
-        if (answer === null || !answer.ok) return refusal("task read", answer);
-        clock.note("store");
-        const found = answer.task;
-        // Null: gone from the store (pruned, or never there) — its row, if any, stays as it was.
-        if (found === null) continue;
-        if ("reason" in found) {
-          log.info(`tasks: skipped 1 unreadable (${found.reason})`);
-          continue;
+      const refused = refusals();
+      try {
+        for (const id of ids) {
+          if (stopped) return true;
+          // oxlint-disable-next-line no-await-in-loop -- one store-get at a time, by design
+          const answer = await source.getTask(id);
+          if (answer === null || !answer.ok) return refusal("task read", answer);
+          clock.note("store");
+          const found = answer.task;
+          // Null: gone from the store (pruned, or never there) — its row, if any, stays as it was.
+          if (found === null) continue;
+          if ("reason" in found) {
+            log.info(`tasks: skipped 1 unreadable (${found.reason})`);
+            continue;
+          }
+          // oxlint-disable-next-line no-await-in-loop -- as above
+          if (await refused.archive(found, Date.now())) archived += 1;
         }
-        // oxlint-disable-next-line no-await-in-loop -- as above
-        if (await archiveTask(found, Date.now())) archived += 1;
+      } finally {
+        refused.report();
       }
       if (archived > 0) log.info(`tasks: archived ${archived}`);
       return true;

@@ -12101,7 +12101,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     archivist itself, with a message: a year at 1 d with more than a handful of series is the
     case, and the app asks per `names` or a shorter range.
   - `archive-tasks` is a page, newest first by end time, filtered by `repo`, `outcome` (`done`,
-    `failed`, `cancelled`), `machine`, `account`, `since`/`until` and a `title` substring
+    `failed`, `cancelled`, `superseded`: `ARCHIVE_TASK_OUTCOMES`, held equal to the finished phase by a
+    test), `machine`, `account`, `since`/`until` and a `title` substring
     (`LIKE` with `%`, `_` and `\` escaped, so case-insensitive for ASCII only: "øl" does not
     find "Øl-oppsett"); every filter is a bound parameter. The archive has no
     finish time, so end time is `first_archived_at`, the first time the archivist saw the task
@@ -12195,17 +12196,25 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   client offers (dotted, bracketed or destructured), and `execPath`, in the archivist's own source. Transitive because an allowed
   module that later grows an edge to a forbidden one must fail here, not in review. A third holds
   `bun:sqlite` to `archive.ts` and `metrics-archive.ts`, and both to no `DELETE`, `DROP`,
-  `TRUNCATE` or replacing insert (A23); a fourth holds the shared tiers'
+  `TRUNCATE` or replacing insert (A23) but the one pinned `DROP TABLE tasks` of migration 2's
+  rebuild in `archive.ts`; a fourth holds the shared tiers'
   (`daemon/src/metrics-tiers.ts`) removing statements to their two horizon prunes, the one way a
   metrics row leaves (A22).
 - **`archive.sqlite`** (item 3), in the state dir beside `state.json`: created empty at 0600
   before SQLite opens it, so the WAL and shared-memory files take that mode (as
   `metrics-store.ts` does), `journal_mode = WAL`, and migrations keyed on `PRAGMA user_version`,
   each run in the one transaction that opens the file. A file at a newer schema than the build
-  refuses start: an older archivist would write rows a newer schema reads differently. Schema 1,
+  refuses start: an older archivist would write rows a newer schema reads differently. Migration
+  2 (2026-11-14) admits `superseded`, which schema 1's `CHECK` refused, so the first superseded
+  record failed every listing and nothing after it was archived. SQLite cannot alter a `CHECK`,
+  so it rebuilds `tasks`: a new table, every row copied, the copy's count checked against the old
+  (a mismatch throws and the open rolls back to schema 1), then the old table dropped, the new one
+  renamed and `tasks_created` recreated — the archive's one `DROP`, a move that removes nothing.
+  The same transaction rewrites a stored successor's `succeeds.account` to `-` and drops a stray `quotaExhausted` (A15); a migrating open runs with `secure_delete` on and checkpoints the WAL after, so the freed pages and the log no longer hold the raw ids either (only a migrating open pays for it). Entries are
+  frozen: each writes its schema as literals, never from a constant that later moves. Schema 2,
   every time in ms:
   - `tasks` — one row per finished task, `id` its key: `version` (the store version it was read
-    at), `state` (`done`, `failed`, `cancelled` only, by `CHECK`), `repo`, `title`, `created_at`,
+    at), `state` (`done`, `failed`, `cancelled`, `superseded` only, by `CHECK`), `repo`, `title`, `created_at`,
     `device_id` (its assignment's), `machine` (that machine's name when archived), `account` (the
     `account:<hex>` store key, never the raw id), `pr_url`, `pr_state`, `done_by`, `failure` (its
     code), `record` (the task as JSON, below), `first_archived_at`, `archived_at`. The record has
@@ -12226,7 +12235,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   then `bindTaskRecord`; one they cannot read is counted in a log line and skipped, never deleted
   or written over. Only a `finished`-phase task gets a row, through `taskRow`: `forgetPrompt`
   first (prompt and attachment manifest gone even if a record still carries them), then
-  `spec.pin.account` and `spillAlert` dropped, the two fields that hold a raw account id, and
+  `spec.pin.account`, `spillAlert` and `quotaExhausted` dropped and `spec.succeeds.account` set to `-` (kept, so
+  the record still parses as a successor), the four fields that hold a raw account id (`quotaExhausted` is already cleared by the scheduler on a finish; the archive drops it anyway), and
   everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
   (a title-less task's window and worktree branch are slugged from the prompt's first words),
   `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its
@@ -12236,7 +12246,13 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   written when the archive holds none or holds it at a lower store version (`ON CONFLICT … WHERE
   excluded.version > tasks.version`), so a PR that merges after its task settled lands, and an
   older blob put back never wins; a machine name the archivist cannot resolve this time keeps the
-  one held. A record that leaves the store leaves its row as it was. The account is resolved when
+  one held. A record that leaves the store leaves its row as it was. A row SQLite refuses (a
+  constraint, a datatype or a size: `isRowRefusal`) skips that task and the pass goes on,
+  counted in one warning per pass with SQLite's message (schema text, nothing of the record);
+  the store is still noted as ingested. A refusal of that kind does not heal on a retry, and
+  before 2026-11-14 one such record kept every record after it out of the archive. Any other
+  write failure (busy, I/O, a full disk) ends the pass and the pacer retries, since every
+  later write would fail too and `busy_timeout` would block the thread on each. The account is resolved when
   archived: the assignment's machine's exclave in the registry, else `pin.account`, HMAC'd with
   the account key (`accountStoreKey`) — so it names the account that exclave held then, and the
   **first** one resolved stays (`coalesce(tasks.account, excluded.account)`): a later PR reading
@@ -12478,12 +12494,14 @@ prompt text or any act on the fleet.
   (moved to `shared/src/task-phase.ts` so the archivist can load it) runs before a task row is
   written, and everything derived from the prompt is dropped too (above, "Tasks").
 - **A15.** _Derived._ An account is keyed by the HMAC'd account id the store already uses, never a raw
-  account identifier or email; an alias is display only. A PSK rotation files the same account under
+  account identifier or email; an alias is display only. A successor's `succeeds.account` (its
+  predecessor's raw id) is archived as the constant `-`; the predecessor's own row names its account
+  by key. A PSK rotation files the same account under
   a new key: accepted (above, "Accounts").
 
 **What it collects.**
 
-- **A16. Tasks.** Finished tasks only (`done`, `failed`, `cancelled`), metadata only, upserted whenever
+- **A16. Tasks.** Finished tasks only (`done`, `failed`, `cancelled`, `superseded`), metadata only, upserted whenever
   the finished record's store version changes while it is still in the store, so a PR that merges after
   its task settled is captured. Once the record is pruned the row is final.
 - **A17. Metrics.** Live `status` frames and timed pulls of each daemon's `metrics` op with a watermark
@@ -12502,8 +12520,9 @@ prompt text or any act on the fleet.
 - **A22.** Metrics: 30 s for 48 h, 5 min for 1 year, hourly forever (`ARCHIVE_RETENTION`,
   `archivist/src/metrics-archive.ts`).
 - **A23.** Append-only. Nothing on the wire removes or changes history; a purge is SQL on the box.
-  Held by the layering test (no removing statement in `archive.ts` or `metrics-archive.ts`; A22's prunes
-  are the shared tiers' two horizon deletes).
+  Held by the layering test (no removing statement in `archive.ts` or `metrics-archive.ts` but migration
+  2's pinned `DROP TABLE tasks`, which moves every row into the rebuilt table first; A22's prunes are the
+  shared tiers' two horizon deletes).
 - **A24.** A retired machine's and a removed account's history stays, keyed by its stable id with the
   last known name.
 

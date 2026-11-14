@@ -3,10 +3,11 @@ import { Database } from "bun:sqlite";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ArchiveTasksRequest, Task } from "@seance/shared";
+import { ARCHIVE_TASK_OUTCOMES, parseTask, statesIn, type ArchiveTasksRequest, type Task } from "@seance/shared";
 import {
   Archive,
   ARCHIVE_SCHEMA_VERSION,
+  ARCHIVED_SUCCEEDS_ACCOUNT,
   archivedTask,
   taskRow,
   type Fleet,
@@ -78,6 +79,112 @@ describe("archive.sqlite", () => {
     expect((await stat(`${path}-wal`)).mode & 0o777).toBe(0o600);
   });
 
+  test("a schema-1 archive upgrades in place: every row and column kept, the index rebuilt, superseded admitted", async () => {
+    archive.close();
+    await rm(path);
+    await rm(`${path}-wal`, { force: true });
+    await rm(`${path}-shm`, { force: true });
+    const old = new Database(path, { strict: true });
+    // Schema 1 as migration 0 → 1 wrote it: the old file's frozen shape is what this test is about.
+    old.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, version INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('done', 'failed', 'cancelled')),
+        repo TEXT NOT NULL, title TEXT, created_at INTEGER NOT NULL, device_id TEXT, machine TEXT, account TEXT,
+        pr_url TEXT, pr_state TEXT, done_by TEXT, failure TEXT, record TEXT NOT NULL,
+        first_archived_at INTEGER NOT NULL, archived_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX tasks_created ON tasks (created_at);
+      CREATE TABLE accounts (key TEXT PRIMARY KEY, alias TEXT, version INTEGER NOT NULL,
+        first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) STRICT;
+      CREATE TABLE machines (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, build TEXT,
+        connected INTEGER NOT NULL, in_registry INTEGER NOT NULL, first_seen_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL) STRICT;
+      CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('first_seen', 'connected', 'gone', 'build_changed', 'term_changed')),
+        device_id TEXT NOT NULL, name TEXT, build TEXT, previous_build TEXT, term INTEGER, previous_term INTEGER) STRICT;
+      CREATE INDEX events_at ON events (at);
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      INSERT INTO tasks VALUES ('t-full', 3, 'done', 'seance', 'Full', 100, 'dev-a', 'alpha', 'account:abc',
+        'https://github.com/o/r/pull/1', 'merged', 'merged', NULL, '{"id":"t-full"}', 200, 300);
+      INSERT INTO tasks VALUES ('t-bare', 1, 'failed', 'seance', NULL, 50, NULL, NULL, NULL,
+        NULL, NULL, NULL, 'dispatch_unconfirmed', '{"id":"t-bare"}', 60, 60);
+      INSERT INTO events (at, kind, device_id) VALUES (5, 'first_seen', 'dev-a');
+      INSERT INTO tasks VALUES ('t-hand', 1, 'cancelled', 'seance', NULL, 70, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, 'not json {', 80, 80);
+      PRAGMA user_version = 1;
+    `);
+    // Schema 1 kept a successor's raw `succeeds.account`.
+    const succeeds = { task: "t-full", account: RAW_ACCOUNT, at: { deviceId: "dev-a", exclave: "x", clone: "c" } };
+    // And an older or foreign write could leave a quota stamp, whose `accountId` is one too.
+    const quotaExhausted = { accountId: RAW_ACCOUNT, window: "5h", reset: 0, at: 1, since: 1 };
+    const successor = {
+      id: "t-succ",
+      quotaExhausted,
+      spec: { repo: "seance", mode: "worktree", succeeds: { ...succeeds, trigger: "pass" } },
+    };
+    old
+      .query(
+        `INSERT INTO tasks VALUES ('t-succ', 2, 'done', 'seance', NULL, 90, 'dev-b', 'beta', 'account:def',
+          NULL, NULL, 'session', NULL, ?, 95, 99)`,
+      )
+      .run(JSON.stringify(successor));
+    type Row = Record<string, unknown> & { id: string; record: string };
+    const all = (db: Database): Row[] => db.query<Row, []>("SELECT * FROM tasks ORDER BY id").all();
+    const before = all(old);
+    old.close();
+
+    archive = await Archive.open(path);
+    expect(rows<{ user_version: number }>("PRAGMA user_version")[0]?.user_version).toBe(ARCHIVE_SCHEMA_VERSION);
+    const after = new Database(path, { readonly: true });
+    try {
+      const upgraded = all(after);
+      // Every column of every row as it was, but the successor's raw account id, which is now the placeholder.
+      expect(upgraded.map(({ record: _r, ...rest }) => rest)).toEqual(before.map(({ record: _r, ...rest }) => rest));
+      const records = new Map(upgraded.map((row) => [row.id, row.record]));
+      for (const row of before) {
+        if (row.id !== "t-succ") expect(records.get(row.id)).toBe(row.record);
+      }
+      const record = records.get("t-succ") ?? "";
+      expect(record).not.toContain(RAW_ACCOUNT);
+      const { quotaExhausted: _quota, ...kept } = successor;
+      expect(JSON.parse(record)).toEqual({
+        ...kept,
+        spec: { ...successor.spec, succeeds: { ...successor.spec.succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } },
+      });
+    } finally {
+      after.close();
+    }
+    expect(
+      rows<{ name: string; tbl_name: string }>("SELECT name, tbl_name FROM sqlite_schema WHERE type = 'index'"),
+    ).toContainEqual({ name: "tasks_created", tbl_name: "tasks" });
+    expect(rows<{ name: string }>("SELECT name FROM sqlite_schema WHERE name = 'tasks_v2'")).toEqual([]);
+    // The rebuilt tables are the ones a fresh archive makes (STRICT, the CHECK and every column included).
+    const schemaSql = "SELECT name, sql FROM sqlite_schema WHERE name IN ('tasks', 'tasks_created') ORDER BY name";
+    const fresh = await Archive.open(join(dir, "fresh.sqlite"));
+    fresh.close();
+    const freshDb = new Database(join(dir, "fresh.sqlite"), { readonly: true });
+    try {
+      expect(rows(schemaSql)).toEqual(freshDb.query(schemaSql).all());
+    } finally {
+      freshDb.close();
+    }
+    // The freed pages and the WAL no longer hold the raw id either (`secure_delete`, then a checkpoint).
+    archive.close();
+    for (const file of [path, `${path}-wal`]) {
+      const bytes = await Bun.file(file)
+        .bytes()
+        .catch(() => new Uint8Array());
+      expect(Buffer.from(bytes).includes(RAW_ACCOUNT)).toBe(false);
+    }
+    archive = await Archive.open(path);
+    expect(rows<{ n: number }>("SELECT count(*) AS n FROM events")[0]?.n).toBe(1);
+    const superseded = taskRow(task({ id: "t-passed", state: "superseded" }), 2, context);
+    if (superseded === null) throw new Error("superseded refused");
+    expect(archive.upsertTask(superseded, 400)).toBe(true);
+    expect(archive.counts().tasks.rows).toBe(5);
+  });
+
   test("refuses a file at a schema newer than this build", async () => {
     archive.close();
     const db = new Database(path);
@@ -98,6 +205,17 @@ describe("task rows", () => {
     }
   });
 
+  test("every finished state is written to SQLite and found by its outcome filter", () => {
+    for (const state of statesIn("finished")) {
+      const row = taskRow(task({ id: `t-${state}`, state }), 2, context);
+      if (row === null) throw new Error(`${state} refused`);
+      expect(archive.upsertTask(row, 10)).toBe(true);
+    }
+    for (const outcome of ARCHIVE_TASK_OUTCOMES) {
+      expect(archive.queryTasks({ outcome }, 10).rows.map((r) => r.id)).toEqual([`t-${outcome}`]);
+    }
+  });
+
   test("a row holds no prompt, no attachment manifest and no raw account id", () => {
     const row = taskRow(task(), 2, context);
     expect(row).not.toBeNull();
@@ -108,10 +226,38 @@ describe("task rows", () => {
     const kept = archivedTask(task());
     expect(kept.spec.pin).toEqual({ deviceId: "dev-a" });
     expect(kept.spillAlert).toBeUndefined();
+    const stamped = archivedTask(
+      task({ quotaExhausted: { accountId: RAW_ACCOUNT, window: "5h", reset: 0, at: 1, since: 1 } }),
+    );
+    expect(stamped.quotaExhausted).toBeUndefined();
     expect(archivedTask(task({ spec: { repo: "r", mode: "here", pin: { account: RAW_ACCOUNT } } })).spec.pin).toBe(
       undefined,
     );
     expect(row).toMatchObject({ repo: "seance", title: "Do the thing", deviceId: "dev-a", prState: "open" });
+  });
+
+  test("a successor keeps its lineage but not its predecessor's raw account id, and still parses as a task", () => {
+    const succeeds = {
+      task: "t-0",
+      account: RAW_ACCOUNT,
+      at: { deviceId: "dev-z", exclave: "default", clone: "seance" },
+      trigger: "quota" as const,
+      since: 500,
+    };
+    const successor = task({
+      id: "t-next",
+      state: "superseded",
+      successor: "t-after",
+      spec: { ...task().spec, pin: undefined, succeeds },
+    });
+    const row = taskRow(successor, 2, context);
+    if (row === null) throw new Error("superseded refused");
+    expect(row.record).not.toContain(RAW_ACCOUNT);
+    expect(archive.upsertTask(row, 10)).toBe(true);
+    const [stored] = archive.queryTasks({ outcome: "superseded" }, 10).rows;
+    const parsed = parseTask(JSON.parse(stored?.record ?? "null"));
+    expect(parsed?.spec.succeeds).toEqual({ ...succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT });
+    expect(parsed?.successor).toBe("t-after");
   });
 
   test("a record not in a finished state still loses its prompt and attachment manifest", () => {
