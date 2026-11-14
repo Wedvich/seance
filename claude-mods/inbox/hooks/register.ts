@@ -7,13 +7,17 @@ import type { EngineInterface, Register } from "claude-code";
  * as one JSON line whose `push` text the daemon rendered, wrapper and fence
  * included. This mod pushes that text verbatim and holds no wording of its own.
  * The daemon binds the connection to a tmux pane by this child's pid and sends only
- * what was addressed to that pane's task, so nothing here names a pane or a task.
+ * what was addressed to that pane's task, or answers a message that session sent
+ * (a session with no task is reached only so), so nothing here names a pane or a task.
  *
  * Delivery is by two engine calls and nothing else: never `asUser` (a message is
  * not the person's own words and must read as a plugin's), never `$.prompt.fill`
  * and never tmux keys (they would land in whatever the person is typing). A
  * question or a request is `$.prompt.submit`, which waits for a running turn to
- * end and wakes an idle session. A note is `$.session.append`, a row added at once
+ * end and wakes an idle session; so is a note the daemon marked `wake`, which is a
+ * reply to a question or request this session itself sent (the daemon's own table
+ * says so, never the sender: a line without it appends, as an older daemon's all do).
+ * Any other note is `$.session.append`, a row added at once
  * (the model reads it within a running turn too) that never wakes an idle session,
  * held back only while a dialog is open and flushed when the last one closes. Any text over the daemon's push cap
  * arrives as a stub naming `read_messages`, whose body is kept here.
@@ -102,6 +106,7 @@ interface Delivery {
   readonly messageKind: string;
   readonly push: string;
   readonly body?: string;
+  readonly wake?: true;
 }
 
 /**
@@ -227,10 +232,10 @@ function flushNotes($: EngineInterface, t: Tracker): void {
 
 function parseDelivery(value: unknown): Delivery | null {
   if (!isRecord(value) || value["v"] !== 1) return null;
-  const { id, messageKind, push, body } = value;
+  const { id, messageKind, push, body, wake } = value;
   if (typeof id !== "string" || typeof messageKind !== "string" || !KINDS.has(messageKind)) return null;
   if (typeof push !== "string" || (body !== undefined && typeof body !== "string")) return null;
-  return { id, messageKind, push, ...(body === undefined ? {} : { body }) };
+  return { id, messageKind, push, ...(body === undefined ? {} : { body }), ...(wake === true ? { wake } : {}) };
 }
 
 function onAck(t: Tracker, ack: Record<string, unknown>): void {
@@ -258,7 +263,7 @@ function onLine($: EngineInterface, t: Tracker, line: string): void {
   if (delivery === null) return;
   t.held.push({ id: delivery.id, text: delivery.body ?? delivery.push });
   trim(t);
-  if (delivery.messageKind !== "note") {
+  if (delivery.messageKind !== "note" || delivery.wake === true) {
     submit($, delivery.push);
     return;
   }
