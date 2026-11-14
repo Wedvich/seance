@@ -19,6 +19,7 @@ import {
   envelope,
   identityOf,
   newDeviceId,
+  pollUntil,
   register,
   startRelay,
   type Client,
@@ -60,16 +61,6 @@ async function waitForEntry(
     const frame = await app.waitFor<RegistryFrame>("registry");
     const entry = frame.entries.find((candidate) => candidate.deviceId === deviceId);
     if (entry !== undefined && matches(entry)) return entry;
-  }
-}
-
-/** Polls a positive assertion's subject rather than sleeping: a relay suite has no business importing the daemon's fixtures. */
-async function pollUntil(ready: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!ready()) {
-    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
-    // oxlint-disable-next-line no-await-in-loop -- polling is sequential by nature
-    await Bun.sleep(20);
   }
 }
 

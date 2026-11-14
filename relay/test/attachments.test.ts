@@ -6,7 +6,7 @@ import {
   type AttachmentHttpCode,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { startRelay, type TestRelay } from "./harness.ts";
+import { pollUntil, startRelay, type TestRelay } from "./harness.ts";
 
 const TOKEN = "test-bearer-token";
 
@@ -226,15 +226,19 @@ describe("attachment routes", () => {
   /**
    * Last: it reads every line the routes above produced. Accepted transfers log
    * nothing, and a refusal names its id and code, never a length or a token.
+   * The last route's line is awaited first, so every earlier one has landed too.
    */
   test("logs hold refusals only, by id", async () => {
+    await pollUntil(
+      () => relay.logs().some((line) => line.endsWith(" code=allowance_exhausted window=hour")),
+      "the allowance refusal's line",
+    );
     const lines = relay.logs();
     expect(accepted.length).toBeGreaterThan(2);
     expect(lines.every((line) => line.startsWith("attachment refused "))).toBe(true);
     expect(lines.filter((line) => line.includes(TOKEN))).toEqual([]);
     expect(lines.filter((line) => accepted.some((id) => line.includes(id)))).toEqual([]);
     expect(lines.some((line) => line.endsWith(" code=exists"))).toBe(true);
-    expect(lines.some((line) => line.endsWith(" code=allowance_exhausted window=hour"))).toBe(true);
   });
 });
 

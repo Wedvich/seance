@@ -21,6 +21,7 @@ import {
   connectZombieDaemon,
   envelope,
   newDeviceId,
+  pollUntil,
   register,
   startRelay,
   type Client,
@@ -762,10 +763,16 @@ describe("relay store: rules, versions and tombstones", () => {
     expect(await put(app, key, 1, sealed(200))).toMatchObject(refused("forbidden"));
     app.close();
 
-    const lines = rigA.relay().logs();
-    expectNoCiphertext(lines);
     // Refusals are logged (with no ciphertext); the marker never appears.
-    expect(lines.some((line) => line.startsWith("store refused"))).toBe(true);
+    await pollUntil(
+      () =>
+        rigA
+          .relay()
+          .logs()
+          .some((line) => line.startsWith("store refused")),
+      "the refusal's line",
+    );
+    expectNoCiphertext(rigA.relay().logs());
   });
 });
 
@@ -939,7 +946,10 @@ describe("relay store: list floors", () => {
       // oxlint-disable-next-line no-await-in-loop -- sequential, as above
       expect((await listReply(leader.daemon)).t).toBe("store-listed");
     }
-    expect(rigD.relay().logs()).toContain("store refused t=store-list leg=app code=rate_limited");
+    await pollUntil(
+      () => rigD.relay().logs().includes("store refused t=store-list leg=app code=rate_limited"),
+      "the rate_limited line",
+    );
 
     app.close();
     await rigD.leave(observer, follower, followerId);
