@@ -81,7 +81,9 @@ describe("custodianSocketDir", () => {
   afterEach(async () => {
     for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
   });
-  const choose = async (recorded: string | undefined): Promise<{ readonly dir: string; readonly reused: boolean }> => {
+  const choose = async (
+    recorded: string | undefined,
+  ): Promise<{ readonly dir: string; readonly reused: boolean; readonly rejected?: string }> => {
     const chosen = await custodianSocketDir(recorded);
     if ("problem" in chosen) throw new Error(chosen.problem);
     made.push(chosen.dir);
@@ -119,6 +121,7 @@ describe("custodianSocketDir", () => {
     const chosen = await choose(planted);
     expect(chosen.reused).toBe(false);
     expect(chosen.dir).not.toBe(planted);
+    expect(chosen.rejected).toContain("not a directory");
     expect(await readdir(target)).toEqual([]);
   });
 
@@ -126,6 +129,7 @@ describe("custodianSocketDir", () => {
     const other = join(base, "other");
     const chosen = await choose(other);
     expect(chosen.reused).toBe(false);
+    expect(chosen.rejected).toBe("not of the expected form");
     expect(await lstat(other).catch(() => null)).toBeNull();
   });
 });

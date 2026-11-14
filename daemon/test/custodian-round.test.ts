@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { APP_ID, CAPABILITIES, importPsk, open as openSealed, parseMachineInfo, seal, toBase64 } from "@seance/shared";
@@ -39,7 +39,7 @@ import type { Exclave } from "../src/exclaves.ts";
 import type { TrackedActivity } from "../src/pane-activity.ts";
 import { startDaemon } from "../src/run.ts";
 import { CUSTODIAN_SOCKET_DIR_PREFIX, ROUND_TMP } from "../src/seat-record.ts";
-import { custodianSeatOf, readState, saveState } from "../src/state.ts";
+import { custodianSeatOf, loadOrInitState, readState, saveState } from "../src/state.ts";
 import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { listClaudeSessions, listPanes, paneInfo } from "../src/sessions.ts";
 import { capturePane, resolveTargetSession, tmux, tmuxOk } from "../src/tmux.ts";
@@ -544,7 +544,7 @@ describe("the capability bit", () => {
   };
   const socketIn = (dir: string): string => join(dir, CUSTODIAN_SOCKET_NAME);
 
-  test("a host whose seat cannot start has no round socket, and the main socket answers the verbs unsupported", async () => {
+  test("a host whose seat cannot start records no round socket dir, and the main socket answers the verbs unsupported", async () => {
     const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve("test: no sandbox") });
     try {
       await pollUntil(async () => (await askVerb(socketPath())) !== null, "the daemon's local socket to answer");
@@ -559,70 +559,96 @@ describe("the capability bit", () => {
 
   test("a started seat records its socket dir and listens there, refusing a caller that is no round; a restart serves the same dir, and a seat turned off removes it", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
-    const first = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
     let socketDir = "";
     try {
-      await pollUntil(async () => {
-        socketDir = (await seatRecordNow()).socketDir ?? "";
-        return socketDir !== "" && (await askVerb(socketIn(socketDir))) !== null;
-      }, "the round's socket to be recorded and answer");
-      // Only a process under the running round's pane is the custodian; this test process is not.
-      expect(await askVerb(socketIn(socketDir))).toEqual({ ok: false, code: "not_custodian" });
-      expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
-    } finally {
-      first.stop();
-    }
-    // The socket goes with the seat; its dir stays, so an adopted round's environment still names a live path.
-    expect(await exists(socketIn(socketDir))).toBe(false);
-    expect(await exists(socketDir)).toBe(true);
+      const first = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(async () => {
+          socketDir = (await seatRecordNow()).socketDir ?? "";
+          return socketDir !== "" && (await askVerb(socketIn(socketDir))) !== null;
+        }, "the round's socket to be recorded and answer");
+        // Only a process under the running round's pane is the custodian; this test process is not.
+        expect(await askVerb(socketIn(socketDir))).toEqual({ ok: false, code: "not_custodian" });
+        expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
+      } finally {
+        first.stop();
+      }
+      // The socket goes with the seat; its dir stays, so an adopted round's environment still names a live path.
+      expect(await exists(socketIn(socketDir))).toBe(false);
+      expect(await exists(socketDir)).toBe(true);
 
-    const second = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
-    try {
-      await pollUntil(
-        async () => (await askVerb(socketIn(socketDir))) !== null,
-        "the restarted seat to serve the recorded dir",
-      );
-      expect((await seatRecordNow()).socketDir).toBe(socketDir);
+      const second = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(
+          async () => (await askVerb(socketIn(socketDir))) !== null,
+          "the restarted seat to serve the recorded dir",
+        );
+        expect((await seatRecordNow()).socketDir).toBe(socketDir);
+      } finally {
+        second.stop();
+      }
     } finally {
-      second.stop();
-    }
-
-    const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
-    try {
-      await pollUntil(async () => !(await exists(socketDir)), "the seat turned off to remove its socket dir");
-      await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
-    } finally {
-      off.stop();
+      const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(async () => !(await exists(socketDir)), "the seat turned off to remove its socket dir");
+        await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
+      } finally {
+        off.stop();
+      }
     }
   });
 
-  test("a round an older daemon left, its record naming no socket dir, is closed and lost, never adopted", async () => {
+  /**
+   * Boots a seat over a record holding a round whose socket dir is `socketDir` (or none), and checks the round is
+   * closed unreachable and lost, and the seat serves a fresh dir of its own.
+   */
+  async function expectRoundUnreachable(socketDir: string | undefined): Promise<void> {
     process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
-    // A state.json to write into.
-    (await boot(undefined, { sandboxProblem: () => Promise.resolve(null) })).stop();
     const stray = await strayRound();
-    const state = await readState();
-    if (state === null) throw new Error("no state.json after a boot");
+    const state = await loadOrInitState();
     const round = { pane: stray, startedAt: Date.now(), tmpDir: "/tmp/seance-cu-abc123", exclave: "default" };
-    await saveState({ ...state, custodian: { round } });
+    await saveState({ ...state, custodian: { round, ...(socketDir === undefined ? {} : { socketDir }) } });
     let booted: Awaited<ReturnType<typeof boot>> | undefined;
-    const lines = await captureLog(async () => {
-      booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
-      await pollUntil(async () => (await paneInfo(stray)) === null, "the unreachable round pane to close");
-      await pollUntil(async () => (await seatRecordNow()).round === undefined, "the round to end");
-    });
     try {
+      const lines = await captureLog(async () => {
+        booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+        await pollUntil(async () => (await paneInfo(stray)) === null, "the unreachable round pane to close");
+        await pollUntil(async () => (await seatRecordNow()).round === undefined, "the round to end");
+      });
       const audit = lines.filter((line) => line.includes("audit custodian"));
       expect(audit.some((line) => line.includes(`op=kill pane=${stray} reason=unreachable`))).toBe(true);
       expect(audit.some((line) => line.includes(`op=end pane=${stray} outcome=failed reason=lost`))).toBe(true);
-      expect((await seatRecordNow()).socketDir).toMatch(/^\/tmp\/seance-cu-s-/u);
+      const served = (await seatRecordNow()).socketDir;
+      expect(served).toMatch(/^\/tmp\/seance-cu-s-/u);
+      expect(served).not.toBe(socketDir);
     } finally {
       booted?.stop();
+      // A seat turned off removes the dir, so no test leaves one in /tmp.
+      const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
+      try {
+        await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
+      } finally {
+        off.stop();
+      }
     }
-    // A seat turned off removes the dir, so no test leaves one in /tmp.
-    const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
-    await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
-    off.stop();
+  }
+
+  test("a round an older daemon left, its record naming no socket dir, is closed and lost, never adopted", async () => {
+    await expectRoundUnreachable(undefined);
+  });
+
+  test("a round whose recorded socket dir is a planted link is closed and lost, and the link's target left alone", async () => {
+    const target = await mkdtemp(join(base, "planted-"));
+    const planted = `${CUSTODIAN_SOCKET_DIR_PREFIX}Plant1`;
+    await rm(planted, { force: true });
+    await symlink(target, planted);
+    try {
+      await expectRoundUnreachable(planted);
+      expect((await lstat(planted)).isSymbolicLink()).toBe(true);
+      expect(await exists(target)).toBe(true);
+    } finally {
+      await rm(planted, { force: true });
+    }
   });
 
   test("a daemon with the key and a live seat advertises custodian", async () => {

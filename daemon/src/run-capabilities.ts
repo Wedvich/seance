@@ -382,15 +382,16 @@ const custodianSeat: DaemonCapability = (ctx) => {
   const platform = custodianPlatform(process.platform);
   const settings = ctx.config.custodian;
 
-  /** The socket dir this process chose: a seat that fails after choosing it removes it with the recorded one. */
+  /** A fresh socket dir this process made: one nothing recorded yet, so whoever stops or fails owns removing it. */
   let servedDir: string | null = null;
   // Whatever a seat that is not running left: the record's round, any other round pane (a stray) and its socket dir.
-  const sweep = async (): Promise<void> => {
+  // `keepRecorded` is for a socket that would not bind: the recorded dir may be another instance's live one.
+  const sweep = async (keepRecorded = false): Promise<void> => {
     const record = ctx.custodianSeat();
     const { round, socketDir } = record;
-    for (const dir of new Set([socketDir, servedDir])) {
+    for (const dir of new Set([keepRecorded ? undefined : socketDir, servedDir])) {
       // oxlint-disable-next-line no-await-in-loop -- at most two, each an unlink and an rmdir
-      if (dir !== undefined && dir !== null) await removeCustodianSocketDir(dir);
+      if (dir !== undefined && dir !== null && !ctx.stopped()) await removeCustodianSocketDir(dir);
     }
     const panes = await listRoundPanes();
     for (const { pane } of panes) {
@@ -398,7 +399,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       await audit.kill(pane, "off", await closeOutcome(pane, opts.graceMs));
     }
     if (round === undefined && panes.length === 0) {
-      if (socketDir !== undefined && !ctx.stopped()) {
+      if (socketDir !== undefined && !keepRecorded && !ctx.stopped()) {
         const { socketDir: _socketDir, ...rest } = record;
         await ctx.custodianSaved(rest);
       }
@@ -422,8 +423,10 @@ const custodianSeat: DaemonCapability = (ctx) => {
     await audit.end(round?.pane ?? panes[0]?.pane ?? null, done ? "healthy" : "failed", done ? "done" : "lost");
     if (!ctx.stopped()) await ctx.custodianSaved({ lastEndedAt: ctx.now() });
   };
-  const sweepLeftovers = (): void =>
-    void sweep().catch((err: unknown) => log.warn(`custodian: closing a leftover round failed: ${String(err)}`));
+  const sweepLeftovers = (keepRecorded = false): void =>
+    void sweep(keepRecorded).catch((err: unknown) =>
+      log.warn(`custodian: closing a leftover round failed: ${String(err)}`),
+    );
 
   if (!seatEnabled(ctx.config, opts, process.platform) || settings === undefined || platform === null) {
     sweepLeftovers();
@@ -592,9 +595,13 @@ const custodianSeat: DaemonCapability = (ctx) => {
       if (!cancelled) sweepLeftovers();
       return;
     }
-    servedDir = chosen.dir;
-    if (record.socketDir !== undefined && !chosen.reused) {
-      log.warn("custodian: the recorded round socket dir is not this daemon's own; serving a fresh one");
+    if (!chosen.reused) servedDir = chosen.dir;
+    if (cancelled) {
+      if (!chosen.reused) await removeCustodianSocketDir(chosen.dir);
+      return;
+    }
+    if (!chosen.reused && chosen.rejected !== undefined) {
+      log.warn(`custodian: the recorded round socket dir was not kept (${chosen.rejected}); serving a fresh one`);
     }
     const started = await startCustodianSocket({
       path: join(chosen.dir, CUSTODIAN_SOCKET_NAME),
@@ -604,7 +611,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     if ("problem" in started) {
       log.warn(`custodian: no rounds — ${started.problem}`);
       markFailed();
-      if (!cancelled) sweepLeftovers();
+      if (!cancelled) sweepLeftovers(true);
       return;
     }
     roundSocket = started;
@@ -617,9 +624,15 @@ const custodianSeat: DaemonCapability = (ctx) => {
     // Recorded before any round can launch, so a restart or reload serves the same dir. A recorded round is left to
     // the seat's adoption, whose end writes it (a write here would make an unreachable round look reachable).
     if (record.round === undefined && record.socketDir !== chosen.dir && !ctx.stopped()) {
-      await ctx.custodianSaved({ ...ctx.custodianSeat(), socketDir: chosen.dir });
-      // `stop` closed the socket meanwhile.
-      if (cancelled) return;
+      // A failed write is not a failed seat: every later seat write carries the dir too.
+      await ctx
+        .custodianSaved({ ...ctx.custodianSeat(), socketDir: chosen.dir })
+        .catch((err: unknown) => log.warn(`custodian: could not record the round socket dir: ${String(err)}`));
+      // `stop` closed the socket meanwhile, and left a dir nothing recorded to this check.
+      if (cancelled) {
+        if (!chosen.reused && ctx.custodianSeat().socketDir !== chosen.dir) await removeCustodianSocketDir(chosen.dir);
+        return;
+      }
     }
     releaseActivity = paneRetention.acquire();
     retainedSince = ctx.now();
@@ -705,6 +718,10 @@ const custodianSeat: DaemonCapability = (ctx) => {
       seat?.stop();
       stopSocket();
       release();
+      // A fresh dir no write recorded (a round's adoption had not finished): the incoming instance never learns it.
+      if (servedDir !== null && ctx.custodianSeat().socketDir !== servedDir) {
+        void removeCustodianSocketDir(servedDir);
+      }
     },
     custodianStatus: (now) =>
       seatFailed

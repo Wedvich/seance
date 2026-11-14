@@ -24,7 +24,11 @@ const WARN_EVERY_MS = 60_000;
 
 export const CUSTODIAN_SOCKET_NAME = "c.sock";
 
-export type SocketDirChoice = { readonly dir: string; readonly reused: boolean } | { readonly problem: string };
+/** `rejected` is why a recorded dir was not kept: a local IO error reads differently in the log from a planted name. */
+export type SocketDirChoice =
+  | { readonly dir: string; readonly reused: true }
+  | { readonly dir: string; readonly reused: false; readonly rejected?: string }
+  | { readonly problem: string };
 
 /**
  * The directory this seat's socket lives in: the recorded one when it is still this daemon's own (made again if
@@ -32,12 +36,17 @@ export type SocketDirChoice = { readonly dir: string; readonly reused: boolean }
  * never waited on, so it cannot hold rounds off; `reused` says whether a recorded round's environment names this one.
  */
 export async function custodianSocketDir(recorded: string | undefined): Promise<SocketDirChoice> {
-  if (recorded !== undefined && CUSTODIAN_SOCKET_DIR.test(recorded) && (await prepareDir(recorded)) === null) {
-    return { dir: recorded, reused: true };
+  let rejected: string | undefined;
+  if (recorded !== undefined) {
+    rejected = CUSTODIAN_SOCKET_DIR.test(recorded)
+      ? ((await prepareDir(recorded)) ?? undefined)
+      : "not of the expected form";
+    if (rejected === undefined) return { dir: recorded, reused: true };
   }
   try {
     // `mkdtemp` makes it 0700 and exclusively: nothing can be there first.
-    return { dir: await mkdtemp(CUSTODIAN_SOCKET_DIR_PREFIX), reused: false };
+    const dir = await mkdtemp(CUSTODIAN_SOCKET_DIR_PREFIX);
+    return rejected === undefined ? { dir, reused: false } : { dir, reused: false, rejected };
   } catch (err) {
     return { problem: err instanceof Error ? err.message : String(err) };
   }
