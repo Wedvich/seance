@@ -1,5 +1,6 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { exec } from "./exec.ts";
 
 /**
@@ -151,25 +152,44 @@ export async function ancestorIn<T>(pid: number, targets: ReadonlyMap<number, T>
 }
 
 /**
- * `ancestorIn` plus the hop before the hit: the target's direct child on the peer's chain, null when the peer is the
- * target itself. Messaging binds a reply handle to it, since a hand-started session's pane process is the shell, which
- * outlives the `claude` that is its child.
+ * `ancestorIn` plus the chain under the hit: the pids from the peer up to, not including, the target, peer first (empty
+ * when the peer is the target itself). Messaging looks for the `claude` process on it, since a hand-started session's
+ * pane process is the shell, which outlives the `claude` that is its child.
  */
 export async function ancestorBelow<T>(
   pid: number,
   targets: ReadonlyMap<number, T>,
-): Promise<{ readonly hit: T; readonly below: number | null } | null> {
+): Promise<{ readonly hit: T; readonly below: readonly number[] } | null> {
   const parentOf = await parentLookup();
   let current: number | null = pid;
-  let below: number | null = null;
+  const below: number[] = [];
   for (let depth = 0; current !== null && current > 1 && depth < MAX_DEPTH; depth++) {
     const hit = targets.get(current);
     if (hit !== undefined) return { hit, below };
-    below = current;
+    below.push(current);
     // oxlint-disable-next-line no-await-in-loop -- each hop needs the one before it
     current = await parentOf(current);
   }
   return null;
+}
+
+/**
+ * What a process is called to tmux and `ps`, as `CLAUDE_COMMAND` (`sessions.ts`) expects it: Linux has argv[0]'s
+ * basename (the symlink name `claude`) and the kernel's comm (the versioned filename), macOS the resolved executable's
+ * basename. Empty when the process is gone or unreadable. Exec-free on Linux; one fixed-argv `ps` per call elsewhere.
+ */
+export async function processNames(pid: number): Promise<readonly string[]> {
+  if (process.platform === "linux") {
+    const names: string[] = [];
+    const argv0 = (await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "")).split("\0")[0] ?? "";
+    if (argv0 !== "") names.push(basename(argv0));
+    const comm = (await readFile(`/proc/${pid}/comm`, "utf8").catch(() => "")).trim();
+    if (comm !== "") names.push(comm);
+    return names;
+  }
+  const listed = await exec(["ps", "-o", "comm=", "-p", String(pid)], { timeoutMs: 5_000 }).catch(() => null);
+  const path = listed?.exitCode === 0 ? listed.stdout.trim() : "";
+  return path === "" ? [] : [basename(path)];
 }
 
 export async function parentLookup(): Promise<(pid: number) => Promise<number | null>> {

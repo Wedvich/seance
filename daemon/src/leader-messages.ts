@@ -77,7 +77,8 @@ export function createMessageRouter(deps: MessageRouterDeps): MessageRouter {
     // daemon that predates `messageReply`.
     if (target !== undefined && !advertisesRouting(target, reply)) return { outcome: "unsupported" };
     const answer = await deps.deliver(deviceId, request);
-    if ("outcome" in answer) return { outcome: answer.outcome, ...(answer.reason === undefined ? {} : { reason: answer.reason }) };
+    if ("outcome" in answer)
+      return { outcome: answer.outcome, ...(answer.reason === undefined ? {} : { reason: answer.reason }) };
     // `unsupported` says "needs `seanced update`", so only a refusal of the frame itself is worded so; a handler
     // that crashed or a reply that did not parse is an answer that did not come, which `offline` says.
     if (answer.code !== "unreachable" && answer.code !== "undelivered") {

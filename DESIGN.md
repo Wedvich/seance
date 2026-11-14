@@ -10803,7 +10803,9 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   even a harmless request. The text is this PR's own draft, the native wording not being available verbatim;
   the Linux live run's request step acted on a harmless request with it, and an adjustment toward the native
   framing stays open to later live runs. An untasked sender is named as such, and its reply clause says to answer with
-  `kind note`, `inReplyTo <id>` and no `to` (a tasked sender's names `to task X`, or no `to`, beside the same two).
+  `kind note`, `inReplyTo <id>` and no `to`; a tasked sender's names `to task X` beside the same two, the one address every
+  daemon and leader reads. A message a leader that predates replies forwarded carries no `origin`, so no handle is kept for
+  it: the wrapper (`byHandle: false`) then offers an untasked sender no reply clause and says it cannot be answered.
 - **The custodian as a sender** (custodian 8, "The custodian frame kind", `nudge`): `deliverAsCustodian(pane, text, expect)`
   is the daemon's own path into the same delivery, for one `request` to the task the named pane carries. `expect` is the
   pid and task the verb counted under: a pane carrying other ones now is `gone`. It takes no
@@ -11043,8 +11045,9 @@ addressed by the id of the message it answers, the **handle**, whatever the repl
 
 **The two tables** (`Messages`, `daemon/src/messages.ts`, memory only, never at rest or on the wire): `sent`, the ids
 this daemon minted for a session (so an answer finds its asker), and `received`, the ids placed in a session's pane
-(so only that session can answer them). Each holds `REPLY_HANDLE_TTL_MS` (1 h) and `REPLY_HANDLE_MAX` (256) entries,
-oldest out first; a restart drops both. An entry binds **pane id, pane pid, task (null stays null) and `session`**.
+(so only that session can answer them). Each holds `REPLY_HANDLE_TTL_MS` (1 h) and `REPLY_HANDLE_MAX` (256) entries;
+past the cap the oldest entry of the pane holding the most goes, so one busy sender's notes cannot push a quiet
+session's open question out; a restart drops both. An entry binds **pane id, pane pid, task (null stays null) and `session`**.
 A handle also dies when its pane is gone, re-tagged or respawned (swept at every send and listen; an empty pane list is
 a failed tmux read and costs no handle), and a listener's bind drops every handle of its pane made for another
 process, task or session.
@@ -11052,13 +11055,19 @@ process, task or session.
 **The binding is to the `claude` process (`Bound.session`), not to the pane and its pid alone.** A hand-started
 session's pane process is its shell, which outlives a restarted `claude` (`claude`, `^C`, `claude` again) and fires
 no `ended`, so a handle bound to the pane pid would answer a stranger: the second `claude` would read the first's
-replies and could answer its questions. `session` is the peer's ancestor that is a direct child of the pane pid
-(`ancestorBelow`, `daemon/src/peer.ts`), or the pane pid itself for a pane séance started (`BoundPane.ours`, the
-tmux `#{m:*--remote-control*,#{pane_start_command}}` match: the pane's own process is `claude`, `exec`ed in place,
-and its children, the MCP server and the listener, all bind to it). A hand-started pane whose command is not
-séance's and which `exec`s `claude` would give each child a session of its own and **fails closed**: no handle
-matches, the reply is `unknown`. A reply is accepted only from the pane, pid, task and session the message was
-placed for (`unknown` otherwise, in the sender's own `ask:` bucket); it reaches the asker only at the pane, pid, task
+replies and could answer its questions. `session` is the `claude` process itself, read off the process tree, never the pane's start command
+(`sessionOf`, `daemon/src/messages.ts`): the outermost process on the peer's chain, from the pane process down
+(`ancestorBelow`, `daemon/src/peer.ts`), that is called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
+`processNames`: argv[0] and comm on Linux, the executable's basename on macOS). A pane that `exec`s `claude` is that
+process (every child, the MCP server and the listener, binds to it); a shell's child is the `claude` under it; a
+nested `claude` a tool started is no session of the pane. A séance spawn needs no read: its launch ledger holds the
+task and `exec`s `claude` as the pane's own process, so `session` is the pane pid (as before handles; a `caffeinate`
+wrapper on macOS is that pid). **No `claude` on the chain fails closed**: the bind is `unbound`, so a bare shell's
+child, or a `claude` that runs as `node` (an npm install; `sessions.ts` lists the same cost), neither listens, asks
+nor answers by handle. The pane's start command (`ours`, `#{m:*--remote-control*,…}`) is deliberately not evidence:
+`claude --remote-control; exec $SHELL` matches it and its pane process is the shell that outlives every `claude`
+in it. A reply is accepted only from the pane, pid, task and session the message was
+placed for (`unknown` otherwise, in the sender's own send rate bucket: a refused probe costs the same as a send); it reaches the asker only at the pane, pid, task
 and session the `sent` entry names, **while that `claude` still runs** (`kill(pid, 0)`: a dead one is `ended` at
 once, and a receipt for it is dropped, rather than waiting a grace for a reconnect that cannot come). A reply held
 for a listener is `only` for its session: it meets that session's listener or reconnect and no other, and the launch
@@ -11082,7 +11091,8 @@ a connected machine advertising `CAPABILITIES.messageReply` (`unsupported` other
 connected), and the target daemon's own `sent` table decides what, if anything, the id names. A reply to a reply
 needs no new state: the target places it with the same `origin`, so the next one routes back. The receipt carries no
 `to` (`MessageReceiptRequest.to` is optional; `receiptNote` words it "your reply `<id>`") and goes to the sealer, whose
-`sent` table finds the replier's pane and session. The gate is the same two-frame one, now asking the verified leader
+`sent` table finds the replier's pane and session; for a **tasked** asker the launch and restart graces hold it as
+they always held a task-addressed receipt, and only an untasked asker's is pinned to its session. The gate is the same two-frame one, now asking the verified leader
 for `messageReply` (`messageRouteGate("reply")`): a refusal names `seanced update` and says nothing was sent.
 
 **`wake`.** A reply to a **question or request** the receiving session itself sent is an answer, and an idle session
@@ -11096,7 +11106,11 @@ two sessions cannot wake each other by replying to replies for ever, and the rat
 answers a reply's `deliver-message`; an old reader keeps the machine. A new `seanced mcp` against a daemon without it
 sends a frame the old parser refuses `invalid`, worded as "it may predate replies by message id (`seanced update`)",
 nothing sent. A leader without it is refused at the gate. A new leader forwards a reply only to a machine advertising
-it. An old daemon answering a new receipt with no `to` drops it as unparseable, which is the courtesy lost, not the
+it. A frame that carries the handle as `to` can only come from a caller that predates replies (a current
+`sendMessage` leaves `to` out), which gated on routing alone: for a handle that came from another machine it is
+answered `unknown` and nothing is routed, since the leader it checked may drop a reply it cannot read. A handle
+whose origin is this machine (the leader returned a message to its sender's own machine) is answered locally,
+through the `sent` table. An old daemon answering a new receipt with no `to` drops it as unparseable, which is the courtesy lost, not the
 message.
 
 **Rejected** (docs/messaging.md D3, amended): **machine id plus pane id as a general address** (a pane id outlives the

@@ -33,7 +33,8 @@ import {
   type MessageFrameRoute,
   type MessageReply,
 } from "./message-frame.ts";
-import { ancestorBelow, peerPidSupported } from "./peer.ts";
+import { ancestorBelow, peerPidSupported, processNames } from "./peer.ts";
+import { CLAUDE_COMMAND } from "./sessions.ts";
 import type { BoundPane } from "./session-events.ts";
 
 /**
@@ -98,6 +99,11 @@ export interface MessagesDeps {
   readonly launchedAt: (taskId: string) => number | undefined;
   /** This machine's name, as the receiver's wrapper shows it. */
   readonly machine: string;
+  /**
+   * This machine's device id. A `received` entry whose origin is this machine is answered locally, through the `sent`
+   * table, never through the leader; absent, every routed origin is taken as another machine.
+   */
+  readonly deviceId?: string;
   readonly audit: MessageAudit;
   readonly now?: () => number;
   /** Whether this host can name a peer at all; `peerPidSupported` unless a test stands in for another host. */
@@ -171,9 +177,8 @@ interface Listener {
 interface Bound {
   readonly pane: BoundPane;
   /**
-   * The pid a reply handle is bound to. A séance spawn runs `claude` as the pane's own process (`exec`), so that is the
-   * pane pid, whichever of its children (the MCP server, the listener) connects. A hand-started session is the shell's
-   * child on the peer's chain: the pane pid is then the shell, which a restarted `claude` shares with its predecessor.
+   * The pid a reply handle is bound to: the `claude` process (`sessionOf`), never a shell it runs under, which a
+   * restarted `claude` shares with its predecessor.
    */
   readonly session: number;
 }
@@ -237,7 +242,10 @@ export function createMessages(deps: MessagesDeps): Messages {
 
   const listeners = new Map<string, Listener>();
   /** A listener that dropped: its pane may reconnect within the grace without its messages being refused. */
-  const disconnects = new Map<string, { readonly taskId: string | null; readonly session: number; readonly at: number }>();
+  const disconnects = new Map<
+    string,
+    { readonly taskId: string | null; readonly session: number; readonly at: number }
+  >();
   const inboxes = new Map<string, Inbox>();
   /** Send timestamps per rate key, pruned to the hour. */
   const sends = new Map<string, number[]>();
@@ -245,7 +253,15 @@ export function createMessages(deps: MessagesDeps): Messages {
   const sent = new Map<string, SentHandle>();
   const received = new Map<string, ReceivedHandle>();
 
-  const remember = <T extends { readonly at: number }>(table: Map<string, T>, id: string, entry: T): void => {
+  /**
+   * Past the cap the oldest entry of the pane holding the most goes, not the oldest overall: one busy sender (an
+   * orchestrator's notes) must not push a quiet session's open question out of the table.
+   */
+  const remember = <T extends { readonly at: number; readonly pane: string }>(
+    table: Map<string, T>,
+    id: string,
+    entry: T,
+  ): void => {
     const t = now();
     for (const [key, held] of table) {
       if (t - held.at < REPLY_HANDLE_TTL_MS) break;
@@ -253,9 +269,19 @@ export function createMessages(deps: MessagesDeps): Messages {
     }
     table.set(id, entry);
     while (table.size > REPLY_HANDLE_MAX) {
-      const oldest = table.keys().next();
-      if (oldest.done === true) break;
-      table.delete(oldest.value);
+      // Insertion order is age order, so the first pane to reach the top count is the one holding the oldest entry.
+      const counts = new Map<string, number>();
+      for (const held of table.values()) counts.set(held.pane, (counts.get(held.pane) ?? 0) + 1);
+      let heaviest: string | undefined;
+      let most = 0;
+      for (const [pane, count] of counts) {
+        if (count <= most) continue;
+        heaviest = pane;
+        most = count;
+      }
+      const victim = [...table].find(([, held]) => held.pane === heaviest);
+      if (victim === undefined) break;
+      table.delete(victim[0]);
     }
   };
 
@@ -282,11 +308,19 @@ export function createMessages(deps: MessagesDeps): Messages {
   const askerPane = (panes: readonly BoundPane[], entry: SentHandle): BoundPane | undefined =>
     processAlive(entry.session) ? paneOf(panes, entry) : undefined;
 
-  const dropHandles = (paneId: string, keep?: { readonly pid: number; readonly task: string | null; readonly session: number }): void => {
+  const dropHandles = (
+    paneId: string,
+    keep?: { readonly pid: number; readonly task: string | null; readonly session: number },
+  ): void => {
     for (const table of [sent, received]) {
       for (const [id, entry] of table) {
         if (entry.pane !== paneId) continue;
-        if (keep !== undefined && entry.pid === keep.pid && entry.task === keep.task && entry.session === keep.session) {
+        if (
+          keep !== undefined &&
+          entry.pid === keep.pid &&
+          entry.task === keep.task &&
+          entry.session === keep.session
+        ) {
           continue;
         }
         table.delete(id);
@@ -302,12 +336,30 @@ export function createMessages(deps: MessagesDeps): Messages {
     audit({ dir: "in", from: item.from, to: item.to, kind: item.messageKind, bytes: item.bytes, outcome });
   };
 
+  /**
+   * The `claude` process a peer belongs to: the pid a reply handle is bound to, never a shell that outlives it. A séance
+   * spawn needs no reading: its ledger holds the task, and its launch `exec`s `claude` as the pane's own process, so the
+   * pane pid it is whichever child connects. Anywhere else the process tree says: the outermost process on the peer's
+   * chain that is called `claude` (the pane process itself for a pane that `exec`s it, else the shell's child; a nested
+   * `claude` a tool started is no session of the pane). None, as for a pane whose `claude` runs as `node`, and the
+   * binding fails closed: a handle bound to the shell would outlive the `claude` and pass to the next one.
+   */
+  const sessionOf = async (pane: BoundPane, below: readonly number[]): Promise<number | null> => {
+    if (pane.taskId !== null && deps.launchedAt(pane.taskId) !== undefined) return pane.pid;
+    for (const pid of [pane.pid, ...below.toReversed()]) {
+      // oxlint-disable-next-line no-await-in-loop -- outermost first, and a handful of hops
+      if ((await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name))) return pid;
+    }
+    return null;
+  };
+
   const bind = async (peer: number | null, panes: readonly BoundPane[]): Promise<Bound | null> => {
     if (peer === null || !hostNamesPeers()) return null;
     const live = panes.filter((pane) => !pane.dead);
     const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
     if (found === null) return null;
-    return { pane: found.hit, session: found.hit.ours || found.below === null ? found.hit.pid : found.below };
+    const session = await sessionOf(found.hit, found.below);
+    return session === null ? null : { pane: found.hit, session };
   };
 
   /** A message written to a listener can be answered by handle, from the session that read it. */
@@ -348,6 +400,10 @@ export function createMessages(deps: MessagesDeps): Messages {
       }
       listeners.delete(paneId);
       listener.sink.close();
+    }
+    // A disconnect past the grace can no longer hold anything, and an untasked pane has no `ended` to clear it.
+    for (const [paneId, dropped] of disconnects) {
+      if (now() - dropped.at > graceMs) disconnects.delete(paneId);
     }
     // A handle whose pane is gone, re-tagged or respawned names nobody now. An empty list is a failed tmux read, which
     // must not cost an hour of handles.
@@ -538,6 +594,9 @@ export function createMessages(deps: MessagesDeps): Messages {
       id: m.id,
       from: m.from,
       text: m.text,
+      // A routed message with no origin comes from a leader that predates replies: no `received` entry is made for it,
+      // so a handle reply to it could only answer `unknown`.
+      byHandle: m.origin !== undefined,
       ...(m.inReplyTo === undefined ? {} : { inReplyTo: m.inReplyTo }),
     });
     const pushed = m.bytes <= MESSAGE_PUSH_MAX;
@@ -663,7 +722,9 @@ export function createMessages(deps: MessagesDeps): Messages {
     };
     // Before the hand-off: a leader in this process can have the receipt back before `route` returns.
     rememberSent(id, o);
-    const routed = await deps.route("to" in target ? { ...common, to: target.to } : { ...common, replyTo: target.replyTo });
+    const routed = await deps.route(
+      "to" in target ? { ...common, to: target.to } : { ...common, replyTo: target.replyTo },
+    );
     if (!routed) {
       sent.delete(id);
       o.out("no_leader");
@@ -683,6 +744,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     route: MessageFrameRoute | undefined,
     panes: readonly BoundPane[],
     bucket: string,
+    viaTo: boolean,
   ): Promise<MessageReply> => {
     const limited = (): MessageReply => {
       o.out("rate_limited");
@@ -703,7 +765,14 @@ export function createMessages(deps: MessagesDeps): Messages {
       return { ok: false, code: "unknown" };
     }
 
-    if (got.origin !== null) {
+    if (got.origin !== null && got.origin !== deps.deviceId) {
+      // A frame that carries the id as `to` comes from a caller that predates replies (a current one leaves `to` out),
+      // which gated only on routing: the leader it checked may drop a reply it cannot read, so none is sent.
+      if (viaTo) {
+        if (!admit(bucket)) return limited();
+        o.out("unknown");
+        return { ok: false, code: "unknown" };
+      }
       if (route === "ask") {
         if (!admit(`ask:${bucket}`)) return limited();
         return { ok: false, code: "remote" };
@@ -757,7 +826,9 @@ export function createMessages(deps: MessagesDeps): Messages {
     const { messageKind: kind, text } = frame;
     // `to` left out, or the message id given as it (a model that fills the field): the id is the address.
     const replyTo =
-      frame.inReplyTo !== undefined && (frame.to === undefined || frame.to === frame.inReplyTo) ? frame.inReplyTo : null;
+      frame.inReplyTo !== undefined && (frame.to === undefined || frame.to === frame.inReplyTo)
+        ? frame.inReplyTo
+        : null;
     const to = replyTo === null ? frame.to : REPLY_LABEL;
     if (to === undefined) return { ok: false, code: "invalid" };
     const bytes = Buffer.byteLength(text, "utf8");
@@ -781,7 +852,7 @@ export function createMessages(deps: MessagesDeps): Messages {
       return { ok: false, code: "too_long" };
     }
     const bucket = from === null ? `pane:${sender.pane.id}` : `task:${from}`;
-    if (replyTo !== null) return sendReply(outgoing, replyTo, frame.route, panes, bucket);
+    if (replyTo !== null) return sendReply(outgoing, replyTo, frame.route, panes, bucket, frame.to !== undefined);
 
     // Local when this machine launched the task and a live pane carries it, or the launch is still inside the grace
     // (a held answer). Anything else is not deliverable here: a caller that can check the leader is told to (`remote`)
@@ -1023,7 +1094,9 @@ export function createMessages(deps: MessagesDeps): Messages {
     if (asker !== undefined && byHandle !== undefined) {
       target = byHandle;
       launched = byHandle.taskId === null ? undefined : deps.launchedAt(byHandle.taskId);
-      only = asker.session;
+      // A tasked asker keeps the launch and restart graces a task-addressed receipt always had: its `claude` is the
+      // pane's own process, so no later session can be mistaken for it. Only an untasked one is pinned to its session.
+      if (byHandle.taskId === null) only = asker.session;
     } else if (request.fromTask !== undefined) {
       const task = request.fromTask;
       launched = deps.launchedAt(task);

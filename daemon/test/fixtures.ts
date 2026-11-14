@@ -184,6 +184,38 @@ export async function scriptStub(dir: string, name: string, body: string): Promi
 }
 
 /**
+ * A hard link of the running bun named `claude`: what `processNames` (and tmux) read as a Claude Code process on both
+ * Linux (argv[0]) and macOS (the executable's basename). A link, not a copy, for `makeClaudeStub`'s first-exec reason.
+ */
+export async function linkClaudeNamed(dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "claude");
+  await rm(path, { force: true });
+  await link(process.execPath, path).catch(async () => {
+    await Bun.write(path, Bun.file(process.execPath));
+    await chmod(path, 0o755);
+  });
+  return path;
+}
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+/**
+ * A shell command that runs `body` (under `sh -c`) as a child of a `claude`-named process, which writes its own pid to
+ * `pidFile` first and stays until `body` ends: the shape of a session whose MCP server and inbox listener are its
+ * children. Without `body`, `claude` just sleeps, as a bare session does.
+ */
+export function underClaude(claude: string, opts: { readonly body?: string; readonly pidFile?: string } = {}): string {
+  const script = [
+    opts.pidFile === undefined ? "" : `await Bun.write(${JSON.stringify(opts.pidFile)}, String(process.pid));`,
+    opts.body === undefined
+      ? "await Bun.sleep(600_000);"
+      : `await Bun.spawn(["sh", "-c", ${JSON.stringify(opts.body)}], { stdio: ["inherit", "inherit", "inherit"] }).exited;`,
+  ].join(" ");
+  return `${shellQuote(claude)} -e ${shellQuote(script)}`;
+}
+
+/**
  * Reproduces what tmux sees of a real claude on each host. The native
  * installer keeps the binary under a versioned filename and execs it through a
  * `claude` symlink: macOS tmux reports the resolved basename ("2.1.267"), Linux

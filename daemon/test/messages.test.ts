@@ -26,8 +26,9 @@ import {
 } from "../src/messages.ts";
 import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
+import { processNames } from "../src/peer.ts";
 import { paneWindowName, tmuxOk } from "../src/tmux.ts";
-import { pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * Session messages with the binding real: panes in a private tmux server, the kernel's peer pid, and for the
@@ -44,6 +45,8 @@ let base: string;
 let stateDir: string;
 let sockPath: string;
 let privateTmux: PrivateTmux | undefined;
+/** A process named `claude`: the binding finds a session by that name (`processNames`). */
+let claudeBin: string;
 let socket: LocalSocketHandle;
 let socketMessages: Messages;
 
@@ -98,7 +101,7 @@ interface Pane {
   readonly pid: number;
 }
 
-/** A pane running `sleep`, whose own pid stands as the peer: `ancestorIn` takes the first hit, which is itself. */
+/** A pane running a `claude`-named process, whose own pid stands as the peer: `ancestorIn` takes the first hit, which is itself. */
 async function pane(name: string, taskId?: string): Promise<Pane> {
   const out = (
     await tmuxOk([
@@ -113,12 +116,15 @@ async function pane(name: string, taskId?: string): Promise<Pane> {
       name,
       "-c",
       base,
-      "sleep",
-      "600",
+      claudeBin,
+      "-e",
+      "await Bun.sleep(600_000);",
     ])
   ).trim();
   const [id, pid] = out.split(" ");
   if (id === undefined || pid === undefined) throw new Error(`no pane from ${out}`);
+  // The pane's process reads as tmux's own fork until its exec lands.
+  await pollUntil(async () => (await processNames(Number(pid))).includes("claude"), `${name}'s claude to exec`);
   if (taskId !== undefined) await tmuxOk(["set-option", "-p", "-t", id, "@seance-task", taskId]);
   return { id, pid: Number(pid) };
 }
@@ -169,6 +175,7 @@ const inAudits = (outcome: string): AuditLine[] => audits.filter((a) => a.dir ==
 beforeAll(async () => {
   base = await realpath(await mkdtemp(join(tmpdir(), "seance-msg-")));
   stateDir = join(base, "state");
+  claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
   sockPath = join(stateDir, "run", "seanced.sock");
   await mkdir(stateDir, { recursive: true });
   privateTmux = usePrivateTmux(base, "msg");
@@ -278,7 +285,7 @@ describe("the real listener child and a real sender", () => {
     const recvOut = join(base, "a-recv.out");
     const bareOut = join(base, "a-bare.out");
     const recv = await runner("a-recv", inboxCommand(recvOut), receiver);
-    const bare = await runner("a-bare", inboxCommand(bareOut));
+    const bare = await runner("a-bare", underClaude(claudeBin, { body: inboxCommand(bareOut) }));
     await recv.go();
     await bare.go();
     await pollUntil(async () => (await readLines(recvOut)).length > 0, "the tasked listener's ack");
@@ -1622,11 +1629,67 @@ describe("a reply by handle, on one machine", () => {
     expect(await messages.send(replyFrame(ids.at(-1) ?? "", "note", "newest"), t.pid)).toMatchObject({ ok: true });
   }, 60_000);
 
-  test("in a pane séance spawned every child of the pane process is one session, so the listener and the sender need not be the same child", async () => {
+  test("in a pane whose process is claude every child is one session, so the listener and the sender need not be the same child", async () => {
     const messages = setup();
-    const aFile = join(base, "ours-a.pid");
-    const bFile = join(base, "ours-b.pid");
-    const script = `sleep 600 & echo $! > ${shq(aFile)}; sleep 600 & echo $! > ${shq(bFile)}; wait`;
+    const aFile = join(base, "exec-a.pid");
+    const bFile = join(base, "exec-b.pid");
+    const body = `sleep 600 & echo $! > ${shq(aFile)}; sleep 600 & echo $! > ${shq(bFile)}; wait`;
+    // `exec`: the pane's own process is the claude, as a séance spawn's (and a hand-started `exec claude`'s) is.
+    await tmuxOk([
+      "new-window",
+      "-d",
+      "-t",
+      "msg:",
+      "-n",
+      "exec-pane",
+      "-c",
+      base,
+      "sh",
+      "-c",
+      `exec ${underClaude(claudeBin, { body })}`,
+    ]);
+    const [a, b] = [await pidFrom(aFile), await pidFrom(bFile)];
+
+    const taskId = await launched("exec-t");
+    const t = await pane("exec-t", taskId);
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, a, uListener.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), b));
+    expect(q).not.toBe("");
+    await messages.send(replyFrame(q, "note", "this one"), t.pid);
+    expect(lineOf(uListener.lines[1]).wake).toBe(true);
+  });
+
+  test("a process that is no claude is no session: a shell's child with no claude above it is refused, never bound to the shell", async () => {
+    const messages = setup();
+    const file = join(base, "noclaude.peer");
+    const shell = await runner("noclaude-shell", `sleep 600 & echo $! > ${shq(file)}; wait`);
+    await shell.go();
+    const peer = await pidFrom(file);
+    const refused = sinkDouble();
+    await messages.listen(INBOX, peer, refused.sink);
+    expect(JSON.parse(refused.lines[0] ?? "null")).toEqual({ ok: false, code: "unbound" });
+    expect(await messages.send(message("task-anywhere", "note", "from a bare shell"), peer)).toEqual({
+      ok: false,
+      code: "unbound",
+    });
+  });
+
+  test("a pane started with `--remote-control` that runs claude under a shell is bound to the claude, not the shell: the next claude holds none of the first's handles", async () => {
+    const messages = setup();
+    const taskId = await launched("ours-t");
+    const t = await pane("ours-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+
+    // The start command names the flag, so `ours` holds, yet the pane process is the shell and each claude its child.
+    const file = (name: string): string => join(base, `ours-${name}`);
+    const claude = (name: string): string =>
+      underClaude(claudeBin, {
+        body: `sleep 600 & echo $! > ${shq(file(`${name}.peer`))}; wait`,
+        pidFile: file(`${name}.claude`),
+      });
     const paneId = (
       await tmuxOk([
         "new-window",
@@ -1637,29 +1700,109 @@ describe("a reply by handle, on one machine", () => {
         "-t",
         "msg:",
         "-n",
-        "ours-pane",
+        "ours-shell",
         "-c",
         base,
         "sh",
         "-c",
-        script,
+        `${claude("one")}; ${claude("two")}; sleep 600`,
         "claude",
         "--remote-control",
       ])
     ).trim();
-    const [a, b] = [await pidFrom(aFile), await pidFrom(bFile)];
+    expect((await listPanePids()).find((p) => p.id === paneId)?.ours).toBe(true);
+    const [claudeOne, peerOne] = [await pidFrom(file("one.claude")), await pidFrom(file("one.peer"))];
+
+    const first = sinkDouble();
+    await messages.listen(INBOX, peerOne, first.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which file?"), peerOne));
+    expect(q).not.toBe("");
+
+    first.drop();
+    process.kill(claudeOne, "SIGKILL");
+    process.kill(peerOne, "SIGKILL");
+    const peerTwo = await pidFrom(file("two.peer"));
+    expect(await pidFrom(file("two.claude"))).not.toBe(claudeOne);
     expect((await listPanePids()).find((p) => p.id === paneId)?.ours).toBe(true);
 
-    const taskId = await launched("ours-t");
-    const t = await pane("ours-t", taskId);
-    await messages.listen(INBOX, t.pid, sinkDouble().sink);
-    const uListener = sinkDouble();
-    await messages.listen(INBOX, a, uListener.sink);
-    const q = idOf(await messages.send(message(taskId, "question", "which?"), b));
-    expect(q).not.toBe("");
-    await messages.send(replyFrame(q, "note", "this one"), t.pid);
-    expect(lineOf(uListener.lines[1]).wake).toBe(true);
+    // The shell outlives the first claude, which is the only reason a handle bound to it would have survived.
+    expect(await messages.send(replyFrame(q, "note", "too late"), t.pid)).toEqual({ ok: false, code: "ended" });
+    const second = sinkDouble();
+    await messages.listen(INBOX, peerTwo, second.sink);
+    expect(await messages.send(replyFrame(q, "note", "after it listened"), t.pid)).toEqual({
+      ok: false,
+      code: "ended",
+    });
+    expect(second.lines).toHaveLength(1);
   });
+
+  test("a pane re-tagged for a task after the question holds no handle, even once it is untagged again", async () => {
+    const messages = setup();
+    const taskId = await launched("retag-t");
+    const t = await pane("retag-t", taskId);
+    const u = await pane("retag-u");
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    const first = sinkDouble();
+    await messages.listen(INBOX, u.pid, first.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), u.pid));
+    expect(q).not.toBe("");
+
+    // Tagged for another task: its listener is closed, and the next listen is another task's binding.
+    await tmuxOk(["set-option", "-p", "-t", u.id, "@seance-task", await launched("retag-other")]);
+    expect(await messages.send(replyFrame(q, "note", "to a re-tagged pane"), t.pid)).toEqual({
+      ok: false,
+      code: "ended",
+    });
+    expect(first.closed()).toBe(true);
+    const second = sinkDouble();
+    await messages.listen(INBOX, u.pid, second.sink);
+    // Untagged again: the pane and process are the question's, but the handle was made for another binding.
+    await tmuxOk(["set-option", "-p", "-u", "-t", u.id, "@seance-task"]);
+    await messages.listen(INBOX, u.pid, sinkDouble().sink);
+    expect(await messages.send(replyFrame(q, "note", "back again"), t.pid)).toEqual({ ok: false, code: "ended" });
+    expect(second.lines).toHaveLength(1);
+  });
+
+  test("a handle names nobody once its pane is gone", async () => {
+    const messages = setup();
+    const taskId = await launched("gone-t");
+    const t = await pane("gone-t", taskId);
+    const u = await pane("gone-u");
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    await messages.listen(INBOX, u.pid, sinkDouble().sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), u.pid));
+    await tmuxOk(["kill-pane", "-t", u.id]);
+    await pollUntil(async () => (await listPanePids()).every((p) => p.id !== u.id), "the pane to go");
+    expect(await messages.send(replyFrame(q, "note", "nobody home"), t.pid)).toEqual({ ok: false, code: "ended" });
+  });
+
+  test("one busy sender cannot push another session's open question out of the table", async () => {
+    const messages = setup();
+    const taskId = await launched("busy-t");
+    const t = await pane("busy-t", taskId);
+    const other = await launched("busy-o");
+    const o = await pane("busy-o", other);
+    const quiet = await pane("busy-quiet");
+    const busy = [await pane("busy-1"), await pane("busy-2"), await pane("busy-3")];
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    await messages.listen(INBOX, o.pid, sinkDouble().sink);
+    await messages.listen(INBOX, quiet.pid, sinkDouble().sink);
+    for (const b of busy) {
+      // oxlint-disable-next-line no-await-in-loop -- one listener at a time
+      await messages.listen(INBOX, b.pid, sinkDouble().sink);
+    }
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), quiet.pid));
+    expect(q).not.toBe("");
+    // Notes enough from three panes to pass the cap, well inside each pane's rate limit and the hour.
+    for (let i = 0; i < REPLY_HANDLE_MAX; i++) {
+      clock.now += 4_000;
+      const from = busy[i % busy.length];
+      if (from === undefined) throw new Error("no sender");
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      expect(await messages.send(message(other, "note", `n${i}`), from.pid)).toMatchObject({ ok: true });
+    }
+    expect(await messages.send(replyFrame(q, "note", "still here"), t.pid)).toMatchObject({ ok: true });
+  }, 60_000);
 });
 
 describe("a hand-started session that restarts under the same shell", () => {
@@ -1679,8 +1822,11 @@ describe("a hand-started session that restarts under the same shell", () => {
     // `seanced mcp` or `seanced inbox` is. The two run in sequence, so both sit under the same shell pid.
     const file = (name: string): string => join(base, `rs-${name}`);
     const claude = (name: string): string =>
-      `echo $$ > ${shq(file(`${name}.claude`))}; sleep 600 & echo $! > ${shq(file(`${name}.peer`))}; wait`;
-    const shell = await runner("rs-shell", `sh -c ${shq(claude("one"))}; sh -c ${shq(claude("two"))}`);
+      underClaude(claudeBin, {
+        body: `sleep 600 & echo $! > ${shq(file(`${name}.peer`))}; wait`,
+        pidFile: file(`${name}.claude`),
+      });
+    const shell = await runner("rs-shell", `${claude("one")}; ${claude("two")}`);
     await shell.go();
     const [claudeOne, peerOne] = [await pidFrom(file("one.claude")), await pidFrom(file("one.peer"))];
     const shellBefore = (await listPanePids()).find((p) => p.id === shell.pane)?.pid;
@@ -1841,6 +1987,115 @@ describe("a reply or a message routed here from another machine, by handle", () 
     expectNoIdsOrText(incoming.id, idOf(sent));
   });
 
+  test("a frame that carries the handle as `to` is a caller that predates replies: a remote handle is refused as unknown and nothing is routed", async () => {
+    const seen: SessionMessage[] = [];
+    const messages = setup({
+      route: (m) => {
+        seen.push(m);
+        return Promise.resolve(true);
+      },
+    });
+    const taskId = await launched("via-t");
+    const t = await pane("via-t", taskId);
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    const incoming = routedTo(taskId);
+    await messages.deliverRouted(incoming);
+
+    for (const route of ["ask", "send"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      expect(await messages.send({ ...replyFrame(incoming.id, "note", "x", route), to: incoming.id }, t.pid)).toEqual({
+        ok: false,
+        code: "unknown",
+      });
+    }
+    expect(seen).toEqual([]);
+    // The same handle without `to` is answerable.
+    expect(await messages.send(replyFrame(incoming.id, "note", "x", "ask"), t.pid)).toEqual({
+      ok: false,
+      code: "remote",
+    });
+  });
+
+  test("a message from a leader that predates replies carries no handle: a tasked sender is answered by task id, an untasked one is told it cannot be", async () => {
+    const messages = setup();
+    const taskId = await launched("legacy-t");
+    const t = await pane("legacy-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    const legacy = (
+      over: Partial<Extract<DeliverMessageRequest, { readonly taskId: string }>>,
+    ): DeliverMessageRequest => ({
+      id: crypto.randomUUID(),
+      taskId,
+      addressed: taskId,
+      kind: "question",
+      text: "legacy question",
+      fromMachine: "MsgBox",
+      ...over,
+    });
+    await messages.deliverRouted(legacy({ fromTask: "t-remote" }));
+    await messages.deliverRouted(legacy({}));
+    const [tasked, untasked] = [lineOf(tListener.lines[1]).push, lineOf(tListener.lines[2]).push];
+    expect(tasked).toContain("to task t-remote");
+    expect(untasked).toContain("no handle");
+    expect(untasked).not.toContain("inReplyTo");
+  });
+
+  test("a message that came back to the machine that sent it is answered here, not through the leader", async () => {
+    const seen: SessionMessage[] = [];
+    const messages = setup({
+      deviceId: "d-self",
+      route: (m) => {
+        seen.push(m);
+        return Promise.resolve(true);
+      },
+    });
+    const taskId = await launched("self-t");
+    const t = await pane("self-t", taskId);
+    const u = await pane("self-u");
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, u.pid, uListener.sink);
+
+    // This daemon never launched the task the question names, so it routes; the leader hands it to that task's
+    // successor on this very machine, with this machine as its origin.
+    const asked = await messages.send(routedFrame("task-superseded", "send", "which?", "question"), u.pid);
+    expect(asked).toMatchObject({ ok: true, outcome: "routed" });
+    const q = idOf(asked);
+    seen.length = 0;
+    expect(
+      await messages.deliverRouted(routedTo(taskId, { id: q, origin: "d-self", text: "forwarded question" })),
+    ).toEqual({ ok: true, outcome: "delivered" });
+
+    expect(await messages.send(replyFrame(q, "note", "answered here", "ask"), t.pid)).toMatchObject({
+      ok: true,
+      outcome: "delivered",
+    });
+    expect(seen).toEqual([]);
+    const line = lineOf(uListener.lines.at(-1));
+    expect(line.push).toContain("answered here");
+    expect(line.wake).toBe(true);
+  });
+
+  test("a receipt for a tasked sender's message waits out the launch grace for its listener, as it did before handles", async () => {
+    const messages = setup({ graceMs: 60_000, route: () => Promise.resolve(true) });
+    const sender = await launched("rcgrace");
+    const from = await pane("rcgrace-from", sender);
+    const sent = await messages.send(routedFrame("task-elsewhere", "send", "hi"), from.pid);
+    expect(sent).toMatchObject({ ok: true, outcome: "routed" });
+    // No listener has bound in the sender's pane yet: held, not dropped.
+    const request: MessageReceiptRequest = {
+      id: idOf(sent),
+      to: "task-elsewhere",
+      kind: "note",
+      outcome: "delivered",
+    };
+    expect(await messages.receipt(request)).toEqual({ ok: true, outcome: "sent" });
+    const listener = sinkDouble();
+    await messages.listen(INBOX, from.pid, listener.sink);
+    expect(lineOf(listener.lines[1]).push).toBe(receiptNote(request));
+  });
+
   test("a refused route leaves the handle usable, and a route-less daemon answers unsupported", async () => {
     const taskId = await launched("rn-t");
     const t = await pane("rn-t", taskId);
@@ -1913,8 +2168,8 @@ describe("a reply or a message routed here from another machine, by handle", () 
     const messages = setup({ route: () => Promise.resolve(true) });
     const file = join(base, "rcg.peer");
     const claudeFile = join(base, "rcg.claude");
-    const inner = `echo $$ > ${shq(claudeFile)}; sleep 600 & echo $! > ${shq(file)}; wait`;
-    const shell = await runner("rcg-shell", `sh -c ${shq(inner)}; sleep 600`);
+    const body = `sleep 600 & echo $! > ${shq(file)}; wait`;
+    const shell = await runner("rcg-shell", `${underClaude(claudeBin, { body, pidFile: claudeFile })}; sleep 600`);
     await shell.go();
     const [claude, peer] = [await pidFrom(claudeFile), await pidFrom(file)];
     const listener = sinkDouble();
@@ -1927,7 +2182,9 @@ describe("a reply or a message routed here from another machine, by handle", () 
       return ps.exitCode !== 0 || ps.stdout.trim().startsWith("Z");
     }, "the claude to be gone");
     listener.drop();
-    expect(await messages.receipt({ id: idOf(sent), to: "task-elsewhere", kind: "note", outcome: "delivered" })).toEqual({
+    expect(
+      await messages.receipt({ id: idOf(sent), to: "task-elsewhere", kind: "note", outcome: "delivered" }),
+    ).toEqual({
       ok: true,
       outcome: "dropped",
     });

@@ -3,7 +3,7 @@ import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { CAPABILITIES, isRecord, type Task } from "@seance/shared";
 import { tmuxOk } from "../daemon/src/tmux.ts";
-import { pollUntil } from "../daemon/test/fixtures.ts";
+import { linkClaudeNamed, pollUntil, underClaude } from "../daemon/test/fixtures.ts";
 import {
   cancelTask,
   PSK,
@@ -203,12 +203,13 @@ async function session(taskId: string, box: "suite" | "box"): Promise<Session> {
 }
 
 /**
- * A session with no task: a window in the box's tmux session running a shell, whose child stands for `claude` and has
- * the listener and the sender as its own children, as a hand-started session's `seanced inbox` and `seanced mcp` are.
- * Bound to the process under the pane's, not the pane's own.
+ * A session with no task: a window in the box's tmux session running a shell, whose child is a process named `claude`
+ * (the daemon finds a session by that name) with the listener and the sender as its own children, as a hand-started
+ * session's `seanced inbox` and `seanced mcp` are. Bound to the process under the pane's, not the pane's own.
  */
 async function untaskedSession(label: string, box: "suite" | "box"): Promise<Session> {
   const tmuxSession = box === "suite" ? stack.config.tmuxSession : (second?.tmuxSession ?? "");
+  const claude = await linkClaudeNamed(join(base, "claude-bin"));
   return sessionIn(label, null, box, async (command) =>
     (
       await tmuxOk([
@@ -223,7 +224,7 @@ async function untaskedSession(label: string, box: "suite" | "box"): Promise<Ses
         label,
         "sh",
         "-c",
-        `sh -c ${q(command)}; exec sleep 600`,
+        `${underClaude(claude, { body: command })}; exec sleep 600`,
       ])
     ).trim(),
   );

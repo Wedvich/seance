@@ -42,7 +42,9 @@ export interface SendMessageResult {
  * What the caller found out about routing: whether the verified leader can take a message for another machine (`route`)
  * or a reply by handle for one (`reply`: a leader that predates it would drop the reply's `replyTo` unseen).
  */
-export type RouteGate = (need: "route" | "reply") => Promise<{ readonly ok: true } | { readonly ok: false; readonly text: string }>;
+export type RouteGate = (
+  need: "route" | "reply",
+) => Promise<{ readonly ok: true } | { readonly ok: false; readonly text: string }>;
 
 export interface SendMessageOpts {
   /** The local op socket; this machine's by default. */
@@ -63,7 +65,8 @@ const REFUSED_REPLY = {
   ended: (id) => `the session that sent message ${id} is gone, so nothing was sent`,
   invalid: () =>
     "this machine's daemon could not read the reply; it may predate replies by message id (`seanced update`), and nothing was sent",
-  held: (id) => `the session that sent message ${id} is not reachable yet; nothing was kept — send again in a little while`,
+  held: (id) =>
+    `the session that sent message ${id} is not reachable yet; nothing was kept — send again in a little while`,
   remote: (id) =>
     `the session that sent message ${id} is on another machine, and this caller cannot route through the scheduler; nothing was sent`,
 } as const satisfies Partial<Record<MessageReplyCode, (id: string) => string>>;
@@ -141,7 +144,10 @@ export async function sendMessage(
   // A message id given as `to` is the handle again: a model that fills the field with what it was told to answer.
   const to = message.to === inReplyTo ? undefined : message.to;
   if (to === undefined && inReplyTo === undefined) {
-    return { ok: false, text: "give `to` (a task id; get_queue lists them), or `inReplyTo` to answer a message you received" };
+    return {
+      ok: false,
+      text: "give `to` (a task id; get_queue lists them), or `inReplyTo` to answer a message you received",
+    };
   }
   if (to !== undefined && !isTaskId(to)) return { ok: false, text: "`to` is not a task id (get_queue lists them)" };
   const who = to === undefined ? `the session that sent message ${inReplyTo}` : `task ${to}`;
@@ -199,7 +205,13 @@ export async function sendMessage(
   let fellBack = false;
   // A daemon that predates routing rejects the unknown `route` key and delivered nothing: ask once more without it. A
   // reply has no such daemon to fall back to: one that predates routing predates replies, and rejects the missing `to`.
-  if (to !== undefined && routeGate !== undefined && "reply" in first && !first.reply.ok && first.reply.code === "invalid") {
+  if (
+    to !== undefined &&
+    routeGate !== undefined &&
+    "reply" in first &&
+    !first.reply.ok &&
+    first.reply.code === "invalid"
+  ) {
     first = await exchangeFrame(undefined);
     fellBack = true;
   }
@@ -229,7 +241,8 @@ export async function sendMessage(
     }
     return { ok: false, text: refusal(reply.code) };
   }
-  if (reply.outcome === "routed") return { ok: true, id: reply.id, text: ROUTED(who, reply.id, reply.receipt !== false) };
+  if (reply.outcome === "routed")
+    return { ok: true, id: reply.id, text: ROUTED(who, reply.id, reply.receipt !== false) };
   const delivered = `delivered to ${who} as message ${reply.id}`;
   return { ok: true, id: reply.id, text: reply.outcome === "delivered" ? delivered : SENT(who, reply.id) };
 }

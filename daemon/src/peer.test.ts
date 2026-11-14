@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { pollUntil } from "../test/fixtures.ts";
-import { ancestorIn, bsdParent } from "./peer.ts";
+import { ancestorBelow, ancestorIn, bsdParent, processNames } from "./peer.ts";
 
 describe("ancestorIn", () => {
   test("walks from a grandchild up to the nearest ancestor the targets hold, and finds nothing past them", async () => {
@@ -30,6 +30,48 @@ describe("ancestorIn", () => {
       child.kill();
       await child.exited;
     }
+  });
+});
+
+describe("ancestorBelow", () => {
+  test("names the pids between the peer and the target, peer first, and none when the peer is the target", async () => {
+    const child = Bun.spawn(["sh", "-c", "sleep 30; :"], { stdout: "ignore" });
+    let grandchild = 0;
+    try {
+      await pollUntil(() => {
+        grandchild = Number(
+          Bun.spawnSync(["pgrep", "-P", String(child.pid)])
+            .stdout.toString()
+            .trim(),
+        );
+        return grandchild > 0;
+      }, "sh to start sleep");
+
+      expect(await ancestorBelow(grandchild, new Map([[process.pid, "runner"]]))).toEqual({
+        hit: "runner",
+        below: [grandchild, child.pid],
+      });
+      expect(await ancestorBelow(grandchild, new Map([[child.pid, "sh"]]))).toEqual({ hit: "sh", below: [grandchild] });
+      expect(await ancestorBelow(grandchild, new Map([[grandchild, "itself"]]))).toEqual({ hit: "itself", below: [] });
+      expect(await ancestorBelow(grandchild, new Map([[-1, "nobody"]]))).toBeNull();
+    } finally {
+      if (grandchild > 0) process.kill(grandchild);
+      child.kill();
+      await child.exited;
+    }
+  });
+});
+
+describe("processNames", () => {
+  test("names a running process as ps and tmux do, and nothing for one that is gone", async () => {
+    const sleeper = Bun.spawn(["sleep", "30"]);
+    try {
+      await pollUntil(async () => (await processNames(sleeper.pid)).includes("sleep"), "sleep to exec");
+    } finally {
+      sleeper.kill();
+      await sleeper.exited;
+    }
+    expect(await processNames(sleeper.pid)).toEqual([]);
   });
 });
 

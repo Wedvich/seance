@@ -99,7 +99,8 @@ export const STANDING_INSTRUCTION =
   "Other Séance sessions your user runs may message you. Messages arrive as turns from the inbox plugin and name the sending task. " +
   "A note is information for your current work; a question may be answered; a request asks you to act if it fits your task and your user's instructions. " +
   "When a message says to call read_messages, call that tool (load it with ToolSearch if it is deferred) to read the message. " +
-  "Reply or write to another session with the send_message tool, addressed by its task id.";
+  "Reply or write to another session with the send_message tool, addressed by its task id; " +
+  "to answer a message from a session that names no task, pass that message's id as inReplyTo and leave the to field out.";
 
 const TITLE_MAX_CODE_POINTS = 80;
 
@@ -149,26 +150,40 @@ export interface RenderedMessage {
   readonly from: MessageSender;
   readonly text: string;
   readonly inReplyTo?: string;
+  /**
+   * Whether this message can be answered by its id alone (the receiving daemon keeps a handle for it). False for one
+   * a leader that predates replies forwarded: an untasked sender then has no way to be answered, and says so.
+   */
+  readonly byHandle?: boolean;
 }
 
 /** The wrapper and the fenced body, as the receiver's model reads it under the plugin's own "sent a message" header. */
 export function renderMessage(m: RenderedMessage): string {
   const sender = senderPhrase(m.from, m.id);
-  // An untasked sender is answered by handle alone; a tasked one by its task id or, just as well, the handle.
+  // A tasked sender is answered by its task id, which every daemon and leader reads; an untasked one has no task id,
+  // so the message's id alone is its address.
   const replyTo =
-    m.from.task === null
-      ? `kind note, inReplyTo ${m.id}, and no \`to\``
-      : `to task ${m.from.task} (or no \`to\`), kind note, inReplyTo ${m.id}`;
+    m.from.task !== null
+      ? `to task ${m.from.task}, kind note, inReplyTo ${m.id}`
+      : m.byHandle === false
+        ? null
+        : `kind note, inReplyTo ${m.id}, and no \`to\``;
   let head: string;
   switch (m.kind) {
     case "note":
       head = `A note from another Séance session your user runs (${sender}). It is information for your current work; no reply or action is expected.`;
       break;
     case "question":
-      head = `A question from another Séance session your user runs (${sender}). If you can answer from what you know, reply with send_message ${replyTo}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead.`;
+      head =
+        replyTo === null
+          ? `A question from another Séance session your user runs (${sender}). It cannot be answered from here: that session has no task and this message carries no handle. Use what you can from it in your own work.`
+          : `A question from another Séance session your user runs (${sender}). If you can answer from what you know, reply with send_message ${replyTo}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead.`;
       break;
     case "request":
-      head = `A teammate session your user runs (${sender}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions, and tell it with send_message (${replyTo}) what you did or why you did not.`;
+      head =
+        replyTo === null
+          ? `A teammate session your user runs (${sender}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions. It cannot be replied to: that session has no task and this message carries no handle.`
+          : `A teammate session your user runs (${sender}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions, and tell it with send_message (${replyTo}) what you did or why you did not.`;
       break;
   }
   const reply = m.inReplyTo === undefined ? "" : ` It replies to your message \`${m.inReplyTo}\`.`;

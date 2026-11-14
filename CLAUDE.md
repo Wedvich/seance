@@ -442,13 +442,14 @@ green:
   other act, or binding by a field, is a threat-model change.
   **A session with no task is reached only as a reply, by the id of a message it sent** (DESIGN.md, "Session messages",
   "Replies by handle"; docs/messaging.md D3, amended). A `message` frame carries `inReplyTo` and no `to` (or the same id as
-  `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each, oldest out first, hold a handle:
+  `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each (past the cap the oldest entry of the busiest pane goes), hold a handle:
   `sent` (ids this daemon minted, for the asker) and `received` (ids placed in a pane, for the replier). A message id is
   `crypto.randomUUID`, so the id is a bearer handle and no audit line, log line or warn carries one (the audit names the
   recipient as the constant `reply`). **Every entry binds the `claude` process, not the pane and its pid alone**
-  (`Bound.session`: the peer's ancestor that is a direct child of the pane pid, or the pane pid itself for a pane séance
-  started, `BoundPane.ours`), since a hand-started session's pane process is the shell, which outlives a restarted
-  `claude`, and no `ended` fires for an untasked pane. A reply is accepted only from the pane, pid, task (null staying
+  (`Bound.session`: the outermost process on the peer's chain, from the pane process down, that is called `claude`
+  (`sessionOf`, read by `processNames`), or the pane pid for a pane whose task this machine's launch ledger holds,
+  never from the pane's start command, `BoundPane.ours`; none on the chain is `unbound`), since a hand-started
+  session's pane process is the shell, which outlives a restarted `claude`, and no `ended` fires for an untasked pane. A reply is accepted only from the pane, pid, task (null staying
   null) and session the message was placed for (`unknown` otherwise, in the sender's own rate bucket), and reaches the
   asker only at the pane, pid, task and session the `sent` entry names, while that `claude` still runs (`ended`
   otherwise): held for no other session, never given to the next `claude` in the same pane, and a held reply meets a
