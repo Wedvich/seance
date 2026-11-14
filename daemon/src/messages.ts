@@ -444,13 +444,21 @@ export function createMessages(deps: MessagesDeps): Messages {
     }
     // Local when this machine launched the task and a live pane carries it, or the launch is still inside the grace
     // (a held answer). Anything else is not deliverable here: a caller that can check the leader is told to (`remote`)
-    // before the rate limit counts the frame, so one routed message is one count, not two.
+    // before the send bucket counts the frame, so one routed message is one count there, not two. The ask has a bucket
+    // of its own (same limits), since each costs a pane listing and a peer walk and a gate that refuses ends there.
     const launched = deps.launchedAt(to);
     const candidates = panes.filter((pane) => !pane.dead && pane.taskId === to);
     const local = launched !== undefined && (candidates.length > 0 || now() - launched <= graceMs);
-    if (!local && frame.route === "ask") return { ok: false, code: "remote" };
+    const bucket = from === null ? `pane:${sender.id}` : `task:${from}`;
+    if (!local && frame.route === "ask") {
+      if (!admit(`ask:${bucket}`)) {
+        out("rate_limited");
+        return { ok: false, code: "rate_limited" };
+      }
+      return { ok: false, code: "remote" };
+    }
 
-    if (!admit(from === null ? `pane:${sender.id}` : `task:${from}`)) {
+    if (!admit(bucket)) {
       out("rate_limited");
       return { ok: false, code: "rate_limited" };
     }
@@ -567,6 +575,8 @@ export function createMessages(deps: MessagesDeps): Messages {
 
   /** Replies to forwards by message id, held as promises so a replay racing the first is answered by it. */
   const forwards = new Map<string, { readonly reply: Promise<DeliverMessageResponse>; readonly at: number }>();
+  /** Receipts placed, by message id and outcome: a second leader sent the same message answers it again. */
+  const receipts = new Map<string, { readonly reply: Promise<MessageReceiptResponse>; readonly at: number }>();
 
   const placeRouted = async (request: DeliverMessageRequest): Promise<DeliverMessageResponse> => {
     const { taskId: to, kind, id } = request;
@@ -628,11 +638,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     return reply;
   };
 
-  const receipt: Messages["receipt"] = async (request) => {
-    if (stopped) return { ok: false, code: "unsupported", message: "stopping" };
-    const to = request.fromTask;
-    // A receipt for an untasked sender: nothing here can address it yet.
-    if (to === undefined) return { ok: true, outcome: "dropped" };
+  const placeReceipt = async (request: MessageReceiptRequest, to: string): Promise<MessageReceiptResponse> => {
     const launched = deps.launchedAt(to);
     if (launched === undefined) return { ok: true, outcome: "dropped" };
     const panes = await deps.panes();
@@ -654,6 +660,23 @@ export function createMessages(deps: MessagesDeps): Messages {
     if (placed === "nolistener") return { ok: true, outcome: "dropped" };
     audit({ dir: "receipt", from: to, to: request.to, kind: request.kind, outcome: request.outcome });
     return { ok: true, outcome: placed };
+  };
+
+  const receipt: Messages["receipt"] = (request) => {
+    if (stopped) return Promise.resolve({ ok: false, code: "unsupported", message: "stopping" });
+    const to = request.fromTask;
+    // A receipt for an untasked sender: nothing here can address it yet.
+    if (to === undefined) return Promise.resolve({ ok: true, outcome: "dropped" });
+    const t = now();
+    for (const [key, entry] of receipts) {
+      if (t - entry.at >= REPLAY_RETAIN_MS) receipts.delete(key);
+    }
+    const key = `${request.id}:${request.outcome}`;
+    const known = receipts.get(key);
+    if (known !== undefined) return known.reply;
+    const reply = placeReceipt(request, to);
+    receipts.set(key, { reply, at: t });
+    return reply;
   };
 
   return {

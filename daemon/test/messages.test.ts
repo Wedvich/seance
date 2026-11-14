@@ -1047,7 +1047,7 @@ function routedFrame(
 }
 
 describe("routing a message for a task that is not on this machine", () => {
-  test("an ask for a task this ledger lacks is remote, audits nothing and counts no frame against the rate", async () => {
+  test("an ask for a task this ledger lacks is remote and audits nothing; asks have their own bucket, so a loop of them is limited and a send is not", async () => {
     const routed: SessionMessage[] = [];
     const messages = setup({
       route: (m) => {
@@ -1057,7 +1057,7 @@ describe("routing a message for a task that is not on this machine", () => {
     });
     const sender = await launched("askfrom");
     const from = await pane("ask-from", sender);
-    for (let i = 0; i < 25; i++) {
+    for (let i = 0; i < 20; i++) {
       // oxlint-disable-next-line no-await-in-loop -- ordered asks
       expect(await messages.send(routedFrame("task-elsewhere", "ask", "x"), from.pid)).toEqual({
         ok: false,
@@ -1066,7 +1066,12 @@ describe("routing a message for a task that is not on this machine", () => {
     }
     expect(audits).toEqual([]);
     expect(routed).toEqual([]);
-    // 25 asks would have exhausted the minute's 20 had they counted.
+    // Each ask costs a pane listing, so the 21st in a minute is refused where it is asked.
+    expect(await messages.send(routedFrame("task-elsewhere", "ask", "x"), from.pid)).toEqual({
+      ok: false,
+      code: "rate_limited",
+    });
+    // The asks did not count against the sends: the minute's 20 are all still there.
     expect(await messages.send(routedFrame("task-elsewhere", "send", "now"), from.pid)).toMatchObject({
       ok: true,
       outcome: "routed",
@@ -1322,6 +1327,23 @@ describe("a receipt the leader sent here", () => {
     expect(await messages.receipt(receiptFor("task-never-launched"))).toEqual({ ok: true, outcome: "dropped" });
     expect(await messages.receipt(receiptFor(undefined))).toEqual({ ok: true, outcome: "dropped" });
     expect(audits).toEqual([]);
+  });
+
+  test("a replay of the same receipt is answered from the first, with one note and one audit line", async () => {
+    const messages = setup();
+    const sender = await launched("receiptreplay");
+    const target = await pane("receiptreplay-target", sender);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    const request = receiptFor(sender);
+    const [first, second] = await Promise.all([messages.receipt(request), messages.receipt(request)]);
+    expect(first).toEqual({ ok: true, outcome: "delivered" });
+    expect(second).toEqual(first);
+    expect(listener.lines).toHaveLength(2);
+    expect(audits).toHaveLength(1);
+    // Another message's receipt is its own.
+    expect(await messages.receipt(receiptFor(sender))).toEqual({ ok: true, outcome: "delivered" });
+    expect(listener.lines).toHaveLength(3);
   });
 
   test("is held for a listener within the grace and never audited as a message the receiver got", async () => {
