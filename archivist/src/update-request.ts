@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 
 /**
  * How the running archivist follows the fleet's update announce without running
@@ -43,7 +43,22 @@ export function createUpdateRequester(opts: {
   const askedAt =
     opts.askedAt ?? (async (): Promise<number | null> => (await stat(opts.path).catch(() => null))?.mtimeMs ?? null);
   // A sha is not a path or a flag anywhere downstream, but it is wire-supplied: one line, hex only.
-  const write = (line: string): Promise<void> => writeFile(opts.path, `${line}\n`, { mode: 0o600 });
+  // Written aside and renamed in: a plain writeFile creates the file before its text lands, and the path
+  // unit's `PathChanged=` fires on that create, so the update could read an empty request. Writes are
+  // chained so an announce and a register never share the `.part` at once.
+  const part = `${opts.path}.part`;
+  // Never rejects: a failed write is its own caller's to report, not the next one's.
+  let chain: Promise<void> = Promise.resolve();
+  const write = (line: string): Promise<void> => {
+    const previous = chain;
+    const next = (async (): Promise<void> => {
+      await previous;
+      await writeFile(part, `${line}\n`, { mode: 0o600 });
+      await rename(part, opts.path);
+    })();
+    chain = next.catch(() => undefined);
+    return next;
+  };
   return {
     announce: async (sha: string): Promise<void> => {
       if (sha === lastSha) return;

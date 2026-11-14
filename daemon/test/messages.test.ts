@@ -217,9 +217,12 @@ async function runner(name: string, command: string, taskId?: string): Promise<R
   return { pane: id, go: () => writeFile(go, "") };
 }
 
-/** `seanced inbox`, the real CLI: stdout to a file, its exit code beside it. */
+/**
+ * `seanced inbox`, the real CLI: stdout to a file, its exit code beside it, renamed in. A redirect creates the
+ * file before `echo` writes it, so a test polling for it to exist could read it empty.
+ */
 function inboxCommand(out: string, state = stateDir): string {
-  return `SEANCE_STATE_DIR=${shq(state)} ${shq(process.execPath)} ${shq(MAIN)} inbox > ${shq(out)}; echo $? > ${shq(`${out}.exit`)}`;
+  return `SEANCE_STATE_DIR=${shq(state)} ${shq(process.execPath)} ${shq(MAIN)} inbox > ${shq(out)}; echo $? > ${shq(`${out}.exit.part`)} && mv ${shq(`${out}.exit.part`)} ${shq(`${out}.exit`)}`;
 }
 
 /** The raw replies to `frames`, sent in order from inside the pane: not through `sendMessage`, so the reply is the daemon's own. */
@@ -367,7 +370,7 @@ describe("the real listener child and a real sender", () => {
     // The reader records its pid (atomically) and exits at once; the child starts only once that pid is gone, so
     // its first write, the ack, meets a closed pipe rather than racing the reader's exit.
     const reader = `echo $$ > ${shq(`${readerPid}.part`)} && mv ${shq(`${readerPid}.part`)} ${shq(readerPid)}`;
-    const child = `SEANCE_STATE_DIR=${shq(stateDir)} ${shq(process.execPath)} ${shq(MAIN)} inbox; echo $? > ${shq(`${out}.exit`)}`;
+    const child = `SEANCE_STATE_DIR=${shq(stateDir)} ${shq(process.execPath)} ${shq(MAIN)} inbox; echo $? > ${shq(`${out}.exit.part`)} && mv ${shq(`${out}.exit.part`)} ${shq(`${out}.exit`)}`;
     const wait = `while [ ! -e ${shq(readerPid)} ] || kill -0 "$(cat ${shq(readerPid)})" 2>/dev/null; do sleep 0.05; done`;
     const command = `( ${wait}; ${child} ) | sh -c ${shq(reader)}`;
     const listeners = await runner("epipe-listener", command, receiver);

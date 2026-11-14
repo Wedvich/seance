@@ -12836,9 +12836,10 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
 - **Updating without exec in the key's process** (A26). The `run` process takes the
   `update-available` broadcast the relay fans to every `/daemon` socket (the seat's included,
   through `RelayClient`'s broadcast allowlist; no wire change) and, for a sha it has not asked
-  about, writes `update-requested` (0600, `archivist/src/update-request.ts`). It also writes one
-  when it takes its seat, at most every 30 minutes (counted from the file's own mtime across
-  processes, so a crash loop does not fetch on every start), to catch an announce it slept
+  about, writes `update-requested` (0600, `archivist/src/update-request.ts`; written aside and
+  renamed in, since `PathChanged=` fires on the create and a plain write would let the update
+  read it empty). It also writes one when it takes its seat, at most every 30 minutes (counted
+  from the file's own mtime across processes, so a crash loop does not fetch on every start), to catch an announce it slept
   through. systemd
   starts the update unit, which runs the daemon's own `updateNow` (fetch, ff-only on the default
   branch, `bun install --frozen-lockfile`) against the archivist's checkout, audited under the
