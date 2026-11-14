@@ -135,6 +135,11 @@ green:
   while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,
   as `spawn.ts` does) rather than reading its automatic name, which on macOS is whatever tmux caught
   mid-exec (`kernel_task`, `tmux`, `""`).
+- A test that needs its own process inside a session's pane (to be bound by peer pid, as a tool would be)
+  runs it through `ClaudeStub.runInPane` (`daemon/test/fixtures.ts`), never `respawn-pane -k`: swapping a
+  live pane's pty failed ENXIO (`fork failed: Device not configured`) in ~2% of full runs on GitHub's macOS
+  runners — not exhaustion (63 ptys of 511), transient, and no other tmux call ever did. `runInPane` starts it
+  as the stub's child on the pane's own tty and untitles the pane, as the respawn did.
 - A test server binds the address it is dialed at — `hostname: "127.0.0.1"` on every `Bun.serve`.
   Bun's default is the dual-stack `[::]`, and macOS lets another process's `SO_REUSEADDR` bind of
   `127.0.0.1` on the same port (a VS Code helper, a dev server) sit on top of it and take every

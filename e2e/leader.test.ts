@@ -229,8 +229,8 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
         script,
         `import { reportDone } from ${JSON.stringify(tool)};\nawait Bun.write(${JSON.stringify(out)}, JSON.stringify(await reportDone({ path: ${JSON.stringify(socket)} })));\n`,
       );
-      // The reporter takes over the spawned pane, so it runs where the session would: the daemon binds
-      // it by its parent walk to that pane, and the pane carries the task the spawn tagged it with.
+      // The reporter runs as the stub's child in the spawned pane, where a session's tool would: the daemon
+      // binds it by its parent walk to that pane, and the pane carries the task the spawn tagged it with.
       // (Its assignment carries no pane until the session registers, which the stub does not.)
       const panes = await tmuxOk(["list-panes", "-a", "-F", "#{pane_id} #{@seance-task}"]);
       const pane = panes
@@ -238,15 +238,10 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
         .map((line) => line.split(" "))
         .find(([, task]) => task === predecessor)?.[0];
       if (pane === undefined) throw new Error(`no pane carries ${predecessor}: ${panes}`);
-      await tmuxOk([
-        "respawn-pane",
-        "-k",
-        "-t",
+      await stack.stub.runInPane(
         pane,
-        "sh",
-        "-c",
         `while [ ! -e ${q(go)} ]; do sleep 0.05; done; ${q(process.execPath)} ${q(script)}; exec sleep 600`,
-      ]);
+      );
       await pollUntil(() => localSocketReachable(socket), "the suite daemon's op socket", 10_000);
       await Bun.write(go, "");
 
@@ -739,15 +734,10 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
         .find(([, task]) => task === taskId)?.[0];
       if (pane === undefined) throw new Error(`no pane carries ${taskId}`);
       // The turn ends only when the test says so: a close before it would be the bug.
-      await tmuxOk([
-        "respawn-pane",
-        "-k",
-        "-t",
+      await stack.stub.runInPane(
         pane,
-        "sh",
-        "-c",
         `${q(process.execPath)} ${q(script)}; while [ ! -e ${q(go)} ]; do sleep 0.05; done; SEANCE_STATE_DIR=${q(stateDir)} ${q(process.execPath)} ${q(main)} session-event < ${q(idle)}; exec sleep 600`,
-      ]);
+      );
 
       await pollUntil(
         async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()) !== "",
@@ -1090,7 +1080,7 @@ describe("hand-off: a successor's inherited PR ↔ the leader's dispatch ↔ the
   };
 
   /**
-   * Takes over the task's pane with a script that calls `handOff` and writes its answer to `out`. With
+   * Runs, as the stub's child in the task's pane, a script that calls `handOff` and writes its answer to `out`. With
    * `steps`, it then waits for `go` and sends an idle turn end, waits for `go2` and sends `ended`.
    */
   async function handOffFrom(
@@ -1124,15 +1114,7 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
       `SEANCE_STATE_DIR=${q(stateDir)} ${q(process.execPath)} ${q(main)} session-event < ${q(input)}`;
     const wait = (file: string): string => `while [ ! -e ${q(file)} ]; do sleep 0.05; done`;
     const rest = steps ? `; ${wait(go)}; ${event(idle)}; ${wait(go2)}; ${event(ended)}` : "";
-    await tmuxOk([
-      "respawn-pane",
-      "-k",
-      "-t",
-      await paneOf(taskId),
-      "sh",
-      "-c",
-      `${q(process.execPath)} ${q(script)}${rest}; exec sleep 600`,
-    ]);
+    await stack.stub.runInPane(await paneOf(taskId), `${q(process.execPath)} ${q(script)}${rest}; exec sleep 600`);
     return { out, go, go2 };
   }
 
