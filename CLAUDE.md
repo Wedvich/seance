@@ -55,14 +55,16 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — spec, five parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
+- **docs/custodian.md** — spec, six parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
   Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
   and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
-  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind"; `MachineStatus.cu`, the Machines row and the owner's
+  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind";
+  the `flag` verb, the flags file, `custodian-event`, `Task.flag`, the card's flag and the `stuck` and `failing` pushes,
+  C29, C33's flags, C41's push, C44 and C47's event, in DESIGN.md, "The custodian frame kind" and "The leader's side"; `MachineStatus.cu`, the Machines row and the owner's
   shell verbs `status`, `log`, `round`, `pause` and `resume`, C40, C43, C45 and C47's status, in DESIGN.md, "The
   custodian's status and the Machines row";
   rounds are held behind `ROUNDS_LIVE` until build item 4b, which contains the round's sandbox — the verbs bound
-  only what goes through them; nudge, interrupt, flags, the push and the card's menu are not built): the
+  only what goes through them; nudge, interrupt and the card's menu are not built): the
   custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
@@ -278,7 +280,11 @@ green:
   permission, never grant one), re-checking the pane, its task, `cl`, its last frame and that its input box shows
   exactly the prompt before Enter, audited `origin=drain` with the task id and outcome, never the text; a
   `session-pass` carries `drain` only while its machine is closed, and the leader writes `trigger: "drain"` for it only
-  while that machine's status carries `cl`, and a pass is offered, by the PWA, `seanced pass` and MCP `pass_task`, only through `passOffer` (`shared/src/successor.ts`) to a verified leader and a task machine that advertise `CAPABILITIES.successor`, and is sent once and never retried, and a session's own pass (`pass_to_successor`) is offered only to a verified leader advertising `CAPABILITIES.successorSelf` (a 2a leader would drop its `session-pass` after the push) and checks the record's length before any push, and the leader acts on a `session-pass` only when it is sealed `from` the machine the task is placed on, never logging its `record` (the successor's prompt) or the branch, and sends `pass-close` only after the successor's commit write, and a daemon sends no pass for a caller whose connection has closed (an interrupted call: checked before and after the push) and marks a pane for one close only (a pass outranks a hand-off), and a `branch-state` is never accepted from an app, and an
+  while that machine's status carries `cl`, and a pass is offered, by the PWA, `seanced pass` and MCP `pass_task`, only through `passOffer` (`shared/src/successor.ts`) to a verified leader and a task machine that advertise `CAPABILITIES.successor`, and is sent once and never retried, and a session's own pass (`pass_to_successor`) is offered only to a verified leader advertising `CAPABILITIES.successorSelf` (a 2a leader would drop its `session-pass` after the push) and checks the record's length before any push, and the leader acts on a `session-pass` only when it is sealed `from` the machine the task is placed on, never logging its `record` (the successor's prompt) or the branch, and sends `pass-close` only after the successor's commit write, and a daemon sends no pass for a caller whose connection has closed (an interrupted call: checked before and after the push) and marks a pane for one close only (a pass outranks a hand-off), and a `branch-state` is never accepted from an app, and a `custodian-event` (`flag`, `unflag`, `failing`: daemon to leader, sealed, no capability and no sentinel) writes
+  `Task.flag` only when the task's `assignment.deviceId` is the machine that sealed it, in any task state (a finish keeps
+  the flag, a move back to `ready` drops it), through the one task sealer, a repeat a no-op and a changed note keeping `at`;
+  the leader never acts on one sealed `from: "app"`, never logs, audits or pushes the note, and a `failing` event only
+  pushes `custodian-failing` carrying the sealer's own device id, and an
   event — a session event or a branch state — moves only a task placed (or, for a session event,
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to a PR URL the record holds (`taskPrs`), its values passed as GraphQL variables, and no frame
@@ -293,13 +299,14 @@ green:
   timed out, never awaited by the scheduler pass; its payload carries ids and state only, and no
   endpoint, key, JWT or payload is logged, and the service worker (`pwa/public/push-sw.js`) holds
   no PSK, so a notification's text is fixed per kind (a spill's window label shown only as one of
-  the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed; the archivist's silence one text, nothing of its payload shown) and a click opens only a same-origin path it
+  the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed; the archivist's silence one text, nothing of its payload shown; a flag's one of four texts by its `reason`, an enum, and a
+  generic one for any other value, the note never shown; a failing custodian's one text, opening only `/?screen=machines`) and a click opens only a same-origin path it
   built from an id that passed `isTaskId` (`/?task=<id>`, `/?screen=machines`), which the app
   reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
   holds no prompt text, no attachment manifest and no raw account id: a task row is written only
   through `taskRow`, only for a finished task read through `listTasks`/`getTask`, after
   `forgetPrompt` and with `pin.account`, `spillAlert`, `quotaExhausted`, `assignment.window`, `branch`,
-  `failure.message` and `decision` dropped (the daemon slugs a title-less task's window and branch
+  `failure.message`, `decision` and `flag.note` dropped (the daemon slugs a title-less task's window and branch
   from its prompt) and `succeeds.account` replaced by the constant `ARCHIVED_SUCCEEDS_ACCOUNT`, its account only as the
   `account:` store key, and only over a row at a lower store version; an account row only from
   `openAccountRecord` or a key `accountStoreKey` made; and no statement there removes a row
@@ -388,6 +395,8 @@ green:
   `get_queue`).
   While this machine is closed, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
+  A bound `busy` following that pane's `idle` carrying `turnEnded` (`isNewTurn`) also lifts the pane's own flag, in the
+  flags file and, by one `unflag`, at the leader: an act on the pane's own entry only, never one a frame names.
   Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, only while a
   custodian seat runs) is retention of what ingest bound, not an act: nothing there is run, sent or persisted, no reply
   depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text.
@@ -413,7 +422,7 @@ green:
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
 - **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
-  "The custodian frame kind"): the round's four verbs `sessions`, `close <pane>`, `notes` and `done`, and no other
+  "The custodian frame kind"): the round's five verbs `sessions`, `close <pane>`, `flag <pane>`, `notes` and `done`, and no other
   act, built but held with the seat (`ROUNDS_LIVE`: no round runs, so the frame answers `unsupported`). The verbs
   bound only what goes through them: a round's sandbox can still reach the tmux socket and the daemon's plain ops
   until docs/custodian.md item 4b. It is bound only by the kernel-reported peer pid, to a process of the one live pane carrying
@@ -429,10 +438,17 @@ green:
   pane), locked in git (bar Claude's own lock whose process is gone) or with a pane in
   it (`custodian-worktree.ts`). `notes` is stored only through `pruneNotes` (sections by `standing`, a live task id
   or a live pane, once each) within `NOTES_MAX`, and `seanced custodian notes --clear` is the owner's shell's act,
-  never a frame. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
+  never a frame. `flag` takes a reason from the fixed `FLAG_REASONS` (the daemon itself also sets `dirty` and
+  `unpushed` when a close keeps a worktree) and an optional note of at most `FLAG_NOTE_MAX`
+  characters, a printable-text rule applied before anything is stored; it acts only on a session `closeVerdict` would
+  not call `foreign` or `marked`, stores `{reason, note, at}` only in `custodian/sessions.json` (0600, the daemon's own
+  file, never the owner CLI's `state.json`, keyed by task id or pane id, pane keys dropped at load) and tells the leader
+  by one sealed, fire-and-forget `custodian-event`. A flag lifts on the session's next turn (a bound `busy` after an
+  `idle` carrying `turnEnded`), on a close that kept nothing, or when no live session holds it; the note is
+  display-only and never logged, audited, pushed, archived, put in `get_queue` or returned by `sessions`. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
   `seanced` is its own `<tmp>/bin/seanced`, first on its `PATH`. Nothing a pane, the notes or the summary held is
-  logged or audited (the `custodian` origin's lines are `op=close` and `op=worktree` with ids, outcomes and
-  reasons), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
+  logged or audited (the `custodian` origin's lines are `op=close`, `op=worktree` and `op=flag` with ids, outcomes and
+  reasons, never a note), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
   (`daemon/test/message-layering.test.ts`). A new verb, or any other act, is a threat-model change.
 - **The custodian's owner verbs are the shell's acts, never a frame** (`custodian-owner-cli.ts`; DESIGN.md, "The
   custodian's status and the Machines row"): `seanced custodian status | log | round | pause | resume` are dispatched

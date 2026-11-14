@@ -41,14 +41,14 @@ describe("DENY", () => {
     }
   });
 
-  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's four are not", () => {
+  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's five are not", () => {
     for (const verb of CUSTODIAN_OWNER_VERBS) {
       expect(denied(`seanced custodian ${verb}`)).toBe(true);
       expect(denied(`seanced custodian ${verb} --for 1h`)).toBe(true);
     }
     expect(denied("seanced custodian notes --clear")).toBe(true);
     expect(denied("seanced custodian notes --clear --x")).toBe(true);
-    for (const allowed of ["sessions", "close %3", "notes", "done"]) {
+    for (const allowed of ["sessions", "close %3", "flag %3 stuck", "flag %3 look a note", "notes", "done"]) {
       expect(denied(`seanced custodian ${allowed}`)).toBe(false);
     }
   });
