@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { COMMANDS } from "./commands.ts";
+import { COMMANDS, CUSTODIAN_OWNER_VERBS } from "./commands.ts";
 import { custodianFence, DENY, procSysReadOnly } from "./custodian-fence.ts";
 
 /**
@@ -38,6 +38,18 @@ describe("DENY", () => {
       ]) {
         expect(DENY).toContain(form);
       }
+    }
+  });
+
+  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's four are not", () => {
+    for (const verb of CUSTODIAN_OWNER_VERBS) {
+      expect(denied(`seanced custodian ${verb}`)).toBe(true);
+      expect(denied(`seanced custodian ${verb} --for 1h`)).toBe(true);
+    }
+    expect(denied("seanced custodian notes --clear")).toBe(true);
+    expect(denied("seanced custodian notes --clear --x")).toBe(true);
+    for (const allowed of ["sessions", "close %3", "notes", "done"]) {
+      expect(denied(`seanced custodian ${allowed}`)).toBe(false);
     }
   });
 

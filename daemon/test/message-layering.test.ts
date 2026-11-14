@@ -17,6 +17,7 @@ const ENTRIES = [
   "inbox-cli.ts",
   "custodian-cli.ts",
   "custodian-frame.ts",
+  "custodian-control.ts",
 ] as const;
 
 const IMPORT = /(?:from|import)\s*\(?\s*"(\.\/[^"]+)"/gu;

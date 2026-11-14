@@ -5,7 +5,7 @@
 // those runs — 47 ms against 11. `inbox` is the second: the inbox mod starts one per session and it lives for the
 // session's life, so loading the MCP SDK and zod into every session's listener would be pure cost. `custodian` is the
 // third: the round runs its verbs many times a turn. Every other command imports what it needs once picked.
-import { USAGE, type CommandName } from "./commands.ts";
+import { CUSTODIAN_OWNER_VERBS, USAGE, type CommandName } from "./commands.ts";
 import { cmdCustodian } from "./custodian-cli.ts";
 import { cmdInbox } from "./inbox-cli.ts";
 import { cmdSessionEvent } from "./session-event-cli.ts";
@@ -107,6 +107,12 @@ try {
       await cmdInbox();
       break;
     case "custodian":
+      // The owner's verbs are loaded on demand: they log and audit, which the round's verbs (statically imported,
+      // their stdout the round's data channel) must never reach.
+      if (CUSTODIAN_OWNER_VERBS.some((verb) => verb === rest[0])) {
+        await (await import("./custodian-owner-cli.ts")).cmdCustodianOwner(rest);
+        break;
+      }
       await cmdCustodian(rest);
       break;
     case undefined:

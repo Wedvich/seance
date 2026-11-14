@@ -11,6 +11,9 @@ import { custodianNotesPath, socketPath } from "./paths.ts";
  * may ask: the frame is bound by this process's pid, never by anything it says. Imported statically by `main.ts` like
  * `session-event` (the round runs its verbs many times a turn): no import here may be heavy.
  *
+ * The owner's verbs (`status`, `log`, `round`, `pause`, `resume`: `CUSTODIAN_OWNER_VERBS`) are not this module's: `main.ts`
+ * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's four.
+ *
  * Exit 0 for an `ok` reply, 1 for a refusal (its code on stderr), 2 for a command line the CLI refuses or a daemon it
  * cannot reach.
  */

@@ -1,4 +1,4 @@
-import { COMMANDS } from "./commands.ts";
+import { COMMANDS, CUSTODIAN_OWNER_VERBS } from "./commands.ts";
 
 /**
  * The custodian round's shell fence, generated (docs/custodian.md, "The fence"; DESIGN.md, "The custodian's seat").
@@ -214,7 +214,15 @@ function fourForms(program: string, subcommand: string): readonly string[] {
 /**
  * The deny list. The `seanced` entries come from the CLI's own command table (`commands.ts`), every command but
  * `custodian`, so a command added later is denied by default; `custodian-fence.test.ts` asserts the coverage.
- * Deny beats allow, so `Bash(seanced *)` would refuse `seanced custodian` too.
+ * Deny beats allow, so `Bash(seanced *)` would refuse `seanced custodian` too; the owner's verbs
+ * (`CUSTODIAN_OWNER_VERBS`) and `notes --clear` are denied under it by generated entries, since the allow covers
+ * `seanced custodian *`.
+ *
+ * A mistake guard for a cheap model, never a boundary. The round's sandboxed Bash cannot write `stateDir()`, but until
+ * docs/custodian.md item 4b the round still reaches the tmux socket, so `tmux run-shell "seanced custodian pause"` runs
+ * outside the sandbox; and every task session runs as the same uid and can write `custodian/state.json` and
+ * `round-request` directly, without the CLI's audit line. The boundary for those files is the owner's uid; the audit
+ * covers the CLI only, and the seat's request spacing bounds what a looping writer can cost.
  */
 export const DENY: readonly string[] = [
   ...PLAIN_DENIED.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]),
@@ -226,6 +234,9 @@ export const DENY: readonly string[] = [
   ...GH_API_WRITE_FLAGS.flatMap((flag) => [`Bash(gh api * ${flag}*)`, `Bash(gh api ${flag}*)`]),
   "Bash(seanced)",
   ...COMMANDS.filter((name) => name !== "custodian").map((name) => `Bash(seanced ${name}*)`),
+  ...CUSTODIAN_OWNER_VERBS.flatMap((verb) => [`Bash(seanced custodian ${verb})`, `Bash(seanced custodian ${verb} *)`]),
+  "Bash(seanced custodian notes --clear)",
+  "Bash(seanced custodian notes --clear *)",
 ];
 
 export interface FenceInput {

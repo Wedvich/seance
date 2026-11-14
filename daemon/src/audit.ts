@@ -779,6 +779,35 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
   };
 }
 
+/**
+ * The owner's shell acts on the custodian (`seanced custodian pause | resume | round`, `custodian-owner-cli.ts`),
+ * under the `cli` origin like every command typed at this machine. `status` and `log` are reads and write nothing. No
+ * text from a file reaches a line: only the pause's end, and a fixed outcome.
+ */
+export type CustodianOwnerOutcome = "requested" | "held" | "unconfigured" | "failed";
+
+export interface CustodianOwnerAudit {
+  readonly pause: (until: number | null) => Promise<void>;
+  readonly resume: () => Promise<void>;
+  readonly round: (outcome: CustodianOwnerOutcome) => Promise<void>;
+}
+
+export function custodianOwnerAudit(sink: AuditSink): CustodianOwnerAudit {
+  return {
+    pause: async (until) => {
+      await sink(
+        `audit custodian origin=cli op=pause until=${until === null ? "none" : new Date(until).toISOString()}`,
+      );
+    },
+    resume: async () => {
+      await sink("audit custodian origin=cli op=resume");
+    },
+    round: async (outcome) => {
+      await sink(`audit custodian origin=cli op=round outcome=${outcome}`);
+    },
+  };
+}
+
 /** A session's message to another session on this machine (`messages.ts`). */
 export type MessageOrigin = "message";
 
