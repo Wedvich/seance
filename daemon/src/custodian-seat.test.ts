@@ -49,9 +49,9 @@ describe("roundDue", () => {
   });
 
   test("a pane idle without a turn's end is not due: close answers it unobserved", () => {
-    expect(
-      roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: false })] }),
-    ).toBe(false);
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: false })] })).toBe(
+      false,
+    );
   });
 
   test("a busy pane with a long-still screen is not due until a verb can act on it", () => {
@@ -70,9 +70,9 @@ describe("roundDue", () => {
   });
 
   test("a pane with no observed state is not due, however long its screen has stood still", () => {
-    expect(
-      roundDue({ ...baseDue, panes: [pane({ state: null, stateSince: null, screenSince: NOW - EVERY })] }),
-    ).toBe(false);
+    expect(roundDue({ ...baseDue, panes: [pane({ state: null, stateSince: null, screenSince: NOW - EVERY })] })).toBe(
+      false,
+    );
   });
 
   test("a long-still needs-input pane alone is not due: no verb may touch it", () => {

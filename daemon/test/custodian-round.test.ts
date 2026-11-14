@@ -624,7 +624,10 @@ describe("the verbs, over the socket, from the round's own pane", () => {
 
       expect(await paneInfo(target)).not.toBeNull();
       expect(audit.filter((line) => line.includes("op=close"))).toEqual(
-        Array.from({ length: 3 }, () => "audit custodian origin=custodian op=close pane=%N task=- outcome=not_custodian"),
+        Array.from(
+          { length: 3 },
+          () => "audit custodian origin=custodian op=close pane=%N task=- outcome=not_custodian",
+        ),
       );
       expect(roundPane).not.toBe(second);
       await tmux(["kill-pane", "-t", impostor]);
