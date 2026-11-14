@@ -16,7 +16,6 @@ import {
   type Task,
 } from "@seance/shared";
 import { accountDisplayName } from "./machines-view.ts";
-import { machineAsleep } from "./asleep.ts";
 import { carriesOnLine, passedToLine, prNames, type QueueRow } from "./queue-view.ts";
 import {
   AUTONOMY_LABELS,
@@ -239,9 +238,8 @@ function chainOf(state: AppState, shown: readonly ArchivedTask[]): Chain {
   const view = state.queueView;
   const live = view?.kind === "ok" ? view.tasks : [];
   const titles = new Map([...live, ...shown.map((row) => row.task)].map((task) => [task.id, taskTitle(task)]));
-  // A card in the collapsed Asleep section is not rendered, so tapping would reveal nothing.
-  const onScreen = live.filter((task) => !machineAsleep(task, state.relay.machines));
-  return { titles, revealable: new Set([...onScreen, ...shown.map((row) => row.task)].map((task) => task.id)) };
+  // Every live card is reachable: the Queue screen opens a collapsed Asleep section before revealing into it.
+  return { titles, revealable: new Set(titles.keys()) };
 }
 
 function accountIds(state: AppState): ReadonlyMap<string, string> {

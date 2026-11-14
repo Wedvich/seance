@@ -12166,9 +12166,9 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   (its `successor`) and a successor "Carries on …" with the live card's trigger suffix (its
   `succeeds.task` and `trigger`; the archived `succeeds.account` placeholder is never read), the
   other task titled from the live queue or the Older rows read, else its short id. The line
-  reveals the other card on tap only while that card is rendered (an Older row shown, or a live
-  task outside the collapsed Asleep section); live cards keep these lines as plain text, since
-  their view cannot see either. Its machine is the registry's
+  reveals the other card on tap when it is an Older row shown or a live task, opening a collapsed
+  Asleep section first; live cards keep these lines as plain text, since their view cannot see
+  the Older rows. Its machine is the registry's
   current name, else the archive's last-known one. Its account is the live account's display
   name, matched by the `account:` store key this install derives, else the archived alias, else
   a short key, never the raw id. The Machine sheet lists the registry's machines, then every

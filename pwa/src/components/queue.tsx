@@ -111,6 +111,26 @@ export function QueueScreen(props: {
     card.focus({ preventScroll: true });
   }, []);
 
+  // A lineage line may name a card in the collapsed Asleep section: open it, and reveal on the next pass.
+  const [pendingReveal, setPendingReveal] = useState<string | null>(null);
+  const revealOpening = useCallback(
+    (taskId: string): void => {
+      const asleep = view.sections.some((s) => s.title === ASLEEP_SECTION && s.rows.some((r) => r.id === taskId));
+      if (!asleep || asleepOpen) {
+        reveal(taskId);
+        return;
+      }
+      setAsleepOpen(true);
+      setPendingReveal(taskId);
+    },
+    [view.sections, asleepOpen, reveal],
+  );
+  useEffect(() => {
+    if (pendingReveal === null || !asleepOpen) return;
+    reveal(pendingReveal);
+    setPendingReveal(null);
+  }, [pendingReveal, asleepOpen, reveal]);
+
   // The row a notification named, marked while it fades; one view, never again on a re-render.
   const [marked, setMarked] = useState<string | null>(null);
   const { focusedTask, onFocused } = props;
@@ -281,7 +301,7 @@ export function QueueScreen(props: {
                 onContinue={props.onContinue}
                 onPass={props.onPass}
                 onFollowUp={props.onFollowUp}
-                onReveal={reveal}
+                onReveal={revealOpening}
               />
             )}
           />
