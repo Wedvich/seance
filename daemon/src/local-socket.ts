@@ -57,8 +57,8 @@ import { isSessionEventFrameKind } from "./session-events.ts";
  * by the kernel's peer pid only and refused where the host names no peer, never by a field a sender
  * claims. DESIGN.md's "Session messages" records the widening.
  *
- * The sixth is `custodian` (`custodian-verbs.ts`): the custodian round's four verbs (`sessions`, `close`, `notes`,
- * `done`). It acts, but only for a process of the pane the seat record names as the running round, found by peer pid
+ * The sixth is `custodian` (`custodian-verbs.ts`): the custodian round's five verbs (`sessions`, `close`, `flag`,
+ * `notes`, `done`). It acts, but only for a process of the pane the seat record names as the running round, found by peer pid
  * alone and refused `not_custodian` otherwise, and its acts are the daemon's checked verbs. DESIGN.md's "The custodian
  * frame kind" records the widening.
  */

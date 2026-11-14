@@ -90,6 +90,8 @@ describe("push-sw.js", () => {
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "work", state: "expired" },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "work", state: "expiring" },
       { v: 1, kind: "archivist", at: 5, since: 1 },
+      { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1" },
+      { v: 1, kind: "flag", at: 5, taskId: TASK, reason: "stuck" },
     ];
     const worker = boot();
     for (const alert of alerts) await worker.push(JSON.stringify(alert));
@@ -175,6 +177,24 @@ describe("push-sw.js", () => {
           data: { url: "/?screen=machines" },
         },
       },
+      {
+        title: "Séance",
+        options: {
+          body: "A machine's custodian has failed three rounds in a row.",
+          tag: "custodian:dev-1",
+          renotify: true,
+          data: { url: "/?screen=machines" },
+        },
+      },
+      {
+        title: "Séance",
+        options: {
+          body: "A task's session looks stuck. The custodian flagged it.",
+          tag: `flag:${TASK}`,
+          renotify: true,
+          data: { url: `/?task=${TASK}` },
+        },
+      },
     ]);
   });
 
@@ -256,6 +276,59 @@ describe("push-sw.js", () => {
       });
     }
     await worker.push(quota({ taskId: "../x" }));
+    expect(worker.shown.at(-1)?.options).toEqual({
+      body: "Something needs your attention.",
+      tag: "seance",
+      renotify: true,
+    });
+  });
+
+  test("a flag alert shows its reason's fixed text, whatever else its payload carries, and an unknown reason a generic one", async () => {
+    const worker = boot();
+    const texts: Record<string, string> = {
+      stuck: "A task's session looks stuck. The custodian flagged it.",
+      look: "The custodian flagged a task for you to look at.",
+      dirty: "A closed task's worktree holds uncommitted changes.",
+      unpushed: "A closed task's worktree holds unpushed commits.",
+    };
+    for (const [reason, body] of Object.entries(texts)) {
+      await worker.push(
+        JSON.stringify({ v: 1, kind: "flag", at: 1, taskId: TASK, reason, note: "<b>never shown</b>" }),
+      );
+      expect(worker.shown.at(-1)?.options).toEqual({
+        body,
+        tag: `flag:${TASK}`,
+        renotify: true,
+        data: { url: `/?task=${TASK}` },
+      });
+    }
+    for (const reason of ["<b>x</b>", "__proto__", "constructor", 7, undefined]) {
+      await worker.push(JSON.stringify({ v: 1, kind: "flag", at: 1, taskId: TASK, reason }));
+      expect(worker.shown.at(-1)?.options).toEqual({
+        body: "The custodian flagged a task.",
+        tag: `flag:${TASK}`,
+        renotify: true,
+        data: { url: `/?task=${TASK}` },
+      });
+    }
+    await worker.push(JSON.stringify({ v: 1, kind: "flag", at: 1, taskId: "../x", reason: "stuck" }));
+    expect(worker.shown.at(-1)?.options).toEqual({
+      body: "Something needs your attention.",
+      tag: "seance",
+      renotify: true,
+    });
+  });
+
+  test("a failing custodian shows one fixed text and opens the Machines screen, and a bad device id only the fallback", async () => {
+    const worker = boot();
+    await worker.push(JSON.stringify({ v: 1, kind: "custodian-failing", at: 1, deviceId: "dev-1", name: "secret" }));
+    expect(worker.shown.at(-1)?.options).toEqual({
+      body: "A machine's custodian has failed three rounds in a row.",
+      tag: "custodian:dev-1",
+      renotify: true,
+      data: { url: "/?screen=machines" },
+    });
+    await worker.push(JSON.stringify({ v: 1, kind: "custodian-failing", at: 1, deviceId: "a/b" }));
     expect(worker.shown.at(-1)?.options).toEqual({
       body: "Something needs your attention.",
       tag: "seance",

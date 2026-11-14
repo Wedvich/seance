@@ -260,6 +260,16 @@ describe("task rows", () => {
     expect(parsed?.successor).toBe("t-after");
   });
 
+  test("a flag keeps its reason and time but loses its note, which is model-written from pane text", () => {
+    const flagged = task({ state: "done", flag: { reason: "stuck", note: "PANE-TEXT-NOTE", at: 77 } });
+    expect(archivedTask(flagged).flag).toEqual({ reason: "stuck", at: 77 });
+    const row = taskRow(flagged, 2, context);
+    if (row === null) throw new Error("done refused");
+    expect(row.record).not.toContain("PANE-TEXT-NOTE");
+    expect(parseTask(JSON.parse(row.record))?.flag).toEqual({ reason: "stuck", at: 77 });
+    expect(archivedTask(task({ state: "done" })).flag).toBeUndefined();
+  });
+
   test("a record not in a finished state still loses its prompt and attachment manifest", () => {
     const { spec } = archivedTask(task({ state: "running" }));
     expect(spec.prompt).toBeUndefined();

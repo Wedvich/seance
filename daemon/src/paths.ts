@@ -113,6 +113,14 @@ export function custodianStatePath(): string {
   return join(custodianDir(), "state.json");
 }
 
+/**
+ * The daemon's open custodian flags (`custodian-flags.ts`), its own file beside the owner's `state.json` so the CLI
+ * stays that file's only writer. Nudge and interrupt counts join it at item 8.
+ */
+export function custodianSessionsPath(): string {
+  return join(custodianDir(), "sessions.json");
+}
+
 /** `seanced custodian round` writes it, the seat reads and drops it. */
 export function custodianRoundRequestPath(): string {
   return join(custodianDir(), "round-request");

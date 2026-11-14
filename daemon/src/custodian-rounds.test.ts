@@ -37,6 +37,8 @@ describe("countedVerb", () => {
     expect(twice.close).toEqual({ ok: 1, refused: 1 });
     expect(twice.sessions).toEqual({ ok: 1, refused: 0 });
     expect(twice.notes).toEqual({ ok: 0, refused: 0 });
+    expect(countedVerb(emptyCounts(), "flag", false).flag).toEqual({ ok: 0, refused: 1 });
+    expect(emptyCounts().flagged).toBe(0);
     expect(emptyCounts().close).toEqual({ ok: 0, refused: 0 });
   });
 });
@@ -46,6 +48,27 @@ describe("parseRoundEntry", () => {
     for (const each of [entry(1), entry(2, { outcome: "healthy", reason: "done", summary: "closed two" })]) {
       expect(parseRoundEntry(JSON.stringify(each))).toEqual(each);
     }
+  });
+
+  test("a line written before custodian 6 has no flag tally or flagged count, and reads as zero", () => {
+    const { flag: _flag, flagged: _flagged, ...old } = emptyCounts();
+    const line = JSON.stringify({ ...entry(1), counts: old });
+    expect(parseRoundEntry(line)).toEqual(entry(1));
+  });
+
+  test("a flag tally or flagged count that is present and malformed refuses the line", () => {
+    for (const counts of [
+      { ...emptyCounts(), flag: { ok: -1, refused: 0 } },
+      { ...emptyCounts(), flag: null },
+      { ...emptyCounts(), flagged: -1 },
+      { ...emptyCounts(), flagged: 1.5 },
+      { ...emptyCounts(), flagged: "1" },
+    ]) {
+      expect(parseRoundEntry(JSON.stringify({ ...entry(1), counts }))).toBeNull();
+    }
+    expect(
+      parseRoundEntry(JSON.stringify({ ...entry(1), counts: { ...emptyCounts(), flagged: 3 } }))?.counts.flagged,
+    ).toBe(3);
   });
 
   test("a line that is not exactly an entry is refused", () => {

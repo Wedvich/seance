@@ -879,6 +879,8 @@ function describeTask(
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
     // The closed kind only: a tool name is a session- or MCP-server-chosen string, not for another agent's context.
     ...(task.inputReason === undefined ? {} : { inputReason: task.inputReason }),
+    // The closed reason only: the custodian's note is model-written from untrusted pane text, not for another agent's context.
+    ...(task.flag === undefined ? {} : { flag: task.flag.reason }),
     ...(spec.until === "reported" ? { until: spec.until } : {}),
     // Only off the default: most tasks run at checkpoint, and `plan: true` alone reads as steer.
     ...(level === DEFAULT_AUTONOMY ? {} : { autonomy: level }),

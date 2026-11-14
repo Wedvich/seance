@@ -272,6 +272,12 @@ export interface SeatDeps {
   readonly onView?: () => void;
   /** The view, without `rc`, for `seat.json`: every tick, so its age says the daemon is alive. */
   readonly publishView: (view: CustodianStatus) => Promise<void>;
+  /**
+   * C41: tells the leader the seat has failed `FAILING_AFTER` rounds in a row (a `custodian-event` `failing`, which it
+   * pushes). True once handed on. The seat holds an undelivered one and tries again on its ticks, since the third
+   * failure is often an `adopt` at daemon start, before the relay is registered or a term runs.
+   */
+  readonly onFailing?: () => Promise<boolean>;
   readonly warn: (line: string) => void;
 }
 
@@ -283,7 +289,10 @@ const COUNT_CAP = 999;
 /** `e` and `n` from the log's newest entry; absent with none. `e` is seconds, as `MachineStatus.at`. */
 export function lastRoundView(last: RoundEntry | undefined): Pick<CustodianStatus, "e" | "n"> {
   if (last === undefined) return {};
-  return { e: Math.floor(last.end / 1000), n: [Math.min(last.counts.close.ok, COUNT_CAP), 0, 0] };
+  return {
+    e: Math.floor(last.end / 1000),
+    n: [Math.min(last.counts.close.ok, COUNT_CAP), 0, Math.min(last.counts.flagged, COUNT_CAP)],
+  };
 }
 
 /** How many entries at the log's tail are failed ones. */
@@ -310,6 +319,8 @@ export interface CustodianSeat {
   /** The round's verb tally, as the round log carries it. In memory: a restart loses an adopted round's counts. */
   readonly count: (verb: CustodianVerb, ok: boolean) => void;
   readonly countWorktree: (kind: "removed" | "kept") => void;
+  /** A flag for the round: one the `flag` verb took as new, or the daemon's own after a close kept a worktree. */
+  readonly countFlagged: () => void;
   /** The round's `done` was accepted: its verbs are refused `round_done`. */
   readonly isDone: () => boolean;
   /**
@@ -346,6 +357,9 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   let unreadableWarned = false;
   /** C41's count: failed log entries, launch failures and picks that threw in a row; a healthy round clears it. A restart reseeds it from the log's tail. */
   let failures = 0;
+  /** The run of `FAILING_AFTER` has been reached and its `failing` event not yet handed on. In memory: a restart seeded past it sends none. */
+  let failingPending = false;
+  let sendingFailing = false;
   /** When this process last started a launch: with the record's `lastEndedAt` and the log's newest start, it spaces requests. */
   let lastLaunchAt = 0;
   let ready = false;
@@ -359,6 +373,33 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     } catch (err) {
       d.warn(`custodian: reading the round log failed: ${String(err)}`);
     }
+  };
+
+  /** Hands the pending `failing` on, once; a send that did not land stays pending for the next tick. */
+  const flushFailing = async (): Promise<void> => {
+    if (!failingPending || sendingFailing || d.onFailing === undefined || d.stopped()) return;
+    sendingFailing = true;
+    try {
+      if (await d.onFailing()) failingPending = false;
+    } catch (err) {
+      d.warn(`custodian: sending the failing event failed: ${String(err)}`);
+    } finally {
+      sendingFailing = false;
+    }
+  };
+
+  /** One failed round or attempt. Only the move onto `FAILING_AFTER` raises the event: a longer run and a restart seeded past it do not. */
+  const failed = (): void => {
+    failures += 1;
+    if (failures !== FAILING_AFTER) return;
+    failingPending = true;
+    void flushFailing();
+  };
+
+  /** A healthy round ends the run, and with it an event nobody took. */
+  const healthy = (): void => {
+    failures = 0;
+    failingPending = false;
   };
 
   const view = (now: number): CustodianStatus => {
@@ -415,7 +456,8 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         counts: reason === "done" ? countedVerb(counts, "done", true) : counts,
       })
       .catch((err: unknown) => d.warn(`custodian: writing the round log failed: ${String(err)}`));
-    failures = reason === "done" ? 0 : failures + 1;
+    if (reason === "done") healthy();
+    else failed();
     remote = null;
     await refreshLog();
     await persist({ lastEndedAt: d.now() });
@@ -460,7 +502,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     } catch (err) {
       // A pick that throws has read every exclave's `.claude.json` too: back off like a `none`, but this one is a fault.
       pickAfter = d.now() + everyMs;
-      failures++;
+      failed();
       throw err;
     }
     if ("none" in picked) {
@@ -487,7 +529,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         await persist(ahead(null, tmpDir));
       });
     } catch (err) {
-      failures++;
+      failed();
       await d.audit.start(exclave.id, null, "launch_failed");
       // A broken launch retries only after `everyMinutes`, never every tick.
       await persist({ lastEndedAt: d.now() });
@@ -507,7 +549,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     } catch (err) {
       // The pane exists but its record may not: a round nothing tracks has no deadline and no reader can reach it
       // (C10), so close it here and count it as ended.
-      failures++;
+      failed();
       d.warn(`custodian: recording a started round failed, closing it: ${String(err)}`);
       let outcome: CloseOutcome;
       try {
@@ -613,6 +655,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     } finally {
       busy = false;
     }
+    await flushFailing();
     await notify();
   };
 
@@ -660,6 +703,9 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     countWorktree: (kind): void => {
       counts = { ...counts, worktrees: { ...counts.worktrees, [kind]: counts.worktrees[kind] + 1 } };
     },
+    countFlagged: (): void => {
+      counts = { ...counts, flagged: counts.flagged + 1 };
+    },
     isDone: (): boolean => d.record().round?.done === true,
     done: (summary) =>
       serially(async () => {
@@ -682,7 +728,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
             summary,
           })
           .catch((err: unknown) => d.warn(`custodian: writing the round log failed: ${String(err)}`));
-        failures = 0;
+        healthy();
         await refreshLog();
         return "ok";
       }),

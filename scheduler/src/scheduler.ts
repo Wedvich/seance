@@ -15,6 +15,7 @@ import {
   type AmendRefusal,
   type AmendRequest,
   type BranchState,
+  type CustodianEvent,
   type FleetQuotaEntry,
   type IdleRelease,
   type DrainRefusal,
@@ -1008,6 +1009,54 @@ export class Scheduler {
       reason: raised.reason,
       head: raised.head,
       message: `pr blocked: task=${quote(taskId)} reason=${raised.reason}`,
+    });
+  }
+
+  /**
+   * The custodian's flag on a task, from a `custodian-event` sealed by `from`: written only when `from` is
+   * the machine the task is placed on, in any state (a session often outlives its task's `done`), and
+   * removed only by its `unflag`. The daemon resends a flag on every accepted call, so a repeat of what
+   * the record holds writes nothing and pushes nothing. A new `stuck` raises one alert once the write
+   * has landed, as `onPrStatus` does, so a new term never repeats it. Neither the log line nor the alert
+   * carries the note.
+   */
+  async onFlag(event: Extract<CustodianEvent, { kind: "flag" | "unflag" }>, from: string): Promise<void> {
+    let raised: number | undefined;
+    let wrote: "flag" | "unflag" | "note" | undefined;
+    const next = await this.#update(event.taskId, (task) => {
+      // The mutator may run again on a conflict: each run starts clean.
+      raised = undefined;
+      wrote = undefined;
+      if (task.assignment?.deviceId !== from) return null;
+      if (event.kind === "unflag") {
+        if (task.flag === undefined) return null;
+        wrote = "unflag";
+        const { flag: _dropped, ...rest } = task;
+        return rest;
+      }
+      const note = event.note === undefined ? {} : { note: event.note };
+      if (task.flag?.reason === event.reason) {
+        if (task.flag.note === event.note) return null;
+        wrote = "note";
+        return { ...task, flag: { reason: event.reason, ...note, at: task.flag.at } };
+      }
+      const at = this.#now();
+      wrote = "flag";
+      if (event.reason === "stuck") raised = at;
+      return { ...task, flag: { reason: event.reason, ...note, at } };
+    });
+    if (next === null || wrote === undefined) return;
+    this.#log(
+      wrote === "unflag"
+        ? `unflag: task=${quote(event.taskId)} from=${quote(from)}`
+        : `flag: task=${quote(event.taskId)} reason=${next.flag?.reason ?? "-"} from=${quote(from)}`,
+    );
+    if (raised === undefined || next.flag?.reason !== "stuck" || next.flag.at !== raised) return;
+    this.#alert({
+      kind: "flag",
+      taskId: event.taskId,
+      reason: "stuck",
+      message: `flag: task=${quote(event.taskId)} reason=stuck`,
     });
   }
 

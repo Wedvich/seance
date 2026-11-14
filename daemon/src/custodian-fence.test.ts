@@ -41,14 +41,14 @@ describe("DENY", () => {
     }
   });
 
-  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's four are not", () => {
+  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's five are not", () => {
     for (const verb of CUSTODIAN_OWNER_VERBS) {
       expect(denied(`seanced custodian ${verb}`)).toBe(true);
       expect(denied(`seanced custodian ${verb} --for 1h`)).toBe(true);
     }
     expect(denied("seanced custodian notes --clear")).toBe(true);
     expect(denied("seanced custodian notes --clear --x")).toBe(true);
-    for (const allowed of ["sessions", "close %3", "notes", "done"]) {
+    for (const allowed of ["sessions", "close %3", "flag %3 stuck", "flag %3 look a note", "notes", "done"]) {
       expect(denied(`seanced custodian ${allowed}`)).toBe(false);
     }
   });
@@ -132,7 +132,11 @@ describe("DENY", () => {
 });
 
 describe("custodianFence", () => {
-  const base = { roundDir: "/r/.seance-custodian", socketDirs: ["/tmp/tmux-1", "/s/run"] } as const;
+  const base = {
+    roundDir: "/r/.seance-custodian",
+    flagsPath: "/s/custodian/sessions.json",
+    socketDirs: ["/tmp/tmux-1", "/s/run"],
+  } as const;
 
   test("macOS lists the socket directories and never allows every socket", () => {
     const fence = custodianFence({ ...base, platform: "darwin", weakerNested: false });
@@ -157,9 +161,11 @@ describe("custodianFence", () => {
     for (const platform of ["darwin", "linux"] as const) {
       const fence = custodianFence({ ...base, platform, weakerNested: false });
       expect(fence.sandbox.filesystem.denyWrite).toEqual([base.roundDir]);
+      // The flags file's notes quote pane text: neither the Read tool nor a sandboxed command reads them back.
+      expect(fence.sandbox.filesystem.denyRead).toEqual([base.flagsPath]);
+      expect(fence.permissions.deny).toEqual([...DENY, `Read(//s/custodian/sessions.json)`]);
       expect(fence.permissions.defaultMode).toBe("dontAsk");
       expect(fence.permissions.allow).toEqual(["Read", "Bash(seanced custodian *)"]);
-      expect(fence.permissions.deny).toBe(DENY);
       expect(fence.sandbox).toMatchObject({
         enabled: true,
         failIfUnavailable: true,

@@ -203,6 +203,14 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
     expect(card?.pr).toMatchObject({ label: "#12", state: "merged", checks: null, stale: false, blocked: null });
   });
 
+  test("an archived card says when the custodian kept a worktree for it, by reason and with no note", () => {
+    const row = archived("t-1", { state: "done", flag: { reason: "dirty", at: NOW - DAY } });
+    const [card] = deriveOlder(state({ list: page([row]) }), NOW)?.rows ?? [];
+    expect(card?.flag).toEqual({ label: "Custodian: kept its worktree (uncommitted changes)", note: null });
+    const [plain] = deriveOlder(state({ list: page([archived("t-2", { state: "done" })]) }), NOW)?.rows ?? [];
+    expect(plain?.flag).toBeNull();
+  });
+
   test("a failed card says why, and names a retired machine by its last known name", () => {
     const row = archived(
       "t-1",

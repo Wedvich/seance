@@ -1092,6 +1092,16 @@ nothing checked it. The last is the gap they leave.
   `.claude/worktrees/`, never touched since the turn ended (where a live session's turn end was observed: a dead or
   exit-prompt pane has none), never locked by anyone but a dead Claude, never with a pane in it. A frame carries no path, branch, task or session id. Nothing read from a pane, the notes or the
   summary is logged or audited; the summary goes only into `rounds.jsonl`, and the notes into their 0600 file.
+- **A custodian flag is display-only and bounded** (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md`
+  carries the requirement). The round's fifth verb and the daemon's own flag after a kept worktree travel as a
+  sealed `custodian-event` from the daemon to the leader, which honours one only from a daemon and only for a task
+  whose assignment is the machine that sealed it, never one sealed `from: "app"`. `Task.flag` is written only by the
+  leader, through `Scheduler.onFlag` and the one task sealer, and moves, routes, settles and binds nothing. The note
+  is model-written from untrusted pane text, so it is non-empty, at most 200 UTF-16 units and free of control,
+  format, surrogate and separator characters (`isFlagNote`, enforced at the verb, at `parseCustodianEvent`, which
+  refuses the event, and at `parseTask`, which drops a flag whose note fails), is shown as text on the card only, and is never logged,
+  audited, put in a push or an archive row, or returned by `get_queue` or the `sessions` verb. A push carries the
+  reason as one of four fixed texts, and a `custodian-failing` push names the sealer's own device id.
 - **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
   `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,
   "Passing to a successor"):
@@ -1490,6 +1500,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | frame `inbox` (local socket, built 2026-11-13)                      | `daemon/src/inbox-cli.ts`, the `inbox` mod's child (`seanced inbox`)                                                                                                                                                                                                                                                                                                               | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
 | frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
 | op `session-pass` (→`"scheduler"`, built 2026-11-12)                | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                     | `daemon/src/leader.ts` `onSessionPass`                                                                                                                                                                                                                                                                                                                                                                  |
+| op `custodian-event` (→`"scheduler"`, built 2026-11-14)             | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                       | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
@@ -1952,6 +1963,15 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   except `record`, the session's claim: at most `SUCCESSOR_RECORD_MAX` (7 168) UTF-16 units, never
   logged (built 2026-11-12). `drain` is `true` only, set while the sending daemon's machine is closed; the
   leader reads it only beside a status of that machine carrying `cl` (Daemon, "The drain's session ask").
+- `custodian-event { kind: "flag" | "unflag" | "failing", taskId?, reason?, note?, at }` (`CustodianEvent`), an
+  `EventOp` daemon → scheduler, fire-and-forget like `session-event` (built 2026-11-14, custodian 6). `flag` carries a
+  `taskId`, a `reason` from `FLAG_REASONS` and an optional `note` of at most `FLAG_NOTE_MAX` (200) UTF-16 units
+  passing `isFlagNote` (one line: no control, format, surrogate or separator character); `unflag` a `taskId`;
+  `failing` nothing but `at`. The note is the round's own words from untrusted pane text, display-only, and is never
+  logged, audited, pushed, archived or shown by MCP. The leader acts on one only from a daemon and, for `flag` and
+  `unflag`, only for a task whose assignment is the machine that sealed it (Daemon, "The custodian frame kind", the
+  leader's side). No
+  capability and no sentinel: an older leader drops the op with one warn line (Daemon, "The custodian frame kind").
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
   "Pause"). `queue` replies carry the same `holds`.
@@ -2143,6 +2163,12 @@ an old peer's frames parse as before. Mixed versions:
   update`"; the daemon's own new reply codes are `untasked` (a pane with no scheduler task),
   `unrecorded` (a task the daemon's launch ledger holds no launch of), `unwritten` (sent, but the
   ledger write failed) and `stopping`.
+- `custodian-event`, `Task.flag` and the `flag` and `custodian-failing` push kinds (2026-11-14, no capability, no
+  sentinel): an older leader drops the op with one warn line and acts on nothing, so the flag stays local (the
+  `sessions` reply and the Machines count show it) and `failing` is lost for that run. An older `parseTask` drops the
+  field, so an older leader rewriting a flagged record loses the flag: a display line, during mixed-version
+  leadership only; no sentinel, since sentinels exist where an older leader would _act_ wrongly on a field it drops.
+  An older service worker shows the fallback text for the two kinds, as for `quota-exhausted` and `pass-refused`.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -3048,7 +3074,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     `quota-exhausted` carries the window label (shown only as `5h`/`7d`) and, when the leader alerts
     instead of passing, `reason` `dirty` or `branch`; `pass-refused` carries the task id alone.
     `auth` carries its device and exclave ids and state, and `archivist` only `since`, when the
-    absence began.
+    absence began. `flag` (custodian 6) carries the task id and the reason (one of four, shown as fixed text each)
+    and nothing else, never the note; it is sent once per new `stuck` only, once the write has landed (`look`,
+    `dirty` and `unpushed` are on the card, not a push). `custodian-failing` carries the machine's device id, sent once
+    per run of three failed rounds (Daemon, "The custodian's status and the Machines row").
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -8890,7 +8919,7 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   `op=worktree pane=<id> task=<id> outcome=removed how=<…>|kept why=<…>`. A round has no task id, so a start, kill and end
   name none; **nothing read from a pane, the seed, the notes, the summary or the agent's text reaches a line**, and
   the seat's own warnings say a reason from a fixed set and exclave ids.
-- **`seanced custodian`** (`custodian-cli.ts`) is the round's four verbs and is built (below). It is a static
+- **`seanced custodian`** (`custodian-cli.ts`) is the round's five verbs and is built (below). It is a static
   import in `main.ts`, as `session-event` and `inbox` are: the verbs run many times a round. The owner's verbs
   (`status`, `log`, `round`, `pause`, `resume`) are a separate module loaded by `import()` (custodian 5, below).
 - **Doctor.** `seanced doctor` has a `custodian` section on a machine whose config carries the key
@@ -11496,17 +11525,16 @@ the binding with real panes.
 ### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4), held with the seat
 
 The local socket's sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the
-custodian round's four verbs, `sessions`, `close <pane>`, `notes` and `done` (docs/custodian.md §5, C23–C25,
-C31–C34, C37–C39, C40, C42). `seanced custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the
-reply as JSON. Nudge, interrupt and flag (C26–C29), the round's pause and health, and the Machines row are not
-built; the `sessions` reply carries `nudges: 0`, `interrupted: false` and `flag: null` as placeholders so its shape
-does not change when they land.
+custodian round's five verbs, `sessions`, `close <pane>`, `flag <pane> <reason> [note]`, `notes` and `done`
+(docs/custodian.md §5, C23–C25, C29, C31–C34, C37–C39, C40, C42). `seanced custodian <verb>` (`custodian-cli.ts`) sends
+one frame and prints the reply as JSON. Nudge and interrupt (C26–C28) are not built; the `sessions` reply carries
+`nudges: 0` and `interrupted: false` as placeholders so its shape does not change when they land.
 
 **Held with the seat.** Nothing here runs in production: the verbs answer only for the round the seat names, and
 a held seat (`ROUNDS_LIVE`, "The custodian's seat") has none, so the frame answers `unsupported`. **The verbs bound
 only what goes through them.** Today a round's sandbox can still reach the tmux socket and the daemon's plain local
 ops, and read on-disk secrets with github.com reachable (docs/custodian.md, build item 4b, is the containment
-that closes these), so an injected round is not limited to the four verbs. What the checks below enforce is what a
+that closes these), so an injected round is not limited to the five verbs. What the checks below enforce is what a
 frame can do, not what the round can.
 
 - **The frame is bound by the kernel, to the round the seat record names, and nothing else.** `{v: 1, kind:
@@ -11534,7 +11562,9 @@ frame can do, not what the round can.
   one `CustodianPaneView`: id, window name, cwd, `ours` or `foreign`, the pane's classification, the retained last
   state and the whole minutes it has held, `turnEnded`, whole minutes of unchanged screen, task id, PR URL
   (`EndedTasks.prUrl`, the one lookup hand-off and pass share), the ledger's worktree path, whether a hand-off, pass
-  or drain mark holds it, and **the verdict `close` would reach right now** (`"ok"` or its refusal code). It adds the
+  or drain mark holds it, **the open flag's reason and time** (`flag`: never its note, which is model-written from
+  pane text and is not fed back to a later round; null for none) and **the verdict `close` would reach right now**
+  (`"ok"` or its refusal code). It first prunes the flags file against the panes in the tmux server (below). It adds the
   time retention began (`retainedSince`: a pane with no state before it is "unobserved after a restart", not a
   hung one) and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
   screen text is returned: a screen is read in memory to judge a close and dropped. Classification runs four at a
@@ -11585,8 +11615,81 @@ frame can do, not what the round can.
   `--force`** (`remove-failed` when git refuses). The local branch is left for reap's merged-branch sweep (C34).
   The outcome is audited (`op=worktree … outcome=removed how=<origin|pr|…>` or `outcome=kept why=<…>`, no path or
   branch), tallied for the round log and returned in the reply. `dirty` and `unpushed`, the two the owner would
-  want told, call `onKept`, a no-op seam: flagging them is custodian 6. A worktree decision that throws is
-  `unevaluated`, never a failed close.
+  want told, are flagged by the daemon itself (below). A worktree decision that throws is `unevaluated`, never a
+  failed close.
+- **`flag` (C29, custodian 6)** takes a pane, a reason from `FLAG_REASONS` (`stuck`, `look`, and the daemon's own
+  `dirty` and `unpushed`) and an optional note. Refusals, in order: `round_done` after `done`; `bad_reason`
+  (a reason outside the set); `too_long` (a note over `FLAG_NOTE_MAX`); `invalid` (an empty note, or one
+  `isFlagNote` refuses: a newline, a bidi or zero-width mark, a control character); `gone` (the pane is not there);
+  `foreign` (not `ours`, or the round's own pane). The pane is re-read at the act, as `close` does. An accepted flag
+  is written to the flags file and, for a pane with a task, **sent to the leader as a `custodian-event` `flag` every
+  time**, a repeat included: that is the only retry a lost event gets, and the leader writes and pushes nothing for
+  what the record already holds. The reply says `sent` (false when nothing could take the event: no relay, or a term
+  still taking over), never an error. An untasked pane is flagged in the file under its pane id and sent nowhere
+  (a task id is what the record is keyed by). Every call, taken or refused, is one audit line, `custodian
+  origin=custodian op=flag pane=<id> task=<id|-> reason=<reason|-> outcome=<ok|unsent|code> by=<round|daemon>`, and the note
+  is in none. `unsent` is a flag nothing took, the round's as the daemon's; an untasked pane's is `ok`, it has no record to tell.
+- **The flags file (C30, `custodian-flags.ts`)** is `stateDir()/custodian/sessions.json`, 0600 under the 0700 dir,
+  through `writeDurable`, **not** `state.json`. C30's text names `state.json`, but that file is the owner CLI's alone
+  (its pause; one the daemon cannot read loads as paused indefinitely), and a daemon write racing the CLI's
+  read-modify-write could lose the owner's pause or leave an unreadable file that pauses the seat: one writer per file.
+  Entries are keyed by the pane's task id, or its pane id for an untasked pane (a `%`, which a task id never
+  starts with). A pane id means nothing after the tmux server restarts and reuses them, so **pane-keyed entries are
+  dropped at load**. A bad entry is dropped alone; an unreadable file reads as empty with a warning that holds none of
+  its content. Reads and writes share one chain per process and the daemon holds one store per file (a second
+  instance would cache a map of its own and write it over the first's). The round's `Read` and its sandbox are denied
+  the file (`custodian-fence.ts`, a mistake guard like the rest): a note quotes pane text, and a later round must not
+  read it back. Nudge and interrupt counts join this file at item 8.
+- **When a flag lifts.** Never from a session event on the leader: the record's flag is removed only by the
+  daemon's `unflag` or by a re-assignment (`advance` to `ready`, Scheduler). The daemon sends `unflag` when (a) a
+  bound `busy` frame arrives for a pane whose retained state was `idle` (turn ended or not: a respawn's idle is
+  followed by a turn too): **a new turn** (the session-events `retain` hook, `isNewTurn`; `needs-input` to
+  `busy`, a permission answered, and `busy` to `busy` are the same turn and clear nothing; a pane with no state
+  retained is **not** a new turn, whether a restart, a config reload or a seat that never started left none: a stuck
+  session sends `busy` after every permission it is asked, so lifting on the first frame would let the next round flag
+  it again and push twice. The flag lifts at the next genuine new turn or a clean close instead. A turn the mod's
+  pending report folded into a `busy` after another `busy` is not seen either, and the next new turn, close or
+  re-assignment lifts that one). Only `stuck` and `look` lift here and in (c): `dirty` and `unpushed` are about the
+  worktree, not the turn or the session, whichever set them, so a round's own is sent again as `flag` until taken and
+  never lifted when its session ends, and a new turn leaves it. Only (b) lifts one, or a re-assignment; a round's
+  `dirty` on a session that ended some other way (a hand-off, a cancel) therefore stays until the re-assignment, like
+  the daemon's after reap removes the worktree, since the daemon cannot tell it from a flag for a worktree still kept
+  (accepted: the line was true when written); (b) a close finds nothing
+  kept: a removed worktree, none to decide on (a `here` task, or a worktree already gone), or an untasked pane; (c) a `sessions` or `flag` finds an entry whose
+  task is no live pane's, so a finished task's `stuck` does not outlive its session. The daemon's own
+  `dirty`/`unpushed` flag is the exception: it is sent as `flag` and the round's earlier local entry for that task is
+  cleared **without** an `unflag`, since a later prune would otherwise send one over the daemon's flag.
+  **An entry is cleared only after its event was taken** (`liftEntry`, `custodian-flags.ts`): the daemon's entry is
+  the source of truth for what the record holds, so an `unflag` nothing took keeps the entry, with a warning, and the
+  next new turn, `sessions` prune or close sends it again; a daemon `dirty`/`unpushed` flag nothing took is audited
+  `outcome=unsent` and left as the entry, which `sessions` resends as `flag` (the leader writes nothing for what the
+  record already holds) until taken; and `clear` after the send runs with `only`, so a flag the round set while the
+  send was out stands, a repeat of the same flag included (`CustodianFlags.revision`, a count of `set` calls that
+  `clear` compares, since a repeat leaves the entry byte for byte as it was yet its event may land after the `unflag`).
+  **Taken** means: in process, a running term took it and, for a flag or unflag, its write resolved
+  (`Leader.onCustodianEvent` answers `false` while a term is still taking over, before the registry's first push for a
+  `failing`, when a `failing`'s push had no room in the parked alerts, and when the write threw, so an event raised then is held or
+  kept); over the relay, the envelope
+  was written to the socket, and there is no ack, so a relay with no leader behind it still loses one. The resends are
+  what cover that gap; no outbox is built. The leader takes a `failing` only from a machine its registry lists (never
+  the archivist seat's id), and pushes at most one per sealer per 30 minutes, the time stamped only once the push was
+  sent or parked (one the parked list had no room for is answered `false`, so the seat sends it again).
+- **The leader's side (`Scheduler.onFlag`, `daemon/src/leader.ts` `onCustodianEvent`).** The leader acts only while a
+  term runs (an event with none is dropped and logged: kind and sender only) and only on an event a daemon sealed,
+  never one sealed `from: "app"`. `flag` and `unflag` are written through `#update` and the one task sealer, **only
+  when the task's `assignment.deviceId` is the sealer, in any state**: no state gate, since a session outlives its
+  task's `done` and the daemon's own flag is sent after its session closed. A flag for the reason the record holds is
+  a no-op (a repeat writes and pushes nothing); a changed note under the same reason rewrites the note and keeps the
+  time. `Task.flag` goes with the assignment it was raised on: `advance` to `ready` (a re-queue) drops it, a
+  finish keeps it. A new `stuck` raises one `flag` push once the write has landed (so a new term never repeats it);
+  neither the log line (`flag: task reason from`) nor the push carries the note. `failing` is pushed as
+  `custodian-failing` with the sealer's id and logged. Everything is a fire-and-forget: a refusal is silent, the
+  sender is not told.
+- **The daemon's own flags (C33).** A close that keeps a worktree as `dirty` or `unpushed` sends a `flag` with that
+  reason for the task (`by=daemon`, counted in `n[2]`): the work exists only in that worktree, and the owner is told
+  on the card. They stay on a finished task's record, which is the point (the card says a worktree was kept); nothing
+  lifts one later, and reap removing that worktree sends no `unflag`, so the card can say "kept" for one that has
+  since gone. Accepted: the line is true when written and a person reading it can look.
 - **`notes` (C37, C38, `pruneNotes`)** takes the text on stdin. Over `NOTES_MAX` (8 KiB) is `too_long`, and an empty
   or blank text is `invalid` (a slipped heredoc must not wipe the file; C38's "a round that writes none keeps the old
   file"). The file is sections keyed `## <key>`; a section is kept when its key is `standing`, a task id some
@@ -11624,13 +11727,15 @@ frame can do, not what the round can.
   daemon it cannot reach (`the daemon is not running`).
 - **The agent's checklist (`daemon/custodian/agent.md`)** is now the real one: `sessions`, judge each pane from its
   facts and, where it must, its screen through `tmux capture-pane`, `close` the finished ones, write `notes` as
-  `## <pane or task id>` sections plus `## standing`, then `done` with a summary of at most 1 KiB. It nudges and
-  flags nothing yet.
+  `## <pane or task id>` sections plus `## standing`, `flag` a session it leaves that needs its owner (`stuck` or
+  `look`, with a one-line note), then `done` with a summary of at most 1 KiB. It nudges nothing yet.
 - **Threat model.** The round reads untrusted text and may call any verb with any argument; these checks bound
   every act that goes through a verb, and nothing else (see "Held with the seat" above: until item 4b the round's
   sandbox can reach the tmux socket and the daemon's plain ops, so rounds stay held). A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The
-  frame has four acts and takes no path, branch, session id, task id or command: a pane id (re-read and bound to
-  `ours` by the daemon), text that is stored or counted and never executed, and a summary. Notes persist
+  frame has five acts and takes no path, branch, session id, task id or command: a pane id (re-read and bound to
+  `ours` by the daemon), a reason from a closed set, text that is stored or counted and never executed, and a
+  summary. A wrong `flag` costs a line on a card: it never closes, moves or settles anything, is display-only on the
+  record, and its note is bounded, character-checked and goes nowhere but the card. Notes persist
   model-written text for the next round, the one way an injection could outlive a round, bounded by the cap, the
   key rules, the per-key pruning, never being logged, never leaving the machine, and the owner's `--clear`. The
   same-uid process that makes itself a descendant of the round's pane can call the verbs; it could already type into
@@ -11654,14 +11759,18 @@ frame can do, not what the round can.
   the daemon (an injected round could then wipe them); a verb per capability bit (one frame kind, and `custodian`
   already says a seat is configured); serializing `writeDurable` itself (the notes and the round log each chain
   their own writes, and no other caller needs it); and a capture of the screen in `sessions`' reply (a second copy
-  of untrusted text for the round to quote into its summary, with no check it needs).
+  of untrusted text for the round to quote into its summary, with no check it needs); the flags in the owner CLI's
+  `state.json` (see "The flags file"); the leader clearing a flag from a session event (a `busy` frame reaches the
+  daemon first, which owns the pane's retained state and so the only knowledge of a turn's end; the leader would
+  clear it on a permission answered); a state gate on the leader's flag write (a session often outlives its task's
+  `done`, and the daemon's own `dirty`/`unpushed` flag is sent after the session has closed).
 
 ### The custodian's status and the Machines row (`custodian-control.ts`, `custodian-owner-cli.ts`, `custodian-remote.ts`) — built 2026-11-14 (custodian 5), held with the seat
 
 Built: `MachineStatus.cu`, the Machines card's Custodian row, and the owner's shell commands `seanced custodian status |
 log | round | pause [--for <n>m|h|d] | resume`. Held with the seat: while `ROUNDS_LIVE` is false no seat runs, no
-`CAPABILITIES.custodian` is advertised and no card shows the row. Not built: the card's menu, the `custodian` app op, flags
-and the `failing` push (custodian 6 and 7).
+`CAPABILITIES.custodian` is advertised and no card shows the row. Custodian 6 added the flagged count and the `failing`
+push (below). Not built: the card's menu and the `custodian` app op (custodian 7).
 
 - **`cu` on the wire** (`CustodianStatus`, `shared/src/types.ts`): `s` (`idle`, `running`, `paused`, `failing`), `e` (the last
   round's end, unix seconds like `at`), `n` (`[closed, nudged, flagged]`, each capped at 999) and `rc`, the running
@@ -11675,6 +11784,19 @@ and the `failing` push (custodian 6 and 7).
   for `everyMinutes` and counts nothing, so a busy afternoon never reads `failing`); `running` while a round's pane is recorded; else `idle`. The count is seeded at start from the log's
   trailing failures, so a restart does not forget a failing seat. A host whose checks failed (`seatFailed`) is
   `failing` too, with nothing to count. A launch failure writes no log entry, which is why the in-memory count exists.
+  `n[2]` is the last logged round's flagged count (the verb's new flags plus the daemon's own after a close), capped
+  at 999; older log lines have no such count and read as zero.
+- **The `failing` push (C41, custodian 6).** The seat hands a `custodian-event` `failing` to the leader **once, on the
+  move from two failures to three**: a longer run and a restart seeded past three send none. The leader pushes
+  `custodian-failing` with the sealer's device id (a daemon cannot name another machine's). The third failure is often
+  an `adopt` at daemon start, before the relay is registered or a term runs, so an event nothing could take is **held
+  in memory and retried on each tick**, until one lands or a healthy round ends the run. It is not persisted: a
+  restart seeded past three sends none, and an event dropped by a leader with no running term (logged there) is lost
+  for that run; the row still says `failing`. A host whose checks failed (`seatFailed`) sends **no push**: it ran no
+  three rounds, and its row already says `failing`. **Rejected:** a status-derived push (a leader watching
+  `cu.s`, re-armed on `idle`, deduped in the settings record): it would survive a term change at the moment of the
+  third failure and would also cover a failed host, at the price of a settings-record field and its parser. Revisit
+  if a missed `failing` push is ever seen.
 - **The row** shows the state, when the last round ended (`last round ended 3h ago`, or `no round yet`), the counts
   (`closed 3 · nudged 1 · flagged 2`, `closed 0` reading `nothing closed`), `failing` in the warn colour, and, while
   running with a valid `rc`, an `Open round` link. Each part is one unbreakable span, so a 390px card wraps between parts.
@@ -11712,7 +11834,7 @@ and the `failing` push (custodian 6 and 7).
   checks failed, while a round runs, and inside the spacing (naming when one can be asked for); nothing is requested
   then. A launch attempt that failed is in the seat's memory only, so a request right after one can still be dropped
   (the seat's log says so); the success line says "at its next tick", never that it will start.
-- **The CLI** is not `custodian-cli.ts` (the round's four verbs). `main.ts` dispatches `CUSTODIAN_OWNER_VERBS` to
+- **The CLI** is not `custodian-cli.ts` (the round's five verbs). `main.ts` dispatches `CUSTODIAN_OWNER_VERBS` to
   `custodian-owner-cli.ts` by dynamic import, outside the round CLI's import closure, because this one logs and audits and
   that closure must never reach `log.ts` (`daemon/test/message-layering.test.ts`). Every verb works from files (the
   round log, `seat.json`, `state.json`), never the socket, so `log` is machine-local by construction and a stopped

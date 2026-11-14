@@ -12,13 +12,13 @@ import { custodianNotesPath, socketPath } from "./paths.ts";
  * `session-event` (the round runs its verbs many times a turn): no import here may be heavy.
  *
  * The owner's verbs (`status`, `log`, `round`, `pause`, `resume`: `CUSTODIAN_OWNER_VERBS`) are not this module's: `main.ts`
- * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's four.
+ * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's five.
  *
  * Exit 0 for an `ok` reply, 1 for a refusal (its code on stderr), 2 for a command line the CLI refuses or a daemon it
  * cannot reach.
  */
 
-const USAGE = "usage: seanced custodian sessions | close <pane> | notes [--clear] | done";
+const USAGE = "usage: seanced custodian sessions | close <pane> | flag <pane> <reason> [note] | notes [--clear] | done";
 
 /** `close` covers a graceful despawn, a fetch and a `gh` read; the rest answer from memory or one small write. */
 const CLOSE_TIMEOUT_MS = 180_000;
@@ -48,11 +48,15 @@ async function clearNotes(): Promise<void> {
   console.log("notes cleared");
 }
 
-function frameFor(rest: readonly string[], text: () => Promise<string>): Promise<object> | null {
+export function frameFor(rest: readonly string[], text: () => Promise<string>): Promise<object> | null {
   const base = { v: CUSTODIAN_FRAME_VERSION, kind: CUSTODIAN_FRAME_KIND } as const;
   const [verb, ...args] = rest;
   if (verb === "sessions" && args.length === 0) return Promise.resolve({ ...base, verb });
   if (verb === "close" && args.length === 1) return Promise.resolve({ ...base, verb, pane: args[0] });
+  if (verb === "flag" && (args.length === 2 || args.length === 3)) {
+    const [pane, reason, note] = args;
+    return Promise.resolve({ ...base, verb, pane, reason, ...(note === undefined ? {} : { note }) });
+  }
   if (verb === "notes" && args.length === 0) return text().then((body) => ({ ...base, verb, text: body }));
   if (verb === "done" && args.length === 0) return text().then((body) => ({ ...base, verb, summary: body }));
   return null;

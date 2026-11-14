@@ -355,6 +355,7 @@ const UNUSED_AUDIT = {
   close: (): Promise<void> => Promise.resolve(),
   removedWorktree: (): Promise<void> => Promise.resolve(),
   keptWorktree: (): Promise<void> => Promise.resolve(),
+  flag: (): Promise<void> => Promise.resolve(),
 };
 
 interface Rig {
@@ -847,6 +848,9 @@ describe("the round's verbs reach the seat", () => {
     r.seat.count("close", false);
     r.seat.countWorktree("removed");
     r.seat.countWorktree("kept");
+    r.seat.count("flag", true);
+    r.seat.countFlagged();
+    r.seat.countFlagged();
     expect(await r.seat.done("closed one, kept one")).toBe("ok");
     expect(r.rounds).toHaveLength(1);
     expect(r.rounds[0]).toMatchObject({
@@ -859,7 +863,9 @@ describe("the round's verbs reach the seat", () => {
         sessions: { ok: 1, refused: 0 },
         close: { ok: 1, refused: 1 },
         notes: { ok: 0, refused: 0 },
+        flag: { ok: 1, refused: 0 },
         done: { ok: 1, refused: 0 },
+        flagged: 2,
         worktrees: { removed: 1, kept: 1 },
       },
     });
@@ -1187,6 +1193,14 @@ describe("the seat's view (C40, C41)", () => {
     r.seat.stop();
   });
 
+  test("n[2] is the last log entry's flagged count, capped at 999", async () => {
+    const r = rig();
+    r.rounds.push(entry({ end: 1_763_000_123_456, counts: { ...emptyCounts(), flagged: 5_000 } }));
+    await r.seat.start();
+    expect(r.seat.view(NOW)).toEqual({ s: "idle", e: 1_763_000_123, n: [0, 0, 999] });
+    r.seat.stop();
+  });
+
   test("failing after three failed entries in a row, not after two failed and a healthy one, and cleared by a healthy round", async () => {
     const three = rig({}, {});
     three.rounds.push(failed(NOW - 4 * MIN), failed(NOW - 3 * MIN), failed(NOW - 2 * MIN));
@@ -1252,6 +1266,100 @@ describe("the seat's view (C40, C41)", () => {
     expect(none.seat.view(none.clock.now).s).toBe("idle");
     r.seat.stop();
     none.seat.stop();
+  });
+
+  describe("the failing event (C41)", () => {
+    const throwingLaunches = async (r: Rig, count: number): Promise<void> => {
+      for (let at = 0; at < count; at++) {
+        r.clock.now += EVERY;
+        await r.seat.tick();
+      }
+    };
+
+    test("the third failure in a row hands one event on, a fourth and a fifth do not", async () => {
+      const sent: number[] = [];
+      const r = rig({
+        onFailing: () => {
+          sent.push(r.clock.now);
+          return Promise.resolve(true);
+        },
+      });
+      r.fail.launch = new Error("no tmux");
+      await r.seat.start();
+      await throwingLaunches(r, 2);
+      expect(sent).toEqual([]);
+      await throwingLaunches(r, 1);
+      expect(sent).toHaveLength(1);
+      await throwingLaunches(r, 3);
+      expect(sent).toHaveLength(1);
+      r.seat.stop();
+    });
+
+    test("an event nothing could take is held and tried again on each tick until one lands", async () => {
+      let accept = false;
+      let tries = 0;
+      const r = rig({
+        onFailing: () => {
+          tries += 1;
+          return Promise.resolve(accept);
+        },
+      });
+      r.fail.launch = new Error("no tmux");
+      await r.seat.start();
+      await throwingLaunches(r, 3);
+      const first = tries;
+      expect(first).toBeGreaterThanOrEqual(1);
+      await r.seat.tick();
+      expect(tries).toBeGreaterThan(first);
+      accept = true;
+      await r.seat.tick();
+      const landed = tries;
+      await r.seat.tick();
+      await r.seat.tick();
+      expect(tries).toBe(landed);
+      r.seat.stop();
+    });
+
+    test("a held event is dropped when a healthy round ends the run first, and a throw is a warning", async () => {
+      let tries = 0;
+      const r = rig({
+        onFailing: () => {
+          tries += 1;
+          return Promise.reject(new Error("relay"));
+        },
+      });
+      r.fail.launch = new Error("no tmux");
+      await r.seat.start();
+      await throwingLaunches(r, 3);
+      expect(r.warnings.join("\n")).toContain("sending the failing event failed");
+      r.fail.launch = null;
+      r.clock.now += EVERY;
+      await r.seat.tick();
+      // The round runs but has not reported: the held event is still tried.
+      const before = tries;
+      expect(await r.seat.done("fine")).toBe("ok");
+      r.live.clear();
+      r.clock.now += MIN;
+      await r.seat.tick();
+      await r.seat.tick();
+      expect(tries).toBe(before);
+      r.seat.stop();
+    });
+
+    test("a restart that reads three failed entries sends none: the transition was before this process", async () => {
+      let tries = 0;
+      const r = rig({
+        onFailing: () => {
+          tries += 1;
+          return Promise.resolve(true);
+        },
+      });
+      r.rounds.push(failed(NOW - 4 * MIN), failed(NOW - 3 * MIN), failed(NOW - 2 * MIN));
+      await r.seat.start();
+      await r.seat.tick();
+      expect(tries).toBe(0);
+      r.seat.stop();
+    });
   });
 
   test("the view is not ready until start has read the log and the control file", async () => {

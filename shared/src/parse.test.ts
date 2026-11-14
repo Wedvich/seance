@@ -4,6 +4,7 @@ import {
   bindTaskRecord,
   PR_URL_MAX_LENGTH,
   isBranchName,
+  isFlagNote,
   isMetricsRequest,
   isSkillName,
   parseAccountRecord,
@@ -48,7 +49,9 @@ import {
   parseQueueRequest,
   parseRepoEntry,
   parseResumeRequest,
+  parseCustodianEvent,
   parseSessionEvent,
+  parseTaskFlag,
   parseStoreChanged,
   parseStoreReply,
   parsePrStatus,
@@ -78,6 +81,7 @@ import {
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   EXIT_STATUS_MAX,
+  FLAG_NOTE_MAX,
   FLEET_QUOTA_MAX_ACCOUNTS,
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
@@ -133,6 +137,7 @@ import {
   type SettingsRecord,
   type WebPushSubscription,
   type Reason,
+  type CustodianEvent,
   type SchedulerError,
   type StoreRecord,
   type StoreReplyFrame,
@@ -1121,6 +1126,31 @@ describe("tasks and their records", () => {
     expect(parseTask({ ...waiting, idleRelease: { since: 9, deviceId: "a" } })).toEqual(waiting);
   });
 
+  test("a flag survives a parse; a malformed one is dropped and the task stays readable", () => {
+    const flagged: Task = { ...task, state: "running", flag: { reason: "stuck", note: "same error", at: 9 } };
+    expect(parseTask(flagged)).toEqual(flagged);
+    const bare: Task = { ...task, state: "running" };
+    expect(parseTask({ ...bare, flag: { reason: "look", at: 9 } })).toEqual({
+      ...bare,
+      flag: { reason: "look", at: 9 },
+    });
+    for (const bad of [
+      { reason: "nope", at: 9 },
+      { reason: "stuck" },
+      { reason: "stuck", at: Number.NaN },
+      { reason: "stuck", at: 9, note: "x".repeat(FLAG_NOTE_MAX + 1) },
+      { reason: "stuck", at: 9, note: "two\nlines" },
+      { reason: "stuck", at: 9, note: "\u202Eevil" },
+      { reason: "stuck", at: 9, note: "" },
+      { reason: "stuck", at: 9, extra: 1 },
+      "stuck",
+      null,
+    ]) {
+      expect(parseTask({ ...bare, flag: bad })).toEqual(bare);
+      expect(parseTaskFlag(bad)).toBeNull();
+    }
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },
@@ -1470,6 +1500,60 @@ describe("parseSessionEvent", () => {
   });
 });
 
+describe("flags and custodian events", () => {
+  const flag = { kind: "flag", taskId: "t-1", reason: "stuck", note: "same error", at: 5 } as const;
+
+  test("isFlagNote holds a note to one printable line within its bound", () => {
+    expect(isFlagNote("x".repeat(FLAG_NOTE_MAX))).toBe(true);
+    for (const bad of [
+      "",
+      "x".repeat(FLAG_NOTE_MAX + 1),
+      "a\nb",
+      "a\tb",
+      "a\u202Eb",
+      "a\u200Bb",
+      "a\u2028b",
+      "\uD800",
+      3,
+      null,
+    ]) {
+      expect(isFlagNote(bad)).toBe(false);
+    }
+  });
+
+  test("parseCustodianEvent accepts each kind as built", () => {
+    const events: readonly CustodianEvent[] = [
+      flag,
+      { kind: "flag", taskId: "t-1", reason: "dirty", at: 5 },
+      { kind: "unflag", taskId: "t-1", at: 5 },
+      { kind: "failing", at: 5 },
+    ];
+    for (const event of events) {
+      expect(parseCustodianEvent(event)).toEqual(event);
+    }
+  });
+
+  test("parseCustodianEvent refuses an extra key, a bad id, reason or note, and a shape of another kind", () => {
+    for (const bad of [
+      { ...flag, extra: 1 },
+      { ...flag, taskId: "a/b" },
+      { ...flag, taskId: undefined },
+      { ...flag, reason: "nope" },
+      { ...flag, note: "x".repeat(FLAG_NOTE_MAX + 1) },
+      { ...flag, note: "a\nb" },
+      { ...flag, at: "5" },
+      { kind: "unflag", taskId: "t-1", at: 5, reason: "stuck" },
+      { kind: "failing", at: 5, taskId: "t-1" },
+      { kind: "failing" },
+      { kind: "other", at: 5 },
+      "flag",
+      null,
+    ]) {
+      expect(parseCustodianEvent(bad)).toBeNull();
+    }
+  });
+});
+
 describe("parseBranchState", () => {
   const event: BranchState = {
     taskId: "t-1",
@@ -1604,6 +1688,18 @@ describe("store", () => {
       ...unfailed,
       state: "running",
       idleRelease: { since: 1_760_000_000_000, deviceId: "d".repeat(ROUTING_ID_MAX_LENGTH) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
+    };
+    expect(parseTask(running)).toEqual(running);
+    expect(await sealedLength(running)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
+  test("a running record carrying a flag at its bound, the note three bytes a unit, fits beside eight candidates", async () => {
+    const { failure: _failure, ...unfailed } = written;
+    const running: Task = {
+      ...unfailed,
+      state: "running",
+      flag: { reason: "unpushed", note: "\u20AC".repeat(FLAG_NOTE_MAX), at: 1_760_000_000_000 },
       decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
     };
     expect(parseTask(running)).toEqual(running);
@@ -2754,7 +2850,9 @@ describe("parsePushAlert", () => {
     const auth = { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired" } as const;
     const expiring = { ...auth, state: "expiring" } as const;
     const archivist = { v: 1, kind: "archivist", at: 5, since: 3 } as const;
-    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring, archivist]) {
+    const flagged = { v: 1, kind: "flag", at: 5, taskId: "t-1", reason: "stuck" } as const;
+    const failing = { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1" } as const;
+    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring, archivist, flagged, failing]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -2824,6 +2922,12 @@ describe("parsePushAlert", () => {
       { v: 1, kind: "archivist", at: 5, since: "3" },
       { v: 1, kind: "archivist", at: 5, since: 3, deviceId: "arch" },
       { v: 1, kind: "archivist", at: 5, since: 3, name: "free text" },
+      { v: 1, kind: "flag", at: 5, taskId: "t-1", reason: "stuck", note: "free text" },
+      { v: 1, kind: "flag", at: 5, taskId: "t-1", reason: "nope" },
+      { v: 1, kind: "flag", at: 5, reason: "stuck" },
+      { v: 1, kind: "custodian-failing", at: 5, deviceId: "a/b" },
+      { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1", note: "free text" },
+      { v: 1, kind: "custodian-failing", at: 5 },
       null,
       "spill",
     ]) {

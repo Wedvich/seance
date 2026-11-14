@@ -11,6 +11,7 @@ import {
   type AmendRequest,
   type DespawnRequest,
   type FailureReason,
+  type FlagReason,
   type MessageKind,
   type SpawnClient,
   type SpawnRequest,
@@ -20,7 +21,7 @@ import {
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
 import type { BrokerErrorCode, BrokerSchedulerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
-import type { CloseRefusal, KeptWhy } from "./custodian-frame.ts";
+import type { CloseRefusal, CustodianReplyCode, KeptWhy } from "./custodian-frame.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
@@ -744,6 +745,19 @@ export interface CustodianAudit {
     taskId: string | null,
     outcome: "exited" | "killed" | "harvested" | CloseRefusal | "not_custodian" | "internal",
   ) => Promise<void>;
+  /**
+   * A flag, by the round's `flag` verb (`by=round`, refused or taken) or the daemon's own after a close kept a
+   * worktree (`by=daemon`, `unsent` when nothing took the event: the entry stays and a later `sessions` sends it again).
+   * There is no parameter for the note, so none can be passed by mistake; a reason the
+   * round sent that is not a `FlagReason` is written as `-`.
+   */
+  readonly flag: (
+    pane: string,
+    taskId: string | null,
+    reason: FlagReason | "-",
+    outcome: "ok" | "unsent" | CustodianReplyCode,
+    by: "round" | "daemon",
+  ) => Promise<void>;
   readonly removedWorktree: (pane: string, taskId: string, how: string) => Promise<void>;
   readonly keptWorktree: (pane: string, taskId: string, why: KeptWhy) => Promise<void>;
 }
@@ -769,6 +783,11 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
     },
     close: async (pane, taskId, outcome) => {
       await sink(`audit custodian origin=${origin} op=close pane=${pane} task=${taskId ?? "-"} outcome=${outcome}`);
+    },
+    flag: async (pane, taskId, reason, outcome, by) => {
+      await sink(
+        `audit custodian origin=${origin} op=flag pane=${pane} task=${taskId ?? "-"} reason=${reason} outcome=${outcome} by=${by}`,
+      );
     },
     removedWorktree: async (pane, taskId, how) => {
       await sink(`audit custodian origin=${origin} op=worktree pane=${pane} task=${taskId} outcome=removed how=${how}`);

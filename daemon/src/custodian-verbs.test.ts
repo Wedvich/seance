@@ -5,7 +5,9 @@ import { join } from "node:path";
 import type { CustodianAudit } from "./audit.ts";
 import { DespawnFailure } from "./backend.ts";
 import { CUSTODIAN_DEFAULTS } from "./config.ts";
-import type { CloseRefusal, CustodianReply, KeptWhy } from "./custodian-frame.ts";
+import type { CustodianEvent } from "@seance/shared";
+import type { CloseRefusal, CustodianReply, CustodianReplyCode, KeptWhy } from "./custodian-frame.ts";
+import { createCustodianFlags, type CustodianFlags } from "./custodian-flags.ts";
 import {
   closeVerdict,
   createCustodianVerbs,
@@ -139,6 +141,9 @@ interface Rig {
   readonly warnings: string[];
   readonly calls: string[];
   readonly counts: string[];
+  /** What the verbs handed the leader, in order. */
+  readonly events: CustodianEvent[];
+  readonly flags: CustodianFlags;
   readonly state: {
     panes: PaneInfo[];
     states: Map<string, PaneState>;
@@ -148,12 +153,14 @@ interface Rig {
     worktree: WorktreeOutcome | null;
     peersNamed: boolean;
     doneAnswer: "ok" | "too_late" | "no_round";
+    sendOk: boolean;
     despawnError: Error | null;
     killed: boolean;
   };
 }
 
 let dir = "";
+let flagFiles = 0;
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "seance-verbs-"));
 });
@@ -173,6 +180,14 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
   const warnings: string[] = [];
   const calls: string[] = [];
   const counts: string[] = [];
+  const events: CustodianEvent[] = [];
+  // The real store on a real file: it is this package's own code, and the file is the boundary.
+  flagFiles += 1;
+  const flags = createCustodianFlags({
+    path: join(dir, `flags-${flagFiles}.json`),
+    now: () => NOW,
+    warn: (line) => warnings.push(line),
+  });
   const state: Rig["state"] = {
     panes: [info({ taskId: "t-1" })],
     states: new Map(),
@@ -182,6 +197,7 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
     worktree: null,
     peersNamed: true,
     doneAnswer: "ok",
+    sendOk: true,
     despawnError: null,
     killed: true,
   };
@@ -198,6 +214,7 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
     close: push("close"),
     removedWorktree: push("removed"),
     keptWorktree: push("kept"),
+    flag: push("flag"),
   };
   const deps: CustodianVerbDeps = {
     roundPane: () => state.round,
@@ -243,17 +260,22 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
     seat: {
       count: (verb, ok) => counts.push(`${verb} ${ok ? "ok" : "refused"}`),
       countWorktree: (kind) => counts.push(`worktree ${kind}`),
+      countFlagged: () => counts.push("flagged"),
       done: () => Promise.resolve(state.doneAnswer),
       isDone: () => state.done,
     },
     settings: CUSTODIAN_DEFAULTS,
     now: () => NOW,
     audit,
-    onKept: (pane, taskId, why) => calls.push(`onKept ${pane} ${taskId} ${why}`),
+    flags,
+    sendEvent: (event) => {
+      events.push(event);
+      return Promise.resolve(state.sendOk);
+    },
     warn: (line) => warnings.push(line),
     ...over,
   };
-  return { verbs: createCustodianVerbs(deps), lines, warnings, calls, counts, state };
+  return { verbs: createCustodianVerbs(deps), lines, warnings, calls, counts, events, flags, state };
 }
 
 const close = (pane = "%1"): unknown => ({ v: 1, kind: "custodian", verb: "close", pane });
@@ -570,7 +592,7 @@ describe("close", () => {
     expect(r.calls).toEqual([]);
   });
 
-  test("the worktree's outcome is audited and tallied, and only a rule failure reaches the flag seam", async () => {
+  test("the worktree's outcome is audited and tallied, and only a rule failure sets the daemon's flag", async () => {
     const removed = rig();
     removed.state.worktree = { removed: true, how: "merged" };
     expect(await removed.verbs.handle(close(), process.pid)).toMatchObject({
@@ -578,6 +600,7 @@ describe("close", () => {
     });
     expect(removed.lines).toEqual(["close %1 t-1 exited", "removed %1 t-1 merged"]);
     expect(removed.counts).toEqual(["worktree removed", "close ok"]);
+    expect(removed.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
 
     for (const why of [
       "dirty",
@@ -590,11 +613,14 @@ describe("close", () => {
       const r = rig();
       r.state.worktree = { kept: why };
       expect(await r.verbs.handle(close(), process.pid)).toMatchObject({ ok: true, worktree: { kept: why } });
-      expect(r.lines).toEqual(["close %1 t-1 exited", `kept %1 t-1 ${why}`]);
-      expect(r.counts).toEqual(["worktree kept", "close ok"]);
-      expect(r.calls.filter((c) => c.startsWith("onKept"))).toEqual(
-        why === "dirty" || why === "unpushed" ? [`onKept %1 t-1 ${why}`] : [],
-      );
+      const flagged = why === "dirty" || why === "unpushed";
+      expect(r.lines).toEqual([
+        "close %1 t-1 exited",
+        `kept %1 t-1 ${why}`,
+        ...(flagged ? [`flag %1 t-1 ${why} ok daemon`] : []),
+      ]);
+      expect(r.counts).toEqual(["worktree kept", ...(flagged ? ["flagged"] : []), "close ok"]);
+      expect(r.events).toEqual(flagged ? [{ kind: "flag", taskId: "t-1", reason: why, at: NOW }] : []);
     }
   });
 
@@ -687,11 +713,262 @@ describe("done", () => {
       seat: {
         count: () => {},
         countWorktree: () => {},
+        countFlagged: () => {},
         done: () => Promise.reject(new Error("must not be asked")),
         isDone: () => false,
       },
     });
     expect(await r.verbs.handle(done("x".repeat(1_025)), process.pid)).toEqual({ ok: false, code: "too_long" });
+  });
+});
+
+const flag = (reason: string, note?: string, pane = "%1"): unknown => ({
+  v: 1,
+  kind: "custodian",
+  verb: "flag",
+  pane,
+  reason,
+  ...(note === undefined ? {} : { note }),
+});
+
+describe("flag", () => {
+  test("a session's flag is stored, sent to the leader with its note, audited and counted, and the reply says it went", async () => {
+    const r = rig();
+    expect(await r.verbs.handle(flag("stuck", "same error four times"), process.pid)).toEqual({
+      ok: true,
+      verb: "flag",
+      pane: "%1",
+      taskId: "t-1",
+      reason: "stuck",
+      sent: true,
+    });
+    expect(await r.flags.get("t-1")).toEqual({ reason: "stuck", note: "same error four times", at: NOW });
+    expect(r.events).toEqual([
+      { kind: "flag", taskId: "t-1", reason: "stuck", note: "same error four times", at: NOW },
+    ]);
+    expect(r.lines).toEqual(["flag %1 t-1 stuck ok round"]);
+    expect(r.counts).toEqual(["flagged", "flag ok"]);
+  });
+
+  test("a repeat is sent again, since it is the only retry a lost event gets, but counted once", async () => {
+    const r = rig();
+    await r.verbs.handle(flag("look", "a"), process.pid);
+    await r.verbs.handle(flag("look", "a"), process.pid);
+    await r.verbs.handle(flag("look", "b"), process.pid);
+    expect(r.events.map((event) => event.kind)).toEqual(["flag", "flag", "flag"]);
+    expect(r.counts.filter((c) => c === "flagged")).toHaveLength(1);
+    expect(await r.flags.get("t-1")).toEqual({ reason: "look", note: "b", at: NOW });
+  });
+
+  test("an event that did not go is sent false, and one that throws is never the round's failure", async () => {
+    const down = rig();
+    down.state.sendOk = false;
+    expect(await down.verbs.handle(flag("look"), process.pid)).toMatchObject({ ok: true, sent: false });
+    expect(await down.flags.get("t-1")).not.toBeNull();
+    // Nothing took it, and the audit says so: `ok` is for a flag the leader's side took.
+    expect(down.lines).toEqual(["flag %1 t-1 look unsent round"]);
+
+    const throws = rig({ sendEvent: () => Promise.reject(new Error("SECRET-NOTE")) });
+    expect(await throws.verbs.handle(flag("look"), process.pid)).toMatchObject({ ok: true, sent: false });
+    expect(`${throws.warnings.join("\n")}${throws.lines.join("\n")}`).not.toContain("SECRET-NOTE");
+  });
+
+  test("an untasked pane is flagged in the store under its pane id, and nothing is sent", async () => {
+    const r = rig();
+    r.state.panes = [info({ taskId: null })];
+    expect(await r.verbs.handle(flag("look", "n"), process.pid)).toEqual({
+      ok: true,
+      verb: "flag",
+      pane: "%1",
+      taskId: null,
+      reason: "look",
+      sent: false,
+    });
+    expect(await r.flags.get("%1")).toMatchObject({ reason: "look" });
+    expect(r.events).toEqual([]);
+    expect(r.lines).toEqual(["flag %1 - look ok round"]);
+  });
+
+  test("a reason outside the set, a note too long or with a control character, and an empty note are refused with their code", async () => {
+    const cases: readonly [string, string | undefined, CustodianReplyCode][] = [
+      ["nope", undefined, "bad_reason"],
+      ["dirty-ish", undefined, "bad_reason"],
+      ["look", "x".repeat(201), "too_long"],
+      ["look", "a\nb", "invalid"],
+      ["look", `a${String.fromCodePoint(0x202e)}b`, "invalid"],
+      ["look", "", "invalid"],
+    ];
+    for (const [reason, note, code] of cases) {
+      const r = rig();
+      expect(await r.verbs.handle(flag(reason, note), process.pid)).toEqual({ ok: false, code });
+      expect(r.events).toEqual([]);
+      expect(await r.flags.get("t-1")).toBeNull();
+      expect(r.counts).toEqual(["flag refused"]);
+    }
+  });
+
+  test("a pane that is gone, not ours, or the round's own is refused, and so is any flag after done", async () => {
+    const gone = rig();
+    expect(await gone.verbs.handle(flag("look", undefined, "%5"), process.pid)).toEqual({ ok: false, code: "gone" });
+
+    const foreign = rig();
+    foreign.state.panes = [info({ taskId: "t-1", ours: false })];
+    expect(await foreign.verbs.handle(flag("look"), process.pid)).toEqual({ ok: false, code: "foreign" });
+
+    const own = rig();
+    own.state.panes = [info({ paneId: ROUND, taskId: null })];
+    expect(await own.verbs.handle(flag("look", undefined, ROUND), process.pid)).toEqual({
+      ok: false,
+      code: "foreign",
+    });
+
+    const finished = rig();
+    finished.state.done = true;
+    expect(await finished.verbs.handle(flag("look"), process.pid)).toEqual({ ok: false, code: "round_done" });
+
+    for (const each of [gone, foreign, own, finished]) {
+      expect(each.events).toEqual([]);
+      expect(await each.flags.get("t-1")).toBeNull();
+    }
+    expect(finished.lines).toEqual(["flag %1 - - round_done round"]);
+  });
+
+  test("a frame from no round pane is refused not_custodian and audited as that", async () => {
+    const r = rig();
+    expect(await r.verbs.handle(flag("look"), null)).toEqual({ ok: false, code: "not_custodian" });
+    expect(r.events).toEqual([]);
+    expect(r.lines).toEqual(["flag %1 - - not_custodian round"]);
+  });
+
+  test("the note is in no audit line, warning or reply, and `sessions` shows the reason and time only", async () => {
+    const r = rig();
+    const reply = await r.verbs.handle(flag("stuck", "SECRET-NOTE"), process.pid);
+    expect(JSON.stringify(reply)).not.toContain("SECRET-NOTE");
+    const view = await r.verbs.handle(sessions, process.pid);
+    expect(JSON.stringify(view)).not.toContain("SECRET-NOTE");
+    expect(view).toMatchObject({ panes: [{ pane: "%1", flag: { reason: "stuck", at: NOW } }] });
+    expect(`${r.lines.join("\n")}${r.warnings.join("\n")}`).not.toContain("SECRET-NOTE");
+  });
+});
+
+describe("a flag's life beside the verbs", () => {
+  test("`sessions` lifts the flag of a session that is gone: its entry goes and the record's flag with it", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", "n");
+    await r.flags.set("%9", "look", undefined);
+    r.state.panes = [info({ paneId: "%2", taskId: "t-2" })];
+    await r.verbs.handle(sessions, process.pid);
+    expect(r.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(await r.flags.get("%9")).toBeNull();
+  });
+
+  test("a close that leaves nothing kept clears the entry and the record's flag", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "look", undefined);
+    expect(await r.verbs.handle(close(), process.pid)).toMatchObject({ ok: true });
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+
+    const removed = rig();
+    await removed.flags.set("t-1", "look", undefined);
+    removed.state.worktree = { removed: true, how: "merged" };
+    await removed.verbs.handle(close(), process.pid);
+    expect(await removed.flags.get("t-1")).toBeNull();
+    expect(removed.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+  });
+
+  test("a close with no worktree to decide on lifts every flag, a worktree reason included; the record's flag goes too", async () => {
+    const r = rig();
+    r.state.worktree = null;
+    await r.flags.set("t-1", "dirty", "edits in the shared checkout");
+    expect(await r.verbs.handle(close(), process.pid)).toMatchObject({ ok: true, worktree: null });
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+  });
+
+  test("a close with no entry still tells the leader: the record may hold the daemon's own flag from an earlier close", async () => {
+    const r = rig();
+    await r.verbs.handle(close(), process.pid);
+    expect(r.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+
+    const kept = rig();
+    kept.state.worktree = { kept: "touched" };
+    await kept.verbs.handle(close(), process.pid);
+    expect(kept.events).toEqual([]);
+  });
+
+  test("a close that keeps a dirty worktree leaves the daemon's flag on the record: the entry goes without an unflag", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", undefined);
+    r.state.worktree = { kept: "dirty" };
+    await r.verbs.handle(close(), process.pid);
+    expect(r.events).toEqual([{ kind: "flag", taskId: "t-1", reason: "dirty", at: NOW }]);
+    expect(await r.flags.get("t-1")).toBeNull();
+    // A later `sessions` has nothing left to prune, so no unflag follows to wipe the daemon's flag.
+    r.state.panes = [];
+    await r.verbs.handle(sessions, process.pid);
+    expect(r.events.map((event) => event.kind)).toEqual(["flag"]);
+  });
+
+  test("a close that keeps a worktree for any other reason leaves the round's entry to the prune", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", undefined);
+    r.state.worktree = { kept: "touched" };
+    await r.verbs.handle(close(), process.pid);
+    expect(r.events).toEqual([]);
+    expect(await r.flags.get("t-1")).not.toBeNull();
+  });
+
+  test("an unflag nothing took leaves the entry and warns, and the next `sessions` sends it again", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", undefined);
+    r.state.panes = [];
+    r.state.sendOk = false;
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).not.toBeNull();
+    expect(r.warnings.join("\n")).toContain("were not taken");
+    r.state.sendOk = true;
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events.map((event) => event.kind)).toEqual(["unflag", "unflag"]);
+  });
+
+  test("a close whose unflag nothing took keeps the entry for the prune", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "look", undefined);
+    r.state.sendOk = false;
+    expect(await r.verbs.handle(close(), process.pid)).toMatchObject({ ok: true });
+    expect(await r.flags.get("t-1")).not.toBeNull();
+    expect(r.warnings.join("\n")).toContain("an unflag was not taken");
+  });
+
+  test("the daemon's dirty flag that nothing took is audited unsent and kept as the entry, which `sessions` sends again until taken", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", undefined);
+    r.state.worktree = { kept: "dirty" };
+    r.state.sendOk = false;
+    await r.verbs.handle(close(), process.pid);
+    expect(r.lines).toContain("flag %1 t-1 dirty unsent daemon");
+    expect(await r.flags.get("t-1")).toMatchObject({ reason: "dirty" });
+    // The session is gone and the entry is a worktree reason: the record is sent the flag, never an unflag.
+    r.state.panes = [];
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).not.toBeNull();
+    r.state.sendOk = true;
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events.map((event) => `${event.kind}`)).toEqual(["flag", "flag", "flag"]);
+    expect(r.events.at(-1)).toMatchObject({ kind: "flag", taskId: "t-1", reason: "dirty" });
+  });
+
+  test("a round's own dirty flag outlives its session on the record: the prune resends it, never lifts it", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "dirty", "uncommitted edits");
+    r.state.panes = [];
+    await r.verbs.handle(sessions, process.pid);
+    expect(r.events).toEqual([{ kind: "flag", taskId: "t-1", reason: "dirty", note: "uncommitted edits", at: NOW }]);
+    expect(await r.flags.get("t-1")).toBeNull();
   });
 });
 

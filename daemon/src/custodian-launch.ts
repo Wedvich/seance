@@ -9,7 +9,7 @@ import { ROUND_TMP, ROUND_TMP_PREFIX } from "./seat-record.ts";
 import { DEFAULT_EXCLAVE, type Exclave } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import { log } from "./log.ts";
-import { custodianDir, custodianNotesPath, runDir } from "./paths.ts";
+import { custodianDir, custodianNotesPath, custodianSessionsPath, runDir } from "./paths.ts";
 import { sessionName, shq } from "./spawn.ts";
 import {
   CUSTODIAN_FIELD,
@@ -192,6 +192,7 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
     const fence = custodianFence({
       platform: o.platform,
       roundDir: o.roundDir,
+      flagsPath: custodianSessionsPath(),
       socketDirs: [dirname(socket), runDir()],
       weakerNested: o.weakerNested,
     });

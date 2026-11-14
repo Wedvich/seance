@@ -200,7 +200,8 @@ export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
  * would keep for good: `assignment.window` and `branch` (a title-less task's
  * slug is the prompt's first words), `failure.message` (a daemon's text, which
  * may name the worktree) and `decision` (a `skill_absent` reason carries a
- * `/skill` read off the prompt). `failure.code` and the placement stay.
+ * `/skill` read off the prompt) and `flag.note` (model-written from pane text; the reason and time stay). `failure.code`
+ * and the placement stay.
  */
 export function archivedTask(task: Task): Task {
   const {
@@ -208,6 +209,7 @@ export function archivedTask(task: Task): Task {
     quotaExhausted: _quota,
     decision: _decision,
     branch: _branch,
+    flag,
     spec,
     assignment,
     failure,
@@ -224,6 +226,7 @@ export function archivedTask(task: Task): Task {
       ...(succeeds === undefined ? {} : { succeeds: { ...succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } }),
     },
     ...(assignment === undefined ? {} : { assignment: withoutWindow(assignment) }),
+    ...(flag === undefined ? {} : { flag: { reason: flag.reason, at: flag.at } }),
     ...(failure === undefined ? {} : { failure: { ...failure, message: "" } }),
   };
 }

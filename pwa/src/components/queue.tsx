@@ -554,6 +554,12 @@ function QueueCard(props: {
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
       {row.carriesOn !== null && <Lineage line={row.carriesOn} onReveal={props.onReveal} />}
       {row.passedTo !== null && <Lineage line={row.passedTo} onReveal={props.onReveal} />}
+      {row.flag !== null && (
+        <p className="fleet-card-body">
+          {row.flag.label}
+          {row.flag.note !== null && <>: {row.flag.note}</>}
+        </p>
+      )}
       {continuing !== null && (
         <p className="fleet-card-body">
           <button

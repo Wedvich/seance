@@ -301,3 +301,25 @@ describe("settle a renamed session", () => {
     expect(settle(placed, listing(""), observed)).toBeNull();
   });
 });
+
+describe("the custodian's flag", () => {
+  const flag = { reason: "stuck", note: "same error", at: NOW } as const;
+
+  test("a session event never clears it: only the daemon's unflag does", () => {
+    const waiting = task({ state: "needs-input", flag, needsInputSince: NOW });
+    const busy = sessionChange(waiting, "busy", FROM_A);
+    expect(busy).toMatchObject({ state: "running", flag });
+    expect(sessionChange(task({ flag }), "busy", FROM_A)).toBeNull();
+  });
+
+  test("finishing keeps every reason", () => {
+    for (const reason of ["stuck", "look", "dirty", "unpushed"] as const) {
+      expect(advance(task({ flag: { reason, at: NOW } }), "done").flag).toEqual({ reason, at: NOW });
+    }
+  });
+
+  test("a task sent back to ready drops it with the assignment it was raised on", () => {
+    const lost = task({ state: "lost", flag, reservedAt: NOW });
+    expect(advance(lost, "ready")).not.toHaveProperty("flag");
+  });
+});

@@ -16,7 +16,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { accountDisplayName } from "./machines-view.ts";
-import { carriesOnLine, passedToLine, prNames, type QueueRow } from "./queue-view.ts";
+import { carriesOnLine, FLAG_LABELS, passedToLine, prNames, type QueueRow } from "./queue-view.ts";
 import {
   AUTONOMY_LABELS,
   NO_OLDER_FILTERS,
@@ -225,6 +225,9 @@ function archivedRow(
     session: null,
     answer: null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
+    // The reason only: the archive keeps no note. What stays on a finished record is the daemon's kept-worktree flag,
+    // which is the point of keeping it (work sits in a worktree), so the card says so.
+    flag: task.flag === undefined ? null : { label: FLAG_LABELS[task.flag.reason], note: null },
   };
 }
 
