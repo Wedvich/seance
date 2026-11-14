@@ -41,12 +41,33 @@ describe("countedVerb", () => {
     expect(emptyCounts().flagged).toBe(0);
     expect(emptyCounts().close).toEqual({ ok: 0, refused: 0 });
   });
+
+  test("capture and pr have their own tallies", () => {
+    const counts = countedVerb(countedVerb(countedVerb(emptyCounts(), "capture", true), "pr", false), "pr", false);
+    expect(counts.capture).toEqual({ ok: 1, refused: 0 });
+    expect(counts.pr).toEqual({ ok: 0, refused: 2 });
+    expect(counts.close).toEqual({ ok: 0, refused: 0 });
+  });
 });
 
 describe("parseRoundEntry", () => {
   test("round-trips an entry with and without a summary", () => {
     for (const each of [entry(1), entry(2, { outcome: "healthy", reason: "done", summary: "closed two" })]) {
       expect(parseRoundEntry(JSON.stringify(each))).toEqual(each);
+    }
+  });
+
+  test("a line from before capture and pr existed parses with their tallies at zero", () => {
+    const { capture: _capture, pr: _pr, ...older } = entry(1).counts;
+    const parsed = parseRoundEntry(JSON.stringify({ ...entry(1), counts: older }));
+    expect(parsed).toEqual(entry(1));
+  });
+
+  test("a capture or pr tally that is present but malformed refuses the line", () => {
+    for (const verb of ["capture", "pr"] as const) {
+      for (const bad of [{ ok: -1, refused: 0 }, { ok: 1 }, null, "x"]) {
+        expect(parseRoundEntry(JSON.stringify({ ...entry(1), counts: { ...emptyCounts(), [verb]: bad } }))).toBeNull();
+      }
     }
   });
 

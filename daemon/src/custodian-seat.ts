@@ -10,7 +10,7 @@ import {
 import type { Config, CustodianConfig } from "./config.ts";
 import type { CustodianVerb } from "./custodian-frame.ts";
 import { pausedAt, ROUND_REQUEST_MIN_GAP_MS, type PauseRead, type RoundRequest } from "./custodian-control.ts";
-import { countedVerb, emptyCounts, type RoundEntry } from "./custodian-rounds.ts";
+import { countedVerb, emptyCounts, verbsUsed, type RoundEntry } from "./custodian-rounds.ts";
 import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
 import type { TrackedActivity } from "./pane-activity.ts";
 import type { SeatRecord } from "./seat-record.ts";
@@ -22,28 +22,30 @@ import type { SeatRecord } from "./seat-record.ts";
  * Nothing here reads a pane's text, and nothing it logs or audits holds any.
  */
 
-/**
- * Rounds are held until the hardening (docs/custodian.md, build item 4b). The verbs bound only what goes through
- * them: a live round's sandbox can still reach the tmux socket and the daemon's plain local ops, and read on-disk
- * secrets with github.com reachable, so an injected round would not be bound by them. Owner decision, 2026-11-14;
- * item 4b removes this constant.
- */
-export const ROUNDS_LIVE = false;
-
 /** `RunOpts.custodian`: the seat's seams. Production passes `{}`; the rest is for tests, which must never launch a real round. */
 export interface CustodianSeatOpts {
-  /** Tests only: `true` turns the seat on where `ROUNDS_LIVE` holds it. */
-  readonly live?: boolean;
   readonly checkIntervalMs?: number;
   /** The graceful exit's grace before a round is killed. */
   readonly graceMs?: number;
   readonly sandboxProblem?: () => Promise<string | null>;
   readonly weakerNested?: () => Promise<boolean>;
+  /** Tests: whether the sandbox mode was drilled (`sandboxDrilled`); a CI runner's strict mode never was. */
+  readonly sandboxDrilled?: (platform: "darwin" | "linux", weakerNested: boolean) => boolean;
 }
 
-export function seatLive(opts: CustodianSeatOpts): boolean {
-  return opts.live ?? ROUNDS_LIVE;
+/**
+ * Whether the round's sandbox has been drilled in this host's mode (docs/custodian.md item 4b; DESIGN.md, "The
+ * custodian's seat"): macOS, and Linux where `/proc/sys` is read-only and bwrap runs in its weaker nested mode (an LXC
+ * container). Linux's strict mode (`--proc /proc`, `--disable-userns`: bare metal or a VM) was never observed, so no
+ * round runs there until a drill has proven it; lifting that is a change to this one function.
+ */
+export function sandboxDrilled(platform: "darwin" | "linux", weakerNested: boolean): boolean {
+  return platform === "darwin" || weakerNested;
 }
+
+/** The one text the seat's warning and `seanced doctor` give for a host in an undrilled sandbox mode. */
+export const SANDBOX_UNDRILLED =
+  "bwrap would run in its strict mode here (/proc/sys is writable: bare metal or a VM), which the round's containment was never drilled in — no rounds on this host";
 
 export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux" | null {
   return platform === "darwin" || platform === "linux" ? platform : null;
@@ -51,25 +53,35 @@ export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux"
 
 /**
  * Whether this daemon holds a seat: the machine's own config carries the key, the process was started for one
- * (`RunOpts.custodian`), rounds are live, and the platform has a fence. One predicate for the capability bit and the
- * seat, so they cannot disagree.
+ * (`RunOpts.custodian`), and the platform has a fence. One predicate for the capability bit and the seat, so they
+ * cannot disagree: the bit says a seat is configured, not that its host checks passed (the log says when they did not).
  */
 export function seatEnabled(
   config: Pick<Config, "custodian">,
   opts: CustodianSeatOpts | null | undefined,
   platform: NodeJS.Platform,
 ): boolean {
-  return (
-    config.custodian !== undefined &&
-    opts !== null &&
-    opts !== undefined &&
-    seatLive(opts) &&
-    custodianPlatform(platform) !== null
-  );
+  return config.custodian !== undefined && opts !== null && opts !== undefined && custodianPlatform(platform) !== null;
 }
 
 const MINUTE_MS = 60_000;
 export const CHECK_INTERVAL_MS = MINUTE_MS;
+/** A round that exits sooner than this with no verb called counts as a failed start (`step`). */
+export const START_FAILED_MS = 2 * MINUTE_MS;
+
+/**
+ * A launch the seat declined, not one that failed: the same refusal the seat's own start check makes, found at a
+ * launch instead (an exclave added since, whose root sits over bun's dir). The seat audits it `op=refused` and runs
+ * no more rounds, where a failed launch is audited `launch_failed` and tried again.
+ */
+export class LaunchRefused extends Error {
+  readonly reason: "toolchain";
+  constructor(reason: "toolchain", detail: string) {
+    super(detail);
+    this.name = "LaunchRefused";
+    this.reason = reason;
+  }
+}
 
 /**
  * C14 and C45: some tracked pane has stood `idle` since a turn's end for `everyMs`; the last round ended at least that
@@ -174,7 +186,7 @@ export type HostProblem =
   | "root missing"
   | "round dir is in another exclave"
   | "round dir untrusted"
-  | "round dir holds settings or agents";
+  | "round dir holds settings, agents or a link";
 
 /**
  * Why a signed-in exclave's round dir cannot host a round, null when it can: the one rule the pick and `seanced
@@ -189,7 +201,7 @@ export async function hostProblem(
   if (!(await d.rootExists(exclave.root))) return "root missing";
   if (exclaveOf(dir, exclaves) !== exclave.id) return "round dir is in another exclave";
   if (!(await d.trusted(dir, exclave.configFile))) return "round dir untrusted";
-  if (await d.planted(dir)) return "round dir holds settings or agents";
+  if (await d.planted(dir)) return "round dir holds settings, agents or a link";
   return null;
 }
 
@@ -355,6 +367,11 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   let timer: ReturnType<typeof setInterval> | null = null;
   let busy = false;
   let counts = emptyCounts();
+  // False for a round this process adopted: its verbs before the restart are not in `counts`, so a verbless early end
+  // proves nothing about its start.
+  let countsKnown = true;
+  // A launch the seat refused (`LaunchRefused`): no round again in this process; a fix takes a restart, which re-checks.
+  let refused = false;
   // `done` writes the record `step` reads: both run through this chain, one at a time. `busy` stays the tick's own
   // guard (a tick while one runs does nothing), which `done` must not be dropped by.
   let chain: Promise<unknown> = Promise.resolve();
@@ -426,7 +443,8 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
       const id = remote !== null && round.pane !== null && remote.key === roundKey(round) ? remote.id : null;
       return { s: "running", ...shared, ...(id !== null && isRemoteSessionId(id) ? { rc: id } : {}) };
     }
-    if (failures >= FAILING_AFTER) return { s: "failing", ...shared };
+    // A refused launch runs no round again in this process: the same `failing` a seat refused at start shows.
+    if (refused || failures >= FAILING_AFTER) return { s: "failing", ...shared };
     return { s: paused ? "paused" : "idle", ...lastRoundView(lastRound) };
   };
 
@@ -455,7 +473,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
 
   const finish = async (
     round: NonNullable<SeatRecord["round"]>,
-    reason: "done" | "deadline" | "exited" | "lost",
+    reason: "done" | "deadline" | "exited" | "lost" | "start_failed",
   ): Promise<void> => {
     await d.removeTmp(round.tmpDir);
     await d.audit.end(round.pane, reason === "done" ? "healthy" : "failed", reason);
@@ -502,6 +520,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     const recorded = recordedPane === null ? undefined : panes.find((pane) => pane.pane === recordedPane);
     const kept = recorded !== undefined && !recorded.dead ? recorded.pane : null;
     await sweep(panes, recordedPane, kept);
+    if (kept !== null) countsKnown = false;
     if (round === undefined || kept !== null) return;
     if (round.done === true) return finish(round, "done");
     await finish(round, recorded === undefined ? "lost" : "exited");
@@ -541,11 +560,19 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     });
     let launched: { readonly pane: string; readonly tmpDir: string };
     counts = emptyCounts();
+    countsKnown = true;
     try {
       launched = await d.launch(exclave, async (tmpDir) => {
         await persist(ahead(null, tmpDir));
       });
     } catch (err) {
+      if (err instanceof LaunchRefused) {
+        refused = true;
+        d.warn(`custodian: no rounds on this host — ${err.message}`);
+        await d.audit.refused(err.reason);
+        await persist({ lastEndedAt: d.now() });
+        return;
+      }
       failed();
       await d.audit.start(exclave.id, null, "launch_failed");
       // A broken launch retries only after `everyMinutes`, never every tick.
@@ -643,7 +670,8 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         panes: asks ? await reachable(d.activity(), now) : d.activity(),
         untouchable: d.untouchable,
       });
-      if (!due || (!requested && now < pickAfter)) return;
+      // A refused launch starts no round again in this process, a requested one included.
+      if (!due || refused || (!requested && now < pickAfter)) return;
       // Dropped before the launch, so a crash in it cannot repeat the request.
       if (requested) await d.dropRoundRequest();
       await launch(requested);
@@ -678,7 +706,12 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
       return;
     }
     if (alive === "dead") await d.audit.kill(round.pane, "exited", await d.close(round.pane));
-    await finish(round, "exited");
+    // Gone within minutes of its start without one verb, in the process that launched it: the audit says so apart from
+    // a round that ran and left. Most often the sandbox refused to start (a protected name a newer Claude Code added,
+    // `PROTECTED_NAMES`), but a model or effort Claude Code rejects, a refused sign-in or an immediate API error ends
+    // the same way: the reason says when, not why.
+    const failedAtStart = countsKnown && now < round.startedAt + START_FAILED_MS && !verbsUsed(counts);
+    await finish(round, failedAtStart ? "start_failed" : "exited");
   };
 
   /** A poke that landed while a pass ran (or before `start` finished): that pass may have read the files before the change. */

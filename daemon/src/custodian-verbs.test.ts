@@ -6,7 +6,7 @@ import type { CustodianAudit } from "./audit.ts";
 import { DespawnFailure } from "./backend.ts";
 import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import { MESSAGE_PUSH_MAX, type CustodianEvent } from "@seance/shared";
-import type { CloseRefusal, CustodianReply, CustodianReplyCode, KeptWhy } from "./custodian-frame.ts";
+import type { CloseRefusal, CustodianReply, CustodianReplyCode, KeptWhy, PrView } from "./custodian-frame.ts";
 import { createCustodianFlags, type CustodianFlags } from "./custodian-flags.ts";
 import {
   closeVerdict,
@@ -183,6 +183,16 @@ const boxScreen = (box: string, after = ""): string =>
   `earlier output\n${RULE}\n${box}\n${RULE}\n  ? for shortcuts${after}`;
 const EMPTY_BOX = boxScreen("❯ ");
 
+const PR_VIEW: PrView = {
+  state: "OPEN",
+  isDraft: false,
+  mergeable: "MERGEABLE",
+  reviewDecision: null,
+  autoMerge: true,
+  checks: { state: "PENDING", contexts: [{ name: "build", status: "IN_PROGRESS", conclusion: null }] },
+  readAt: NOW,
+};
+
 /** Every fact a verb reads is a seam, so each test says only what it differs in. */
 function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig {
   const lines: string[] = [];
@@ -225,6 +235,7 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
     start: push("start"),
     kill: push("kill"),
     end: push("end"),
+    refused: push("refused"),
     close: push("close"),
     removedWorktree: push("removed"),
     keptWorktree: push("kept"),
@@ -240,6 +251,12 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
     paneInfo: (pane) => Promise.resolve(state.panes.find((p) => p.paneId === pane) ?? null),
     classifyPane: (pane) => Promise.resolve(state.states.get(pane.paneId) ?? "live"),
     capture: () => Promise.resolve(state.screen),
+    captureText: () => Promise.resolve(state.screen),
+    readPr: (url) => {
+      calls.push(`readPr ${url}`);
+      return Promise.resolve(PR_VIEW);
+    },
+    originOf: () => Promise.resolve({ owner: "o", name: "r" }),
     activity: () => rested(),
     retainedSince: () => NOW - 3 * CLOSE_AFTER,
     untouchable: () => false,
@@ -308,6 +325,8 @@ function rig(over: Partial<CustodianVerbDeps> = {}, notesName = "notes.md"): Rig
 
 const close = (pane = "%1"): unknown => ({ v: 1, kind: "custodian", verb: "close", pane });
 const sessions = { v: 1, kind: "custodian", verb: "sessions" };
+const capture = (pane = "%1"): unknown => ({ v: 1, kind: "custodian", verb: "capture", pane });
+const pr = (pane = "%1"): unknown => ({ v: 1, kind: "custodian", verb: "pr", pane });
 const notes = (text: string): unknown => ({ v: 1, kind: "custodian", verb: "notes", text });
 const done = (summary: string): unknown => ({ v: 1, kind: "custodian", verb: "done", summary });
 
@@ -452,6 +471,130 @@ describe("sessions", () => {
     const r = rig({ listPanes: () => Promise.reject(new Error("tmux")) });
     expect(await r.verbs.handle(sessions, process.pid)).toEqual({ ok: false, code: "internal" });
     expect(r.counts).toEqual(["sessions refused"]);
+  });
+});
+
+describe("capture", () => {
+  test("a session of ours: the visible screen as text, counted, never audited or logged", async () => {
+    const r = rig();
+    r.state.screen = "the pane's text";
+    expect(await r.verbs.handle(capture(), process.pid)).toEqual({
+      ok: true,
+      verb: "capture",
+      pane: "%1",
+      text: "the pane's text",
+    });
+    expect(r.counts).toEqual(["capture ok"]);
+    expect(r.lines).toEqual([]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  test("the round's own pane and a custodian pane are marked, a foreign one is foreign, a missing one or screen is gone", async () => {
+    const cases: readonly [(r: Rig) => void, CloseRefusal][] = [
+      [(r) => (r.state.panes = [info({ custodian: true })]), "marked"],
+      [(r) => (r.state.panes = [info({ paneId: "%1", ours: false })]), "foreign"],
+      [(r) => (r.state.panes = []), "gone"],
+      [(r) => (r.state.screen = null), "gone"],
+    ];
+    for (const [arrange, code] of cases) {
+      const r = rig();
+      arrange(r);
+      expect(await r.verbs.handle(capture(), process.pid)).toEqual({ ok: false, code });
+      expect(r.counts).toEqual(["capture refused"]);
+    }
+    const own = rig();
+    own.state.panes = [info({ paneId: ROUND, custodian: true })];
+    expect(await own.verbs.handle(capture(ROUND), process.pid)).toEqual({ ok: false, code: "marked" });
+  });
+
+  test("a capture that throws is internal, and the warning carries the error's name, never its text", async () => {
+    const r = rig({ captureText: () => Promise.reject(new TypeError("secret screen text")) });
+    expect(await r.verbs.handle(capture(), process.pid)).toEqual({ ok: false, code: "internal" });
+    expect(r.warnings.join("\n")).toContain("TypeError");
+    expect(r.warnings.join("\n")).not.toContain("secret");
+  });
+
+  test("from a process that is not the round it is not_custodian and reads nothing", async () => {
+    const r = rig({ captureText: () => Promise.reject(new Error("must not be read")) });
+    expect(await r.verbs.handle(capture(), null)).toEqual({ ok: false, code: "not_custodian" });
+  });
+});
+
+describe("pr", () => {
+  const tasks = (url: string | undefined, worktree: ReturnType<CustodianVerbDeps["tasks"]["worktree"]>) => ({
+    worktree: () => worktree,
+    prUrl: (): string | undefined => url,
+    launchedAt: (): number | undefined => undefined,
+    closing: () => Promise.resolve(),
+    harvestExits: () => Promise.resolve(),
+  });
+  const SITE = { repo: "/work/repo", path: "/work/repo/.claude/worktrees/a" } as const;
+  const URL_OK = "https://github.com/o/r/pull/7";
+
+  test("a task's PR: the reader gets exactly the ledger's URL, and the view comes back with the task", async () => {
+    const r = rig({ tasks: tasks(URL_OK, SITE) });
+    expect(await r.verbs.handle(pr(), process.pid)).toEqual({
+      ok: true,
+      verb: "pr",
+      pane: "%1",
+      taskId: "t-1",
+      url: URL_OK,
+      ...PR_VIEW,
+    });
+    expect(r.calls).toEqual([`readPr ${URL_OK}`]);
+    expect(r.counts).toEqual(["pr ok"]);
+    expect(r.lines).toEqual([]);
+  });
+
+  test("a pane with no task is untasked, a task with no PR is prless, and neither reads anything", async () => {
+    const bare = rig({ tasks: tasks(URL_OK, SITE) });
+    bare.state.panes = [info({ taskId: null })];
+    expect(await bare.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "untasked" });
+    const prless = rig({ tasks: tasks(undefined, SITE) });
+    expect(await prless.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "prless" });
+    expect(bare.calls).toEqual([]);
+    expect(prless.calls).toEqual([]);
+  });
+
+  test("the pane checks are capture's: gone, foreign and marked", async () => {
+    for (const [pane, code] of [
+      [info({ ours: false }), "foreign"],
+      [info({ custodian: true }), "marked"],
+    ] as const) {
+      const r = rig({ tasks: tasks(URL_OK, SITE) });
+      r.state.panes = [pane];
+      expect(await r.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code });
+    }
+    const gone = rig({ tasks: tasks(URL_OK, SITE) });
+    gone.state.panes = [];
+    expect(await gone.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "gone" });
+  });
+
+  test("a PR outside the repo the task's worktree's origin names is foreign_pr, whatever its case, and is never read", async () => {
+    for (const url of ["https://github.com/other/r/pull/7", "https://github.com/o/other/pull/7"]) {
+      const r = rig({ tasks: tasks(url, SITE) });
+      expect(await r.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "foreign_pr" });
+      expect(r.calls).toEqual([]);
+    }
+    const cased = rig({ tasks: tasks("https://github.com/O/R/pull/7", SITE) });
+    expect(await cased.verbs.handle(pr(), process.pid)).toMatchObject({ ok: true });
+  });
+
+  test("with no worktree here (a here task, a launch in flight), or an origin that is not GitHub's, nothing proves the PR's repo: unreadable, never a false foreign_pr", async () => {
+    const noTree = rig({ tasks: tasks(URL_OK, { refused: "none" }) });
+    expect(await noTree.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "unreadable" });
+    const elsewhere = rig({ tasks: tasks(URL_OK, SITE), originOf: () => Promise.resolve(null) });
+    expect(await elsewhere.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "unreadable" });
+    expect(noTree.calls).toEqual([]);
+    expect(elsewhere.calls).toEqual([]);
+  });
+
+  test("a URL that is not a GitHub PR, or one the reader cannot read, is unreadable", async () => {
+    const odd = rig({ tasks: tasks("https://example.com/o/r/pull/7", SITE) });
+    expect(await odd.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "unreadable" });
+    const failing = rig({ tasks: tasks(URL_OK, SITE), readPr: () => Promise.resolve("unreadable") });
+    expect(await failing.verbs.handle(pr(), process.pid)).toEqual({ ok: false, code: "unreadable" });
+    expect(failing.counts).toEqual(["pr refused"]);
   });
 });
 

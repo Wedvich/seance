@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 /**
@@ -20,7 +20,7 @@ const ENTRIES = [
   "custodian-control.ts",
 ] as const;
 
-const IMPORT = /(?:from|import)\s*\(?\s*"(\.\/[^"]+)"/gu;
+const IMPORT = /(?:from|import)\s*\(?\s*["'](\.\/[^"']+)["']/gu;
 
 async function closure(entry: string): Promise<ReadonlySet<string>> {
   const seen = new Set<string>();
@@ -46,4 +46,42 @@ describe("the message paths that run where stdout is a protocol channel", () => 
       expect([...reached].filter((file) => file === "log.ts")).toEqual([]);
     });
   }
+});
+
+/**
+ * The round runs `seanced` under a sandbox that reads only `daemon/`, `shared/` and `node_modules/` of the checkout
+ * (`toolchainAllow`, `custodian-launch.ts`): a static import from `main.ts` that left `daemon/src` or named another
+ * workspace (`@seance/scheduler`, whose source is `scheduler/src`) would make every verb fail inside the round, with
+ * no error the round could read. Dynamic `import()` is how `main.ts` keeps the rest of the CLI out of this closure.
+ */
+const STATIC_IMPORT = /^\s*(?:import|export)\s(?:[^;]*?\sfrom\s*)?["']([^"']+)["']/gmu;
+
+describe("what `seanced custodian` loads in the round's sandbox", () => {
+  test("main.ts's static import closure stays under daemon/src, node and @seance/shared", async () => {
+    const files = new Set<string>();
+    const bare = new Set<string>();
+    const queue = ["main.ts"];
+    for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
+      if (files.has(file)) continue;
+      files.add(file);
+      // oxlint-disable-next-line no-await-in-loop -- a walk
+      const source = await readFile(join(SRC, file), "utf8");
+      for (const match of source.matchAll(STATIC_IMPORT)) {
+        const target = match[1];
+        if (target === undefined) continue;
+        if (!target.startsWith(".")) {
+          bare.add(target);
+          continue;
+        }
+        const resolved = relative(SRC, resolve(SRC, dirname(file), target));
+        expect(resolved.startsWith("..")).toBe(false);
+        queue.push(resolved);
+      }
+    }
+    expect(files.has("custodian-cli.ts")).toBe(true);
+    const outside = [...bare].filter(
+      (name) => !name.startsWith("node:") && name !== "bun" && !name.startsWith("bun:") && name !== "@seance/shared",
+    );
+    expect(outside).toEqual([]);
+  });
 });

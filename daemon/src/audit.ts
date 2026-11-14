@@ -737,8 +737,10 @@ export interface CustodianAudit {
   readonly end: (
     pane: string | null,
     outcome: "healthy" | "failed",
-    reason: "done" | "deadline" | "exited" | "lost",
+    reason: "done" | "deadline" | "exited" | "lost" | "start_failed",
   ) => Promise<void>;
+  /** The seat declined to start rounds on this host, for a fixed reason (`run-capabilities.ts`). */
+  readonly refused: (reason: "sandbox_undrilled" | "toolchain") => Promise<void>;
   /** A `close` the round asked for, refused or done (`custodian-verbs.ts`). */
   readonly close: (
     pane: string,
@@ -790,6 +792,9 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
     end: async (pane, outcome, reason) => {
       await sink(`audit custodian origin=${origin} op=end pane=${pane ?? "-"} outcome=${outcome} reason=${reason}`);
     },
+    refused: async (reason) => {
+      await sink(`audit custodian origin=${origin} op=refused reason=${reason}`);
+    },
     close: async (pane, taskId, outcome) => {
       await sink(`audit custodian origin=${origin} op=close pane=${pane} task=${taskId ?? "-"} outcome=${outcome}`);
     },
@@ -818,14 +823,7 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
  * origin like every command typed at this machine, and the `custodian` app op under `relay`. `status` and `log` are
  * reads and write nothing. No text from a file or a payload reaches a line: only the pause's end, and a fixed outcome.
  */
-export type CustodianOwnerOutcome =
-  | "requested"
-  | "held"
-  | "unconfigured"
-  | "failed"
-  | "running"
-  | "starting"
-  | "too_soon";
+export type CustodianOwnerOutcome = "requested" | "unconfigured" | "failed" | "running" | "starting" | "too_soon";
 
 export interface CustodianOwnerAudit {
   readonly pause: (until: number | null) => Promise<void>;

@@ -44,20 +44,19 @@ let dir: string;
 let statePath: string;
 let requestPath: string;
 /** What the seat and its files say; each test sets what it needs. */
-let seat: { live: boolean; configured: boolean; view: SeatView | null; record: SeatRecord; rounds: RoundEntry[] };
+let seat: { configured: boolean; view: SeatView | null; record: SeatRecord; rounds: RoundEntry[] };
 
 beforeEach(async () => {
   lines.length = 0;
   dir = await mkdtemp(join(tmpdir(), "seance-custodian-op-"));
   statePath = join(dir, "custodian", "state.json");
   requestPath = join(dir, "custodian", "round-request");
-  seat = { live: true, configured: true, view: null, record: {}, rounds: [] };
+  seat = { configured: true, view: null, record: {}, rounds: [] };
 });
 afterEach(() => rm(dir, { recursive: true, force: true }));
 
 const inputs = (): Omit<OwnerRoundInputs, "now"> & { now: () => number; path: string } => ({
   now: () => NOW,
-  live: seat.live,
   configured: () => Promise.resolve(seat.configured),
   seatView: () => Promise.resolve(seat.view),
   seatRecord: () => Promise.resolve(seat.record),
@@ -135,17 +134,6 @@ describe("the custodian op's acts", () => {
     ]);
   });
 
-  test("round while rounds are held: refused held, nothing requested, pause and resume still work", async () => {
-    seat.live = false;
-    expect(await act({ act: "round" })).toMatchObject({ ok: false, code: "held" });
-    expect(await exists(requestPath)).toBe(false);
-    expect(await act({ act: "pause" })).toEqual({ ok: true, pause: { until: null } });
-    expect(trail()).toEqual([
-      "audit custodian origin=relay op=round outcome=held",
-      "audit custodian origin=relay op=pause until=none",
-    ]);
-  });
-
   test("round while the daemon's seat is still starting: unsupported, nothing requested; pause still writes", async () => {
     const starting = (): Omit<OwnerRoundInputs, "now"> & { now: () => number; path: string } => ({
       ...inputs(),
@@ -183,13 +171,12 @@ describe("the custodian op's acts", () => {
       [() => (seat.record = { round: { pane: "%3", startedAt: NOW - 1, tmpDir: "/tmp/x", exclave: "e" } }), "running"],
     ];
     for (const [arrange, code] of cases) {
-      seat = { live: true, configured: true, view: null, record: {}, rounds: [] };
+      seat = { configured: true, view: null, record: {}, rounds: [] };
       arrange();
       // oxlint-disable-next-line no-await-in-loop -- one case at a time over one dir
       expect(await act({ act: "round" })).toMatchObject({ ok: false, code });
     }
     seat = {
-      live: true,
       configured: true,
       view: null,
       record: {},

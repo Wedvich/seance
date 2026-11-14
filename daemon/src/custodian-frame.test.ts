@@ -11,6 +11,9 @@ describe("parseCustodianFrame", () => {
       verb: "close",
       pane: "%12",
     });
+    for (const verb of ["capture", "pr"] as const) {
+      expect(parseCustodianFrame({ ...base, verb, pane: "%3" })).toEqual({ ...base, verb, pane: "%3" });
+    }
     expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%12", reason: "stuck" })).toEqual({
       ...base,
       verb: "flag",
@@ -82,7 +85,12 @@ describe("parseCustodianFrame", () => {
     expect(parseCustodianFrame({ ...base, verb: "close" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: "%1", text: "x" })).toBeNull();
     expect(parseCustodianFrame({ ...base, v: 2, verb: "sessions" })).toBeNull();
-    expect(parseCustodianFrame({ ...base, verb: "capture", pane: "%1" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "type", pane: "%1" })).toBeNull();
+    for (const verb of ["capture", "pr"] as const) {
+      expect(parseCustodianFrame({ ...base, verb })).toBeNull();
+      expect(parseCustodianFrame({ ...base, verb, pane: "12" })).toBeNull();
+      expect(parseCustodianFrame({ ...base, verb, pane: "%1", text: "x" })).toBeNull();
+    }
     expect(parseCustodianFrame({ ...base, verb: "close", pane: "12" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: "%x" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: 12 })).toBeNull();

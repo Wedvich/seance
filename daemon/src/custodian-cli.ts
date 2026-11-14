@@ -2,7 +2,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { isRecord } from "@seance/shared";
 import { CUSTODIAN_FRAME_KIND, CUSTODIAN_FRAME_VERSION, parseCustodianFrame } from "./custodian-frame.ts";
 import { exchange, LocalRequestFailed, LocalUnavailable, RESTART_GRACE_MS } from "./local-client.ts";
-import { custodianNotesPath, socketPath } from "./paths.ts";
+import { custodianNotesPath } from "./paths.ts";
 
 /**
  * `seanced custodian <verb>`: the round's verbs (docs/custodian.md; DESIGN.md, "The custodian frame kind"). Each sends
@@ -12,17 +12,17 @@ import { custodianNotesPath, socketPath } from "./paths.ts";
  * `session-event` (the round runs its verbs many times a turn): no import here may be heavy.
  *
  * The owner's verbs (`status`, `log`, `round`, `pause`, `resume`: `CUSTODIAN_OWNER_VERBS`) are not this module's: `main.ts`
- * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's seven.
+ * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's nine.
  *
  * Exit 0 for an `ok` reply, 1 for a refusal (its code on stderr), 2 for a command line the CLI refuses or a daemon it
  * cannot reach.
  */
 
 const USAGE =
-  "usage: seanced custodian sessions | close <pane> | flag <pane> <reason> [note] | nudge <pane> (text on stdin) | " +
-  "interrupt <pane> | notes [--clear] | done";
+  "usage: seanced custodian sessions | close <pane> | capture <pane> | pr <pane> | flag <pane> <reason> [note] | " +
+  "nudge <pane> (text on stdin) | interrupt <pane> | notes [--clear] | done";
 
-/** `close` covers a graceful despawn, a fetch and a `gh` read; the rest answer from memory or one small write. */
+/** `close` covers a graceful despawn, a fetch and a `gh` read; the rest answer from memory, one read or one small write. */
 const CLOSE_TIMEOUT_MS = 180_000;
 const VERB_TIMEOUT_MS = 30_000;
 
@@ -54,7 +54,7 @@ export function frameFor(rest: readonly string[], text: () => Promise<string>): 
   const base = { v: CUSTODIAN_FRAME_VERSION, kind: CUSTODIAN_FRAME_KIND } as const;
   const [verb, ...args] = rest;
   if (verb === "sessions" && args.length === 0) return Promise.resolve({ ...base, verb });
-  if ((verb === "close" || verb === "interrupt") && args.length === 1) {
+  if ((verb === "close" || verb === "interrupt" || verb === "capture" || verb === "pr") && args.length === 1) {
     return Promise.resolve({ ...base, verb, pane: args[0] });
   }
   if (verb === "nudge" && args.length === 1)
@@ -81,14 +81,26 @@ export async function cmdCustodian(rest: readonly string[]): Promise<void> {
   const frame = await pending;
   // The daemon parses it again; this one catches a pane that is not tmux's own form before a round trip.
   if (parseCustodianFrame(frame) === null) return usage();
+  // The round's own socket, handed over by the round's launch: the CLI cannot derive it, since the round's env holds no state dir.
+  const path = process.env["SEANCE_CUSTODIAN_SOCKET"];
+  if (path === undefined || path === "") {
+    console.error("seanced custodian: not in a round (SEANCE_CUSTODIAN_SOCKET is unset)");
+    process.exitCode = 2;
+    return;
+  }
   const verb = rest[0];
   try {
     const reply = await exchange(frame, {
-      path: socketPath(),
+      path,
       timeoutMs: verb === "close" ? CLOSE_TIMEOUT_MS : VERB_TIMEOUT_MS,
       timeoutText: `the daemon did not answer ${verb ?? "the verb"} in time`,
-      // Only a read rides out a restart: a lost close, nudge, interrupt or done may have run.
-      ...(verb === "sessions" ? { restartGraceMs: RESTART_GRACE_MS } : {}),
+      // The same reload window drops this socket too. A repeat is safe for a verb that reads or rewrites: a second
+      // `done` answers ok, `notes` rewrites the same text, a `flag` is re-sent by design, the reads read again. A
+      // `close`, `nudge` or `interrupt` the daemon already did, whose reply was cut off, would answer `gone`, `limit` or
+      // `once_per_round` to the repeat and read as an act that failed. One that never connected sent nothing, so it
+      // still waits out the gap.
+      restartGraceMs: RESTART_GRACE_MS,
+      ...(verb === "close" || verb === "nudge" || verb === "interrupt" ? { graceUnsentOnly: true } : {}),
     });
     console.log(JSON.stringify(reply));
     if (isRecord(reply) && reply["ok"] === true) return;

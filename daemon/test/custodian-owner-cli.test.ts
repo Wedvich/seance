@@ -70,21 +70,20 @@ describe("seanced custodian, the owner's verbs", () => {
     expect((await run("status")).out).toMatch(/paused:\s+no\n/u);
   });
 
-  test("round is refused while rounds are held: exit 1, the reason, no request file, one audit line", async () => {
+  test("round is refused with no custodian configured: exit 1, the reason, no request file, one audit line", async () => {
     const result = await run("round");
     expect(result.code).toBe(1);
-    expect(result.err).toContain("build item 4b");
+    expect(result.err).toContain("no custodian configured");
     expect(await Bun.file(join(custodian, "round-request")).exists()).toBe(false);
     const lines = (await audit()).split("\n").filter((line) => line.includes("op=round"));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("origin=cli");
-    expect(lines[0]).toContain("outcome=held");
+    expect(lines[0]).toContain("outcome=unconfigured");
   });
 
-  test("status says rounds are held, and that the daemon has not reported", async () => {
+  test("status says no seat is configured, and that the daemon has not reported", async () => {
     const { out, code } = await run("status");
     expect(code).toBe(0);
-    expect(out).toContain("rounds:      held (docs/custodian.md, build item 4b)");
     expect(out).toContain("has not reported");
     expect(out).toContain("seat:        not configured");
     expect(out).toContain("last round:  none");
@@ -148,7 +147,7 @@ describe("printable and parseDuration", () => {
   });
 });
 
-describe("round, with rounds live (the test seam), reads the seat's published view", () => {
+describe("round reads the seat's published view", () => {
   let root: string;
   const saved = { state: process.env["SEANCE_STATE_DIR"], config: process.env["SEANCE_CONFIG_DIR"] };
   const seatPath = (): string => join(root, "state", "custodian", "seat.json");
@@ -180,26 +179,26 @@ describe("round, with rounds live (the test seam), reads the seat's published vi
 
   test("a fresh view writes the request and exits 0", async () => {
     await writeFile(seatPath(), view({}));
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(process.exitCode ?? 0).toBe(0);
     expect(JSON.parse(await readFile(requestPath(), "utf8")).at).toBeNumber();
   });
 
   test("a failed view writes nothing and exits 1, but a stale failed view is no report", async () => {
     await writeFile(seatPath(), view({ failed: true }));
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(process.exitCode).toBe(1);
     expect(await Bun.file(requestPath()).exists()).toBe(false);
     process.exitCode = 0;
     await writeFile(seatPath(), view({ failed: true, at: Date.now() - 3_600_000 }));
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(process.exitCode ?? 0).toBe(0);
     expect(await Bun.file(requestPath()).exists()).toBe(true);
   });
 
   test("a running round, or one that started or ended within the min-gap, is refused with the reason", async () => {
     await writeFile(seatPath(), view({ s: "running" }));
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(process.exitCode).toBe(1);
     expect(await Bun.file(requestPath()).exists()).toBe(false);
     process.exitCode = 0;
@@ -213,24 +212,24 @@ describe("round, with rounds live (the test seam), reads the seat's published vi
       counts: emptyCounts(),
     };
     await writeFile(join(root, "state", "custodian", "rounds.jsonl"), `${JSON.stringify(entry)}\n`);
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(process.exitCode).toBe(1);
     expect(await Bun.file(requestPath()).exists()).toBe(false);
   });
 
   test("a missing or stale view warns but still writes the request", async () => {
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(await Bun.file(requestPath()).exists()).toBe(true);
     await rm(requestPath());
     await writeFile(seatPath(), view({ at: Date.now() - 3_600_000 }));
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(await Bun.file(requestPath()).exists()).toBe(true);
     expect(process.exitCode ?? 0).toBe(0);
   });
 
   test("with no custodian key it writes nothing and exits 1", async () => {
     await writeConfig({});
-    await requestOwnerRound(true);
+    await requestOwnerRound();
     expect(process.exitCode).toBe(1);
     expect(await Bun.file(requestPath()).exists()).toBe(false);
   });

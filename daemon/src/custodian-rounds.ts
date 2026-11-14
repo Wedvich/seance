@@ -20,6 +20,8 @@ export interface VerbCount {
 export interface RoundCounts {
   readonly sessions: VerbCount;
   readonly close: VerbCount;
+  readonly capture: VerbCount;
+  readonly pr: VerbCount;
   readonly flag: VerbCount;
   readonly nudge: VerbCount;
   readonly interrupt: VerbCount;
@@ -30,7 +32,7 @@ export interface RoundCounts {
   readonly worktrees: { readonly removed: number; readonly kept: number };
 }
 
-export const ROUND_REASONS = ["done", "deadline", "exited", "lost"] as const;
+export const ROUND_REASONS = ["done", "deadline", "exited", "lost", "start_failed"] as const;
 export type RoundReason = (typeof ROUND_REASONS)[number];
 
 export interface RoundEntry {
@@ -48,6 +50,8 @@ export function emptyCounts(): RoundCounts {
   return {
     sessions: zero,
     close: zero,
+    capture: zero,
+    pr: zero,
     flag: zero,
     nudge: zero,
     interrupt: zero,
@@ -77,6 +81,9 @@ function countsOf(raw: unknown): RoundCounts | null {
   if (!isRecord(raw)) return null;
   const sessions = verbCountOf(raw["sessions"]);
   const close = verbCountOf(raw["close"]);
+  // Lines from before `capture` and `pr` existed lack them: absent is zero, present but malformed is not a line.
+  const capture = raw["capture"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["capture"]);
+  const pr = raw["pr"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["pr"]);
   // Lines written before custodian 6 have neither key: absent is zero, present and malformed rejects the line.
   const flag = raw["flag"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["flag"]);
   const flagged = raw["flagged"] === undefined ? 0 : raw["flagged"];
@@ -89,6 +96,8 @@ function countsOf(raw: unknown): RoundCounts | null {
   if (
     sessions === null ||
     close === null ||
+    capture === null ||
+    pr === null ||
     flag === null ||
     !wholeNumber(flagged) ||
     nudge === null ||
@@ -104,6 +113,8 @@ function countsOf(raw: unknown): RoundCounts | null {
   return {
     sessions,
     close,
+    capture,
+    pr,
     flag,
     nudge,
     interrupt,
@@ -192,4 +203,11 @@ export function upsertRound(path: string, entry: RoundEntry): Promise<void> {
   const run = chain.then(apply);
   chain = run.catch(() => {});
   return run;
+}
+
+/** Whether the round called any verb: one that never did never got as far as reading its first session list. */
+export function verbsUsed(counts: RoundCounts): boolean {
+  return [counts.sessions, counts.close, counts.capture, counts.pr, counts.notes, counts.done].some(
+    (verb) => verb.ok + verb.refused > 0,
+  );
 }

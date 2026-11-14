@@ -1,11 +1,11 @@
 import { COMMANDS, CUSTODIAN_OWNER_VERBS } from "./commands.ts";
 
 /**
- * The custodian round's shell fence, generated (DESIGN.md, "The custodian's seat", "The fence").
- * Pure: no I/O. The fence is for a cheap model's mistakes, never a boundary (C21) — a `bash -c` around a denied
- * command gets through — so the intended bound under injection is C19: every change goes through a verb the daemon
- * checks. It holds only once the round cannot reach the tmux socket and the daemon's plain ops (item 4b; rounds are
- * held until then).
+ * The custodian round's settings, generated (docs/custodian.md, "The fence"; DESIGN.md, "The custodian's seat"). Pure:
+ * no I/O. The deny list is for a cheap model's mistakes, never a boundary (C21) — a `bash -c` around a denied command
+ * gets through. What bounds an injected round is the sandbox's masks (it reads nothing but its own directories and the
+ * read-only toolchain, reaches no network and one acting socket, its own) plus the daemon's verbs behind that socket
+ * (C19: every change goes through a verb the daemon checks).
  */
 
 /** Commands a round never needs: each is denied whole, as `Bash(<c>)` and `Bash(<c> *)`. */
@@ -22,6 +22,10 @@ const PLAIN_DENIED = [
   "docker",
   "podman",
   "ssh",
+  // The round has no tmux socket and no network, so neither can work; a read goes through `seanced custodian capture`
+  // and `pr`. Denied whole so a cheap model does not spend its turns on them.
+  "tmux",
+  "gh",
 ] as const;
 
 /** `git` subcommands of C20; each comes in four forms (a global option such as `-C` is not unwrapped). */
@@ -37,170 +41,6 @@ const GIT_DENIED = [
   "switch",
   "stash",
 ] as const;
-
-/**
- * `tmux` subcommands that type, kill, or run a shell. The tmux server runs outside the sandbox and the round's shell
- * can reach its socket, so a command that runs a shell there escapes C20's write fence. The spec's tested list is
- * `send-keys`, `send`, `paste-buffer`, `pasteb`, `kill-*`, `respawn-*`; the rest are additions (DESIGN.md): shell
- * runners, option setters that could set `@seance-task` or `@seance-custodian`, buffer feeders for a paste, and the
- * aliases the spec's list missed. `capture-pane`, `list-*` and `display-message` stay free.
- */
-const TMUX_DENIED = [
-  "send-keys",
-  "send",
-  "send-prefix",
-  "paste-buffer",
-  "pasteb",
-  "kill-*",
-  "killp",
-  "killw",
-  "respawn-*",
-  "respawnp",
-  "respawnw",
-  "run-shell",
-  "run",
-  "new-window",
-  "neww",
-  "split-window",
-  "splitw",
-  "new-session",
-  "new",
-  "if-shell",
-  "if",
-  "pipe-pane",
-  "pipep",
-  "display-popup",
-  "popup",
-  "source-file",
-  "source",
-  "set-hook",
-  "command-prompt",
-  "confirm-before",
-  "confirm",
-  "set-option",
-  "set",
-  "set-window-option",
-  "setw",
-  "load-buffer",
-  "loadb",
-  "set-buffer",
-  "setb",
-  "unlink-window",
-  "unlinkw",
-  // State other readers trust (a pane's title and options, a window's identity, the server's environment, which every
-  // session started later inherits) or commands that run later.
-  "set-environment",
-  "setenv",
-  "bind-key",
-  "bind",
-  "display-menu",
-  "menu",
-  "select-pane",
-  "selectp",
-  "rename-window",
-  "renamew",
-  "rename-session",
-  "rename",
-  "swap-pane",
-  "swapp",
-  "swap-window",
-  "swapw",
-  "move-window",
-  "movew",
-  "move-pane",
-  "movep",
-  "link-window",
-  "linkw",
-  "join-pane",
-  "joinp",
-  "break-pane",
-  "breakp",
-  "switch-client",
-  "switchc",
-  "detach-client",
-  "detach",
-  // The server writes the buffer as the user, outside the sandbox (`capture-pane -b x` fills one); `-C` on attach reads
-  // commands from stdin, past every entry here; the lock family runs `lock-command`; the modes make the drain ask's
-  // `send-keys -l` land as mode keys and `capture-pane` hash another screen; `server-access` edits the server's ACL.
-  "save-buffer",
-  "saveb",
-  "attach-session",
-  "attach",
-  "lock-server",
-  "lock",
-  "lock-session",
-  "locks",
-  "lock-client",
-  "lockc",
-  "copy-mode",
-  "clock-mode",
-  "server-access",
-] as const;
-
-/**
- * `gh` verbs that write, each as a whole word anywhere after `gh` (`fourForms`). The spec's list is the first eleven;
- * the rest write to GitHub over the allowed network too. A whole word, not a prefix: `closed`, `mergeable`,
- * `reviewDecision`, `comments` and `additions` are the reads a round makes (`--state closed`, `--json mergeable`),
- * and a word that merely starts with a verb must not be refused.
- */
-const GH_WRITE_VERBS = [
-  "create",
-  "delete",
-  "edit",
-  "merge",
-  "comment",
-  "close",
-  "reopen",
-  "review",
-  "ready",
-  "cancel",
-  "rerun",
-  "update-branch",
-  "delete-asset",
-  "revert",
-  "lock",
-  "unlock",
-  "pin",
-  "unpin",
-  "transfer",
-  "develop",
-  "archive",
-  "unarchive",
-  "rename",
-  "sync",
-  "set-default",
-  "fork",
-  "add",
-  "upload",
-  "set",
-  "clone",
-  "link",
-  "unlink",
-  "copy",
-  "item-add",
-  "item-create",
-  "item-edit",
-  "item-delete",
-  "item-archive",
-  "field-create",
-  "field-delete",
-  "mark-template",
-] as const;
-
-/** `gh` commands denied whole: nothing a round reads lives there. */
-const GH_WHOLE_DENIED = [
-  "workflow",
-  "auth",
-  "secret",
-  "variable",
-  "extension",
-  "codespace",
-  "ssh-key",
-  "gpg-key",
-] as const;
-
-/** `gh api` flags that write. A round reads through `gh pr view --json`, `gh run view` and plain `gh api <path>`. */
-const GH_API_WRITE_FLAGS = ["-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"] as const;
 
 function fourForms(program: string, subcommand: string): readonly string[] {
   return [
@@ -218,20 +58,15 @@ function fourForms(program: string, subcommand: string): readonly string[] {
  * (`CUSTODIAN_OWNER_VERBS`) and `notes --clear` are denied under it by generated entries, since the allow covers
  * `seanced custodian *`.
  *
- * A mistake guard for a cheap model, never a boundary. The round's sandboxed Bash cannot write `stateDir()`, but until
- * docs/custodian.md item 4b the round still reaches the tmux socket, so `tmux run-shell "seanced custodian pause"` runs
- * outside the sandbox; and every task session runs as the same uid and can write `custodian/state.json` and
+ * A mistake guard for a cheap model, never a boundary. What keeps the owner's verbs from a round is its sandbox: it
+ * neither reads nor writes `stateDir()` (bar its own round dir) and reaches no tmux socket, so a `bash -c` around them
+ * finds no files to act on. Every task session runs as the same uid, though, and can write `custodian/state.json` and
  * `round-request` directly, without the CLI's audit line. The boundary for those files is the owner's uid; the audit
  * covers the CLI only, and the seat's request spacing bounds what a looping writer can cost.
  */
 export const DENY: readonly string[] = [
   ...PLAIN_DENIED.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]),
   ...GIT_DENIED.flatMap((subcommand) => fourForms("git", subcommand)),
-  ...TMUX_DENIED.flatMap((subcommand) => fourForms("tmux", subcommand)),
-  ...GH_WRITE_VERBS.flatMap((verb) => fourForms("gh", verb)),
-  ...GH_WHOLE_DENIED.flatMap((command) => [`Bash(gh ${command})`, `Bash(gh ${command} *)`]),
-  // `*` matches no empty gap (verified on Linux), so the flag directly after `api` needs its own entry.
-  ...GH_API_WRITE_FLAGS.flatMap((flag) => [`Bash(gh api * ${flag}*)`, `Bash(gh api ${flag}*)`]),
   "Bash(seanced)",
   ...COMMANDS.filter((name) => name !== "custodian").map((name) => `Bash(seanced ${name}*)`),
   ...CUSTODIAN_OWNER_VERBS.flatMap((verb) => [`Bash(seanced custodian ${verb})`, `Bash(seanced custodian ${verb} *)`]),
@@ -239,18 +74,23 @@ export const DENY: readonly string[] = [
   "Bash(seanced custodian notes --clear *)",
 ];
 
+/** A path the Read tool is denied: a file, or a directory with everything under it. */
+export interface ReadDeny {
+  readonly path: string;
+  readonly dir: boolean;
+}
+
 export interface FenceInput {
   readonly platform: "darwin" | "linux";
-  /** The round's cwd: the one directory a sandboxed command may not write. */
+  /** The round's cwd: the one directory a sandboxed command may not write, and the one the Read tool may read. */
   readonly roundDir: string;
-  /**
-   * The flags file (`custodian-flags.ts`): its notes quote untrusted pane text, which a later round must not read back
-   * (the `sessions` reply leaves them out for the same reason). Denied to `Read` and to the sandbox; a mistake guard
-   * like the rest, since until item 4b the round still reaches the tmux socket and every other file its uid can read.
-   */
-  readonly flagsPath: string;
-  /** macOS only: the directories whose sockets the round may reach (tmux's, the daemon's run dir). */
-  readonly socketDirs: readonly string[];
+  /** The round's socket's directory: macOS lists it alone in `allowUnixSockets`. */
+  readonly socketDir: string;
+  /** Sandbox masks (`roundSandboxPaths`): what a sandboxed command cannot read, and what it re-reads inside them. */
+  readonly denyRead: readonly string[];
+  readonly allowRead: readonly string[];
+  /** Secrets denied to the Read tool too, which runs outside the sandbox (`roundReadDenies`). */
+  readonly readDenies: readonly ReadDeny[];
   /** Linux only: `/proc/sys` is read-only (a container), where `allowAllUnixSockets` needs the weaker nested mode. */
   readonly weakerNested: boolean;
 }
@@ -266,11 +106,15 @@ export interface CustodianFence {
     readonly failIfUnavailable: true;
     readonly allowUnsandboxedCommands: false;
     readonly autoAllowBashIfSandboxed: true;
-    readonly enableWeakerNetworkIsolation: true;
     readonly enableWeakerNestedSandbox?: true;
-    readonly filesystem: { readonly denyWrite: readonly string[]; readonly denyRead: readonly string[] };
+    readonly filesystem: {
+      readonly denyWrite: readonly string[];
+      readonly denyRead: readonly string[];
+      readonly allowRead: readonly string[];
+    };
     readonly network: {
-      readonly allowedDomains: readonly string[];
+      /** Present and empty: an absent key lifts the network restriction (and, on Linux, `--unshare-net`). */
+      readonly allowedDomains: readonly [];
       readonly allowUnixSockets?: readonly string[];
       readonly allowAllUnixSockets?: true;
     };
@@ -278,31 +122,37 @@ export interface CustodianFence {
 }
 
 /**
- * The `--settings` JSON. Unix sockets differ by platform: macOS lists directories; on Linux `allowUnixSockets` is
- * ignored (seccomp cannot filter by path) and tmux and the daemon's socket need `allowAllUnixSockets`, which drops
- * bubblewrap's `--disable-userns` and so fails where `/proc/sys` is read-only unless `enableWeakerNestedSandbox` is set.
- * `enableWeakerNetworkIsolation` is macOS's `trustd` key, left set on Linux as verified.
+ * Claude Code's path-rule form: `Read(//abs)` is an absolute path, and `Read(/abs)` with one slash silently matches
+ * nothing, so every rule is built as `/` plus an absolute path.
+ */
+const readRule = (path: string, dir: boolean): string => `Read(/${path}${dir ? "/**" : ""})`;
+
+/**
+ * The `--settings` JSON. The Read tool runs outside the sandbox, so `allow` narrows it to the round's own directory
+ * (under `dontAsk` anything not allowed is refused) and `deny` names the known secrets behind that. Unix sockets differ
+ * by platform: macOS lists the round socket's directory alone, so no other path socket connects; on Linux
+ * `allowUnixSockets` is ignored (seccomp cannot filter by path) and `allowAllUnixSockets` stays, because the masks
+ * hide every path socket but the round's own — and it drops bubblewrap's `--disable-userns`, so it fails where
+ * `/proc/sys` is read-only unless `enableWeakerNestedSandbox` is set. `allowedDomains: []` is no network at all.
  */
 export function custodianFence(input: FenceInput): CustodianFence {
   return {
     permissions: {
       defaultMode: "dontAsk",
-      allow: ["Read", "Bash(seanced custodian *)"],
-      // `//` is the permission syntax for an absolute path.
-      deny: [...DENY, `Read(/${input.flagsPath})`],
+      allow: [readRule(input.roundDir, true), "Bash(seanced custodian *)"],
+      deny: [...DENY, ...input.readDenies.map((entry) => readRule(entry.path, entry.dir))],
     },
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       autoAllowBashIfSandboxed: true,
-      enableWeakerNetworkIsolation: true,
       ...(input.platform === "linux" && input.weakerNested ? { enableWeakerNestedSandbox: true as const } : {}),
-      filesystem: { denyWrite: [input.roundDir], denyRead: [input.flagsPath] },
+      filesystem: { denyWrite: [input.roundDir], denyRead: input.denyRead, allowRead: input.allowRead },
       network: {
-        allowedDomains: ["github.com", "api.github.com", "*.githubusercontent.com"],
+        allowedDomains: [],
         ...(input.platform === "darwin"
-          ? { allowUnixSockets: input.socketDirs }
+          ? { allowUnixSockets: [input.socketDir] }
           : { allowAllUnixSockets: true as const }),
       },
     },

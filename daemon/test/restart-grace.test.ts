@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Plain, SessionsResponse } from "@seance/shared";
 import { brokerMachines, brokerSchedulerCall } from "../src/broker-client.ts";
 import { brokerFrameId, brokerOk, type BrokerReply } from "../src/broker-protocol.ts";
-import { LocalConnectionLost, localRequest, LocalUnavailable } from "../src/local-client.ts";
+import { exchange, LocalConnectionLost, localRequest, LocalUnavailable } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { pollUntil } from "./fixtures.ts";
 
@@ -197,5 +197,49 @@ describe("a daemon restarting under a call", () => {
     } finally {
       second.stop();
     }
+  });
+
+  describe("a frame that is repeated only while nothing of it was sent (graceUnsentOnly)", () => {
+    const frame = (): Plain => ({ id: crypto.randomUUID(), ts: Date.now(), op: "sessions", payload: {} });
+    const opts = (path: string) => ({
+      path,
+      timeoutMs: 5_000,
+      timeoutText: "no answer",
+      restartGraceMs: 5_000,
+      graceUnsentOnly: true,
+    });
+
+    test("a socket left refusing is waited out, and the frame is then sent once", async () => {
+      const path = join(base, "unsent-stale.sock");
+      await staleSocket(path);
+      const seen: unknown[] = [];
+      const reply = exchange(frame(), opts(path));
+      await Bun.sleep(DOWN_MS);
+      const back = await answering(path, seen);
+      try {
+        expect(await reply).toMatchObject({ re: expect.any(String) });
+        expect(seen).toHaveLength(1);
+      } finally {
+        back.stop();
+      }
+    });
+
+    test("a connection lost after the frame was taken is final, and a daemon that comes back is not sent it again", async () => {
+      const path = join(base, "unsent-lost.sock");
+      const seen: unknown[] = [];
+      const first = await hung(path, seen);
+      const reply = exchange(frame(), opts(path)).catch((err: unknown) => err);
+      await pollUntil(() => seen.length === 1, "the frame to reach the daemon");
+      first.stop();
+      expect(await reply).toBeInstanceOf(LocalConnectionLost);
+      const second = await answering(path, seen);
+      try {
+        // A negative assertion: a retry, had there been one, would have landed by now.
+        await Bun.sleep(DOWN_MS);
+        expect(seen).toHaveLength(1);
+      } finally {
+        second.stop();
+      }
+    });
   });
 });

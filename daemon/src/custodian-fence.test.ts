@@ -20,35 +20,38 @@ function matches(pattern: string, command: string): boolean {
 const denied = (command: string): boolean => DENY.some((pattern) => matches(pattern, command));
 
 describe("DENY", () => {
-  test("each git and tmux entry comes in all four forms", () => {
-    for (const [program, subcommand] of [
-      ["git", "push"],
-      ["git", "worktree remove"],
-      ["git", "branch -D"],
-      ["tmux", "send-keys"],
-      ["tmux", "kill-*"],
-      ["tmux", "run-shell"],
-      ["tmux", "neww"],
-    ] as const) {
+  test("each git entry comes in all four forms", () => {
+    for (const subcommand of ["push", "worktree remove", "branch -D"]) {
       for (const form of [
-        `Bash(${program} ${subcommand})`,
-        `Bash(${program} ${subcommand} *)`,
-        `Bash(${program} * ${subcommand})`,
-        `Bash(${program} * ${subcommand} *)`,
+        `Bash(git ${subcommand})`,
+        `Bash(git ${subcommand} *)`,
+        `Bash(git * ${subcommand})`,
+        `Bash(git * ${subcommand} *)`,
       ]) {
         expect(DENY).toContain(form);
       }
     }
   });
 
-  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's five are not", () => {
+  test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's verbs are not", () => {
     for (const verb of CUSTODIAN_OWNER_VERBS) {
       expect(denied(`seanced custodian ${verb}`)).toBe(true);
       expect(denied(`seanced custodian ${verb} --for 1h`)).toBe(true);
     }
     expect(denied("seanced custodian notes --clear")).toBe(true);
     expect(denied("seanced custodian notes --clear --x")).toBe(true);
-    for (const allowed of ["sessions", "close %3", "flag %3 stuck", "flag %3 look a note", "notes", "done"]) {
+    for (const allowed of [
+      "sessions",
+      "close %3",
+      "capture %3",
+      "pr %3",
+      "flag %3 stuck",
+      "flag %3 look a note",
+      "nudge %3",
+      "interrupt %3",
+      "notes",
+      "done",
+    ]) {
       expect(denied(`seanced custodian ${allowed}`)).toBe(false);
     }
   });
@@ -63,22 +66,24 @@ describe("DENY", () => {
     expect(denied("seanced custodian done")).toBe(false);
   });
 
-  test("the reads a round needs are not denied", () => {
+  test("tmux and gh are denied whole: a round reads through the verbs", () => {
     for (const command of [
-      "gh pr view 1 --json state",
-      "gh pr view 1 --json state,statusCheckRollup",
-      "gh pr view 1 --json mergeable,mergeStateStatus,reviewDecision",
-      "gh pr view 1 --json additions,deletions,comments",
-      "gh pr list --state closed",
-      "gh issue list --state closed --label sync-deps",
-      "gh run list --branch sync-deps",
-      "gh pr list --label pinned",
-      "gh run view 2",
-      "gh api repos/o/r/pulls/1",
+      "tmux",
       "tmux capture-pane -p -t %1",
       "tmux -L s capture-pane -p -t %1",
-      "tmux list-panes -a",
-      "tmux display-message -p x",
+      "gh pr view 1 --json state",
+      "gh api repos/o/r/pulls/1",
+      "gh",
+    ]) {
+      expect(denied(command)).toBe(true);
+    }
+  });
+
+  test("the verbs and plain reads a round needs are not denied", () => {
+    for (const command of [
+      "seanced custodian capture %1",
+      "seanced custodian pr %1",
+      "seanced custodian sessions",
       "git log -1",
       "git status",
       "git -C /x log --oneline",
@@ -134,13 +139,18 @@ describe("DENY", () => {
 describe("custodianFence", () => {
   const base = {
     roundDir: "/r/.seance-custodian",
-    flagsPath: "/s/custodian/sessions.json",
-    socketDirs: ["/tmp/tmux-1", "/s/run"],
+    socketDir: "/tmp/seance-cu-s-x",
+    denyRead: ["/home/u", "/etc"],
+    allowRead: ["/etc/resolv.conf"],
+    readDenies: [
+      { path: "/home/u/.ssh", dir: true },
+      { path: "/home/u/.claude/.credentials.json", dir: false },
+    ],
   } as const;
 
-  test("macOS lists the socket directories and never allows every socket", () => {
+  test("macOS lists the round socket's directory alone and never allows every socket", () => {
     const fence = custodianFence({ ...base, platform: "darwin", weakerNested: false });
-    expect(fence.sandbox.network.allowUnixSockets).toEqual(["/tmp/tmux-1", "/s/run"]);
+    expect(fence.sandbox.network.allowUnixSockets).toEqual([base.socketDir]);
     expect(fence.sandbox.network).not.toHaveProperty("allowAllUnixSockets");
   });
 
@@ -157,23 +167,40 @@ describe("custodianFence", () => {
     );
   });
 
-  test("the shared shape: one denied write dir, dontAsk, Read and the verbs allowed", () => {
+  test("no network at all: allowedDomains is present and empty, and the weaker network isolation is not asked for", () => {
+    for (const platform of ["darwin", "linux"] as const) {
+      const { sandbox } = custodianFence({ ...base, platform, weakerNested: false });
+      expect(Object.hasOwn(sandbox.network, "allowedDomains")).toBe(true);
+      expect(sandbox.network.allowedDomains).toEqual([]);
+      expect(sandbox).not.toHaveProperty("enableWeakerNetworkIsolation");
+    }
+  });
+
+  test("the shared shape: one denied write dir, dontAsk, Read narrowed to the round dir, the verbs allowed", () => {
     for (const platform of ["darwin", "linux"] as const) {
       const fence = custodianFence({ ...base, platform, weakerNested: false });
-      expect(fence.sandbox.filesystem.denyWrite).toEqual([base.roundDir]);
-      // The flags file's notes quote pane text: neither the Read tool nor a sandboxed command reads them back.
-      expect(fence.sandbox.filesystem.denyRead).toEqual([base.flagsPath]);
-      expect(fence.permissions.deny).toEqual([...DENY, `Read(//s/custodian/sessions.json)`]);
+      expect(fence.sandbox.filesystem).toEqual({
+        denyWrite: [base.roundDir],
+        denyRead: base.denyRead,
+        allowRead: base.allowRead,
+      });
       expect(fence.permissions.defaultMode).toBe("dontAsk");
-      expect(fence.permissions.allow).toEqual(["Read", "Bash(seanced custodian *)"]);
+      expect(fence.permissions.allow).toEqual([`Read(/${base.roundDir}/**)`, "Bash(seanced custodian *)"]);
       expect(fence.sandbox).toMatchObject({
         enabled: true,
         failIfUnavailable: true,
         allowUnsandboxedCommands: false,
         autoAllowBashIfSandboxed: true,
-        enableWeakerNetworkIsolation: true,
       });
     }
+  });
+
+  test("a Read deny is an absolute path in the double-slash form, a directory with its contents, after the command denies", () => {
+    const { permissions } = custodianFence({ ...base, platform: "linux", weakerNested: false });
+    expect(permissions.deny.slice(0, DENY.length)).toEqual([...DENY]);
+    const reads = permissions.deny.slice(DENY.length);
+    expect(reads).toEqual(["Read(//home/u/.ssh/**)", "Read(//home/u/.claude/.credentials.json)"]);
+    for (const rule of reads) expect(rule.startsWith("Read(//")).toBe(true);
   });
 });
 

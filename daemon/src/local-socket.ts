@@ -5,7 +5,7 @@ import type { ErrorResponse, OpName, Plain } from "@seance/shared";
 import { quote } from "@seance/shared";
 import { brokerFail, brokerFrameId, isBrokerFrame, type BrokerReply } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
-import { isCustodianFrameKind, type CustodianReply } from "./custodian-frame.ts";
+import { isCustodianFrameKind } from "./custodian-frame.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
 import { isInboxFrameKind, isMessageFrameKind, type MessageReply } from "./message-frame.ts";
@@ -14,6 +14,7 @@ import { runDir, socketPath } from "./paths.ts";
 import { peerPid, socketFd } from "./peer.ts";
 import type { SessionEventReply } from "./session-event-frame.ts";
 import { isSessionEventFrameKind } from "./session-events.ts";
+import { EMPTY, flush, sendLine } from "./socket-lines.ts";
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,
@@ -57,10 +58,10 @@ import { isSessionEventFrameKind } from "./session-events.ts";
  * by the kernel's peer pid only and refused where the host names no peer, never by a field a sender
  * claims. DESIGN.md's "Session messages" records the widening.
  *
- * The sixth is `custodian` (`custodian-verbs.ts`): the custodian round's five verbs (`sessions`, `close`, `flag`,
- * `notes`, `done`). It acts, but only for a process of the pane the seat record names as the running round, found by peer pid
- * alone and refused `not_custodian` otherwise, and its acts are the daemon's checked verbs. DESIGN.md's "The custodian
- * frame kind" records the widening.
+ * The sixth kind, `custodian`, is answered `unsupported` here, always: the round's verbs live on the round's own
+ * socket (`custodian-socket.ts`), which the round's sandbox can reach and this one it cannot. The branch stays so a
+ * misdirected client or an old shim gets a clear answer, not a Plain parse error. DESIGN.md's "The custodian frame
+ * kind" records it.
  */
 
 /**
@@ -84,8 +85,6 @@ const LOCAL_OPS: ReadonlySet<string> = new Set<OpName>(["sessions", "spawn", "de
  * frame is not a request.
  */
 const MAX_FRAME_BYTES = 1_048_576;
-
-const EMPTY = Buffer.alloc(0);
 
 interface Conn {
   inbound: Buffer;
@@ -117,11 +116,6 @@ export interface LocalSocketOpts {
    * connection. Absent, both kinds are answered `unsupported`.
    */
   readonly messages?: Pick<Messages, "listen" | "send">;
-  /**
-   * The custodian round's verbs (`createCustodianVerbs(...).handle`), given the connection's peer pid. Absent, such
-   * frames are answered `unsupported`.
-   */
-  readonly custodian?: (raw: unknown, peer: number | null) => Promise<CustodianReply>;
   readonly path?: string;
 }
 
@@ -143,28 +137,6 @@ function isPlain(raw: unknown): raw is Plain {
 function errorReply(op: string, re: string, message: string): Plain {
   const payload: ErrorResponse = { ok: false, code: "internal_error", message };
   return { id: crypto.randomUUID(), ts: Date.now(), op: op as OpName, re, payload };
-}
-
-/**
- * Queued rather than written straight through: a spawn reply embeds a refreshed
- * session list, which is comfortably large enough to meet backpressure, and a
- * short write would truncate the JSON into an unparseable line.
- */
-function flush(sock: Socket<undefined>, conn: Conn): void {
-  if (conn.outbound.length === 0) return;
-  try {
-    const written = sock.write(conn.outbound);
-    conn.outbound = written >= conn.outbound.length ? EMPTY : conn.outbound.subarray(written);
-  } catch {
-    // The peer vanished — a Claude session killed mid-spawn is the ordinary
-    // case. The spawn itself already happened; there is no one left to tell.
-    conn.outbound = EMPTY;
-  }
-}
-
-function sendLine(sock: Socket<undefined>, conn: Conn, line: string): void {
-  conn.outbound = Buffer.concat([conn.outbound, Buffer.from(`${line}\n`, "utf8")]);
-  flush(sock, conn);
 }
 
 function send(sock: Socket<undefined>, conn: Conn, plain: Plain): void {
@@ -250,22 +222,9 @@ async function dispatchMessage(
   sendLine(sock, conn, JSON.stringify(reply));
 }
 
-/** Always answers, so the round's CLI can wait for the reply — and stay alive while its pid is walked. */
-async function dispatchCustodian(
-  sock: Socket<undefined>,
-  conn: Conn,
-  raw: unknown,
-  custodian: LocalSocketOpts["custodian"],
-): Promise<void> {
-  let reply: CustodianReply;
-  try {
-    reply = custodian === undefined ? { ok: false, code: "unsupported" } : await custodian(raw, conn.peer);
-  } catch (err) {
-    // Never the frame: it carries notes or a summary.
-    log.error(`local socket: custodian verb crashed: ${String(err)}`);
-    reply = { ok: false, code: "internal" };
-  }
-  sendLine(sock, conn, JSON.stringify(reply));
+/** The main socket never serves the round's verbs (`custodian-socket.ts` does): whoever sends one is told so. */
+function dispatchCustodian(sock: Socket<undefined>, conn: Conn): void {
+  sendLine(sock, conn, JSON.stringify({ ok: false, code: "unsupported" }));
 }
 
 /** The connection stays open after this returns: the daemon writes to it as messages arrive. */
@@ -307,7 +266,7 @@ async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages" | "custodian">,
+  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages">,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -342,7 +301,7 @@ async function dispatch(
     return;
   }
   if (isCustodianFrameKind(raw)) {
-    await dispatchCustodian(sock, conn, raw, opts.custodian);
+    dispatchCustodian(sock, conn);
     return;
   }
   if (!isPlain(raw)) {

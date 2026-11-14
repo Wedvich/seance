@@ -112,6 +112,12 @@ export interface ExchangeOpts {
    * `timeoutMs`. Absent or 0, one try.
    */
   readonly restartGraceMs?: number;
+  /**
+   * With `restartGraceMs`, for a frame whose repeat is not safe once it may have reached the daemon: only a try that
+   * never connected (a socket refusing or briefly gone) is repeated, and a connection lost after the frame was written
+   * is final.
+   */
+  readonly graceUnsentOnly?: boolean;
   /** Closes the connection when it aborts, which the daemon reads as the caller having gone. */
   readonly signal?: AbortSignal;
 }
@@ -133,6 +139,7 @@ export async function exchange(frame: object, opts: ExchangeOpts): Promise<unkno
     } catch (err) {
       if (graceMs <= 0 || !(err instanceof LocalUnavailable)) throw err;
       const lost = err instanceof LocalConnectionLost;
+      if (lost && opts.graceUnsentOnly === true) throw err;
       // Once a restart is under way, a socket that is gone for a moment is part of it.
       if (until === null && !lost && !err.refused) throw err;
       // Taken and dropped twice running is a daemon refusing the frame (one older than it), not a restart:

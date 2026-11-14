@@ -32,9 +32,10 @@ import {
   type CustodianVerb,
   type InterruptRefusal,
   type KeptWhy,
+  type PrView,
 } from "./custodian-frame.ts";
 import type { CustodianDelivery, CustodianTarget } from "./messages.ts";
-import type { WorktreeOutcome, WorktreeRule } from "./custodian-worktree.ts";
+import { githubOfClone, type WorktreeOutcome, type WorktreeRule } from "./custodian-worktree.ts";
 import { mapLimit } from "./concurrency.ts";
 import { inputBoxDraft } from "./drain-ask.ts";
 import { writeDurable } from "./durable-write.ts";
@@ -43,19 +44,21 @@ import { custodianNotesPath, reapRefusalsPath } from "./paths.ts";
 import { ancestorIn, peerPidSupported } from "./peer.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { SAMPLE_INTERVAL_MS, type PaneActivity } from "./pane-activity.ts";
+import { parseGithubPr } from "./pr-status.ts";
 import { DEAD_PANE_MIN_AGE_MS, readReapRefusals } from "./reap.ts";
 import type { EndedTasks } from "./session-events.ts";
 import { classifyPane, listPanes, paneInfo, type PaneInfo, type PaneState } from "./sessions.ts";
 import { capturePane } from "./tmux.ts";
 
 /**
- * The custodian round's verbs, the `custodian` frame kind on the local socket (DESIGN.md, "The custodian frame
- * kind"). They bound only what goes through them: a frame is acted on only for a process of the
- * live pane the seat record names as the running round, found by the kernel's peer pid and never by a field, and
- * `close` acts only on a session at rest, through the graceful despawn, the exit-status harvest or a `closing`-first
- * kill. They do not bound a round's other reach (the tmux socket, the daemon's plain ops, on-disk secrets), which is
- * why rounds stay held (`ROUNDS_LIVE`) until docs/custodian.md item 4b. Everything outside effects goes through
- * `CustodianVerbDeps`. Nothing a pane's screen, the notes or the
+ * The custodian round's verbs, the `custodian` frame kind, served on the round's own socket (`custodian-socket.ts`;
+ * DESIGN.md, "The custodian frame kind"). A frame is acted on only for a process of the live pane the seat record
+ * names as the running round, found by the kernel's peer pid and never by a field, and `close` acts only on a session
+ * at rest, through the graceful despawn, the exit-status harvest or a `closing`-first kill. The verbs bound what goes
+ * through them; what bounds the round's other reach is its sandbox (`custodian-launch.ts`), which leaves it this one
+ * socket. `capture` and `pr` are the round's reads: it has no tmux and no `gh`. `flag`, `nudge` and `interrupt` act
+ * daemon-side (the leader event, messaging's delivery, the daemon's own tmux key), so the round needs no reach for
+ * them either. Everything outside effects goes through `CustodianVerbDeps`. Nothing a pane's screen, the notes or the
  * summary held is ever logged, audited or returned: a screen is read in memory to judge it and dropped.
  */
 
@@ -213,6 +216,12 @@ export interface CustodianVerbDeps {
   readonly classifyPane?: (info: PaneInfo) => Promise<PaneState>;
   /** The pane's current screen with its attributes (`capture-pane -e`), null when tmux cannot say. */
   readonly capture?: (pane: string) => Promise<string | null>;
+  /** The pane's visible screen as plain text, for the `capture` verb; null when tmux cannot say. */
+  readonly captureText?: (pane: string) => Promise<string | null>;
+  /** The PR at a URL (`createPrReader`): `"unreadable"` when `gh` cannot say. */
+  readonly readPr: (url: string) => Promise<PrView | "unreadable">;
+  /** The GitHub repo `origin` names in a clone (reap's resolution); null for any other host or none. */
+  readonly originOf?: (repoPath: string) => Promise<{ readonly owner: string; readonly name: string } | null>;
   /** One screen sampling pass (`PaneActivityTracker.sample`), which `interrupt` takes at the act; absent, the sampler's last reading stands. */
   readonly sample?: () => Promise<void>;
   /**
@@ -287,6 +296,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
   const infoOf = deps.paneInfo ?? paneInfo;
   const classify = deps.classifyPane ?? classifyPane;
   const capture = deps.capture ?? ((pane: string) => capturePane(pane, { history: false, styled: true }));
+  const captureText = deps.captureText ?? ((pane: string) => capturePane(pane, { history: false }));
+  const originOf = deps.originOf ?? githubOfClone;
   const readRefusals = deps.readRefusals ?? (() => readReapRefusals(reapRefusalsPath()));
   const notesPath = deps.notesPath ?? custodianNotesPath();
   const closeAfterMs = deps.settings.closeAfterMinutes * MINUTE_MS;
@@ -586,6 +597,61 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     throw new Error("kill-pane failed");
   };
 
+  /**
+   * The checks `capture` and `pr` share, in `closeVerdict`'s first order: the pane exists, is not a custodian pane (the
+   * round's own included), and is one of ours. Not audited and never logged: they act on nothing.
+   */
+  const readable = async (pane: string): Promise<PaneInfo | CloseRefusal> => {
+    const info = await infoOf(pane);
+    if (info === null) return "gone";
+    if (info.custodian) return "marked";
+    if (!info.ours) return "foreign";
+    return info;
+  };
+
+  const capturePaneText = async (pane: string): Promise<CustodianReply> => {
+    try {
+      const info = await readable(pane);
+      if (typeof info === "string") return { ok: false, code: info };
+      const text = await captureText(pane);
+      if (text === null) return { ok: false, code: "gone" };
+      return { ok: true, verb: "capture", pane, text };
+    } catch (err) {
+      // Never the error's text: it may hold pane output.
+      deps.warn(`custodian: capture of ${pane} failed (${err instanceof Error ? err.name : "error"})`);
+      return { ok: false, code: "internal" };
+    }
+  };
+
+  const readPr = async (pane: string): Promise<CustodianReply> => {
+    try {
+      const info = await readable(pane);
+      if (typeof info === "string") return { ok: false, code: info };
+      const { taskId } = info;
+      if (taskId === null) return { ok: false, code: "untasked" };
+      const url = deps.tasks.prUrl(taskId);
+      if (url === undefined) return { ok: false, code: "prless" };
+      // The URL is the ledger's, which can be one the session itself reported: only a PR in the GitHub repo the task's
+      // own worktree's `origin` names is read, so a session cannot steer the daemon's `gh` to another repo's PR. A
+      // task with no worktree here, or an origin that is not GitHub's, has nothing to prove it by.
+      const site = deps.tasks.worktree(taskId);
+      const pr = parseGithubPr(url);
+      const origin = "refused" in site ? null : await originOf(site.repo);
+      // `foreign_pr` says the PR is in another repo, which only a known origin can show: a `here` task or a launch with
+      // no worktree yet has none, and is `unreadable`, not a false "foreign".
+      if (pr === null || origin === null) return { ok: false, code: "unreadable" };
+      if (pr.owner.toLowerCase() !== origin.owner || pr.repo.toLowerCase() !== origin.name) {
+        return { ok: false, code: "foreign_pr" };
+      }
+      const view = await deps.readPr(url);
+      if (view === "unreadable") return { ok: false, code: "unreadable" };
+      return { ok: true, verb: "pr", pane, taskId, url, ...view };
+    } catch (err) {
+      deps.warn(`custodian: pr of ${pane} failed (${err instanceof Error ? err.name : "error"})`);
+      return { ok: false, code: "internal" };
+    }
+  };
+
   /** C29: the round's flag. Every call, taken or refused, is one audit line, and the note is in none. */
   const flag = async (pane: string, reason: string, note: string | undefined): Promise<CustodianReply> => {
     const refuse = async (
@@ -850,6 +916,10 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         return sessions();
       case "close":
         return close(frame.pane);
+      case "capture":
+        return capturePaneText(frame.pane);
+      case "pr":
+        return readPr(frame.pane);
       case "flag":
         return flag(frame.pane, frame.reason, frame.note);
       case "nudge":
