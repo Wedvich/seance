@@ -179,7 +179,7 @@ export interface QueueRow {
 }
 
 /** What each flag reason says on the card: fixed per reason, the note beside it is the custodian's own words. */
-const FLAG_LABELS: Record<FlagReason, string> = {
+export const FLAG_LABELS: Record<FlagReason, string> = {
   stuck: "Custodian: looks stuck",
   look: "Custodian: take a look",
   dirty: "Custodian: kept its worktree (uncommitted changes)",
