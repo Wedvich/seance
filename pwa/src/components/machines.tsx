@@ -327,7 +327,7 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
           ))}
         </ul>
       )}
-      <p className="fleet-note">{card.note}</p>
+      {card.note !== null && <p className="fleet-note">{card.note}</p>}
     </section>
   );
 }

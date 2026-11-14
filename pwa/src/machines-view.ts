@@ -614,10 +614,12 @@ export interface ArchivistCard {
   readonly build: string | null;
   /** Empty offline, and online until a reply for this very device is held. */
   readonly rows: readonly ArchivistRow[];
-  readonly note: string;
+  /** Only offline: what is hidden until it is back. */
+  readonly note: string | null;
 }
 
-const ARCHIVIST_NOTE = "Keeps task, chart and fleet history. Never runs sessions.";
+/** The role's name, not the host's: the card is the archivist whatever its machine is called. */
+const ARCHIVIST_NAME = "Archivist";
 const ARCHIVIST_OFFLINE_NOTE =
   "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.";
 
@@ -665,7 +667,7 @@ export function deriveArchivist(
   const build = buildLine(entry.source, now);
   if (!entry.connected) {
     return {
-      name: entry.name,
+      name: ARCHIVIST_NAME,
       online: false,
       meta: `offline · last seen ${formatSeen(entry.lastSeen, now)}`,
       build,
@@ -679,7 +681,7 @@ export function deriveArchivist(
     ingests.length === 0 ? entry.platform : `${entry.platform} · last ingest ${formatSeen(Math.max(...ingests), now)}`;
   const database = reply === null ? null : bytesText(reply.database.archiveBytes + reply.database.metricsBytes);
   return {
-    name: entry.name,
+    name: ARCHIVIST_NAME,
     online: true,
     meta,
     build,
@@ -692,6 +694,6 @@ export function deriveArchivist(
             tableRow("Events", reply.events),
             { label: "Database", detail: "archive + metrics", ...database },
           ],
-    note: ARCHIVIST_NOTE,
+    note: null,
   };
 }
