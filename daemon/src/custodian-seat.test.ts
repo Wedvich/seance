@@ -828,6 +828,27 @@ describe("the round's verbs reach the seat", () => {
     r.seat.stop();
   });
 
+  test("a done the seat cannot mark writes no healthy line, and one whose log write fails still answers ok", async () => {
+    // A stop that lands after `done` read the round, before it could mark it.
+    let reads = 0;
+    let armed = false;
+    const lost = rig({ stopped: () => armed && ++reads > 1 });
+    await lost.seat.start();
+    await lost.seat.tick();
+    armed = true;
+    expect(await lost.seat.done("x")).toBe("no_round");
+    expect(lost.rounds).toEqual([]);
+    lost.seat.stop();
+
+    const broken = rig({ appendRound: () => Promise.reject(new Error("disk full")) });
+    await broken.seat.start();
+    await broken.seat.tick();
+    expect(await broken.seat.done("x")).toBe("ok");
+    expect(broken.state.record.round?.done).toBe(true);
+    expect(broken.warnings.join("\n")).toContain("writing the round log failed");
+    broken.seat.stop();
+  });
+
   test("a second done answers ok and writes nothing", async () => {
     const r = await started();
     expect(await r.seat.done("first")).toBe("ok");

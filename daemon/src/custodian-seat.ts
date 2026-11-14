@@ -489,16 +489,21 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         if (round === undefined || round.pane === null || d.stopped()) return "no_round";
         if (round.done === true) return "ok";
         if (d.now() >= round.startedAt + timeoutMs) return "too_late";
-        await d.appendRound({
-          start: round.startedAt,
-          end: d.now(),
-          exclave: round.exclave,
-          outcome: "healthy",
-          reason: "done",
-          counts: countedVerb(counts, "done", true),
-          summary,
-        });
+        // The record first: a `done` the seat could not mark (a stop landed) writes no healthy line, so the log never
+        // says healthy for a round whose end the audit then calls failed. A log write that fails after it is a
+        // warning, like every other round-log write: the round is done either way.
         if (!(await persist({ ...d.record(), round: { ...round, done: true } }))) return "no_round";
+        await d
+          .appendRound({
+            start: round.startedAt,
+            end: d.now(),
+            exclave: round.exclave,
+            outcome: "healthy",
+            reason: "done",
+            counts: countedVerb(counts, "done", true),
+            summary,
+          })
+          .catch((err: unknown) => d.warn(`custodian: writing the round log failed: ${String(err)}`));
         return "ok";
       }),
   };

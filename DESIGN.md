@@ -11563,8 +11563,10 @@ does not change when they land.
   itself, in the owner's own shell, with no frame sent, so an injected round cannot wipe or probe it (and its
   sandbox cannot write the state dir anyway); a file that is not there stays absent.
 - **`done` (C40, `CustodianSeat.done`)** takes a summary of at most `SUMMARY_MAX` (1 KiB; `too_long`). It is `too_late`
-  at or past the round's deadline and `not_custodian` with no round. Accepted, it appends the round's **healthy**
-  entry to the round log and then marks the seat record's round `done: true`; a second `done` answers `ok` and
+  at or past the round's deadline and `not_custodian` with no round. Accepted, it marks the seat record's round
+  `done: true` and then appends the round's **healthy** entry to the round log (code review F7: a `done` the seat could
+  not mark, because a stop landed, writes no healthy line for an end the audit calls failed; a log write that fails
+  after the mark is a warning, never an error reply); a second `done` answers `ok` and
   writes nothing. The mark is what refuses `close` and `notes` thereafter (`round_done`; `sessions` still answers).
   The seat **closes the pane at its next tick, never in the reply**, since the caller's `Bash` is waiting on it,
   audits `kill reason=done` and `end outcome=healthy reason=done`, and a restart that finds a `done` round whose pane
