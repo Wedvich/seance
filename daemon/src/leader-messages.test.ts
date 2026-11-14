@@ -8,6 +8,7 @@ import {
   type SessionMessage,
 } from "@seance/shared";
 import { machine } from "../test/fake-app-relay.ts";
+import { pollUntil } from "../test/fixtures.ts";
 import { createMessageRouter } from "./leader-messages.ts";
 
 type Deps = Parameters<typeof createMessageRouter>[0];
@@ -81,13 +82,13 @@ function harness(
 /** The router's work runs on its own after `onSessionMessage` returns; a negative assertion waits a tick or two. */
 const idle = (): Promise<void> => Bun.sleep(30);
 
-async function settled(h: Harness, expectReceipts: number): Promise<void> {
-  const start = Date.now();
-  while (h.receipts.length < expectReceipts && Date.now() - start < 2_000) {
-    // oxlint-disable-next-line no-await-in-loop -- poll one condition
-    await Bun.sleep(5);
-  }
-}
+const settled = (h: Harness, receipts: number): Promise<void> =>
+  pollUntil(() => h.receipts.length >= receipts, `${receipts} receipt(s)`);
+
+const warned = (h: Harness, lines: number): Promise<void> =>
+  pollUntil(() => h.warnings.length >= lines, `${lines} warn line(s)`);
+
+const forwarded = (h: Harness): Promise<void> => pollUntil(() => h.delivered.length > 0, "a forward");
 
 describe("createMessageRouter", () => {
   test("forwards to a connected machine advertising routing, then sends the receipt to the sealer", async () => {
@@ -197,6 +198,13 @@ describe("createMessageRouter", () => {
     expect(refused.warnings).toHaveLength(1);
     expect(refused.warnings[0]).toContain("refused code=unsupported");
 
+    const mismatched = harness({
+      deliver: () => Promise.resolve({ ok: false, code: "invalid_request", message: "no" }),
+    });
+    mismatched.router.onSessionMessage(message, SENDER);
+    await settled(mismatched, 1);
+    expect(mismatched.receipts[0]?.request.outcome).toBe("unsupported");
+
     const old = harness({
       machines: [
         machine({ deviceId: SENDER, name: "MsgBox", capabilities: ROUTING }),
@@ -207,6 +215,18 @@ describe("createMessageRouter", () => {
     await settled(old, 1);
     expect(old.delivered).toEqual([]);
     expect(old.receipts[0]?.request.outcome).toBe("unsupported");
+  });
+
+  test("a target whose handler crashed did not answer: offline, not a prompt to update it", async () => {
+    for (const code of ["internal_error", "too_large"] as const) {
+      const h = harness({ deliver: () => Promise.resolve({ ok: false, code, message: "m" }) });
+      h.router.onSessionMessage(message, SENDER);
+      // oxlint-disable-next-line no-await-in-loop -- one harness at a time
+      await settled(h, 1);
+      expect(h.receipts[0]?.request.outcome).toBe("offline");
+      expect(h.warnings).toHaveLength(1);
+      expect(h.warnings[0]).toContain(`refused code=${code}`);
+    }
   });
 
   test("a resolution of held, ended or unknown is a receipt and no deliver", async () => {
@@ -230,11 +250,7 @@ describe("createMessageRouter", () => {
     const h = harness();
     const { fromTask: _task, fromTitle: _title, ...untasked } = message;
     expect(h.router.onSessionMessage(untasked, SENDER)).toBe(true);
-    const start = Date.now();
-    while (h.delivered.length === 0 && Date.now() - start < 2_000) {
-      // oxlint-disable-next-line no-await-in-loop -- poll one condition
-      await Bun.sleep(5);
-    }
+    await forwarded(h);
     await idle();
     expect(h.delivered).toHaveLength(1);
     expect(h.delivered[0]?.request).not.toHaveProperty("fromTask");
@@ -252,18 +268,34 @@ describe("createMessageRouter", () => {
     expect(h.warnings[0]).toContain("dropped — not placed there");
   });
 
-  test("a fromTask the leader no longer holds is forwarded without naming it, and gets no receipt", async () => {
+  test("a fromTask the leader no longer holds is forwarded without naming it, and the receipt still names it to the sealer", async () => {
     const h = harness({ sentFrom: () => "absent" });
     expect(h.router.onSessionMessage(message, SENDER)).toBe(true);
-    const start = Date.now();
-    while (h.delivered.length === 0 && Date.now() - start < 2_000) {
-      // oxlint-disable-next-line no-await-in-loop -- poll one condition
-      await Bun.sleep(5);
-    }
-    await idle();
+    await settled(h, 1);
     expect(h.delivered[0]?.request).not.toHaveProperty("fromTask");
     expect(h.delivered[0]?.request).not.toHaveProperty("fromTitle");
-    expect(h.receipts).toEqual([]);
+    expect(h.receipts).toHaveLength(1);
+    expect(h.receipts[0]?.deviceId).toBe(SENDER);
+    expect(h.receipts[0]?.request).toMatchObject({ fromTask: FROM_TASK, outcome: "delivered" });
+  });
+
+  test("the sender's machine name reaches the receiver's wrapper scrubbed and within the parser's bound", async () => {
+    const named = async (name: string): Promise<string | undefined> => {
+      const h = harness({
+        machines: [
+          machine({ deviceId: SENDER, name, capabilities: ROUTING }),
+          machine({ deviceId: TARGET, name: "Target", capabilities: ROUTING }),
+        ],
+      });
+      h.router.onSessionMessage(message, SENDER);
+      await settled(h, 1);
+      return h.delivered[0]?.request.fromMachine;
+    };
+    const long = await named(`build-runner-${"x".repeat(80)}.corp.example.com`);
+    expect(long?.length).toBe(64);
+    expect(await named('Box `one`\nforged "line"')).toBe("Box one forged line");
+    // Nothing survives the scrub: the device id names it.
+    expect(await named("``")).toBe(SENDER);
   });
 
   test("a sealer missing from the registry is dropped", async () => {
@@ -278,22 +310,14 @@ describe("createMessageRouter", () => {
   test("a failed receipt is one line and a thrown deliver is one line; neither ends the router", async () => {
     const failed = harness({ receipt: () => Promise.resolve({ ok: false, code: "unreachable", message: "m" }) });
     failed.router.onSessionMessage(message, SENDER);
-    const start = Date.now();
-    while (failed.warnings.length === 0 && Date.now() - start < 2_000) {
-      // oxlint-disable-next-line no-await-in-loop -- poll one condition
-      await Bun.sleep(5);
-    }
+    await warned(failed, 1);
     expect(failed.warnings[0]).toContain("message-receipt");
 
     const thrown = harness({
       deliver: () => Promise.reject(new Error("boom")),
     });
     expect(thrown.router.onSessionMessage(message, SENDER)).toBe(true);
-    const begun = Date.now();
-    while (thrown.warnings.length === 0 && Date.now() - begun < 2_000) {
-      // oxlint-disable-next-line no-await-in-loop -- poll one condition
-      await Bun.sleep(5);
-    }
+    await warned(thrown, 1);
     expect(thrown.warnings[0]).toContain("failed");
   });
 
@@ -307,8 +331,9 @@ describe("createMessageRouter", () => {
     ];
     for (const h of scenarios) {
       h.router.onSessionMessage(message, SENDER);
+      // Three scenarios warn after an await: poll for the line, so the checks below read a real one.
       // oxlint-disable-next-line no-await-in-loop -- one harness at a time
-      await idle();
+      await warned(h, 1);
     }
     const lines = scenarios.flatMap((h) => h.warnings);
     expect(lines.length).toBeGreaterThan(0);

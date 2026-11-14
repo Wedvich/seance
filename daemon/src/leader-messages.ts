@@ -1,10 +1,12 @@
 import type { MessageRoute } from "@seance/scheduler";
 import {
   CAPABILITIES,
+  displayTitle,
   quote,
   type DeliverMessageRequest,
   type Machine,
   type MessageReceiptRequest,
+  ROUTING_ID_MAX_LENGTH,
   type ReceiptOutcome,
   type SessionMessage,
 } from "@seance/shared";
@@ -41,12 +43,29 @@ function advertisesRouting(machine: Machine): boolean {
   return capabilities.includes(CAPABILITIES.messages) && capabilities.includes(CAPABILITIES.messageRoute);
 }
 
+/**
+ * The sender machine's name as the receiver's wrapper shows it. A name is any string the owner configured, and it sits
+ * inside backticks there, while the receiver's parser holds `fromMachine` to `ROUTING_ID_MAX_LENGTH`: so it goes through
+ * `displayTitle`'s scrub and is cut to that length, and a name nothing survives of falls back to the device id.
+ */
+function senderLabel(name: string, deviceId: string): string {
+  let label = "";
+  for (const char of displayTitle(name) ?? "") {
+    if (label.length + char.length > ROUTING_ID_MAX_LENGTH) break;
+    label += char;
+  }
+  return label === "" ? deviceId : label;
+}
+
 export function createMessageRouter(deps: MessageRouterDeps): MessageRouter {
   const route = async (
     message: SessionMessage,
     from: string,
     senderName: string,
+    /** What the forward names: only a task the leader holds, so the receiver's wrapper never names one it cannot bind. */
     fromTask: string | undefined,
+    /** What the receipt names: the task the sealer's own daemon bound, which only that daemon places a note for. */
+    receiptTask: string | undefined,
   ): Promise<void> => {
     const resolved = deps.resolve(message.to);
     let outcome: ReceiptOutcome;
@@ -78,25 +97,26 @@ export function createMessageRouter(deps: MessageRouterDeps): MessageRouter {
         if ("outcome" in reply) {
           outcome = reply.outcome;
           reason = reply.reason;
-        } else if (reply.code === "unreachable" || reply.code === "undelivered") {
-          outcome = "offline";
         } else {
-          // The target answered but would not take it: an older build, or a daemon running no messaging.
-          deps.warn(
-            `scheduler: session-message to=${quote(resolved.taskId)} machine=${quote(resolved.deviceId)} refused code=${reply.code}`,
-          );
-          outcome = "unsupported";
+          // `unsupported` says "needs `seanced update`", so only a refusal of the frame itself is worded so; a handler
+          // that crashed or a reply that did not parse is an answer that did not come, which `offline` says.
+          if (reply.code !== "unreachable" && reply.code !== "undelivered") {
+            deps.warn(
+              `scheduler: session-message to=${quote(resolved.taskId)} machine=${quote(resolved.deviceId)} refused code=${reply.code}`,
+            );
+          }
+          outcome = reply.code === "unsupported" || reply.code === "invalid_request" ? "unsupported" : "offline";
         }
       }
     }
-    if (fromTask === undefined) return;
+    if (receiptTask === undefined) return;
     const taskId = resolved.kind === "unknown" ? undefined : resolved.taskId;
     const receipt = {
       id: message.id,
       to: message.to,
       kind: message.kind,
       outcome,
-      fromTask,
+      fromTask: receiptTask,
       ...(taskId === undefined ? {} : { taskId }),
       ...(reason === undefined ? {} : { reason }),
     } satisfies MessageReceiptRequest;
@@ -122,10 +142,10 @@ export function createMessageRouter(deps: MessageRouterDeps): MessageRouter {
           );
           return false;
         }
-        // A task the leader pruned may still have a live session. Its wrapper must not name a task the leader cannot bind.
+        // A task the leader pruned may still have a live session: its receipt still goes to the sealer, which bound it.
         if (placed === "absent") fromTask = undefined;
       }
-      route(message, from, sender.name, fromTask).catch((err: unknown) => {
+      route(message, from, senderLabel(sender.name, from), fromTask, message.fromTask).catch((err: unknown) => {
         deps.warn(`scheduler: session-message from=${quote(from)} failed: ${String(err)}`);
       });
       return true;
