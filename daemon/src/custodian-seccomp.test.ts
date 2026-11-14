@@ -47,8 +47,8 @@ describe("vsockFilter", () => {
           const child = Bun.spawn(["bwrap", "--dev-bind", "/", "/", "--seccomp", "3", "--", ...argv], {
             stdio: ["ignore", "pipe", "pipe", file],
           });
-          const out = await new Response(child.stdout).text();
-          expect(await child.exited).toBe(0);
+          const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+          expect({ code: await child.exited, err }).toEqual({ code: 0, err: "" });
           return out;
         };
         // A failed AF_VSOCK create would be 97 (EAFNOSUPPORT) without the filter too where the module is absent, so the
