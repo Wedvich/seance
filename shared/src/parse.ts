@@ -72,6 +72,7 @@ import {
   type AccountRecord,
   type ArchiveIngestSource,
   type ArchiveMetricsRequest,
+  type ArchiveRefusals,
   type ArchiveTasksCursor,
   type ArchiveTasksReply,
   type ArchiveTasksRequest,
@@ -714,6 +715,12 @@ function isFiniteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+/** Unreadable is undefined, never null: a bad `refused` costs that line of the card, not the reply. */
+function parseArchiveRefusals(value: unknown): ArchiveRefusals | undefined {
+  if (!isRecord(value) || !isUint(value["tasks"]) || !isFiniteOrNull(value["since"])) return undefined;
+  return { tasks: value["tasks"], since: value["since"] };
+}
+
 /** The card's numbers: an archivist a version ahead must cost the rows, not the app. */
 export function parseArchiveStatusResponse(value: unknown): ArchiveStatusResponse | null {
   if (!isRecord(value)) return null;
@@ -733,6 +740,7 @@ export function parseArchiveStatusResponse(value: unknown): ArchiveStatusRespons
   if (tasks === undefined || samples === undefined || events === undefined) return null;
   const { archiveBytes, metricsBytes } = database;
   if (!isFiniteNonNegative(archiveBytes) || !isFiniteNonNegative(metricsBytes)) return null;
+  const refused = parseArchiveRefusals(value["refused"]);
   return {
     ok: true,
     onlineSince,
@@ -747,6 +755,7 @@ export function parseArchiveStatusResponse(value: unknown): ArchiveStatusRespons
     events,
     database: { archiveBytes, metricsBytes },
     countedAt,
+    ...(refused === undefined ? {} : { refused }),
   };
 }
 

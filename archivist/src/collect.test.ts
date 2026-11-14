@@ -7,6 +7,7 @@ import { pollUntil } from "../../daemon/test/fixtures.ts";
 import { Archive } from "./archive.ts";
 import { Paced, startCollector, type ArchiveSource } from "./collect.ts";
 import { createIngestClock } from "./ingest-clock.ts";
+import { createRefusalTally } from "./refusal-tally.ts";
 
 /**
  * `Paced` on its own, and the collector over a scripted source: the relay
@@ -149,6 +150,7 @@ describe("collector", () => {
     source: ArchiveSource,
     warnings: string[] = [],
     clock = createIngestClock(),
+    refusals = createRefusalTally(),
   ): Promise<ReturnType<typeof startCollector>> =>
     startCollector({
       source,
@@ -157,6 +159,7 @@ describe("collector", () => {
       selfId: "seat",
       log: { info: () => {}, warn: (line) => warnings.push(line) },
       clock,
+      refusals,
       timings: { listGapMs: 10_000, retryMs: 10_000, pollMs: 60_000 },
     });
 
@@ -209,10 +212,11 @@ describe("collector", () => {
     }
   });
 
-  test("a row SQLite refuses is skipped and counted; the rest of the listing is archived and the store noted", async () => {
+  test("a row SQLite refuses is skipped, counted and tallied; the rest is archived, and a later write clears it", async () => {
     const fake = script();
     const warnings: string[] = [];
     const clock = createIngestClock();
+    const tally = createRefusalTally();
     // A STRICT INTEGER column refuses a fractional `created_at`: one row refused, the rest writable.
     const listing = [
       { task: finished("t-a"), version: 1 },
@@ -223,7 +227,7 @@ describe("collector", () => {
       ...fake.source,
       listTasks: () => Promise.resolve({ ok: true, tasks: listing, unreadable: [] }),
     };
-    const collector = await start(source, warnings, clock);
+    const collector = await start(source, warnings, clock, tally);
     try {
       await pollUntil(() => archive.taskVersion("t-c") === 1, "the task after the refused one archived");
       expect(archive.taskVersion("t-a")).toBe(1);
@@ -233,6 +237,12 @@ describe("collector", () => {
       expect(taskWarnings).toHaveLength(1);
       expect(taskWarnings[0]).toMatch(/^tasks: 1 not archived: .*tasks\.created_at/u);
       expect(clock.snapshot().store).not.toBeNull();
+      expect(tally.snapshot()).toMatchObject({ tasks: 1, since: expect.any(Number) });
+      // The corrected record, at a later version, through a named get: archived, so no longer refused.
+      fake.release();
+      fake.nudge({ at: 2, tasks: ["t-b"] });
+      await pollUntil(() => archive.taskVersion("t-b") === 2, "the corrected task archived");
+      expect(tally.snapshot()).toEqual({ tasks: 0, since: null });
     } finally {
       collector.stop();
     }
@@ -246,6 +256,42 @@ describe("collector", () => {
       await pollUntil(() => clock.snapshot().store !== null, "the store noted after the listing");
       expect(clock.snapshot().status).toBeNull();
       await pollUntil(() => clock.snapshot().registry !== null, "the registry noted after the fleet write");
+    } finally {
+      collector.stop();
+    }
+  });
+
+  test("account reads do not note the store: only a task read does", async () => {
+    const fake = script();
+    const clock = createIngestClock();
+    let accountLists = 0;
+    let accountGets = 0;
+    let storeChanged: (key: string, version: number) => void = () => {};
+    const source: ArchiveSource = {
+      ...fake.source,
+      listTasks: () => Promise.resolve({ ok: false, code: "internal_error" }),
+      listAccounts: () => {
+        accountLists += 1;
+        return Promise.resolve({ ok: true, accounts: [], unreadable: [] });
+      },
+      getAccountRecord: (key) => {
+        accountGets += 1;
+        return Promise.resolve({ ok: true, key, version: 0, entry: null });
+      },
+      onStoreChanged: (listener) => {
+        storeChanged = listener;
+        return () => {};
+      },
+    };
+    const collector = await start(source, [], clock);
+    try {
+      await pollUntil(() => accountLists === 1, "the account listing at ready");
+      storeChanged("account:k", 1);
+      await pollUntil(() => accountGets === 1, "the named account get");
+      await pollUntil(() => clock.snapshot().registry !== null, "the registry noted after the fleet write");
+      // A negative assertion: the account reads' landing is a non-event for the store's clock.
+      await Bun.sleep(30);
+      expect(clock.snapshot().store).toBeNull();
     } finally {
       collector.stop();
     }

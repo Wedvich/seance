@@ -27,6 +27,7 @@ import { sealArchivistInfo } from "./info.ts";
 import { answerArchiveMetrics, answerArchiveTasks, createMetricsAnswer, createTasksAnswer } from "./query.ts";
 import { MetricsArchive } from "./metrics-archive.ts";
 import { startMetricsCollector, type MetricsTimings } from "./metrics-collect.ts";
+import { createRefusalTally } from "./refusal-tally.ts";
 import {
   archivePathIn,
   archivistConfigPath,
@@ -128,6 +129,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
   async function startLegs(metrics: MetricsArchive): Promise<Archivist> {
     const startedAt = Date.now();
     const clock = createIngestClock();
+    const refusals = createRefusalTally();
     const source = await readServedSource(servedSourcePathIn(stateDir));
     let connectedSince: number | null = null;
     // Chained: the refusal loop flaps connected/disconnected back to back, and unordered renames could leave a stale value.
@@ -160,6 +162,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
     const answerStatus = createStatusAnswer({
       counts: counts.snapshot,
       clock,
+      refusals,
       onlineSince: () => connectedSince,
       archivePath: archivePathIn(stateDir),
       metricsPath: metricsPathIn(stateDir),
@@ -213,6 +216,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       selfId: identity.deviceId,
       log,
       clock,
+      refusals,
       ...(opts.collect === undefined ? {} : { timings: opts.collect }),
     });
     const metricsCollector = startMetricsCollector({

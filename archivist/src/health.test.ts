@@ -6,6 +6,7 @@ import { APP_ID, parseArchiveStatusReply, type ArchiveTableStatus, type ArchiveS
 import { pollUntil } from "../../daemon/test/fixtures.ts";
 import { answerArchiveStatus, createStatusAnswer, startCountRefresher, type Counted } from "./health.ts";
 import { createIngestClock } from "./ingest-clock.ts";
+import { createRefusalTally } from "./refusal-tally.ts";
 
 const none: ArchiveTableStatus = { rows: 0, oldest: null };
 
@@ -142,10 +143,13 @@ describe("status answer", () => {
   afterAll(() => rm(dir, { recursive: true, force: true }));
 
   const counted: Counted = { tasks: none, events: none, samples: { rows: 3, oldest: 9 }, countedAt: 77 };
+  const refusals = createRefusalTally(() => 42);
+  refusals.refused("t-a");
   const answerFor = (paths: { archive: string; metrics: string }, counts: Counted | null) =>
     createStatusAnswer({
       counts: () => counts,
       clock: createIngestClock(() => 5),
+      refusals,
       onlineSince: () => 11,
       archivePath: paths.archive,
       metricsPath: paths.metrics,
@@ -159,6 +163,9 @@ describe("status answer", () => {
   test("carries the snapshot, the clock and onlineSince; null tables before a first pass", async () => {
     const answer = await answerFor(noWal, counted)();
     expect(answer).toMatchObject({ ok: true, onlineSince: 11, samples: { rows: 3, oldest: 9 }, countedAt: 77 });
+    // A count and a time only: the tally's ids never reach the reply.
+    expect(answer.refused).toEqual({ tasks: 1, since: 42 });
+    expect(JSON.stringify(answer)).not.toContain("t-a");
     expect(answer.lastIngest).toEqual({ store: null, registry: null, status: null, pull: null });
     expect(await answerFor(noWal, null)()).toMatchObject({ tasks: null, samples: null, events: null, countedAt: null });
   });
