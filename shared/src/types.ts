@@ -716,6 +716,7 @@ export type OpName =
   | "spawn"
   | "despawn"
   | "availability"
+  | "custodian"
   | "rescan"
   | "metrics"
   | "push-branch"
@@ -778,6 +779,8 @@ export const OP_TIMEOUT_MS = {
   despawn: 20_000,
   // A local write plus one state save.
   availability: 10_000,
+  // Two small file reads and one write, as `availability`.
+  custodian: 10_000,
   metrics: 15_000,
   // Answered from a cached count and two stat calls, never a scan.
   "archive-status": 10_000,
@@ -1146,7 +1149,9 @@ export interface MachineInfo {
  * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian`.
  * Configured, not checked: a host that fails the sandbox or agent checks runs no round and still advertises it
  * (its `MachineStatus.cu` then says `failing`). The Machines card shows its Custodian row only for a machine that
- * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`).
+ * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`). It also means the daemon
+ * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
+ * `ROUNDS_LIVE` has held every seat since the seat was built, so the one bit gates the Machines card's menu too.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1359,6 +1364,11 @@ export interface CustodianStatus {
   readonly e?: number;
   readonly n?: readonly [number, number, number];
   readonly rc?: string;
+  /**
+   * A pause holds behind `running` or `failing`, which outrank `paused` in `s`: the card offers Resume from it. Only
+   * `true`, only beside those two states.
+   */
+  readonly p?: true;
 }
 
 /**
@@ -1897,6 +1907,46 @@ export type AvailabilityErrorCode = (typeof AVAILABILITY_ERROR_CODES)[number];
 export type AvailabilityResponse =
   | { readonly ok: true; readonly closed: number | null }
   | { readonly ok: false; readonly code: AvailabilityErrorCode; readonly message: string };
+
+/** What the Machines card's menu asks of a machine's custodian seat (`custodian` op, docs/custodian.md C45). */
+export const CUSTODIAN_ACTS = ["round", "pause", "resume"] as const;
+export type CustodianAct = (typeof CUSTODIAN_ACTS)[number];
+
+/** The longest pause the op takes, as the shell's `pause --for` (30 days). */
+export const CUSTODIAN_PAUSE_MAX_MINUTES = 30 * 24 * 60;
+
+/**
+ * `custodian`, app → daemon, sealed `from: "app"` only. `minutes` only beside `pause` (1 to
+ * `CUSTODIAN_PAUSE_MAX_MINUTES`); a pause without it holds until resumed.
+ */
+export interface CustodianRequest {
+  readonly act: CustodianAct;
+  readonly minutes?: number;
+}
+
+/**
+ * `held`: rounds are held on this build (`ROUNDS_LIVE`); `unconfigured`: no `custodian` key in its config.json;
+ * `host_failed`: its host checks failed, so no round can run; `running`: a round runs now; `too_soon`: one started
+ * or ended within the request spacing, `after` (ms) saying when one may be asked. Those five refuse `round` only.
+ */
+export const CUSTODIAN_ERROR_CODES = [
+  "invalid_request",
+  "refused",
+  "unsupported",
+  "held",
+  "unconfigured",
+  "host_failed",
+  "running",
+  "too_soon",
+  ...TRANSPORT_ERROR_CODES,
+] as const;
+
+export type CustodianErrorCode = (typeof CUSTODIAN_ERROR_CODES)[number];
+
+/** `pause`: the owner's pause after the act (`until` ms, null until resumed), null when none holds. */
+export type CustodianResponse =
+  | { readonly ok: true; readonly pause: { readonly until: number | null } | null }
+  | { readonly ok: false; readonly code: CustodianErrorCode; readonly message: string; readonly after?: number };
 
 export type DespawnResponse =
   | {

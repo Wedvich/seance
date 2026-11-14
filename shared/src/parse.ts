@@ -197,6 +197,11 @@ import {
   AVAILABILITY_ERROR_CODES,
   type AvailabilityRequest,
   type AvailabilityResponse,
+  CUSTODIAN_ACTS,
+  CUSTODIAN_ERROR_CODES,
+  CUSTODIAN_PAUSE_MAX_MINUTES,
+  type CustodianRequest,
+  type CustodianResponse,
 } from "./types.ts";
 
 /**
@@ -567,11 +572,14 @@ export function parseCustodianStatus(value: unknown): CustodianStatus | null {
     counts = [closed, nudged, flagged];
   }
   if (rc !== undefined && !(state === "running" && isRemoteSessionId(rc))) return null;
+  const { p } = value;
+  if (p !== undefined && !(p === true && (state === "running" || state === "failing"))) return null;
   return {
     s: state,
     ...(e === undefined ? {} : { e }),
     ...(counts === undefined ? {} : { n: counts }),
     ...(rc === undefined ? {} : { rc }),
+    ...(p === true ? { p } : {}),
   };
 }
 
@@ -2365,6 +2373,35 @@ export function parseAvailabilityResponse(value: unknown): AvailabilityResponse 
   const code = AVAILABILITY_ERROR_CODES.find((c) => c === value["code"]);
   if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
   return { ok: false, code, message: value["message"] };
+}
+
+/** `custodian`, at the daemon: `minutes` only beside `pause`, a whole number within 1..`CUSTODIAN_PAUSE_MAX_MINUTES`. */
+export function parseCustodianRequest(value: unknown): CustodianRequest | null {
+  if (!isRecord(value)) return null;
+  const act = CUSTODIAN_ACTS.find((candidate) => candidate === value["act"]);
+  if (act === undefined) return null;
+  const { minutes } = value;
+  if (minutes === undefined) return { act };
+  if (act !== "pause" || !isUint(minutes) || minutes < 1 || minutes > CUSTODIAN_PAUSE_MAX_MINUTES) return null;
+  return { act, minutes };
+}
+
+/** A `custodian` answer at a client: a code it does not know reads as a failure. */
+export function parseCustodianResponse(value: unknown): CustodianResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === true) {
+    const { pause } = value;
+    if (pause === null) return { ok: true, pause: null };
+    if (!isRecord(pause)) return null;
+    const { until } = pause;
+    if (until === null) return { ok: true, pause: { until: null } };
+    return isFiniteNumber(until) && until > 0 ? { ok: true, pause: { until } } : null;
+  }
+  const code = CUSTODIAN_ERROR_CODES.find((c) => c === value["code"]);
+  if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
+  const { after } = value;
+  if (after !== undefined && !(isFiniteNumber(after) && after > 0)) return null;
+  return { ok: false, code, message: value["message"], ...(after === undefined ? {} : { after }) };
 }
 
 /** `pass-close`, at the daemon holding the task. */
