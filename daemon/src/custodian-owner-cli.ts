@@ -1,15 +1,8 @@
+import { CUSTODIAN_PAUSE_MAX_MINUTES } from "@seance/shared";
 import { cliSink, custodianOwnerAudit } from "./audit.ts";
 import { loadConfig, type Config } from "./config.ts";
-import {
-  pausedAt,
-  readControl,
-  readSeatView,
-  requestRound,
-  writePause,
-  type CustodianPause,
-  type SeatView,
-} from "./custodian-control.ts";
-import { ROUND_REQUEST_MIN_GAP_MS } from "./custodian-control.ts";
+import { pausedAt, readControl, readSeatView, type SeatView } from "./custodian-control.ts";
+import { freshView, ownerPause, ownerResume, ownerRound } from "./custodian-owner.ts";
 import { readRounds, type RoundEntry } from "./custodian-rounds.ts";
 import { FAILING_AFTER, ROUNDS_LIVE, trailingFailures } from "./custodian-seat.ts";
 import { custodianRoundsPath } from "./paths.ts";
@@ -29,9 +22,8 @@ import { custodianSeatOf, pidAlive, readRuntime, readState } from "./state.ts";
 const USAGE = "usage: seanced custodian status | log | round | pause [--for <n>m|h|d] | resume";
 
 const MINUTE_MS = 60_000;
-const SEAT_VIEW_STALE_MS = 5 * MINUTE_MS;
 const MIN_PAUSE_MS = MINUTE_MS;
-const MAX_PAUSE_MS = 30 * 24 * 60 * MINUTE_MS;
+const MAX_PAUSE_MS = CUSTODIAN_PAUSE_MAX_MINUTES * MINUTE_MS;
 const UNIT_MS = { m: MINUTE_MS, h: 60 * MINUTE_MS, d: 24 * 60 * MINUTE_MS } as const;
 const FIELD_MAX = 120;
 const SUMMARY_PRINT_MAX = 1_024;
@@ -115,7 +107,7 @@ async function status(): Promise<void> {
   const last = entries.at(-1);
   console.log(`last round:  ${last === undefined ? "none" : lastLine(last)}`);
   const tail = trailingFailures(entries);
-  const live = fresh(view, now) ? view : null;
+  const live = freshView(view, now) ? view : null;
   if (live?.s === "failing" || tail >= FAILING_AFTER) {
     console.log(
       `failing:     yes (${live?.failed === true ? "this host's checks failed, so no round can run" : `${FAILING_AFTER} failed rounds or attempts in a row`})`,
@@ -123,13 +115,8 @@ async function status(): Promise<void> {
   }
 }
 
-/** A view older than the heartbeat allows is no report: the daemon may have stopped or the host been fixed since. */
-function fresh(view: SeatView | null, now: number): view is SeatView {
-  return view !== null && now - view.at <= SEAT_VIEW_STALE_MS;
-}
-
 function viewLine(view: SeatView | null, now: number): string {
-  if (!fresh(view, now)) {
+  if (!freshView(view, now)) {
     return "has not reported (not running, not enabled on this host, or an older daemon)";
   }
   const parts = [view.s, ...(view.failed ? ["host checks failed"] : [])];
@@ -170,62 +157,48 @@ async function logRounds(): Promise<void> {
   console.log(blocks.join("\n\n"));
 }
 
+const ROUND_REFUSALS = {
+  held: "rounds are held until docs/custodian.md build item 4b",
+  unconfigured: "no custodian configured in config.json",
+  failed: "this host's checks failed, so no round can run",
+  running: "a round is running",
+} as const;
+
 /** `live` is a seam for tests: production passes none, and rounds are held while `ROUNDS_LIVE` is false. */
 export async function requestOwnerRound(live: boolean = ROUNDS_LIVE): Promise<void> {
-  const audit = custodianOwnerAudit(cliSink);
-  if (!live) {
-    console.error("seanced custodian: rounds are held until docs/custodian.md build item 4b; nothing requested");
-    process.exitCode = 1;
-    await audit.round("held");
-    return;
-  }
-  const config = await configOf();
-  if (config?.custodian === undefined) {
-    console.error("seanced custodian: no custodian configured in config.json; nothing requested");
-    process.exitCode = 1;
-    await audit.round("unconfigured");
-    return;
-  }
-  const now = Date.now();
-  const read = await readSeatView();
-  const view = fresh(read, now) ? read : null;
-  if (view?.failed === true) {
-    console.error("seanced custodian: this host's checks failed, so no round can run; nothing requested");
-    process.exitCode = 1;
-    await audit.round("failed");
-    return;
-  }
-  // What the seat will drop silently (its tick, `custodian-seat.ts` `step`): say so here instead. The seat's own
-  // launch attempts are in its memory only, so a request right after a failed launch can still be dropped.
-  const [state, entries] = await Promise.all([
-    readState().catch(() => null),
-    readRounds(custodianRoundsPath()).catch(() => [] as readonly RoundEntry[]),
-  ]);
-  const record = state === null ? undefined : custodianSeatOf(state);
-  if (record?.round !== undefined || view?.s === "running") {
-    console.error("seanced custodian: a round is running; nothing requested");
-    process.exitCode = 1;
-    await audit.round("running");
-    return;
-  }
-  const latest = Math.max(record?.lastEndedAt ?? 0, entries.at(-1)?.start ?? 0);
-  if (now - latest < ROUND_REQUEST_MIN_GAP_MS) {
+  const decided = await ownerRound(
+    {
+      now: Date.now(),
+      live,
+      configured: async () => (await configOf())?.custodian !== undefined,
+      seatView: readSeatView,
+      seatRecord: async () => {
+        const state = await readState().catch(() => null);
+        return state === null ? undefined : custodianSeatOf(state);
+      },
+      rounds: () => readRounds(custodianRoundsPath()),
+    },
+    custodianOwnerAudit("cli", cliSink),
+  );
+  if (decided.outcome === "too_soon") {
     console.error(
-      `seanced custodian: a round started or ended at ${time(latest)}; one can be requested after ${time(latest + ROUND_REQUEST_MIN_GAP_MS)}; nothing requested`,
+      `seanced custodian: a round started or ended at ${time(decided.latest)}; one can be requested after ${time(decided.after)}; nothing requested`,
     );
     process.exitCode = 1;
-    await audit.round("too_soon");
+    return;
+  }
+  if (decided.outcome !== "requested") {
+    console.error(`seanced custodian: ${ROUND_REFUSALS[decided.outcome]}; nothing requested`);
+    process.exitCode = 1;
     return;
   }
   const runtime = await readRuntime();
   const daemonUp = runtime !== null && pidAlive(runtime.pid);
   if (!daemonUp) {
     console.error("seanced custodian: the daemon is not running; the request runs when it next ticks, if still fresh");
-  } else if (view === null) {
+  } else if (decided.view === null) {
     console.error("seanced custodian: the daemon has not reported a seat; it may not honour the request");
   }
-  await requestRound(now);
-  await audit.round("requested");
   console.log(
     daemonUp
       ? "round requested; the seat starts it at its next tick (within a minute) unless the launch fails or the daemon is stopping"
@@ -249,14 +222,11 @@ async function pause(args: readonly string[]): Promise<void> {
     }
     until = now + ms;
   }
-  const record: CustodianPause = { at: now, until };
-  await writePause(record);
-  await custodianOwnerAudit(cliSink).pause(until);
+  await ownerPause(now, until, custodianOwnerAudit("cli", cliSink));
   console.log(until === null ? "paused until resume" : `paused until ${time(until)}`);
 }
 
 async function resume(): Promise<void> {
-  await writePause(null);
-  await custodianOwnerAudit(cliSink).resume();
+  await ownerResume(custodianOwnerAudit("cli", cliSink));
   console.log("resumed");
 }
