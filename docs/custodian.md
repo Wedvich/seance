@@ -176,7 +176,7 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
 - **C32. The rule** is built: `nothingLost` in `daemon/src/reap-git.ts`, used by `reap` and by the
   close. Its record, the `gh` lookup's shape included, is DESIGN.md, Reap, "Nothing lost". The close
   adds guards the rule does not know (DESIGN.md, "The custodian frame kind"): the worktree must sit under
-  its clone's `.claude/worktrees/`, not have been touched since the turn ended, not be locked by anyone but
+  its clone's `.claude/worktrees/`, not have been touched since the turn ended (where a live session's turn end was observed), not be locked by anyone but
   a dead Claude, and have no pane in it.
 - **C33.** When the rule fails, the worktree is kept, the session is still closed, and the daemon
   flags it `dirty` or `unpushed`. When the rule cannot be evaluated, the worktree is kept and

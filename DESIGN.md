@@ -1086,8 +1086,8 @@ nothing checked it. The last is the gap they leave.
   only, no screen text), close a pane the daemon's own facts show at rest (re-read at the act, never `foreign`,
   marked, `needs-input`, `busy` or holding a draft), store pruned notes and report done. A close removes a worktree
   only under the nothing-lost rule, through `git worktree remove` without `--force`, under the clone's
-  `.claude/worktrees/`, never touched since the turn ended, never locked by anyone but a dead Claude, never with a
-  pane in it. A frame carries no path, branch, task or session id. Nothing read from a pane, the notes or the
+  `.claude/worktrees/`, never touched since the turn ended (where a live session's turn end was observed: a dead or
+  exit-prompt pane has none), never locked by anyone but a dead Claude, never with a pane in it. A frame carries no path, branch, task or session id. Nothing read from a pane, the notes or the
   summary is logged or audited; the summary goes only into `rounds.jsonl`, and the notes into their 0600 file.
 - **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
   `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,

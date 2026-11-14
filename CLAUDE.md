@@ -419,7 +419,8 @@ green:
   be found — `waiting`, since the despawn's Escape and Ctrl+C would clear a draft) through the graceful despawn;
   it then removes the task's worktree only for one its own launch ledger noted, under its clone's
   `.claude/worktrees/`, by `git worktree remove` **without `--force`**, after `nothingLost`, never one touched since
-  the turn ended (`TOUCH_SLACK_MS`), locked in git (bar Claude's own lock whose process is gone) or with a pane in
+  the turn ended (`TOUCH_SLACK_MS`; only where a live session's turn end was observed, not for a dead or exit-prompt
+  pane), locked in git (bar Claude's own lock whose process is gone) or with a pane in
   it (`custodian-worktree.ts`). `notes` is stored only through `pruneNotes` (sections by `standing`, a live task id
   or a live pane, once each) within `NOTES_MAX`, and `seanced custodian notes --clear` is the owner's shell's act,
   never a frame. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
