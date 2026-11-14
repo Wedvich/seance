@@ -132,9 +132,9 @@ export interface QueueRow {
   /** The earlier session it continues, one line; null for any other task. */
   readonly continues: string | null;
   /** The earlier task whose work this one carries on, one line; null for any other task. */
-  readonly carriesOn: string | null;
+  readonly carriesOn: LineageLine | null;
   /** The task its work was passed to, one line; null for any other task. */
-  readonly passedTo: string | null;
+  readonly passedTo: LineageLine | null;
   /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
   readonly continuing: { readonly id: string; readonly text: string } | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
@@ -374,20 +374,47 @@ function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string 
   return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
 }
 
-function carriesOnLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+/** A successor-chain line, and the other task's id to reveal on tap when its card is on screen. */
+export interface LineageLine {
+  readonly text: string;
+  readonly reveal: string | null;
+}
+
+function lineage(text: string, other: string, revealable: ReadonlySet<string>): LineageLine {
+  return { text, reveal: revealable.has(other) ? other : null };
+}
+
+/** Reads only `succeeds.task` and `trigger`: an archived record's `succeeds.account` is a placeholder (A15). */
+export function carriesOnLine(
+  task: Task,
+  titles: ReadonlyMap<string, string>,
+  revealable: ReadonlySet<string>,
+): LineageLine | null {
   const earlier = task.spec.succeeds?.task;
   if (earlier === undefined) return null;
   const line = `Carries on ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
   const trigger = task.spec.succeeds?.trigger;
-  if (trigger === "quota") return `${line} after its usage ran out`;
-  return trigger === "drain" ? `${line} after its machine closed` : line;
+  const text =
+    trigger === "quota"
+      ? `${line} after its usage ran out`
+      : trigger === "drain"
+        ? `${line} after its machine closed`
+        : line;
+  return lineage(text, earlier, revealable);
 }
 
-function passedToLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+export function passedToLine(
+  task: Task,
+  titles: ReadonlyMap<string, string>,
+  revealable: ReadonlySet<string>,
+): LineageLine | null {
   const next = task.successor;
   if (next === undefined) return null;
-  return `Passed to ${titles.get(next) ?? `task ${next.slice(0, 8)}`}`;
+  return lineage(`Passed to ${titles.get(next) ?? `task ${next.slice(0, 8)}`}`, next, revealable);
 }
+
+// Live cards link nothing: the other end may sit in collapsed Asleep or in Older, which this view cannot see.
+const NO_REVEAL: ReadonlySet<string> = new Set();
 
 function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"] {
   // A task whose continuation landed (`continuedBy`) is continued by whatever waits on that link, not on itself.
@@ -452,8 +479,8 @@ function rowOf(
     inlinePrimary: canContinue && taskPrBlock(task) !== null,
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
-    carriesOn: carriesOnLine(task, titles),
-    passedTo: passedToLine(task, titles),
+    carriesOn: carriesOnLine(task, titles, NO_REVEAL),
+    passedTo: passedToLine(task, titles, NO_REVEAL),
     continuing: continuingOf(task, tasks),
     placement: placementLine(task, state, now),
     batch: batchLine(task),

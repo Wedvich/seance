@@ -1192,9 +1192,12 @@ describe("passing a running task to a successor", () => {
         succeeds: { task: "old", account: "acct", at: placedAt, trigger: "manual" },
       },
     });
-    expect(rowOf([old, next], "old", CAN)).toMatchObject({ passedTo: "Passed to New work", canPass: false });
-    expect(rowOf([old, next], "next", CAN)?.carriesOn).toBe("Carries on Old work");
-    expect(rowOf([old], "old", CAN)?.passedTo).toBe("Passed to task next");
+    expect(rowOf([old, next], "old", CAN)).toMatchObject({
+      passedTo: { text: "Passed to New work", reveal: null },
+      canPass: false,
+    });
+    expect(rowOf([old, next], "next", CAN)?.carriesOn?.text).toBe("Carries on Old work");
+    expect(rowOf([old], "old", CAN)?.passedTo?.text).toBe("Passed to task next");
   });
 
   test("a successor of a quota pass says its predecessor's usage ran out", () => {
@@ -1212,7 +1215,7 @@ describe("passing a running task to a successor", () => {
         succeeds: { task: "old", account: "acct", at: placedAt, trigger: "quota", since: 5 },
       },
     });
-    expect(rowOf([old, next], "next", CAN)?.carriesOn).toBe("Carries on Old work after its usage ran out");
+    expect(rowOf([old, next], "next", CAN)?.carriesOn?.text).toBe("Carries on Old work after its usage ran out");
   });
 
   test("a drain's successor says its machine closed", () => {
@@ -1226,7 +1229,7 @@ describe("passing a running task to a successor", () => {
         succeeds: { task: "old", account: "acct", at: placed, trigger: "drain", since: 5 },
       },
     });
-    expect(rowOf([old, next], "next", CAN)?.carriesOn).toBe("Carries on Old work after its machine closed");
+    expect(rowOf([old, next], "next", CAN)?.carriesOn?.text).toBe("Carries on Old work after its machine closed");
   });
 
   test("a pass always asks twice, and its arm is disarmed with the row's menu", () => {

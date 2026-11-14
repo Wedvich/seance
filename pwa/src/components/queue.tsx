@@ -6,6 +6,7 @@ import {
   armTap,
   disarmRow,
   type ArmOp,
+  type LineageLine,
   type QueueRow,
   type QueueScreenView,
 } from "../queue-view.ts";
@@ -109,6 +110,26 @@ export function QueueScreen(props: {
     // The scroll alone leaves keyboard and screen-reader focus on the button; preventScroll keeps the smooth scroll ours.
     card.focus({ preventScroll: true });
   }, []);
+
+  // A lineage line may name a card in the collapsed Asleep section: open it, and reveal on the next pass.
+  const [pendingReveal, setPendingReveal] = useState<string | null>(null);
+  const revealOpening = useCallback(
+    (taskId: string): void => {
+      const asleep = view.sections.some((s) => s.title === ASLEEP_SECTION && s.rows.some((r) => r.id === taskId));
+      if (!asleep || asleepOpen) {
+        reveal(taskId);
+        return;
+      }
+      setAsleepOpen(true);
+      setPendingReveal(taskId);
+    },
+    [view.sections, asleepOpen, reveal],
+  );
+  useEffect(() => {
+    if (pendingReveal === null || !asleepOpen) return;
+    reveal(pendingReveal);
+    setPendingReveal(null);
+  }, [pendingReveal, asleepOpen, reveal]);
 
   // The row a notification named, marked while it fades; one view, never again on a re-render.
   const [marked, setMarked] = useState<string | null>(null);
@@ -280,7 +301,7 @@ export function QueueScreen(props: {
                 onContinue={props.onContinue}
                 onPass={props.onPass}
                 onFollowUp={props.onFollowUp}
-                onReveal={reveal}
+                onReveal={revealOpening}
               />
             )}
           />
@@ -531,8 +552,8 @@ function QueueCard(props: {
       </div>
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
-      {row.carriesOn !== null && <p className="fleet-card-body">{row.carriesOn}</p>}
-      {row.passedTo !== null && <p className="fleet-card-body">{row.passedTo}</p>}
+      {row.carriesOn !== null && <Lineage line={row.carriesOn} onReveal={props.onReveal} />}
+      {row.passedTo !== null && <Lineage line={row.passedTo} onReveal={props.onReveal} />}
       {continuing !== null && (
         <p className="fleet-card-body">
           <button
@@ -583,6 +604,23 @@ function QueueCard(props: {
         </div>
       )}
     </section>
+  );
+}
+
+function Lineage(props: { line: LineageLine; onReveal: (taskId: string) => void }): JSX.Element {
+  const { text, reveal } = props.line;
+  if (reveal === null) return <p className="fleet-card-body">{text}</p>;
+  return (
+    <p className="fleet-card-body">
+      <button
+        type="button"
+        className="queue-reveal"
+        aria-label={`${text}, show in queue`}
+        onClick={() => props.onReveal(reveal)}
+      >
+        {text}
+      </button>
+    </p>
   );
 }
 
