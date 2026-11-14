@@ -298,6 +298,22 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       // Before the despawn, whose `/exit` writes the session's own transcript.
       const touchedAt =
         info.taskId === null || turnEndedAt === null ? null : await deps.worktree.touchedAt(info.taskId);
+      if (verdict === "despawn" && state === "live") {
+        // The awaits above (the capture, the stats) are a window in which the owner may have sent a prompt, from claude.ai
+        // say: the despawn's Escape would interrupt that turn and `/exit` end it. `inFlight` is left out of the
+        // re-read, since it holds this very pane.
+        const again = closeVerdict({
+          info,
+          state,
+          activity: deps.activity(pane),
+          untouchable: deps.untouchable(pane),
+          now: deps.now(),
+          closeAfterMs,
+        });
+        if (again !== "despawn" && again !== "harvest" && again !== "kill") {
+          return await refuseClose(pane, info.taskId, again);
+        }
+      }
       const act = await actOn(verdict, info);
       if ("refused" in act) return await refuseClose(pane, info.taskId, act.refused);
       await deps.audit.close(pane, info.taskId, act.outcome);

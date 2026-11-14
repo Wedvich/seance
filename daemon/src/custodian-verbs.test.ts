@@ -440,6 +440,23 @@ describe("close", () => {
     expect(typed.calls).toEqual([]);
   });
 
+  test("a pane that turns busy while the close reads its worktree is refused before any key goes in", async () => {
+    let seen: PaneActivity = rested();
+    const r = rig({
+      activity: () => seen,
+      worktree: {
+        touchedAt: () => {
+          seen = rested({ state: "busy", turnEnded: false });
+          return Promise.resolve(null);
+        },
+        decide: () => Promise.resolve(null),
+      },
+    });
+    r.state.panes = [info({ taskId: "t-1" })];
+    expect(await r.verbs.handle(close(), process.pid)).toEqual({ ok: false, code: "busy" });
+    expect(r.calls).toEqual([]);
+  });
+
   test("a box that cannot be found, or a screen that cannot be read, fails closed the same way", async () => {
     for (const screen of ["a permission dialog\n1. Yes\n2. No\n", null]) {
       const r = rig();

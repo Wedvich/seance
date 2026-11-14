@@ -11520,6 +11520,9 @@ does not change when they land.
   (`despawnSession`, `force: false`, audited `origin=custodian`). The pane is **re-read at the moment of the act**
   (`paneInfo`, then the classification), never trusted from an earlier `sessions`, and a pane id the frame names
   that is gone is `gone`. A close holds its pane while it runs, so a second for it is `marked`.
+  For a `live` pane the daemon's facts (not the screen) are read once more after the capture and the worktree's
+  stat calls and before the despawn's first key (code review F6): a prompt the owner sent in that window, from
+  claude.ai say, turns the pane `busy` and the close is refused `busy`, so its Escape never interrupts that turn.
 - **A draft is never typed over (plan review F5).** The graceful despawn clears the input box with Escape and
   Ctrl+C, and neither the screen hash nor a session event sees typing: an owner composing a reply in a finished
   session would lose it. Before a `live` pane is despawned, `close` reads the screen with its attributes
