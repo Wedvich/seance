@@ -713,19 +713,37 @@ function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] })
 
 const CUSTODIAN_STATE_WORDS = { idle: "Idle", running: "Running", paused: "Paused", failing: "Failing" } as const;
 
-/** Each part is one unbreakable span, so a narrow card wraps between parts, never inside one. */
+/**
+ * Each part is one unbreakable span, so a narrow card wraps between parts, never inside one. The ` · ` leads each
+ * later part inside its span (it wraps with its part), and a text space between the spans keeps `textContent` and
+ * screen readers from running the words together; flex layout ignores that whitespace.
+ */
 function CustodianLine({ row }: { readonly row: CustodianRow }): JSX.Element {
   return (
     <p className={`fleet-note custodian-row${row.warn ? " fleet-warn" : ""}`}>
       <span>Custodian · {row.state === null ? "no report yet" : CUSTODIAN_STATE_WORDS[row.state]}</span>
-      {row.ended !== null && <span>{row.ended}</span>}
-      {row.counts !== null && <span>{row.counts}</span>}
+      {row.ended !== null && (
+        <>
+          {" "}
+          <span>· {row.ended}</span>
+        </>
+      )}
+      {row.counts !== null && (
+        <>
+          {" "}
+          <span>· {row.counts}</span>
+        </>
+      )}
       {row.link !== null && (
-        <span>
-          <a href={row.link} target="_blank" rel="noreferrer">
-            Open round
-          </a>
-        </span>
+        <>
+          {" "}
+          <span>
+            ·{" "}
+            <a href={row.link} target="_blank" rel="noreferrer">
+              Open round
+            </a>
+          </span>
+        </>
       )}
     </p>
   );

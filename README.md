@@ -199,8 +199,8 @@ Edit `~/.config/seance/config.json`:
   in `custodian/notes.md` in the daemon's state dir (`seanced custodian notes --clear` empties it) and its last 20
   rounds in `custodian/rounds.jsonl` beside it. At the shell, `seanced custodian status` says what the seat is doing,
   `log` prints the last rounds (summaries included, which the Machines screen never sees), `pause [--for 1h]` and
-  `resume` hold and release it, and `round` asks for one now (honoured even while paused, spaced 15 minutes from
-  the last round, and dropped if not taken within 10). Once rounds go live the Machines card shows a Custodian row
+  `resume` hold and release it, and `round` asks for one now (honoured even while paused, refused while a round runs or
+  within 15 minutes of the last round's start or end, and dropped if not taken within 10). Once rounds go live the Machines card shows a Custodian row
   for the machine.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
   account's cached quota may get before the daemon refreshes it with `claude -p /usage`.

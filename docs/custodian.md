@@ -224,7 +224,7 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
   most 1 KiB). The summary may quote a pane, so it is read only on the machine
   (`seanced custodian log`) and never crosses the wire or reaches a log. _Built (C40, C42):_ the
   `done` verb, the log and `seanced custodian log` (DESIGN.md, "The custodian frame kind" and "The custodian's status
-  and the Machines row"). C40's health also counts a launch failure and a pick that found no host.
+  and the Machines row"). C40's health also counts a launch failure and a pick that threw; a pick that found no host (quota, a lapsed login) is not the seat's fault and does not count.
 
 ### 9. What the owner sees and controls
 

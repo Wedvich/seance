@@ -94,7 +94,7 @@ describe("seanced custodian, the owner's verbs", () => {
     await mkdir(custodian, { recursive: true });
     await writeFile(
       join(custodian, "seat.json"),
-      JSON.stringify({ s: "failing", at: Date.now(), held: false, failed: true, version: "abc123" }),
+      JSON.stringify({ s: "failing", at: Date.now(), failed: true, version: "abc123" }),
     );
     const { out } = await run("status");
     expect(out).toContain("failing, host checks failed");
@@ -156,7 +156,7 @@ describe("round, with rounds live (the test seam), reads the seat's published vi
   const writeConfig = (extra: object): Promise<void> =>
     writeFile(join(root, "config", "config.json"), JSON.stringify({ ...JSON.parse(configSkeleton("m")), ...extra }));
   const view = (over: object): string =>
-    JSON.stringify({ s: "idle", at: Date.now(), held: false, failed: false, version: "v", ...over });
+    JSON.stringify({ s: "idle", at: Date.now(), failed: false, version: "v", ...over });
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "seance-owner-round-"));
@@ -185,14 +185,37 @@ describe("round, with rounds live (the test seam), reads the seat's published vi
     expect(JSON.parse(await readFile(requestPath(), "utf8")).at).toBeNumber();
   });
 
-  test("a failed or held view writes nothing and exits 1", async () => {
-    for (const over of [{ failed: true }, { held: true }]) {
-      process.exitCode = 0;
-      await writeFile(seatPath(), view(over));
-      await requestOwnerRound(true);
-      expect(process.exitCode).toBe(1);
-      expect(await Bun.file(requestPath()).exists()).toBe(false);
-    }
+  test("a failed view writes nothing and exits 1, but a stale failed view is no report", async () => {
+    await writeFile(seatPath(), view({ failed: true }));
+    await requestOwnerRound(true);
+    expect(process.exitCode).toBe(1);
+    expect(await Bun.file(requestPath()).exists()).toBe(false);
+    process.exitCode = 0;
+    await writeFile(seatPath(), view({ failed: true, at: Date.now() - 3_600_000 }));
+    await requestOwnerRound(true);
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(await Bun.file(requestPath()).exists()).toBe(true);
+  });
+
+  test("a running round, or one that started or ended within the min-gap, is refused with the reason", async () => {
+    await writeFile(seatPath(), view({ s: "running" }));
+    await requestOwnerRound(true);
+    expect(process.exitCode).toBe(1);
+    expect(await Bun.file(requestPath()).exists()).toBe(false);
+    process.exitCode = 0;
+    await writeFile(seatPath(), view({}));
+    const entry = {
+      start: Date.now() - 60_000,
+      end: Date.now() - 30_000,
+      exclave: "default",
+      outcome: "healthy",
+      reason: "done",
+      counts: emptyCounts(),
+    };
+    await writeFile(join(root, "state", "custodian", "rounds.jsonl"), `${JSON.stringify(entry)}\n`);
+    await requestOwnerRound(true);
+    expect(process.exitCode).toBe(1);
+    expect(await Bun.file(requestPath()).exists()).toBe(false);
   });
 
   test("a missing or stale view warns but still writes the request", async () => {

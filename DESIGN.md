@@ -11670,8 +11670,9 @@ and the `failing` push (custodian 6 and 7).
   scheduling fields (`drn` and `cl` reject the whole status because they gate routing). `rc` is kept only beside
   `running` and only as `isRemoteSessionId` passes it. (`QuotaObservation.cu`, the credits, is an unrelated name.)
 - **State.** `paused` while `custodian/state.json` carries a pause; `failing` after `FAILING_AFTER` (3) failed rounds in a
-  row, where a failed log entry, a launch failure and an empty or throwing pick each count and a healthy round resets
-  the count; `running` while a round's pane is recorded; else `idle`. The count is seeded at start from the log's
+  row, where a failed log entry, a launch failure and a throwing pick each count and a healthy round resets
+  the count (an empty pick, with every exclave over quota or signed out, is not the seat's fault: it backs the pick off
+  for `everyMinutes` and counts nothing, so a busy afternoon never reads `failing`); `running` while a round's pane is recorded; else `idle`. The count is seeded at start from the log's
   trailing failures, so a restart does not forget a failing seat. A host whose checks failed (`seatFailed`) is
   `failing` too, with nothing to count. A launch failure writes no log entry, which is why the in-memory count exists.
 - **The row** shows the state, when the last round ended (`last round ended 3h ago`, or `no round yet`), the counts
@@ -11686,23 +11687,31 @@ and the `failing` push (custodian 6 and 7).
   observed on 2.1.325, re-verify on upgrades), only for a file whose pid is the recorded round pane's pid (Linux `exec`s
   `claude`) or its direct child (macOS's `caffeinate -is` wrapper), never any descendant, so a leftover file whose pid a
   round's child reuses cannot link another session; the file's own `pid` must match its name and its `startedAt` be no
-  earlier than the round's. Only `<digits>.json` names are opened (the directory also holds `.key` files), and neither the
-  id nor a failure is logged. The origin of the link is the PWA's constant (`CLAUDE_CODE_URL`), the id re-checked there.
+  earlier than the round's. Only `<digits>.json` names are opened (the directory also holds `.key` files), as untrusted: `O_NOFOLLOW|O_NONBLOCK`,
+  a regular file by `fstat` on the opened descriptor, at most 64 KiB read (a FIFO or a link to `/dev/zero` in the
+  round's place must not hang or exhaust the seat's serial chain), and neither the id nor a failure is logged. The origin of the link is the PWA's constant (`CLAUDE_CODE_URL`), the id re-checked there.
   **Rejected:** carrying it in a reply to a card's own request (an app op with no other user until custodian 7); taking it
   from a session event (the mod does not run); a map of every pane's id (a round has one pane).
 - **Control files** live in the 0700 `stateDir()/custodian/`, each 0600 and written with `writeDurable`: `state.json` (the
-  pause: `{pausedUntil: <ms>|null}`, indefinite when null), `round-request` (a timestamp) and `seat.json` (the seat's view
-  without `rc`, plus `at`, `held`, `failed` and `version`, republished each tick as a heartbeat so `status` can say the
-  daemon is not answering past five minutes). **An unreadable `state.json` loads as paused indefinitely** (the `closed`
+  pause: `{"pause": {"at": <ms>, "until": <ms>|null}}`, indefinite when `until` is null, and no `pause` key for not
+  paused; `{"pause": null}` is not a valid clear and reads as unreadable, so `resume` deletes the key), `round-request`
+  (`{"at": <ms>}`) and `seat.json` (the seat's view without `rc`, plus `at`, `failed` and `version`, republished every
+  tick by a running seat as a heartbeat; a seat whose host checks failed has no tick and writes it once). `status` and
+  `round` treat a view older than five minutes as no report, so neither a stopped daemon's leftover `failed` nor a
+  fixed host's old one is read as current. **An unreadable `state.json` loads as paused indefinitely** (the `closed`
   precedent: a fault never starts a round the owner paused). `state.json` is deliberately not the daemon's `state.json`:
   the shell is its only writer today, and sharing the daemon's would race its writes. Custodian 7's app-op pause must
   serialise with the CLI's or give the pause one owner.
 - **Pause and `round`.** A pause stops the due check; it does not stop a round already running. `round` writes the request
   and the seat honours it on its next tick, **even while paused (the pause stays)**: asking for a round is the owner
-  overriding their own pause for one round. A request is spaced by `ROUND_REQUEST_MIN_GAP_MS` (15 min) from the last
-  round's start and honoured only within `ROUND_REQUEST_TTL_MS` (10 min); a stale one is dropped, never run late. It is
-  dropped before launch, kept across a restart drain and dropped while a round runs. `round` refuses while rounds are held
-  (`ROUNDS_LIVE`) and when `seat.json` says the seat is held or its host checks failed; nothing is requested then.
+  overriding their own pause for one round. A request is spaced by `ROUND_REQUEST_MIN_GAP_MS` (15 min) from the newest
+  of the last round's start, the last round's end and this process's last launch attempt, and honoured only within
+  `ROUND_REQUEST_TTL_MS` (10 min); a stale one is dropped, never run late. It is dropped before launch, kept across a
+  restart drain and dropped while a round runs. `round` checks what it can from files and refuses, with the reason and
+  exit 1, while rounds are held (`ROUNDS_LIVE`), with no `custodian` config, when a fresh `seat.json` says the host
+  checks failed, while a round runs, and inside the spacing (naming when one can be asked for); nothing is requested
+  then. A launch attempt that failed is in the seat's memory only, so a request right after one can still be dropped
+  (the seat's log says so); the success line says "at its next tick", never that it will start.
 - **The CLI** is not `custodian-cli.ts` (the round's four verbs). `main.ts` dispatches `CUSTODIAN_OWNER_VERBS` to
   `custodian-owner-cli.ts` by dynamic import, outside the round CLI's import closure, because this one logs and audits and
   that closure must never reach `log.ts` (`daemon/test/message-layering.test.ts`). Every verb works from files (the
@@ -11714,10 +11723,11 @@ and the `failing` push (custodian 6 and 7).
   otherwise reach the owner's terminal. `log` prints a summary, never sends it anywhere.
 - **The fence.** The generated deny list refuses a round the owner verbs and `notes --clear` (`Bash(seanced custodian
   <verb>*)` per verb, from `CUSTODIAN_OWNER_VERBS`). Like the rest of the fence it is a mistake guard, not a boundary:
-  until item 4b a round's sandbox can still write `state.json`. The acceptance "a round cannot pause itself or request
+  until item 4b a round's sandbox can still reach the tmux socket and same-uid processes (it cannot write `stateDir()`). The acceptance "a round cannot pause itself or request
   another" holds from 4b.
 - **Known gaps.** `seatFailed` is in memory and in `seat.json` only: `round` and `status` see it through `seat.json`
-  (up to a tick old), nothing else does. `seat.json`'s `held` is false while a seat exists at all.
+  (up to a tick old), nothing else does. The seat answers no `cu` (the row reads `no report yet`) until `start` has read
+  the log and the control file (`ready`), so a restarting paused or failing seat never shows a transient `idle`.
 - **Rejected, and why:** `cu` as a pair of fields on a reply (a row must work from the push); trimming `cu` in `fitStatus`
   (a seat's state is small and the card is its only reader); rejecting the whole status on a bad `cu` (see above); reading
   the round's status from the log alone (a launch failure leaves none, so a seat that cannot start would read `idle`); and

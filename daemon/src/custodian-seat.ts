@@ -319,6 +319,8 @@ export interface CustodianSeat {
   readonly done: (summary: string) => Promise<"ok" | "too_late" | "no_round">;
   /** The seat's state for the status's `cu` (C40), synchronous: it reads what the last tick cached. */
   readonly view: (now: number) => CustodianStatus;
+  /** False until `start` has read the log and the control file: before that `view` would say `idle` whatever is true. */
+  readonly ready: () => boolean;
 }
 
 export function createCustodianSeat(d: SeatDeps): CustodianSeat {
@@ -342,10 +344,11 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   let lastRound: RoundEntry | undefined;
   let control: PauseRead = { pause: null, unreadable: false };
   let unreadableWarned = false;
-  /** C41's count: failed log entries, launch failures and empty picks in a row; a healthy round clears it. A restart reseeds it from the log's tail. */
+  /** C41's count: failed log entries, launch failures and picks that threw in a row; a healthy round clears it. A restart reseeds it from the log's tail. */
   let failures = 0;
   /** When this process last started a launch: with the record's `lastEndedAt` and the log's newest start, it spaces requests. */
   let lastLaunchAt = 0;
+  let ready = false;
   let remote: { readonly key: string; readonly id: string | null } | null = null;
   let lastViewKey: string | null = null;
   const roundKey = (round: NonNullable<SeatRecord["round"]>): string => `${round.pane ?? "-"}:${round.startedAt}`;
@@ -455,14 +458,14 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     try {
       picked = await d.pick();
     } catch (err) {
-      // A pick that throws has read every exclave's `.claude.json` too: back off like a `none`.
+      // A pick that throws has read every exclave's `.claude.json` too: back off like a `none`, but this one is a fault.
       pickAfter = d.now() + everyMs;
       failures++;
       throw err;
     }
     if ("none" in picked) {
+      // Not the seat's fault (quota, a lapsed login, no trusted exclave), so it does not count toward `failing`.
       pickAfter = d.now() + everyMs;
-      failures++;
       if (picked.none !== lastNone) d.warn(`custodian: no exclave can host a round: ${picked.none}`);
       lastNone = picked.none;
       if (requested) d.warn("custodian: the requested round found no exclave to run in");
@@ -633,6 +636,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         .then(() => d.readControl())
         .then((read) => {
           control = read;
+          ready = true;
           return null;
         })
         .then(() => serially(adopt))
@@ -643,6 +647,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         .then(notify);
     },
     tick,
+    ready: () => ready,
     // Never closes the round: a reload or restart adopts it (C4).
     stop: (): void => {
       if (timer !== null) clearInterval(timer);

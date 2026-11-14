@@ -784,7 +784,7 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
  * under the `cli` origin like every command typed at this machine. `status` and `log` are reads and write nothing. No
  * text from a file reaches a line: only the pause's end, and a fixed outcome.
  */
-export type CustodianOwnerOutcome = "requested" | "held" | "unconfigured" | "failed";
+export type CustodianOwnerOutcome = "requested" | "held" | "unconfigured" | "failed" | "running" | "too_soon";
 
 export interface CustodianOwnerAudit {
   readonly pause: (until: number | null) => Promise<void>;

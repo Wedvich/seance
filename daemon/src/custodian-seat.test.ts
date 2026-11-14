@@ -1220,7 +1220,7 @@ describe("the seat's view (C40, C41)", () => {
     r.seat.stop();
   });
 
-  test("launch failures and empty picks count: three throwing launches show failing, and a healthy round clears it", async () => {
+  test("launch failures count: three throwing launches show failing, and a healthy round clears it", async () => {
     const r = rig();
     r.fail.launch = new Error("no tmux");
     await r.seat.start();
@@ -1248,9 +1248,18 @@ describe("the seat's view (C40, C41)", () => {
       none.clock.now = NOW + at * EVERY;
       await none.seat.tick();
     }
-    expect(none.seat.view(none.clock.now).s).toBe("failing");
+    // An empty pick is quota or auth, not the seat's fault: it never turns the row to failing.
+    expect(none.seat.view(none.clock.now).s).toBe("idle");
     r.seat.stop();
     none.seat.stop();
+  });
+
+  test("the view is not ready until start has read the log and the control file", async () => {
+    const r = rig();
+    expect(r.seat.ready()).toBe(false);
+    await r.seat.start();
+    expect(r.seat.ready()).toBe(true);
+    r.seat.stop();
   });
 
   test("a failing seat that is also paused still shows failing; a failed launch does not move e", async () => {

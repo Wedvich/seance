@@ -101,7 +101,7 @@ describe("the seat's published view", () => {
   test("round-trips, and anything unreadable is null", async () => {
     const path = join(dir, "custodian", "seat.json");
     expect(await readSeatView(path)).toBeNull();
-    const view = { s: "paused", e: 5, n: [1, 0, 0], at: 9, held: false, failed: false, version: "1.2.3" } as const;
+    const view = { s: "paused", e: 5, n: [1, 0, 0], at: 9, failed: false, version: "1.2.3" } as const;
     await writeSeatView(view, path);
     expect(await readSeatView(path)).toEqual(view);
     expect(await mode(path)).toBe(0o600);

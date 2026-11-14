@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord, isRemoteSessionId } from "@seance/shared";
@@ -45,12 +46,21 @@ export async function roundRemoteId(
   return null;
 }
 
+/**
+ * The file is the round's to write (same uid, until 4b), so it is opened as untrusted: no symlink followed, no blocking
+ * on a FIFO, and only a regular file read, at most `MAX_FILE_BYTES` of it — all checked on the opened descriptor.
+ */
 async function idOf(path: string, pid: number, roundStartedAt: number): Promise<string | null> {
-  const handle = await open(path, "r").catch(() => null);
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const handle = await open(path, flags).catch(() => null);
   if (handle === null) return null;
   try {
-    if ((await handle.stat()).size > MAX_FILE_BYTES) return null;
-    const raw: unknown = JSON.parse(await handle.readFile("utf8"));
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null;
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_FILE_BYTES) return null;
+    const raw: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
     if (!isRecord(raw) || raw["pid"] !== pid) return null;
     const { startedAt, bridgeSessionId } = raw;
     if (typeof startedAt !== "number" || startedAt < roundStartedAt) return null;

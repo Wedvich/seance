@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { roundRemoteId } from "./custodian-remote.ts";
@@ -76,5 +76,17 @@ describe("roundRemoteId", () => {
   test("with the real parent lookup, this process's own pid is its own round pane", async () => {
     await file(process.pid);
     expect(await roundRemoteId(configDir, { panePid: process.pid, startedAt: STARTED })).toBe(ID);
+  });
+
+  test("a FIFO or a symlink in place of the file is skipped without blocking or following", async () => {
+    const fifo = join(sessions, `${PANE_PID}.json`);
+    expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+    expect(await roundRemoteId(configDir, round, parentOf)).toBeNull();
+    await rm(fifo);
+    // Valid content for the round, reachable only through the link.
+    await file(PANE_PID);
+    await rename(join(sessions, `${PANE_PID}.json`), join(configDir, "real.txt"));
+    await symlink(join(configDir, "real.txt"), join(sessions, `${PANE_PID}.json`));
+    expect(await roundRemoteId(configDir, round, parentOf)).toBeNull();
   });
 });

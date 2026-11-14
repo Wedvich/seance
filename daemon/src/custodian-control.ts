@@ -121,15 +121,14 @@ export async function dropRoundRequest(path: string = custodianRoundRequestPath(
 
 /**
  * What the seat publishes for `seanced custodian status` and `round` (which answer from files and cannot see the
- * daemon's memory): `cu` without `rc`, whether rounds are held, whether the host checks failed (a boolean, no
- * detail), and the daemon's version.
+ * daemon's memory): `cu` without `rc`, whether the host checks failed (a boolean, no detail), and the daemon's
+ * version. Republished every tick by a running seat (a heartbeat); a seat whose checks failed writes it once, so the owner's commands treat a view older than five minutes as no report.
  */
 export interface SeatView {
   readonly s: CustodianState;
   readonly e?: number;
   readonly n?: readonly [number, number, number];
   readonly at: number;
-  readonly held: boolean;
   readonly failed: boolean;
   readonly version: string;
 }
@@ -143,9 +142,9 @@ export async function readSeatView(path: string = custodianSeatViewPath()): Prom
   try {
     const raw: unknown = JSON.parse(await readFile(path, "utf8"));
     if (!isRecord(raw)) return null;
-    const { s, e, n, at, held, failed, version } = raw;
+    const { s, e, n, at, failed, version } = raw;
     const state: CustodianState | undefined = CUSTODIAN_STATES.find((x) => x === s);
-    if (state === undefined || typeof at !== "number" || typeof held !== "boolean") return null;
+    if (state === undefined || typeof at !== "number") return null;
     if (typeof failed !== "boolean" || typeof version !== "string") return null;
     const [first, second, third] = Array.isArray(n) ? n : [];
     const counts =
@@ -155,7 +154,6 @@ export async function readSeatView(path: string = custodianSeatViewPath()): Prom
     return {
       s: state,
       at,
-      held,
       failed,
       version,
       ...(typeof e === "number" ? { e } : {}),

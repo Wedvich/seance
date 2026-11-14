@@ -32,7 +32,6 @@ import {
   custodianPlatform,
   lastRoundView,
   seatEnabled,
-  seatLive,
   type CloseOutcome,
   type CustodianSeatOpts,
   type SeatRecord,
@@ -374,7 +373,6 @@ const custodianSeat: DaemonCapability = (ctx) => {
       ...(view.e === undefined ? {} : { e: view.e }),
       ...(view.n === undefined ? {} : { n: view.n }),
       at: ctx.now(),
-      held: !seatLive(opts),
       failed,
       version: ctx.version ?? "unknown",
     });
@@ -508,7 +506,8 @@ const custodianSeat: DaemonCapability = (ctx) => {
       seat?.stop();
       release();
     },
-    custodianStatus: (now) => (seatFailed ? { s: "failing", ...failedLast } : (seat?.view(now) ?? null)),
+    custodianStatus: (now) =>
+      seatFailed ? { s: "failing", ...failedLast } : seat?.ready() === true ? seat.view(now) : null,
     ...(verbs === null
       ? {}
       : {

@@ -2327,7 +2327,7 @@
 .custodian-row {
   display: flex;
   flex-wrap: wrap;
-  column-gap: 0.5em;
+  column-gap: 0.3em;
 }
 
 .custodian-row > span {

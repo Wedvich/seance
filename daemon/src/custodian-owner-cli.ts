@@ -9,6 +9,7 @@ import {
   type CustodianPause,
   type SeatView,
 } from "./custodian-control.ts";
+import { ROUND_REQUEST_MIN_GAP_MS } from "./custodian-control.ts";
 import { readRounds, type RoundEntry } from "./custodian-rounds.ts";
 import { FAILING_AFTER, ROUNDS_LIVE, trailingFailures } from "./custodian-seat.ts";
 import { custodianRoundsPath } from "./paths.ts";
@@ -114,19 +115,24 @@ async function status(): Promise<void> {
   const last = entries.at(-1);
   console.log(`last round:  ${last === undefined ? "none" : lastLine(last)}`);
   const tail = trailingFailures(entries);
-  const failing = view?.s === "failing" || tail >= FAILING_AFTER;
-  if (failing) {
+  const live = fresh(view, now) ? view : null;
+  if (live?.s === "failing" || tail >= FAILING_AFTER) {
     console.log(
-      `failing:     yes (${view?.failed === true ? "this host's checks failed, so no round can run" : `${FAILING_AFTER} failed rounds or attempts in a row`})`,
+      `failing:     yes (${live?.failed === true ? "this host's checks failed, so no round can run" : `${FAILING_AFTER} failed rounds or attempts in a row`})`,
     );
   }
 }
 
+/** A view older than the heartbeat allows is no report: the daemon may have stopped or the host been fixed since. */
+function fresh(view: SeatView | null, now: number): view is SeatView {
+  return view !== null && now - view.at <= SEAT_VIEW_STALE_MS;
+}
+
 function viewLine(view: SeatView | null, now: number): string {
-  if (view === null || now - view.at > SEAT_VIEW_STALE_MS) {
+  if (!fresh(view, now)) {
     return "has not reported (not running, not enabled on this host, or an older daemon)";
   }
-  const parts = [view.s, ...(view.held ? ["held"] : []), ...(view.failed ? ["host checks failed"] : [])];
+  const parts = [view.s, ...(view.failed ? ["host checks failed"] : [])];
   return `${parts.join(", ")} (reported ${Math.max(0, Math.round((now - view.at) / 1000))}s ago, version ${printable(view.version, 12)})`;
 }
 
@@ -180,26 +186,51 @@ export async function requestOwnerRound(live: boolean = ROUNDS_LIVE): Promise<vo
     await audit.round("unconfigured");
     return;
   }
-  const view = await readSeatView();
-  if (view?.held === true || view?.failed === true) {
+  const now = Date.now();
+  const read = await readSeatView();
+  const view = fresh(read, now) ? read : null;
+  if (view?.failed === true) {
+    console.error("seanced custodian: this host's checks failed, so no round can run; nothing requested");
+    process.exitCode = 1;
+    await audit.round("failed");
+    return;
+  }
+  // What the seat will drop silently (its tick, `custodian-seat.ts` `step`): say so here instead. The seat's own
+  // launch attempts are in its memory only, so a request right after a failed launch can still be dropped.
+  const [state, entries] = await Promise.all([
+    readState().catch(() => null),
+    readRounds(custodianRoundsPath()).catch(() => [] as readonly RoundEntry[]),
+  ]);
+  const record = state === null ? undefined : custodianSeatOf(state);
+  if (record?.round !== undefined || view?.s === "running") {
+    console.error("seanced custodian: a round is running; nothing requested");
+    process.exitCode = 1;
+    await audit.round("running");
+    return;
+  }
+  const latest = Math.max(record?.lastEndedAt ?? 0, entries.at(-1)?.start ?? 0);
+  if (now - latest < ROUND_REQUEST_MIN_GAP_MS) {
     console.error(
-      view.failed
-        ? "seanced custodian: this host's checks failed, so no round can run; nothing requested"
-        : "seanced custodian: rounds are held; nothing requested",
+      `seanced custodian: a round started or ended at ${time(latest)}; one can be requested after ${time(latest + ROUND_REQUEST_MIN_GAP_MS)}; nothing requested`,
     );
     process.exitCode = 1;
-    await audit.round(view.failed ? "failed" : "held");
+    await audit.round("too_soon");
     return;
   }
   const runtime = await readRuntime();
-  if (runtime === null || !pidAlive(runtime.pid)) {
+  const daemonUp = runtime !== null && pidAlive(runtime.pid);
+  if (!daemonUp) {
     console.error("seanced custodian: the daemon is not running; the request runs when it next ticks, if still fresh");
-  } else if (view === null || Date.now() - view.at > SEAT_VIEW_STALE_MS) {
+  } else if (view === null) {
     console.error("seanced custodian: the daemon has not reported a seat; it may not honour the request");
   }
-  await requestRound(Date.now());
+  await requestRound(now);
   await audit.round("requested");
-  console.log("round requested; the seat starts it within a minute");
+  console.log(
+    daemonUp
+      ? "round requested; the seat starts it at its next tick (within a minute) unless the launch fails or the daemon is stopping"
+      : "round requested",
+  );
 }
 
 async function pause(args: readonly string[]): Promise<void> {
