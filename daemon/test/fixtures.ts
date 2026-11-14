@@ -184,17 +184,21 @@ export async function scriptStub(dir: string, name: string, body: string): Promi
 }
 
 /**
- * A hard link of the running bun named `claude`: what `processNames` (and tmux) read as a Claude Code process on both
- * Linux (argv[0]) and macOS (the executable's basename). A link, not a copy, for `makeClaudeStub`'s first-exec reason.
+ * A hard link of the running bun named `claude` (or `name`, such as a version): what `processNames` (and tmux) read as a
+ * Claude Code process on both Linux (argv[0]) and macOS (the executable's basename). A link, not a copy, for
+ * `makeClaudeStub`'s first-exec reason, and run once here so a copy (another filesystem, or a bun the link is refused
+ * for) pays its scan in setup, never inside a test's timed window: call it from `beforeAll`.
  */
-export async function linkClaudeNamed(dir: string): Promise<string> {
+export async function linkClaudeNamed(dir: string, name = "claude"): Promise<string> {
   await mkdir(dir, { recursive: true });
-  const path = join(dir, "claude");
+  const path = join(dir, name);
   await rm(path, { force: true });
   await link(process.execPath, path).catch(async () => {
     await Bun.write(path, Bun.file(process.execPath));
     await chmod(path, 0o755);
   });
+  const warmed = await exec([path, "-e", ""]);
+  if (warmed.exitCode !== 0) throw new Error(`${name} failed to start: ${warmed.stderr}`);
   return path;
 }
 

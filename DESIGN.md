@@ -11047,26 +11047,40 @@ addressed by the id of the message it answers, the **handle**, whatever the repl
 this daemon minted for a session (so an answer finds its asker), and `received`, the ids placed in a session's pane
 (so only that session can answer them). Each holds `REPLY_HANDLE_TTL_MS` (1 h) and `REPLY_HANDLE_MAX` (256) entries;
 past the cap the oldest entry of the pane holding the most goes, so one busy sender's notes cannot push a quiet
-session's open question out; a restart drops both. An entry binds **pane id, pane pid, task (null stays null) and `session`**.
-A handle also dies when its pane is gone, re-tagged or respawned (swept at every send and listen; an empty pane list is
-a failed tmux read and costs no handle), and a listener's bind drops every handle of its pane made for another
-process, task or session.
+session's open question out, and within that pane a `sent` entry for a note goes before one for a question or request
+(a note's serves an optional receipt, a question's carries the reply and its wake); a restart drops both. An entry binds
+**pane id, pane pid, task (null stays null) and `session`**. A handle also dies when its pane is gone, re-tagged or
+respawned (swept at every send and listen; an empty pane list is a failed tmux read and costs no handle), and a
+listener's bind drops every handle of its pane made for another pane process or task, or for a session that no longer
+runs; a handle of another `claude` still running there (a nested one) stays, since each is bound to its own session.
 
 **The binding is to the `claude` process (`Bound.session`), not to the pane and its pid alone.** A hand-started
 session's pane process is its shell, which outlives a restarted `claude` (`claude`, `^C`, `claude` again) and fires
 no `ended`, so a handle bound to the pane pid would answer a stranger: the second `claude` would read the first's
 replies and could answer its questions. `session` is the `claude` process itself, read off the process tree, never the pane's start command
-(`sessionOf`, `daemon/src/messages.ts`): the outermost process on the peer's chain, from the pane process down
-(`ancestorBelow`, `daemon/src/peer.ts`), that is called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
-`processNames`: argv[0] and comm on Linux, the executable's basename on macOS). A pane that `exec`s `claude` is that
-process (every child, the MCP server and the listener, binds to it); a shell's child is the `claude` under it; a
-nested `claude` a tool started is no session of the pane. A séance spawn needs no read: its launch ledger holds the
-task and `exec`s `claude` as the pane's own process, so `session` is the pane pid (as before handles; a `caffeinate`
-wrapper on macOS is that pid). **No `claude` on the chain fails closed**: the bind is `unbound`, so a bare shell's
-child, or a `claude` that runs as `node` (an npm install; `sessions.ts` lists the same cost), neither listens, asks
-nor answers by handle. The pane's start command (`ours`, `#{m:*--remote-control*,…}`) is deliberately not evidence:
-`claude --remote-control; exec $SHELL` matches it and its pane process is the shell that outlives every `claude`
-in it. A reply is accepted only from the pane, pid, task and session the message was
+(`sessionOf`, `daemon/src/messages.ts`): the **innermost** process on the peer's chain (`ancestorBelow`,
+`daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
+`processNames`: argv[0] and comm on Linux, `pbi_comm` and `pbi_name` from `proc_pidinfo` on macOS, `ps` only where
+libproc will not load), with its **start time** (`processStart`: `/proc/<pid>/stat` field 22, or `pbi_start_tvsec` and
+`pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seanced inbox` or `seanced mcp`, is the child
+of the `claude` that started it: a shell script named `claude` above it that runs `claude` twice (`claude "$@" || claude
+--continue`, a restart loop; its comm is the script's name) is never the session, the real `claude` under it is, and a
+`claude` a tool started under another is its own session, not the outer one's. A pane that `exec`s `claude` is that
+process (every child binds to it), and a séance spawn is the same (its launch `exec`s `claude`; a macOS `caffeinate`
+wrapper is the pane process and `claude` its child, the one found). **A name is a hint, not a proof**: any process can
+take it (`exec -a claude`), but only the innermost counts, so one that does is its own session and holds none of
+another's handles. The executable's own path is not read: the native install's is a version
+(`…/versions/2.1.325`), not `claude`. The start time tells claude #2 from a claude #1 whose pid the kernel recycled
+(macOS wraps at 99 999) inside the handles' hour; a session whose start time cannot be read (gone, a zombie, macOS
+without libproc) has none. **No `claude` on the chain is no session, not no peer**: the binding then carries
+`session: null`, and only what needs a handle is refused or skipped. Such a peer (a bare shell's child, a `claude`
+that runs as `node` from an npm install; `sessions.ts` lists the same cost) still sends to a task by its id, as in Part
+A, and still listens in a pane whose task this machine launched; it is refused `unbound` as a listener in any other
+pane; it gets no `sent` entry (its message carries no handle, so a question of its own cannot be answered by one and
+its wrapper on a local receiver says so), no `received` entry (a message placed for its listener is not answerable by
+handle) and no `wake`, and a reply by handle from it is `unknown`. The pane's start command (`ours`,
+`#{m:*--remote-control*,…}`) is deliberately not evidence: `claude --remote-control; exec $SHELL` matches it and its
+pane process is the shell that outlives every `claude` in it. A reply is accepted only from the pane, pid, task and session the message was
 placed for (`unknown` otherwise, in the sender's own send rate bucket: a refused probe costs the same as a send); it reaches the asker only at the pane, pid, task
 and session the `sent` entry names, **while that `claude` still runs** (`kill(pid, 0)`: a dead one is `ended` at
 once, and a receipt for it is dropped, rather than waiting a grace for a reconnect that cannot come). A reply held
@@ -11091,8 +11105,10 @@ a connected machine advertising `CAPABILITIES.messageReply` (`unsupported` other
 connected), and the target daemon's own `sent` table decides what, if anything, the id names. A reply to a reply
 needs no new state: the target places it with the same `origin`, so the next one routes back. The receipt carries no
 `to` (`MessageReceiptRequest.to` is optional; `receiptNote` words it "your reply `<id>`") and goes to the sealer, whose
-`sent` table finds the replier's pane and session; for a **tasked** asker the launch and restart graces hold it as
-they always held a task-addressed receipt, and only an untasked asker's is pinned to its session. The gate is the same two-frame one, now asking the verified leader
+`sent` table finds the replier's pane and session; for an asker whose **task this machine's ledger holds** the launch and
+restart graces hold it as they always held a task-addressed receipt (its `claude` is the pane's own process), and any
+other asker's (untasked, or tagged with a task the ledger does not hold, where a shell's later `claude` could be) is
+pinned to its session. The gate is the same two-frame one, now asking the verified leader
 for `messageReply` (`messageRouteGate("reply")`): a refusal names `seanced update` and says nothing was sent.
 
 **`wake`.** A reply to a **question or request** the receiving session itself sent is an answer, and an idle session

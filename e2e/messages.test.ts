@@ -26,6 +26,8 @@ import { fixtureOrigin, q, startSuite, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
 let base: string;
+/** A process named `claude`, linked and run once in `beforeAll` so no test's timed window pays a first-exec scan. */
+let claudeBin: string;
 let stack: Stack;
 let second: SecondDaemon | undefined;
 let app: AppHandle | undefined;
@@ -65,6 +67,7 @@ const bootBox = (): Promise<SecondDaemon> =>
 beforeAll(async () => {
   suite = await startSuite("e2e-messages");
   ({ base, stack } = suite);
+  claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
   // Seeded first: `seedTask` restarts the suite's daemon, which must not be a second machine's takeover to survive.
   await stack.seedTask({
     id: PREDECESSOR,
@@ -209,7 +212,6 @@ async function session(taskId: string, box: "suite" | "box"): Promise<Session> {
  */
 async function untaskedSession(label: string, box: "suite" | "box"): Promise<Session> {
   const tmuxSession = box === "suite" ? stack.config.tmuxSession : (second?.tmuxSession ?? "");
-  const claude = await linkClaudeNamed(join(base, "claude-bin"));
   return sessionIn(label, null, box, async (command) =>
     (
       await tmuxOk([
@@ -224,7 +226,7 @@ async function untaskedSession(label: string, box: "suite" | "box"): Promise<Ses
         label,
         "sh",
         "-c",
-        `${underClaude(claude, { body: command })}; exec sleep 600`,
+        `${underClaude(claudeBin, { body: command })}; exec sleep 600`,
       ])
     ).trim(),
   );

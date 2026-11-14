@@ -33,7 +33,7 @@ import {
   type MessageFrameRoute,
   type MessageReply,
 } from "./message-frame.ts";
-import { ancestorBelow, peerPidSupported, processNames } from "./peer.ts";
+import { ancestorBelow, peerPidSupported, processNames, processStart } from "./peer.ts";
 import { CLAUDE_COMMAND } from "./sessions.ts";
 import type { BoundPane } from "./session-events.ts";
 
@@ -51,9 +51,10 @@ import type { BoundPane } from "./session-events.ts";
  * A session with no task is addressed only as a reply, by the id of a message it sent (its handle). Two tables,
  * both memory only, 1 h and 256 entries each, bind a handle to who it reached: `sent` (the ids this daemon minted
  * for a session, so an answer finds its asker) and `received` (the ids placed in a session's pane, so only that
- * session can answer them). Every entry is bound to the `claude` process (`session`), not the pane and its pid alone:
- * a hand-started session's pane process is the shell, which outlives a `claude` restart, and no `ended` ever
- * fires for an untasked pane.
+ * session can answer them). Every entry is bound to the `claude` process (`session`: its pid and start time), not the
+ * pane and its pid alone: a hand-started session's pane process is the shell, which outlives a `claude` restart, and no
+ * `ended` ever fires for an untasked pane. A peer with no `claude` above it has no session: it may still send to a task
+ * and, in a pane whose task this machine launched, listen, but it holds no handle.
  */
 
 /** Unread output a listener's connection may hold before the daemon drops it: a mod that stopped reading. */
@@ -64,7 +65,7 @@ export { LISTENER_GRACE_MS };
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 
-/** How long a reply handle stays good, and how many a daemon keeps (the oldest goes first). */
+/** How long a reply handle stays good, and how many a daemon keeps (past it the busiest pane's oldest note goes first). */
 export const REPLY_HANDLE_TTL_MS = HOUR_MS;
 export const REPLY_HANDLE_MAX = 256;
 
@@ -72,16 +73,18 @@ export const REPLY_HANDLE_MAX = 256;
 const REPLY_LABEL = "reply";
 
 /**
- * Whether a process still runs. EPERM is a process of another user, which still runs. A recycled pid reads as alive,
- * which costs nothing: every handle is also checked against the session pid the listener bound.
+ * A session: the `claude` process's pid and start time, `<pid>:<start>`. The start time is what tells claude #2, which
+ * the kernel may give claude #1's recycled pid, from claude #1 (macOS wraps its pids at 99 999). A string so that every
+ * comparison is `===`.
  */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err instanceof Error && "code" in err && err.code === "EPERM";
-  }
+type SessionKey = string;
+
+const sessionKey = (pid: number, start: string): SessionKey => `${pid}:${start}`;
+
+/** Whether the process a session names still runs: the pid is held by the same process that started it. */
+function sessionAlive(session: SessionKey): boolean {
+  const at = session.indexOf(":");
+  return processStart(Number(session.slice(0, at))) === session.slice(at + 1);
 }
 
 export interface ListenerSink {
@@ -168,8 +171,8 @@ export interface Messages {
 interface Listener {
   readonly taskId: string | null;
   readonly panePid: number;
-  /** The `claude` process this listener belongs to (`Bound.session`). */
-  readonly session: number;
+  /** The `claude` process this listener belongs to (`Bound.session`), null when none stands above it. */
+  readonly session: SessionKey | null;
   readonly sink: ListenerSink;
 }
 
@@ -177,17 +180,18 @@ interface Listener {
 interface Bound {
   readonly pane: BoundPane;
   /**
-   * The pid a reply handle is bound to: the `claude` process (`sessionOf`), never a shell it runs under, which a
-   * restarted `claude` shares with its predecessor.
+   * What a reply handle is bound to: the `claude` process (`sessionOf`), never a shell it runs under, which a
+   * restarted `claude` shares with its predecessor. Null when no `claude` stands on the peer's chain: such a peer
+   * holds no handle, and nothing that needs one is done for it.
    */
-  readonly session: number;
+  readonly session: SessionKey | null;
 }
 
 /** A message this daemon minted for a session: its id is the handle an answer carries. */
 interface SentHandle {
   readonly pane: string;
   readonly pid: number;
-  readonly session: number;
+  readonly session: SessionKey;
   readonly task: string | null;
   readonly kind: MessageKind;
   readonly at: number;
@@ -197,7 +201,7 @@ interface SentHandle {
 interface ReceivedHandle {
   readonly pane: string;
   readonly pid: number;
-  readonly session: number;
+  readonly session: SessionKey;
   readonly task: string | null;
   readonly origin: string | null;
   readonly at: number;
@@ -213,9 +217,9 @@ interface Held {
   /** Where a reply to it goes: null for a local sender, a device id, undefined when it cannot be replied to by handle. */
   readonly origin?: string | null;
   /** Only this session may be written it: the reply's addressee, never the next `claude` in the same pane. */
-  readonly only?: number;
+  readonly only?: SessionKey;
   /** The line carries `wake` only on a listener of this session: the one that asked. */
-  readonly wakeSession?: number;
+  readonly wakeSession?: SessionKey;
   /** The sender's task, null when untasked, or the custodian: for the audit line only. */
   readonly from: string | null | CustodianSender;
   readonly bytes: number;
@@ -244,7 +248,7 @@ export function createMessages(deps: MessagesDeps): Messages {
   /** A listener that dropped: its pane may reconnect within the grace without its messages being refused. */
   const disconnects = new Map<
     string,
-    { readonly taskId: string | null; readonly session: number; readonly at: number }
+    { readonly taskId: string | null; readonly session: SessionKey | null; readonly at: number }
   >();
   const inboxes = new Map<string, Inbox>();
   /** Send timestamps per rate key, pruned to the hour. */
@@ -255,12 +259,15 @@ export function createMessages(deps: MessagesDeps): Messages {
 
   /**
    * Past the cap the oldest entry of the pane holding the most goes, not the oldest overall: one busy sender (an
-   * orchestrator's notes) must not push a quiet session's open question out of the table.
+   * orchestrator's notes) must not push a quiet session's open question out of the table. Within that pane `spare`
+   * says which entries to keep as long as another can go instead: a note's entry serves an optional receipt, an open
+   * question's carries the reply and its wake.
    */
   const remember = <T extends { readonly at: number; readonly pane: string }>(
     table: Map<string, T>,
     id: string,
     entry: T,
+    spare: (held: T) => boolean = () => false,
   ): void => {
     const t = now();
     for (const [key, held] of table) {
@@ -279,7 +286,8 @@ export function createMessages(deps: MessagesDeps): Messages {
         heaviest = pane;
         most = count;
       }
-      const victim = [...table].find(([, held]) => held.pane === heaviest);
+      const inPane = [...table].filter(([, held]) => held.pane === heaviest);
+      const victim = inPane.find(([, held]) => !spare(held)) ?? inPane[0];
       if (victim === undefined) break;
       table.delete(victim[0]);
     }
@@ -302,15 +310,20 @@ export function createMessages(deps: MessagesDeps): Messages {
 
   /**
    * The pane a `sent` entry's session still asks from: the same live pane, process and task, and a `claude` that still
-   * runs. A hand-started session's pane outlives it (the shell stays), and no `ended` fires for an untasked pane, so the
-   * process itself is the only sign it is gone.
+   * runs (the same process, by start time as well as pid). A hand-started session's pane outlives it (the shell stays),
+   * and no `ended` fires for an untasked pane, so the process itself is the only sign it is gone.
    */
   const askerPane = (panes: readonly BoundPane[], entry: SentHandle): BoundPane | undefined =>
-    processAlive(entry.session) ? paneOf(panes, entry) : undefined;
+    sessionAlive(entry.session) ? paneOf(panes, entry) : undefined;
 
+  /**
+   * Drops a pane's handles, bar `keep`'s: those made for that pane process and task and for the listener's own session,
+   * or for another `claude` that still runs there (a nested one's listener must not end the outer session's handles;
+   * each handle is bound to its own session, so keeping it gives nobody else access).
+   */
   const dropHandles = (
     paneId: string,
-    keep?: { readonly pid: number; readonly task: string | null; readonly session: number },
+    keep?: { readonly pid: number; readonly task: string | null; readonly session: SessionKey | null },
   ): void => {
     for (const table of [sent, received]) {
       for (const [id, entry] of table) {
@@ -319,7 +332,7 @@ export function createMessages(deps: MessagesDeps): Messages {
           keep !== undefined &&
           entry.pid === keep.pid &&
           entry.task === keep.task &&
-          entry.session === keep.session
+          (entry.session === keep.session || sessionAlive(entry.session))
         ) {
           continue;
         }
@@ -337,18 +350,23 @@ export function createMessages(deps: MessagesDeps): Messages {
   };
 
   /**
-   * The `claude` process a peer belongs to: the pid a reply handle is bound to, never a shell that outlives it. A séance
-   * spawn needs no reading: its ledger holds the task, and its launch `exec`s `claude` as the pane's own process, so the
-   * pane pid it is whichever child connects. Anywhere else the process tree says: the outermost process on the peer's
-   * chain that is called `claude` (the pane process itself for a pane that `exec`s it, else the shell's child; a nested
-   * `claude` a tool started is no session of the pane). None, as for a pane whose `claude` runs as `node`, and the
-   * binding fails closed: a handle bound to the shell would outlive the `claude` and pass to the next one.
+   * The `claude` process a peer belongs to, what a reply handle is bound to: the innermost process on the peer's chain,
+   * peer first and the pane process last, whose name `CLAUDE_COMMAND` accepts, with its start time. Innermost, because
+   * the peer is the child of the `claude` that started it (`seanced inbox`, `seanced mcp`): a wrapper above it that
+   * carries the name (a shell script called `claude` that runs `claude` twice) or a `claude` that started another in a
+   * tool is never the peer's session, and the wrapper, which outlives every `claude` it runs, never holds a handle. A
+   * pane that `exec`s `claude` is its own pane pid, a séance spawn too (`caffeinate` on macOS is the pane's process,
+   * `claude` its child). A name is a hint any process can set, but only the innermost counts: a process that takes the
+   * name is its own session, which holds none of another's handles. Null when no name on the chain matches (a `claude`
+   * that runs as `node`, an npm install: `sessions.ts` lists the same cost) or the process cannot be told apart from a
+   * later one (gone, or no start time read): the peer then holds no handle, whatever else it may do.
    */
-  const sessionOf = async (pane: BoundPane, below: readonly number[]): Promise<number | null> => {
-    if (pane.taskId !== null && deps.launchedAt(pane.taskId) !== undefined) return pane.pid;
-    for (const pid of [pane.pid, ...below.toReversed()]) {
-      // oxlint-disable-next-line no-await-in-loop -- outermost first, and a handful of hops
-      if ((await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name))) return pid;
+  const sessionOf = async (pane: BoundPane, below: readonly number[]): Promise<SessionKey | null> => {
+    for (const pid of [...below, pane.pid]) {
+      // oxlint-disable-next-line no-await-in-loop -- nearest the peer first, and a handful of hops
+      if (!(await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name))) continue;
+      const start = processStart(pid);
+      return start === null ? null : sessionKey(pid, start);
     }
     return null;
   };
@@ -358,13 +376,12 @@ export function createMessages(deps: MessagesDeps): Messages {
     const live = panes.filter((pane) => !pane.dead);
     const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
     if (found === null) return null;
-    const session = await sessionOf(found.hit, found.below);
-    return session === null ? null : { pane: found.hit, session };
+    return { pane: found.hit, session: await sessionOf(found.hit, found.below) };
   };
 
   /** A message written to a listener can be answered by handle, from the session that read it. */
   const noteReceived = (item: Held, paneId: string, listener: Listener): void => {
-    if (item.origin === undefined) return;
+    if (item.origin === undefined || listener.session === null) return;
     remember(received, item.id, {
       pane: paneId,
       pid: listener.panePid,
@@ -379,7 +396,7 @@ export function createMessages(deps: MessagesDeps): Messages {
    * The session that asked, when `inReplyTo` is a question or request this very pane's session sent, from the same
    * process and task: the daemon's own table makes the wake binding, never a field of a frame.
    */
-  const wakeFor = (inReplyTo: string | undefined, target: BoundPane): number | undefined => {
+  const wakeFor = (inReplyTo: string | undefined, target: BoundPane): SessionKey | undefined => {
     if (inReplyTo === undefined) return undefined;
     const entry = recall(sent, inReplyTo);
     if (entry === undefined || entry.kind === "note") return undefined;
@@ -586,8 +603,8 @@ export function createMessages(deps: MessagesDeps): Messages {
     readonly from: MessageSender;
     readonly inReplyTo: string | undefined;
     readonly origin: string | null | undefined;
-    readonly only?: number;
-    readonly wakeSession: number | undefined;
+    readonly only?: SessionKey;
+    readonly wakeSession: SessionKey | undefined;
   }): Held => {
     const full = renderMessage({
       kind: m.kind,
@@ -632,6 +649,13 @@ export function createMessages(deps: MessagesDeps): Messages {
       return refuse("unbound");
     }
     const { pane, session } = bound;
+    // No `claude` above the peer: no handle can be bound, so it listens only where a task id reaches it, as in Part A.
+    if (session === null && (pane.taskId === null || deps.launchedAt(pane.taskId) === undefined)) {
+      log.info(
+        `local socket: inbox listener from pid=${peer ?? "unknown"} has no claude process above it and no task — refused`,
+      );
+      return refuse("unbound");
+    }
     if (stopped) return refuse("stopping");
     // The peer may have gone while the pane list was read: nothing to serve, and no binding to keep.
     if (sink.gone.aborted) return;
@@ -683,15 +707,24 @@ export function createMessages(deps: MessagesDeps): Messages {
     readonly out: (outcome: Parameters<MessageAudit>[0]["outcome"]) => void;
   }
 
-  const rememberSent = (id: string, o: Outgoing): void =>
-    remember(sent, id, {
-      pane: o.sender.pane.id,
-      pid: o.sender.pane.pid,
-      session: o.sender.session,
-      task: o.sender.pane.taskId,
-      kind: o.kind,
-      at: now(),
-    });
+  /** A sender with no session gets no handle: its message still goes, and an answer to it by id finds nobody. */
+  const rememberSent = (id: string, o: Outgoing): void => {
+    const { session } = o.sender;
+    if (session === null) return;
+    remember(
+      sent,
+      id,
+      {
+        pane: o.sender.pane.id,
+        pid: o.sender.pane.pid,
+        session,
+        task: o.sender.pane.taskId,
+        kind: o.kind,
+        at: now(),
+      },
+      (held) => held.kind !== "note",
+    );
+  };
 
   /** The sender's wrapper title, or null when it has no task. */
   const titleOf = async (o: Outgoing): Promise<string | null> =>
@@ -903,7 +936,8 @@ export function createMessages(deps: MessagesDeps): Messages {
       bytes,
       from: { task: from, title, machine: deps.machine },
       inReplyTo: frame.inReplyTo,
-      origin: null,
+      // No origin, so no handle clause and no `received` entry, for a sender nothing could answer by handle.
+      origin: sender.session === null ? undefined : null,
       wakeSession: wakeFor(frame.inReplyTo, target),
     });
 
@@ -1090,13 +1124,14 @@ export function createMessages(deps: MessagesDeps): Messages {
     const byHandle = asker === undefined ? undefined : askerPane(panes, asker);
     let target: BoundPane | undefined;
     let launched: number | undefined;
-    let only: number | undefined;
+    let only: SessionKey | undefined;
     if (asker !== undefined && byHandle !== undefined) {
       target = byHandle;
       launched = byHandle.taskId === null ? undefined : deps.launchedAt(byHandle.taskId);
-      // A tasked asker keeps the launch and restart graces a task-addressed receipt always had: its `claude` is the
-      // pane's own process, so no later session can be mistaken for it. Only an untasked one is pinned to its session.
-      if (byHandle.taskId === null) only = asker.session;
+      // An asker whose task this machine launched keeps the launch and restart graces a task-addressed receipt always
+      // had: its `claude` is the pane's own process, so no later session is taken for it. Any other (untasked, or
+      // tagged with a task the ledger does not hold, where a shell's later `claude` could be) is pinned to its session.
+      if (launched === undefined) only = asker.session;
     } else if (request.fromTask !== undefined) {
       const task = request.fromTask;
       launched = deps.launchedAt(task);

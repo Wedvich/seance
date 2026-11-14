@@ -442,19 +442,21 @@ green:
   other act, or binding by a field, is a threat-model change.
   **A session with no task is reached only as a reply, by the id of a message it sent** (DESIGN.md, "Session messages",
   "Replies by handle"; docs/messaging.md D3, amended). A `message` frame carries `inReplyTo` and no `to` (or the same id as
-  `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each (past the cap the oldest entry of the busiest pane goes), hold a handle:
+  `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each (past the cap the oldest entry of the busiest pane goes, a note's before a question's), hold a handle:
   `sent` (ids this daemon minted, for the asker) and `received` (ids placed in a pane, for the replier). A message id is
   `crypto.randomUUID`, so the id is a bearer handle and no audit line, log line or warn carries one (the audit names the
   recipient as the constant `reply`). **Every entry binds the `claude` process, not the pane and its pid alone**
-  (`Bound.session`: the outermost process on the peer's chain, from the pane process down, that is called `claude`
-  (`sessionOf`, read by `processNames`), or the pane pid for a pane whose task this machine's launch ledger holds,
-  never from the pane's start command, `BoundPane.ours`; none on the chain is `unbound`), since a hand-started
+  (`Bound.session`: `<pid>:<start time>` of the innermost process on the peer's chain, peer first, that is called `claude`
+  (`sessionOf`, read by `processNames`; a name is a hint any process can take, and only the innermost counts, so a
+  wrapper script named `claude` is never the session), never from the pane's start command, `BoundPane.ours`, nor the
+  executable's path; none on the chain is no session: that peer still sends by task id and listens where its task was
+  launched here, but holds no handle, `sent` entry, `received` entry or `wake`), since a hand-started
   session's pane process is the shell, which outlives a restarted `claude`, and no `ended` fires for an untasked pane. A reply is accepted only from the pane, pid, task (null staying
   null) and session the message was placed for (`unknown` otherwise, in the sender's own rate bucket), and reaches the
-  asker only at the pane, pid, task and session the `sent` entry names, while that `claude` still runs (`ended`
-  otherwise): held for no other session, never given to the next `claude` in the same pane, and a held reply meets a
-  listener of its own session only (`only`). A listener's bind drops every handle of its pane made for another process,
-  task or session. A reply to an asker on another machine goes through the leader as a `session-message` carrying
+  asker only at the pane, pid, task and session the `sent` entry names, while that `claude` still runs, the same
+  process by start time as well as pid (`ended` otherwise): held for no other session, never given to the next `claude`
+  in the same pane, and a held reply meets a listener of its own session only (`only`). A listener's bind drops every
+  handle of its pane made for another pane process or task, or for a session that no longer runs. A reply to an asker on another machine goes through the leader as a `session-message` carrying
   `replyTo` (`{id, deviceId}`) and no `to`; the leader resolves nothing for it, forwards it to `replyTo.deviceId` only
   while that machine advertises `CAPABILITIES.messageReply` (`unsupported` otherwise), with `origin` the sealer's id
   (what a later reply routes back to), and the target daemon's own `sent` table decides. `wake` is on an inbox line only

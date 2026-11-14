@@ -308,7 +308,8 @@ Small PRs, each landing on its own:
 
 - Tested by: `daemon/test/messages.test.ts` with real peers, including the restart that matters most (a second
   `claude` stub under the same shell pid must not read the first's replies or answer its questions, also in a pane
-  whose start command names `--remote-control`, and a shell's child with no `claude` above it is refused); leader tests
+  whose start command names `--remote-control`, under a wrapper named `claude` that runs it twice, and with a `claude` nested
+  under another; and a shell's child with no `claude` above it holds no handle but still sends by task id); leader tests
   for forwarding by `replyTo` and the `messageReply` gate; the mod's test for `wake`; and an e2e test
   (`e2e/messages.test.ts`) where a session with no task asks a task on the other machine and is answered by id, with
   a wake, and answers back.

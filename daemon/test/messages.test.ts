@@ -47,6 +47,8 @@ let sockPath: string;
 let privateTmux: PrivateTmux | undefined;
 /** A process named `claude`: the binding finds a session by that name (`processNames`). */
 let claudeBin: string;
+/** The same binary under a version's name, as the native installer keeps it and macOS tmux reads it. */
+let versionedBin: string;
 let socket: LocalSocketHandle;
 let socketMessages: Messages;
 
@@ -176,6 +178,7 @@ beforeAll(async () => {
   base = await realpath(await mkdtemp(join(tmpdir(), "seance-msg-")));
   stateDir = join(base, "state");
   claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
+  versionedBin = await linkClaudeNamed(join(base, "versioned-bin"), "9.9.9");
   sockPath = join(stateDir, "run", "seanced.sock");
   await mkdir(stateDir, { recursive: true });
   privateTmux = usePrivateTmux(base, "msg");
@@ -1661,7 +1664,7 @@ describe("a reply by handle, on one machine", () => {
     expect(lineOf(uListener.lines[1]).wake).toBe(true);
   });
 
-  test("a process that is no claude is no session: a shell's child with no claude above it is refused, never bound to the shell", async () => {
+  test("a process with no claude above it holds no handle: an untasked one cannot listen, and a message it sends to a task cannot be answered by handle", async () => {
     const messages = setup();
     const file = join(base, "noclaude.peer");
     const shell = await runner("noclaude-shell", `sleep 600 & echo $! > ${shq(file)}; wait`);
@@ -1670,10 +1673,85 @@ describe("a reply by handle, on one machine", () => {
     const refused = sinkDouble();
     await messages.listen(INBOX, peer, refused.sink);
     expect(JSON.parse(refused.lines[0] ?? "null")).toEqual({ ok: false, code: "unbound" });
+    // Never bound to the shell, and not shut out of a send either: a task's id needs no session.
     expect(await messages.send(message("task-anywhere", "note", "from a bare shell"), peer)).toEqual({
       ok: false,
-      code: "unbound",
+      code: "unknown",
     });
+
+    const taskId = await launched("noclaude-t");
+    const t = await pane("noclaude-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    const asked = await messages.send(message(taskId, "question", "which file?"), peer);
+    expect(asked).toMatchObject({ ok: true, outcome: "delivered" });
+    expect(lineOf(tListener.lines[1]).push).toContain("cannot be answered from here");
+    // No handle was made for it: the id answers nothing.
+    expect(await messages.send(replyFrame(idOf(asked), "note", "src/a.ts"), t.pid)).toEqual({
+      ok: false,
+      code: "unknown",
+    });
+  });
+
+  test("a tasked pane whose process is no claude still listens and sends by task id, as in Part A, but holds no handle and no wake", async () => {
+    const messages = setup();
+    const askerTask = await launched("nc-asker");
+    const file = join(base, "nc-asker.peer");
+    const shell = await runner("nc-asker", `sleep 600 & echo $! > ${shq(file)}; wait`, askerTask);
+    await shell.go();
+    const peer = await pidFrom(file);
+    const answerTask = await launched("nc-answer");
+    const t = await pane("nc-answer", answerTask);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+
+    const listener = sinkDouble();
+    await messages.listen(INBOX, peer, listener.sink);
+    expect(JSON.parse(listener.lines[0] ?? "null")).toMatchObject({ ok: true });
+    expect(await messages.send(message(answerTask, "note", "hello"), peer)).toMatchObject({
+      ok: true,
+      outcome: "delivered",
+    });
+    const q = idOf(await messages.send(message(answerTask, "question", "which file?"), peer));
+    expect(q).not.toBe("");
+    // The answer goes by the asker's task id, as it always did, and wakes nobody: no session holds the question.
+    expect(await messages.send(message(askerTask, "note", "src/a.ts", q), t.pid)).toMatchObject({
+      ok: true,
+      outcome: "delivered",
+    });
+    expect(lineOf(listener.lines[1]).push).toContain("src/a.ts");
+    expect(lineOf(listener.lines[1])).not.toHaveProperty("wake");
+    // By handle it answers nothing, in either direction.
+    expect(await messages.send(replyFrame(q, "note", "by handle"), t.pid)).toEqual({ ok: false, code: "unknown" });
+  });
+
+  test("a claude found only by its versioned filename is a session, as macOS tmux names it", async () => {
+    const messages = setup();
+    const id = (
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id} #{pane_pid}",
+        "-t",
+        "msg:",
+        "-n",
+        "versioned",
+        "-c",
+        base,
+        versionedBin,
+        "-e",
+        "await Bun.sleep(600_000);",
+      ])
+    ).trim();
+    const pid = Number(id.split(" ")[1]);
+    await pollUntil(async () => (await processNames(pid)).includes("9.9.9"), "the versioned claude to exec");
+    expect(await processNames(pid)).not.toContain("claude");
+    // An untasked pane is acked only when a session was found: it matched by the version alone.
+    const listener = sinkDouble();
+    await messages.listen(INBOX, pid, listener.sink);
+    expect(JSON.parse(listener.lines[0] ?? "null")).toMatchObject({ ok: true });
   });
 
   test("a pane started with `--remote-control` that runs claude under a shell is bound to the claude, not the shell: the next claude holds none of the first's handles", async () => {
@@ -1803,6 +1881,77 @@ describe("a reply by handle, on one machine", () => {
     }
     expect(await messages.send(replyFrame(q, "note", "still here"), t.pid)).toMatchObject({ ok: true });
   }, 60_000);
+
+  test("past the cap a busy pane's oldest note goes before its own open question", async () => {
+    const messages = setup();
+    const taskId = await launched("keepq-t");
+    const t = await pane("keepq-t", taskId);
+    const other = await launched("keepq-o");
+    const o = await pane("keepq-o", other);
+    const busy = await pane("keepq-busy");
+    const quiet = [await pane("keepq-1"), await pane("keepq-2")];
+    for (const target of [t, o, busy, ...quiet]) {
+      // oxlint-disable-next-line no-await-in-loop -- one listener at a time
+      await messages.listen(INBOX, target.pid, sinkDouble().sink);
+    }
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), busy.pid));
+    expect(q).not.toBe("");
+    // The busy pane holds the most (101), so each entry past the cap is its own: the question is the oldest of all.
+    const send = async (from: Pane, i: number): Promise<void> => {
+      clock.now += 4_000;
+      expect(await messages.send(message(other, "note", `n${i}`), from.pid)).toMatchObject({ ok: true });
+    };
+    for (let i = 0; i < 100; i++) await send(busy, i);
+    for (let i = 0; i < 160; i++) {
+      const from = quiet[i % quiet.length];
+      if (from === undefined) throw new Error("no sender");
+      await send(from, i);
+    }
+    expect(await messages.send(replyFrame(q, "note", "still here"), t.pid)).toMatchObject({ ok: true });
+  }, 60_000);
+
+  test("a claude a tool started under a claude is its own session: its listener neither reads nor ends the outer session's handles", async () => {
+    const messages = setup();
+    const taskId = await launched("nest-t");
+    const t = await pane("nest-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+
+    const file = (name: string): string => join(base, `nest-${name}`);
+    const inner = underClaude(claudeBin, {
+      body: `sleep 600 & echo $! > ${shq(file("inner.peer"))}; wait`,
+      pidFile: file("inner.claude"),
+    });
+    const outer = underClaude(claudeBin, {
+      body: `sleep 600 & echo $! > ${shq(file("outer.peer"))}; ${inner}`,
+      pidFile: file("outer.claude"),
+    });
+    const shell = await runner("nest-shell", outer);
+    await shell.go();
+    const [outerPeer, innerPeer] = [await pidFrom(file("outer.peer")), await pidFrom(file("inner.peer"))];
+
+    const first = sinkDouble();
+    await messages.listen(INBOX, outerPeer, first.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which file?"), outerPeer));
+    expect(q).not.toBe("");
+    const r = idOf(await messages.send(replyFrame(q, "note", "src/a.ts"), t.pid));
+    expect(lineOf(first.lines[1]).wake).toBe(true);
+
+    // The nested claude's listener takes the pane's one listener, and answers nothing the outer one received.
+    const nested = sinkDouble();
+    await messages.listen(INBOX, innerPeer, nested.sink);
+    expect(first.closed()).toBe(true);
+    expect(await messages.send(replyFrame(r, "note", "not mine"), innerPeer)).toEqual({ ok: false, code: "unknown" });
+
+    // It ends; the outer session listens again and still holds what it received.
+    nested.drop();
+    await messages.listen(INBOX, outerPeer, sinkDouble().sink);
+    expect(await messages.send(replyFrame(r, "note", "thanks"), outerPeer)).toMatchObject({
+      ok: true,
+      outcome: "delivered",
+    });
+    expect(tListener.lines).toHaveLength(3);
+  });
 });
 
 describe("a hand-started session that restarts under the same shell", () => {
@@ -1872,6 +2021,83 @@ describe("a hand-started session that restarts under the same shell", () => {
     expect(tListener.lines).toHaveLength(2);
     expect(audits.filter((a) => a.dir === "in" && a.to === "reply" && a.outcome === "delivered")).toHaveLength(1);
     expectNoIdsOrText(q, r);
+  });
+
+  test("a wrapper called claude that runs claude twice is not the session: each claude is, so the second holds none of the first's handles", async () => {
+    const messages = setup();
+    const taskId = await launched("wrap-t");
+    const t = await pane("wrap-t", taskId);
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+
+    const file = (name: string): string => join(base, `wrap-${name}`);
+    const claude = (name: string): string =>
+      underClaude(claudeBin, {
+        body: `sleep 600 & echo $! > ${shq(file(`${name}.peer`))}; wait`,
+        pidFile: file(`${name}.claude`),
+      });
+    // `claude "$@"; claude --continue`: the wrapper reads as a claude to tmux and ps, and outlives both.
+    const wrapper = underClaude(claudeBin, { body: `${claude("one")}; ${claude("two")}` });
+    const shell = await runner("wrap-shell", wrapper);
+    await shell.go();
+    const [claudeOne, peerOne] = [await pidFrom(file("one.claude")), await pidFrom(file("one.peer"))];
+
+    const first = sinkDouble();
+    await messages.listen(INBOX, peerOne, first.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which file?"), peerOne));
+    expect(q).not.toBe("");
+    const r = idOf(await messages.send(replyFrame(q, "note", "src/a.ts"), t.pid));
+    expect(lineOf(first.lines[1]).wake).toBe(true);
+
+    first.drop();
+    process.kill(claudeOne, "SIGKILL");
+    process.kill(peerOne, "SIGKILL");
+    const peerTwo = await pidFrom(file("two.peer"));
+    expect(await pidFrom(file("two.claude"))).not.toBe(claudeOne);
+
+    expect(await messages.send(replyFrame(q, "note", "too late"), t.pid)).toEqual({ ok: false, code: "ended" });
+    const second = sinkDouble();
+    await messages.listen(INBOX, peerTwo, second.sink);
+    expect(await messages.send(replyFrame(r, "note", "not mine"), peerTwo)).toEqual({ ok: false, code: "unknown" });
+    expect(await messages.send(replyFrame(q, "note", "after it listened"), t.pid)).toEqual({
+      ok: false,
+      code: "ended",
+    });
+    expect(second.lines).toHaveLength(1);
+  });
+
+  test("a receipt for a pane tagged with a task this machine never launched is pinned to its session: a sibling claude's listener is not served it", async () => {
+    const messages = setup({ route: () => Promise.resolve(true) });
+    const file = (name: string): string => join(base, `rcpt-${name}`);
+    const claude = (name: string): string =>
+      underClaude(claudeBin, {
+        body: `sleep 600 & echo $! > ${shq(file(`${name}.peer`))}; wait`,
+        pidFile: file(`${name}.claude`),
+      });
+    // Two claudes alive under one shell, so the shell's later `claude` is not the first's: no launch ledger entry stands
+    // for the tag, so nothing but the session separates them.
+    const shell = await runner("rcpt-shell", `${claude("one")} & ${claude("two")} & wait`, "task-never-launched-rcpt");
+    await shell.go();
+    const [peerOne, peerTwo] = [await pidFrom(file("one.peer")), await pidFrom(file("two.peer"))];
+
+    const one = sinkDouble();
+    await messages.listen(INBOX, peerOne, one.sink);
+    const routed = await messages.send(
+      { ...message("t-0123456789abcdef", "note", "hello there"), route: "send" },
+      peerOne,
+    );
+    expect(routed).toMatchObject({ ok: true, outcome: "routed" });
+
+    const two = sinkDouble();
+    await messages.listen(INBOX, peerTwo, two.sink);
+    expect(
+      await messages.receipt({
+        id: idOf(routed),
+        to: "t-0123456789abcdef",
+        kind: "note",
+        outcome: "delivered",
+      }),
+    ).toEqual({ ok: true, outcome: "dropped" });
+    expect(two.lines).toHaveLength(1);
   });
 });
 
