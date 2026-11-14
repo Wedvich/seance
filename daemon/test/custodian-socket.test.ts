@@ -1,14 +1,21 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, rmdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { CustodianReply } from "../src/custodian-frame.ts";
-import { custodianSocketPath, startCustodianSocket, type CustodianSocket } from "../src/custodian-socket.ts";
+import {
+  CUSTODIAN_SOCKET_NAME,
+  custodianSocketDir,
+  removeCustodianSocketDir,
+  startCustodianSocket,
+  type CustodianSocket,
+} from "../src/custodian-socket.ts";
+import { CUSTODIAN_SOCKET_DIR, ROUND_TMP } from "../src/seat-record.ts";
 import { peerPidSupported } from "../src/peer.ts";
 import { pollUntil } from "./fixtures.ts";
 
 /**
  * The round's own socket with real sockets and a real directory. It lives under a literal `/tmp` (the production path
- * is `/tmp/seance-cu-s-<hash>/c.sock`), so each test makes its own short directory there: `tmpdir()` on macOS would
+ * is `/tmp/seance-cu-s-XXXXXX/c.sock`), so each test makes its own short directory there: `tmpdir()` on macOS would
  * push the socket path past the 104 bytes a unix socket address holds.
  */
 
@@ -68,13 +75,76 @@ async function exchange(path: string, line: string): Promise<{ readonly text: st
 const frame = (extra: Record<string, unknown> = {}): string =>
   `${JSON.stringify({ v: 1, kind: "custodian", verb: "done", summary: "s", ...extra })}\n`;
 
-describe("custodianSocketPath", () => {
-  test("is a function of the state dir, under /tmp, short enough for a unix socket, and not a round tmp dir", () => {
-    const path = custodianSocketPath("/home/u/.local/state/seance");
-    expect(path).toBe(custodianSocketPath("/home/u/.local/state/seance"));
-    expect(path).not.toBe(custodianSocketPath("/home/v/.local/state/seance"));
-    expect(path).toMatch(/^\/tmp\/seance-cu-s-[0-9a-f]{12}\/c\.sock$/u);
-    expect(Buffer.byteLength(path)).toBeLessThan(104);
+describe("custodianSocketDir", () => {
+  /** Real dirs under the production prefix: each test removes what it made. */
+  const made: string[] = [];
+  afterEach(async () => {
+    for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const choose = async (recorded: string | undefined): Promise<{ readonly dir: string; readonly reused: boolean }> => {
+    const chosen = await custodianSocketDir(recorded);
+    if ("problem" in chosen) throw new Error(chosen.problem);
+    made.push(chosen.dir);
+    return chosen;
+  };
+
+  test("with none recorded: a fresh 0700 dir, unguessable, short enough for a unix socket, and not a round tmp dir", async () => {
+    const one = await choose(undefined);
+    const two = await choose(undefined);
+    expect(one.reused).toBe(false);
+    expect(one.dir).toMatch(CUSTODIAN_SOCKET_DIR);
+    expect(one.dir).not.toMatch(ROUND_TMP);
+    expect(one.dir).not.toBe(two.dir);
+    expect((await lstat(one.dir)).mode & 0o777).toBe(0o700);
+    expect(Buffer.byteLength(join(one.dir, CUSTODIAN_SOCKET_NAME))).toBeLessThan(104);
+  });
+
+  test("a recorded dir of this daemon's own is reused, its mode put back to 0700, and made again when gone", async () => {
+    const { dir } = await choose(undefined);
+    await chmod(dir, 0o755);
+    expect(await choose(dir)).toEqual({ dir, reused: true });
+    expect((await lstat(dir)).mode & 0o777).toBe(0o700);
+    await rmdir(dir);
+    expect(await choose(dir)).toEqual({ dir, reused: true });
+    expect((await lstat(dir)).isDirectory()).toBe(true);
+  });
+
+  test("a recorded name planted as a symlink is not used, nothing is made through it, and a fresh dir is served", async () => {
+    const target = join(base, "planted-target");
+    await mkdir(target);
+    // A name of the right shape nobody holds (another run may be planting its own beside it).
+    const planted = `/tmp/seance-cu-s-${crypto.randomUUID().replaceAll("-", "").slice(0, 6)}`;
+    await symlink(target, planted);
+    made.push(planted);
+    const chosen = await choose(planted);
+    expect(chosen.reused).toBe(false);
+    expect(chosen.dir).not.toBe(planted);
+    expect(await readdir(target)).toEqual([]);
+  });
+
+  test("a recorded path of any other shape is never touched", async () => {
+    const other = join(base, "other");
+    const chosen = await choose(other);
+    expect(chosen.reused).toBe(false);
+    expect(await lstat(other).catch(() => null)).toBeNull();
+  });
+});
+
+describe("removeCustodianSocketDir", () => {
+  test("removes this daemon's own dir with the socket in it, and touches no path of another shape", async () => {
+    const chosen = await custodianSocketDir(undefined);
+    if ("problem" in chosen) throw new Error(chosen.problem);
+    const started = await start(join(chosen.dir, CUSTODIAN_SOCKET_NAME));
+    started.stop();
+    // A daemon killed -9 leaves its socket file: the removal takes that too.
+    await Bun.write(join(chosen.dir, CUSTODIAN_SOCKET_NAME), "");
+    await removeCustodianSocketDir(chosen.dir);
+    expect(await lstat(chosen.dir).catch(() => null)).toBeNull();
+
+    const other = join(base, "keep");
+    await mkdir(other);
+    await removeCustodianSocketDir(other);
+    expect((await lstat(other)).isDirectory()).toBe(true);
   });
 });
 
@@ -220,11 +290,13 @@ describe("startCustodianSocket", () => {
     expect(JSON.parse((await exchange(path, frame())).text)).toEqual({ ok: true, verb: "done" });
   });
 
-  test("stop unlinks the socket and removes the directory it made", async () => {
+  test("stop unlinks the socket and keeps the directory, so the next instance serves the same path", async () => {
     const { dir, path } = socketIn();
     const started = await start(path);
     started.stop();
     expect(await lstat(path).catch(() => null)).toBeNull();
-    expect(await lstat(dir).catch(() => null)).toBeNull();
+    expect((await lstat(dir)).isDirectory()).toBe(true);
+    await start(path);
+    expect(JSON.parse((await exchange(path, frame())).text)).toEqual({ ok: true, verb: "done" });
   });
 });

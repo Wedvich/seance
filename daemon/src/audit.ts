@@ -731,7 +731,7 @@ export interface CustodianAudit {
   readonly start: (exclave: string, pane: string | null, outcome: "started" | "launch_failed") => Promise<void>;
   readonly kill: (
     pane: string,
-    reason: "deadline" | "stray" | "off" | "exited" | "done",
+    reason: "deadline" | "stray" | "off" | "exited" | "done" | "unreachable",
     outcome: "exited" | "killed" | "gone",
   ) => Promise<void>;
   readonly end: (

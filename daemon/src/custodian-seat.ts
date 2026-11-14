@@ -264,6 +264,12 @@ export interface SeatDeps {
   /** The capability was stopped: nothing is saved, and a late launch closes its own pane. */
   readonly stopped: () => boolean;
   readonly record: () => SeatRecord;
+  /**
+   * False when the recorded round was launched against a socket this seat does not serve (an older daemon's record, or
+   * a recorded socket dir found unusable): it could call no verb until its deadline, so adoption closes it, `lost`.
+   * Absent, true.
+   */
+  readonly roundReachable?: boolean;
   readonly save: (record: SeatRecord) => Promise<void>;
   readonly pick: () => Promise<PickResult>;
   readonly launch: (
@@ -498,7 +504,10 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     await persist({ lastEndedAt: d.now() });
   };
 
-  /** Closes every round pane but `kept`; the recorded round's own dead pane is `exited`, any other is stray. */
+  /**
+   * Closes every round pane but `kept`; the recorded round's own dead pane is `exited`, its live one `unreachable`
+   * (kept only when reachable), any other is stray.
+   */
   const sweep = async (
     panes: readonly { readonly pane: string; readonly dead: boolean }[],
     recorded: string | null,
@@ -506,24 +515,28 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   ): Promise<void> => {
     for (const pane of panes) {
       if (pane.pane === kept) continue;
-      const reason = pane.pane === recorded ? "exited" : "stray";
+      const reason = pane.pane !== recorded ? "stray" : pane.dead ? "exited" : "unreachable";
       // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
       await d.audit.kill(pane.pane, reason, await d.close(pane.pane));
     }
   };
 
-  /** C4: the round a restart or reload left is adopted with its original deadline; any other round pane is stray. */
+  /**
+   * C4: the round a restart or reload left is adopted with its original deadline; any other round pane is stray. One
+   * launched against a socket this seat does not serve is closed and lost instead: adopted, it would run blind.
+   */
   const adopt = async (): Promise<void> => {
     const round = d.record().round;
     const panes = await d.listRounds();
     const recordedPane = round?.pane ?? null;
     const recorded = recordedPane === null ? undefined : panes.find((pane) => pane.pane === recordedPane);
-    const kept = recorded !== undefined && !recorded.dead ? recorded.pane : null;
+    const reachable = d.roundReachable ?? true;
+    const kept = reachable && recorded !== undefined && !recorded.dead ? recorded.pane : null;
     await sweep(panes, recordedPane, kept);
     if (kept !== null) countsKnown = false;
     if (round === undefined || kept !== null) return;
     if (round.done === true) return finish(round, "done");
-    await finish(round, recorded === undefined ? "lost" : "exited");
+    await finish(round, recorded?.dead === true ? "exited" : "lost");
   };
 
   const closeStray = async (launched: { readonly pane: string; readonly tmpDir: string }): Promise<void> => {
