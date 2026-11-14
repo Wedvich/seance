@@ -2,6 +2,7 @@ import {
   accountNameIn,
   CAPABILITIES,
   closedAt,
+  custodianOf,
   drainStuckText,
   drainSummary,
   drainView,
@@ -10,6 +11,7 @@ import {
   effectivePct,
   exclaveAuth,
   exclaveTraitHealth,
+  isRemoteSessionId,
   lastHeardAt,
   liveStatus,
   METRIC_NAMES,
@@ -21,10 +23,12 @@ import {
   type DrainStuck,
   type SessionEntry,
   type ArchiveTableStatus,
+  type CustodianState,
   type ArchivistEntry,
   type ExclaveInfo,
   type FleetQuotaEntry,
   type Machine,
+  type MachineStatus,
   type NewestQuota,
   type QuotaReading,
   type SchedulerAvailability,
@@ -96,6 +100,45 @@ export interface MachineCard {
   readonly openSwitch: "on" | "off" | null;
   /** A closed machine's drain under a `drainPass` leader: null otherwise, and while the queue is unread. */
   readonly drain: DrainRow | null;
+  /** The custodian seat's row: null unless the machine advertises `custodian`. */
+  readonly custodian: CustodianRow | null;
+}
+
+/**
+ * `MachineStatus.cu` as the card shows it. `state` null is a seat that has not reported (a status not in yet, or from
+ * a daemon too old to send `cu`).
+ */
+export interface CustodianRow {
+  readonly state: CustodianState | null;
+  /** "last round ended 5m ago", or "no round yet"; null while there is no report. */
+  readonly ended: string | null;
+  /** "closed 3 · nudged 1", or "nothing closed"; null with no counts. */
+  readonly counts: string | null;
+  /** The running round's claude.ai page; null unless it is running and its id passes `isRemoteSessionId` here too. */
+  readonly link: string | null;
+  /** `failing`: the warn colour. */
+  readonly warn: boolean;
+}
+
+/** An origin constant, never from a status: the id spliced after it passed `isRemoteSessionId` (`session_` and base62 only). */
+const CLAUDE_CODE_URL = "https://claude.ai/code/";
+
+export function custodianRow(machine: Machine, status: MachineStatus | undefined, now: number): CustodianRow | null {
+  if (machine.capabilities?.includes(CAPABILITIES.custodian) !== true) return null;
+  const cu = custodianOf(status);
+  if (cu === null) return { state: null, ended: null, counts: null, link: null, warn: false };
+  const [closed, nudged, flagged] = cu.n ?? [];
+  const parts =
+    closed === undefined
+      ? []
+      : [`closed ${closed}`, ...(nudged ? [`nudged ${nudged}`] : []), ...(flagged ? [`flagged ${flagged}`] : [])];
+  return {
+    state: cu.s,
+    ended: cu.e === undefined ? "no round yet" : `last round ended ${formatSeen(cu.e * 1000, now)}`,
+    counts: parts.length === 0 ? null : parts.join(" · ") === "closed 0" ? "nothing closed" : parts.join(" · "),
+    link: cu.s === "running" && isRemoteSessionId(cu.rc) ? `${CLAUDE_CODE_URL}${cu.rc}` : null,
+    warn: cu.s === "failing",
+  };
 }
 
 export interface DrainRow {
@@ -415,6 +458,7 @@ function machineCard(
     closed,
     openSwitch: !canClose ? null : closed ? "off" : canDrain ? "on" : null,
     drain: drainRow(machine, drains),
+    custodian: custodianRow(machine, status, now),
   };
 }
 

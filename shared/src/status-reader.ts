@@ -1,6 +1,13 @@
 import type { Machine } from "./app-client.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
-import { CAPABILITIES, STATUS_INTERVAL_MS, type MachineStatus, type QuotaObservation, type Task } from "./types.ts";
+import {
+  CAPABILITIES,
+  STATUS_INTERVAL_MS,
+  type CustodianStatus,
+  type MachineStatus,
+  type QuotaObservation,
+  type Task,
+} from "./types.ts";
 
 /**
  * The rules every reader of a `status` goes through, so the PWA and the
@@ -44,6 +51,11 @@ export function liveStatus(machine: Pick<Machine, "connected" | "status">): Mach
  */
 export function closedAt(machine: Pick<Machine, "status">): number | null {
   return machine.status?.cl ?? null;
+}
+
+/** The custodian seat's view from a status, null when none was sent: display only. */
+export function custodianOf(status: MachineStatus | null | undefined): CustodianStatus | null {
+  return status?.cu ?? null;
 }
 
 /** One exclave's login as a reader sees it; `expiresAt` is ms. */

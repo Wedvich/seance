@@ -167,6 +167,23 @@ describe("fitStatus", () => {
     expect(fitStatus(closed, padded({ ...closed, quota: undefined, tr: 3 })).cl).toBe(1_763_000_000_000);
   });
 
+  test("the custodian's view is never trimmed, and the worst case beside every other kept field fits the budget", () => {
+    const cu = {
+      s: "running" as const,
+      e: 1_763_000_000,
+      n: [999, 999, 999] as const,
+      rc: `session_${"A".repeat(64)}`,
+    };
+    const crowded = fitStatus({ ...status(3), cu, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.cu).toEqual(cu);
+    expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
+    const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
+    const worst = fitStatus({ ...status(12), ae, cu, drn: true, cl: 1_763_000_000_000, sess: [9] });
+    expect(worst.cu).toEqual(cu);
+    expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
+  });
+
   test("an exclave list too long even for sess still says it was trimmed", () => {
     const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);

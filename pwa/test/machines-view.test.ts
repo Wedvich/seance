@@ -900,3 +900,56 @@ describe("deriveArchivist", () => {
     expect(card?.rows[3]).toMatchObject({ value: "500", unit: "B" });
   });
 });
+
+describe("the custodian row", () => {
+  const RC = `session_${"A".repeat(20)}`;
+  const seated = (cu: MachineStatus["cu"], capabilities: string[] = [CAPABILITIES.custodian]): Machine =>
+    machine({ capabilities, ...(cu === undefined ? {} : { status: { at: S - 5, scan: 1, cu } }) });
+  const rowOf = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.custodian;
+
+  test("no row without the capability, however the status looks", () => {
+    expect(rowOf(seated({ s: "idle" }, []))).toBeNull();
+  });
+
+  test("with the capability and no cu yet: no report", () => {
+    expect(rowOf(seated(undefined))).toEqual({ state: null, ended: null, counts: null, link: null, warn: false });
+  });
+
+  test("idle with a last round: its age and counts", () => {
+    expect(rowOf(seated({ s: "idle", e: S - 600, n: [3, 1, 2] }))).toEqual({
+      state: "idle",
+      ended: "last round ended 10m ago",
+      counts: "closed 3 · nudged 1 · flagged 2",
+      link: null,
+      warn: false,
+    });
+  });
+
+  test("no round yet when e is absent; zero parts are dropped but closed, and closed 0 alone reads as nothing closed", () => {
+    expect(rowOf(seated({ s: "idle" }))).toMatchObject({ ended: "no round yet", counts: null });
+    expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 0, 0] }))?.counts).toBe("nothing closed");
+    expect(rowOf(seated({ s: "idle", e: S - 60, n: [4, 0, 0] }))?.counts).toBe("closed 4");
+    expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 2, 0] }))?.counts).toBe("closed 0 · nudged 2");
+    expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 0, 1] }))?.counts).toBe("closed 0 · flagged 1");
+  });
+
+  test("failing is the warn colour; paused and idle are not", () => {
+    expect(rowOf(seated({ s: "failing" }))?.warn).toBe(true);
+    expect(rowOf(seated({ s: "paused" }))?.warn).toBe(false);
+  });
+
+  test("a running round with a valid rc links to claude.ai", () => {
+    expect(rowOf(seated({ s: "running", rc: RC }))?.link).toBe(`https://claude.ai/code/${RC}`);
+    expect(rowOf(seated({ s: "running" }))?.link).toBeNull();
+  });
+
+  test("an rc that fails the check here, or sits beside another state, never links", () => {
+    // Built past the parser, which would have dropped these.
+    for (const rc of ["session_a/../b", "https://evil.example/x", "session_a b", ""]) {
+      const bad = { s: "running", rc } satisfies MachineStatus["cu"];
+      expect(rowOf(seated(bad))?.link).toBeNull();
+    }
+    expect(rowOf(seated({ s: "paused", rc: RC }))?.link).toBeNull();
+    expect(rowOf(seated({ s: "idle", rc: RC }))?.link).toBeNull();
+  });
+});

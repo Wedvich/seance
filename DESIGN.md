@@ -8684,7 +8684,8 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   on screen, which only the `interrupt` verb (custodian 8) can act on. `close` answers the first two `unobserved`
   (C24) and the third `busy`, and a round they kept due would run every `everyMinutes` to do nothing. So the due
   check is the idle-since-turn-end term alone, and custodian 8 adds the still-screen term beside it
-  (`actionable`, `custodian-seat.ts`). Pause (C45) is custodian 5. A round is not held
+  (`actionable`, `custodian-seat.ts`). A pause and the owner's round request (custodian 5, "The custodian's status and
+  the Machines row") enter the check as `paused` and `requested`. A round is not held
   back on a closed machine (`cl`): closing a machine routes work away and asks its sessions to pass, and the
   sessions it still holds are the ones a round tidies; only a restart drain stops a launch, because the daemon
   is about to go. A broken launch counts as a round that ended, so it retries after `everyMinutes`, never every
@@ -8794,7 +8795,8 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
     <path>`); and `seanced` itself: `Bash(seanced)` and `Bash(seanced <command>*)` for **every `COMMANDS` name but
     `custodian`**, generated from the one table in `commands.ts` that `main.ts`'s dispatch is also typed against
     and `USAGE` is checked against, with a test that each is covered, so a new command is denied by default
-    (deny beats allow, so a plain `Bash(seanced *)` would refuse `seanced custodian` too). **Additions to the
+    (deny beats allow, so a plain `Bash(seanced *)` would refuse `seanced custodian` too), plus `Bash(seanced custodian
+    <verb>*)` for each owner verb (`CUSTODIAN_OWNER_VERBS`) and for `notes --clear`. **Additions to the
     spike's tested list** (owner decision, 2026-11-13: they cost the round no read, and a round has no reason
     for any): tmux's shell runners (`run-shell`, `new-window`, `split-window`, `new-session`, `respawn-*`, `if-shell`,
     `pipe-pane`, `display-popup`, `source-file`, `set-hook`, `command-prompt`, `confirm-before`), since the tmux
@@ -8889,7 +8891,8 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   name none; **nothing read from a pane, the seed, the notes, the summary or the agent's text reaches a line**, and
   the seat's own warnings say a reason from a fixed set and exclave ids.
 - **`seanced custodian`** (`custodian-cli.ts`) is the round's four verbs and is built (below). It is a static
-  import in `main.ts`, as `session-event` and `inbox` are: the verbs run many times a round.
+  import in `main.ts`, as `session-event` and `inbox` are: the verbs run many times a round. The owner's verbs
+  (`status`, `log`, `round`, `pause`, `resume`) are a separate module loaded by `import()` (custodian 5, below).
 - **Doctor.** `seanced doctor` has a `custodian` section on a machine whose config carries the key
   (`custodian-checks.ts`): the platform, `bwrap`/`socat` and the sandbox probe, the weaker nested mode's warning,
   and per exclave signed out, trusted, or untrusted with the fix, through the pick's own `hostProblem` (so a
@@ -11301,7 +11304,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   launch ledger: a leader that missed it learns it from the session's next event. The residual
   is the one above: a same-uid process on the task's machine can make the title link to
   another claude.ai session the same account owns. Not covered: the spawn verdict (above,
-  "Out of scope for v1"), and sessions with no task, whose events go nowhere.
+  "Out of scope for v1"), and sessions with no task, whose events go nowhere. The custodian's round is such a session
+  and its id reaches the Machines row another way (custodian 5, "the live link").
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
   `question` and `permission`, and `tool` rides beside `permission` only. Closed kinds plus a
@@ -11609,7 +11613,7 @@ frame can do, not what the round can.
   a missing file) rejects the write, so a transient fault never rewrites the history to one line (code review F8). A write is an **upsert on `start`**: a later
   `failed` end replaces an earlier `failed` one (a deadline after an exit), a `healthy` entry is never replaced, and
   writes run one at a time through a module-level chain. The summary may quote a pane, so it goes nowhere else: no
-  log, no audit line, and not the wire (C42's reading side is custodian 5). The tally is in memory: a round a
+  log, no audit line, and not the wire (`seanced custodian log` reads it on the machine: custodian 5, below). The tally is in memory: a round a
   restart adopted counts from the restart.
 - **The CLI (`custodian-cli.ts`)** imports only `local-client.ts`, `custodian-frame.ts`, `paths.ts`, `node:fs/promises`
   and `@seance/shared`, so a round's many calls load none of the daemon, and **nothing it reaches may call
@@ -11651,6 +11655,83 @@ frame can do, not what the round can.
   already says a seat is configured); serializing `writeDurable` itself (the notes and the round log each chain
   their own writes, and no other caller needs it); and a capture of the screen in `sessions`' reply (a second copy
   of untrusted text for the round to quote into its summary, with no check it needs).
+
+### The custodian's status and the Machines row (`custodian-control.ts`, `custodian-owner-cli.ts`, `custodian-remote.ts`) — built 2026-11-14 (custodian 5), held with the seat
+
+Built: `MachineStatus.cu`, the Machines card's Custodian row, and the owner's shell commands `seanced custodian status |
+log | round | pause [--for <n>m|h|d] | resume`. Held with the seat: while `ROUNDS_LIVE` is false no seat runs, no
+`CAPABILITIES.custodian` is advertised and no card shows the row. Not built: the card's menu, the `custodian` app op, flags
+and the `failing` push (custodian 6 and 7).
+
+- **`cu` on the wire** (`CustodianStatus`, `shared/src/types.ts`): `s` (`idle`, `running`, `paused`, `failing`), `e` (the last
+  round's end, unix seconds like `at`), `n` (`[closed, nudged, flagged]`, each capped at 999) and `rc`, the running
+  round's Remote Control id. It is display-only and is never trimmed by `fitStatus`, like `drn` and `cl`. **A bad `cu` is
+  dropped alone** (`parseCustodianStatus`): the status around it stays, since a card row is not worth a status's
+  scheduling fields (`drn` and `cl` reject the whole status because they gate routing). `rc` is kept only beside
+  `running` and only as `isRemoteSessionId` passes it. (`QuotaObservation.cu`, the credits, is an unrelated name.)
+- **State.** `paused` while `custodian/state.json` carries a pause; `failing` after `FAILING_AFTER` (3) failed rounds in a
+  row, where a failed log entry, a launch failure and a throwing pick each count and a healthy round resets
+  the count (an empty pick, with every exclave over quota or signed out, is not the seat's fault: it backs the pick off
+  for `everyMinutes` and counts nothing, so a busy afternoon never reads `failing`); `running` while a round's pane is recorded; else `idle`. The count is seeded at start from the log's
+  trailing failures, so a restart does not forget a failing seat. A host whose checks failed (`seatFailed`) is
+  `failing` too, with nothing to count. A launch failure writes no log entry, which is why the in-memory count exists.
+- **The row** shows the state, when the last round ended (`last round ended 3h ago`, or `no round yet`), the counts
+  (`closed 3 · nudged 1 · flagged 2`, `closed 0` reading `nothing closed`), `failing` in the warn colour, and, while
+  running with a valid `rc`, an `Open round` link. Each part is one unbreakable span, so a 390px card wraps between parts.
+  A machine advertising the capability whose status has no `cu` (not in yet, an older daemon, or an asleep machine, which
+  reads through `liveStatus`) shows `no report yet`.
+- **The live link.** The round runs with `--setting-sources project`, so the session-events mod never runs in it, its pane
+  is skipped by every pane reader, and C24 keeps session ids off the custodian frame: no session event can carry the id
+  (the one "The remote session id" above describes). The daemon reads it instead (`roundRemoteId`): from
+  `<configDir>/sessions/<pid>.json` (`pid`, `startedAt` in ms, `bridgeSessionId`; undocumented Claude Code behaviour,
+  observed on 2.1.325, re-verify on upgrades), only for a file whose pid is the recorded round pane's pid (Linux `exec`s
+  `claude`) or its direct child (macOS's `caffeinate -is` wrapper), never any descendant, so a leftover file whose pid a
+  round's child reuses cannot link another session; the file's own `pid` must match its name and its `startedAt` be no
+  earlier than the round's. Only `<digits>.json` names are opened (the directory also holds `.key` files), as untrusted: `O_NOFOLLOW|O_NONBLOCK`,
+  a regular file by `fstat` on the opened descriptor, at most 64 KiB read (a FIFO or a link to `/dev/zero` in the
+  round's place must not hang or exhaust the seat's serial chain), and neither the id nor a failure is logged. The origin of the link is the PWA's constant (`CLAUDE_CODE_URL`), the id re-checked there.
+  **Rejected:** carrying it in a reply to a card's own request (an app op with no other user until custodian 7); taking it
+  from a session event (the mod does not run); a map of every pane's id (a round has one pane).
+- **Control files** live in the 0700 `stateDir()/custodian/`, each 0600 and written with `writeDurable`: `state.json` (the
+  pause: `{"pause": {"at": <ms>, "until": <ms>|null}}`, indefinite when `until` is null, and no `pause` key for not
+  paused; `{"pause": null}` is not a valid clear and reads as unreadable, so `resume` deletes the key), `round-request`
+  (`{"at": <ms>}`) and `seat.json` (the seat's view without `rc`, plus `at`, `failed` and `version`, republished every
+  tick by a running seat as a heartbeat; a seat whose host checks failed has no tick and writes it once). `status` and
+  `round` treat a view older than five minutes as no report, so neither a stopped daemon's leftover `failed` nor a
+  fixed host's old one is read as current. **An unreadable `state.json` loads as paused indefinitely** (the `closed`
+  precedent: a fault never starts a round the owner paused). `state.json` is deliberately not the daemon's `state.json`:
+  the shell is its only writer today, and sharing the daemon's would race its writes. Custodian 7's app-op pause must
+  serialise with the CLI's or give the pause one owner.
+- **Pause and `round`.** A pause stops the due check; it does not stop a round already running. `round` writes the request
+  and the seat honours it on its next tick, **even while paused (the pause stays)**: asking for a round is the owner
+  overriding their own pause for one round. A request is spaced by `ROUND_REQUEST_MIN_GAP_MS` (15 min) from the newest
+  of the last round's start, the last round's end and this process's last launch attempt, and honoured only within
+  `ROUND_REQUEST_TTL_MS` (10 min); a stale one is dropped, never run late. It is dropped before launch, kept across a
+  restart drain and dropped while a round runs. `round` checks what it can from files and refuses, with the reason and
+  exit 1, while rounds are held (`ROUNDS_LIVE`), with no `custodian` config, when a fresh `seat.json` says the host
+  checks failed, while a round runs, and inside the spacing (naming when one can be asked for); nothing is requested
+  then. A launch attempt that failed is in the seat's memory only, so a request right after one can still be dropped
+  (the seat's log says so); the success line says "at its next tick", never that it will start.
+- **The CLI** is not `custodian-cli.ts` (the round's four verbs). `main.ts` dispatches `CUSTODIAN_OWNER_VERBS` to
+  `custodian-owner-cli.ts` by dynamic import, outside the round CLI's import closure, because this one logs and audits and
+  that closure must never reach `log.ts` (`daemon/test/message-layering.test.ts`). Every verb works from files (the
+  round log, `seat.json`, `state.json`), never the socket, so `log` is machine-local by construction and a stopped
+  daemon still answers. `pause`, `resume` and `round` audit `custodian origin=cli op=pause|resume|round outcome=<…>`
+  with a duration or reason and no text. Everything read from a file reaches the terminal through `printable`, which
+  replaces control, formatting (bidi, zero-width), surrogate and line and paragraph separator characters with U+FFFD and
+  caps the length: a round's summary is model-written from untrusted pane text, and an escape sequence in it would
+  otherwise reach the owner's terminal. `log` prints a summary, never sends it anywhere.
+- **The fence.** The generated deny list refuses a round the owner verbs and `notes --clear` (`Bash(seanced custodian
+  <verb>*)` per verb, from `CUSTODIAN_OWNER_VERBS`). Like the rest of the fence it is a mistake guard, not a boundary:
+  until item 4b a round's sandbox can still reach the tmux socket and same-uid processes (it cannot write `stateDir()`). The acceptance "a round cannot pause itself or request
+  another" holds from 4b.
+- **Known gaps.** `seatFailed` is in memory and in `seat.json` only: `round` and `status` see it through `seat.json`
+  (up to a tick old), nothing else does. The seat answers no `cu` (the row reads `no report yet`) until `start` has read
+  the log and the control file (`ready`), so a restarting paused or failing seat never shows a transient `idle`.
+- **Rejected, and why:** `cu` as a pair of fields on a reply (a row must work from the push); trimming `cu` in `fitStatus`
+  (a seat's state is small and the card is its only reader); rejecting the whole status on a bad `cu` (see above); reading
+  the round's status from the log alone (a launch failure leaves none, so a seat that cannot start would read `idle`); and
+  a `round` that bypasses the min-gap (a loop at the shell would start a round a minute).
 
 ## Raycast extension (`raycast/`) — designed 2026-08-14
 

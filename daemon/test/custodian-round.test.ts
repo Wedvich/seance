@@ -136,6 +136,12 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
       else if (rounds[at]?.outcome !== "healthy") rounds[at] = entry;
       return Promise.resolve();
     },
+    readRounds: () => Promise.resolve([...rounds]),
+    readControl: () => Promise.resolve({ pause: null, unreadable: false }),
+    peekRoundRequest: () => Promise.resolve("none"),
+    dropRoundRequest: () => Promise.resolve(),
+    remoteId: () => Promise.resolve(null),
+    publishView: () => Promise.resolve(),
     draining: () => false,
     stopped: () => false,
     record: () => saved.record,

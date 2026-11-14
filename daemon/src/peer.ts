@@ -158,7 +158,7 @@ export async function ancestorIn<T>(pid: number, targets: ReadonlyMap<number, T>
   return null;
 }
 
-async function parentLookup(): Promise<(pid: number) => Promise<number | null>> {
+export async function parentLookup(): Promise<(pid: number) => Promise<number | null>> {
   if (process.platform === "linux") {
     return async (pid) => {
       try {

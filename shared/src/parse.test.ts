@@ -2288,6 +2288,31 @@ describe("M4 shapes", () => {
     expect(parseDecision(decide({ code: "closed" }))?.candidates[0]?.rejected).toEqual([{ code: "closed" }]);
   });
 
+  test("a status carries the custodian's view as `cu`; a bad one is dropped alone and the rest of the status stays", () => {
+    const rc = `session_${"A".repeat(64)}`;
+    const good = { s: "running", e: 1_763_000_000, n: [999, 0, 3], rc } as const;
+    expect(parseMachineStatus({ at: 1, scan: 2, cu: good })).toEqual({ at: 1, scan: 2, cu: good });
+    expect(parseMachineStatus({ at: 1, scan: 2, cu: { s: "idle" } })).toEqual({ at: 1, scan: 2, cu: { s: "idle" } });
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("cu");
+    const bad: unknown[] = [
+      { s: "sleeping" },
+      { s: "idle", n: [1, 2] },
+      { s: "idle", n: [1, 2, 1000] },
+      { s: "idle", n: [1, 2, 1.5] },
+      { s: "idle", e: -1 },
+      { s: "idle", e: 0 },
+      { s: "running", rc: "session_a b" },
+      { s: "idle", rc },
+      { s: "paused", rc },
+      "idle",
+      null,
+    ];
+    for (const cu of bad)
+      expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, cu })).toEqual({ at: 1, scan: 2, cpu: 40 });
+    const extra = parseMachineStatus({ at: 1, scan: 2, cu: { s: "idle", extra: "x" } });
+    expect(extra?.cu).toEqual({ s: "idle" });
+  });
+
   test("availability: open is required, now is kept only as true, a reply keeps its time or code", () => {
     expect(parseAvailabilityRequest({ open: false })).toEqual({ open: false });
     expect(parseAvailabilityRequest({ open: false, now: true })).toEqual({ open: false, now: true });

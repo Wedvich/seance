@@ -55,12 +55,14 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — spec, four parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
+- **docs/custodian.md** — spec, five parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
   Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
   and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
-  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind";
+  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind"; `MachineStatus.cu`, the Machines row and the owner's
+  shell verbs `status`, `log`, `round`, `pause` and `resume`, C40, C43, C45 and C47's status, in DESIGN.md, "The
+  custodian's status and the Machines row";
   rounds are held behind `ROUNDS_LIVE` until build item 4b, which contains the round's sandbox — the verbs bound
-  only what goes through them; nudge, interrupt, flags, health and the Machines row are not built): the
+  only what goes through them; nudge, interrupt, flags, the push and the card's menu are not built): the
   custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
@@ -432,6 +434,19 @@ green:
   logged or audited (the `custodian` origin's lines are `op=close` and `op=worktree` with ids, outcomes and
   reasons), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
   (`daemon/test/message-layering.test.ts`). A new verb, or any other act, is a threat-model change.
+- **The custodian's owner verbs are the shell's acts, never a frame** (`custodian-owner-cli.ts`; DESIGN.md, "The
+  custodian's status and the Machines row"): `seanced custodian status | log | round | pause | resume` are dispatched
+  from `main.ts` by `import()`, outside `custodian-cli.ts`'s import closure (this module logs, audits `origin=cli`,
+  and that closure must never reach `log.ts`), work from files and never the socket, and are denied to a round by
+  generated fence entries (a mistake guard, not a boundary, until item 4b). Their files live in the 0700
+  `custodian/` dir, each 0600 and written durably: `state.json` (the pause; one the daemon cannot read loads as
+  paused indefinitely), `round-request` (honoured only within `ROUND_REQUEST_TTL_MS`, spaced by
+  `ROUND_REQUEST_MIN_GAP_MS`, dropped before launch) and `seat.json` (the seat's view, no `rc`). Everything read from
+  a file reaches the terminal through `printable` (control, format, surrogate and separator characters become U+FFFD),
+  since a round's summary quotes untrusted pane text. `MachineStatus.cu` is display-only and never trimmed by
+  `fitStatus`; a bad `cu` is dropped alone, never the status; its `rc` is kept only beside `running` and as
+  `isRemoteSessionId` passes it, read by the daemon from `<configDir>/sessions/<pid>.json` only for the round pane's own
+  pid or its direct child and never logged, and the PWA's link origin is a constant.
 - **The custodian's round is a fenced reader of untrusted text and never a session** (DESIGN.md, "The
   custodian's seat"). Its pane carries the tmux pane option `@seance-custodian`, every pane reader skips it
   through its format-field parse (`listClaudeSessions`, `listPanes`, `parsePanePids`, `despawnSession`), only

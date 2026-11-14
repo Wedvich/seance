@@ -39,6 +39,13 @@ export const COMMANDS = [
 
 export type CommandName = (typeof COMMANDS)[number];
 
+/**
+ * `seanced custodian <verb>`'s owner verbs: typed at this machine's shell, never a frame, a local-socket op or an app
+ * op. `main.ts` dispatches them to `custodian-owner-cli.ts`, outside the round's verbs' import closure
+ * (`custodian-cli.ts`), and the fence denies them to the round from this table.
+ */
+export const CUSTODIAN_OWNER_VERBS = ["status", "log", "round", "pause", "resume"] as const;
+
 export const USAGE = `seanced — séance daemon
 
 usage: seanced [command]
@@ -76,7 +83,7 @@ usage: seanced [command]
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
   session-event  read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)
   inbox       hold this session's inbox listener open on the local daemon and print each message as a JSON line (the inbox mod's child; silent)
-  custodian   the custodian round's verbs: sessions | close <pane> | notes [--clear] | done (docs/custodian.md)
+  custodian   the custodian: the round's verbs sessions | close <pane> | notes [--clear] | done, and the owner's status | log | round | pause [--for 1h] | resume (docs/custodian.md; the owner's are this shell's only)
   raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
   help        this text
 `;

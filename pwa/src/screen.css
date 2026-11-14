@@ -2323,6 +2323,17 @@
   color: var(--warn);
 }
 
+/* Wraps between its parts, never inside one: a 390px card holds two or three. */
+.custodian-row {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.3em;
+}
+
+.custodian-row > span {
+  white-space: nowrap;
+}
+
 /* The dot leads the name on the card's own left edge, so every row below starts where it does. */
 .fleet-name-row {
   min-height: var(--fleet-line);

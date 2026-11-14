@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExclaveInfo, MachineStatus, QuotaReading } from "@seance/shared";
+import type { CustodianStatus, ExclaveInfo, MachineStatus, QuotaReading } from "@seance/shared";
 import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import {
   createCustodianSeat,
@@ -14,7 +14,8 @@ import {
   type SeatDeps,
   type SeatRecord,
 } from "./custodian-seat.ts";
-import type { RoundEntry } from "./custodian-rounds.ts";
+import { emptyCounts, type RoundEntry } from "./custodian-rounds.ts";
+import { ROUND_REQUEST_MIN_GAP_MS, type PauseRead, type RoundRequest } from "./custodian-control.ts";
 import type { Exclave, ExclaveScan } from "./exclaves.ts";
 import { newestReadings } from "./fleet-quota.ts";
 import type { TrackedActivity } from "./pane-activity.ts";
@@ -39,6 +40,8 @@ const baseDue = {
   lastEndedAt: undefined,
   running: false,
   draining: false,
+  paused: false,
+  requested: false,
   panes: [pane({ state: "idle", stateSince: NOW - EVERY, turnEnded: true })],
   untouchable: (): boolean => false,
 };
@@ -366,6 +369,11 @@ interface Rig {
   readonly lingering: { rounds: { pane: string; dead: boolean }[] };
   readonly fail: { launch: Error | null; pick: string | null };
   readonly gate: { launch: Promise<void> | null };
+  readonly control: { read: PauseRead };
+  readonly request: { state: RoundRequest; drops: number; peek: () => RoundRequest };
+  readonly remote: { id: string | null };
+  readonly published: CustodianStatus[];
+  readonly onView: { calls: number };
 }
 
 const TMP = "/tmp/seance-cu-abc123";
@@ -381,6 +389,18 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
   const fail = { launch: null as Error | null, pick: null as string | null };
   const gate = { launch: null as Promise<void> | null };
   const rounds: RoundEntry[] = [];
+  const control = { read: { pause: null, unreadable: false } as PauseRead };
+  const request = {
+    state: "none" as RoundRequest,
+    drops: 0,
+    // A call, so a test's assignment of `state` does not narrow what it then reads back.
+    peek(): RoundRequest {
+      return this.state;
+    },
+  };
+  const remote = { id: null as string | null };
+  const published: CustodianStatus[] = [];
+  const onView = { calls: 0 };
   let next = 1;
   const deps: SeatDeps = {
     settings: CUSTODIAN_DEFAULTS,
@@ -438,6 +458,22 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
       },
       ...UNUSED_AUDIT,
     },
+    readRounds: () => Promise.resolve([...rounds]),
+    readControl: () => Promise.resolve(control.read),
+    peekRoundRequest: () => Promise.resolve(request.state),
+    dropRoundRequest: () => {
+      request.state = "none";
+      request.drops++;
+      return Promise.resolve();
+    },
+    remoteId: () => Promise.resolve(remote.id),
+    publishView: (view) => {
+      published.push(view);
+      return Promise.resolve();
+    },
+    onView: () => {
+      onView.calls++;
+    },
     warn: (line) => warnings.push(line),
     ...over,
   };
@@ -453,6 +489,11 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
     lingering,
     fail,
     gate,
+    control,
+    request,
+    remote,
+    published,
+    onView,
   };
 }
 
@@ -948,5 +989,307 @@ describe("the round's verbs reach the seat", () => {
     expect(gone.rounds).toMatchObject([{ outcome: "healthy", reason: "done" }]);
     expect(gone.state.record).toEqual({ lastEndedAt: NOW });
     gone.seat.stop();
+  });
+});
+
+const entry = (over: Partial<RoundEntry> = {}): RoundEntry => ({
+  start: NOW - 2 * MIN,
+  end: NOW - MIN,
+  exclave: "default",
+  outcome: "healthy",
+  reason: "done",
+  counts: emptyCounts(),
+  ...over,
+});
+const failed = (at: number): RoundEntry => entry({ start: at, end: at + 1000, outcome: "failed", reason: "deadline" });
+
+describe("pause and the owner's round request (C45)", () => {
+  test("a paused seat starts no round, even past everyMinutes; an expired pause lets it", async () => {
+    const r = rig();
+    r.control.read = { pause: { at: NOW - 10, until: NOW + MIN }, unreadable: false };
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    r.seat.stop();
+  });
+
+  test("a pause with no end holds, and an unreadable control file holds with one warning", async () => {
+    const r = rig();
+    r.control.read = { pause: { at: 0, until: null }, unreadable: true };
+    await r.seat.start();
+    await r.seat.tick();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(r.warnings.filter((line) => line.includes("custodian/state.json is unreadable"))).toHaveLength(1);
+    r.control.read = { pause: null, unreadable: false };
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    r.seat.stop();
+  });
+
+  test("a fresh request starts a round despite everyMinutes, a busy pane and the pick's back-off, dropped before the launch", async () => {
+    const r = rig({ activity: () => [pane({ state: "busy" })] }, { lastEndedAt: NOW - ROUND_REQUEST_MIN_GAP_MS });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    r.request.state = "fresh";
+    r.fail.pick = "no exclave";
+    await r.seat.tick();
+    // The pick backed off after finding none; a request skips the back-off.
+    r.fail.pick = null;
+    r.request.state = "fresh";
+    r.fail.launch = new Error("boom");
+    const dropsBefore = r.request.drops;
+    await r.seat.tick();
+    expect(r.request.drops).toBe(dropsBefore + 1);
+    expect(r.request.peek()).toBe("none");
+    r.fail.launch = null;
+    r.clock.now = NOW + ROUND_REQUEST_MIN_GAP_MS;
+    r.request.state = "fresh";
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    expect(r.request.peek()).toBe("none");
+    r.seat.stop();
+  });
+
+  test("a requested round runs while paused, and the pause stays", async () => {
+    const r = rig();
+    const pause = { pause: { at: NOW - 10, until: null }, unreadable: false };
+    r.control.read = pause;
+    r.request.state = "fresh";
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    expect(r.control.read).toBe(pause);
+    expect(r.seat.view(NOW).s).toBe("running");
+    r.seat.stop();
+  });
+
+  test("a request while a round runs is dropped, and no second round starts", async () => {
+    const r = rig();
+    await r.seat.start();
+    await r.seat.tick();
+    r.request.state = "fresh";
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    expect(r.request.peek()).toBe("none");
+    r.seat.stop();
+  });
+
+  test("a request while draining is kept, and runs after, within its age", async () => {
+    const r = rig();
+    r.state.draining = true;
+    r.request.state = "fresh";
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(r.request.peek()).toBe("fresh");
+    r.state.draining = false;
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    r.seat.stop();
+  });
+
+  test("a stale request is dropped and starts nothing", async () => {
+    const r = rig({ activity: () => [] });
+    r.request.state = "stale";
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(r.request.drops).toBe(1);
+    r.seat.stop();
+  });
+
+  test("requests are spaced: one within the minimum gap of the last round, or of a launch attempt, is dropped with a warning", async () => {
+    const r = rig();
+    await r.seat.start();
+    await r.seat.tick();
+    r.live.clear();
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.launches).toHaveLength(1);
+    // The round ended at NOW + MIN: a request now, and again a minute short of the gap, starts nothing.
+    for (const at of [NOW + 2 * MIN, NOW + MIN + ROUND_REQUEST_MIN_GAP_MS - 1]) {
+      r.clock.now = at;
+      r.request.state = "fresh";
+      r.warnings.length = 0;
+      await r.seat.tick();
+      expect(r.request.peek()).toBe("none");
+      expect(r.warnings.join("\n")).toContain("requested too soon");
+    }
+    expect(r.launches).toHaveLength(1);
+    r.clock.now = NOW + MIN + ROUND_REQUEST_MIN_GAP_MS;
+    r.request.state = "fresh";
+    await r.seat.tick();
+    expect(r.launches).toHaveLength(2);
+    r.seat.stop();
+  });
+
+  test("a request right after a failed launch attempt is spaced from it too", async () => {
+    const r = rig({}, {});
+    r.fail.launch = new Error("no tmux");
+    await r.seat.start();
+    await r.seat.tick();
+    r.fail.launch = null;
+    r.clock.now = NOW + MIN;
+    r.request.state = "fresh";
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(r.request.peek()).toBe("none");
+    r.seat.stop();
+  });
+});
+
+describe("the seat's view (C40, C41)", () => {
+  test("idle, paused, and running with the round's remote id once found", async () => {
+    const r = rig({}, {});
+    await r.seat.start();
+    expect(r.seat.view(NOW)).toEqual({ s: "idle" });
+    r.control.read = { pause: { at: NOW, until: NOW + MIN }, unreadable: false };
+    await r.seat.tick();
+    expect(r.seat.view(NOW).s).toBe("paused");
+    // The expiry shows without waiting for a tick.
+    expect(r.seat.view(NOW + MIN).s).toBe("idle");
+    r.control.read = { pause: null, unreadable: false };
+    r.remote.id = `session_${"a".repeat(10)}`;
+    await r.seat.tick();
+    expect(r.seat.view(NOW)).toEqual({ s: "running" });
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.seat.view(NOW)).toEqual({ s: "running", rc: `session_${"a".repeat(10)}` });
+    r.seat.stop();
+  });
+
+  test("an id that is not a remote session id never shows, and none shows once the round ends", async () => {
+    const r = rig();
+    r.remote.id = "session_a b";
+    await r.seat.start();
+    await r.seat.tick();
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.seat.view(NOW)).toEqual({ s: "running" });
+    r.remote.id = `session_${"b".repeat(5)}`;
+    r.live.clear();
+    await r.seat.tick();
+    expect(r.seat.view(NOW)).not.toHaveProperty("rc");
+    r.seat.stop();
+  });
+
+  test("e is the last log entry's end in seconds and n[0] its closed count, capped at 999", async () => {
+    const r = rig();
+    r.rounds.push(entry({ end: 1_763_000_123_456, counts: { ...emptyCounts(), close: { ok: 4_000, refused: 1 } } }));
+    await r.seat.start();
+    expect(r.seat.view(NOW)).toEqual({ s: "idle", e: 1_763_000_123, n: [999, 0, 0] });
+    r.seat.stop();
+  });
+
+  test("failing after three failed entries in a row, not after two failed and a healthy one, and cleared by a healthy round", async () => {
+    const three = rig({}, {});
+    three.rounds.push(failed(NOW - 4 * MIN), failed(NOW - 3 * MIN), failed(NOW - 2 * MIN));
+    await three.seat.start();
+    expect(three.seat.view(NOW).s).toBe("failing");
+    three.seat.stop();
+
+    const mixed = rig({}, {});
+    mixed.rounds.push(failed(NOW - 4 * MIN), failed(NOW - 3 * MIN), entry({ start: NOW - 2 * MIN }));
+    await mixed.seat.start();
+    expect(mixed.seat.view(NOW).s).toBe("idle");
+    mixed.seat.stop();
+  });
+
+  test("failed rounds ended by this seat count, and a round that reports done clears them", async () => {
+    const r = rig();
+    await r.seat.start();
+    for (let at = 0; at < 3; at++) {
+      r.clock.now = NOW + at * (TIMEOUT + EVERY);
+      await r.seat.tick();
+      r.clock.now += TIMEOUT;
+      await r.seat.tick();
+    }
+    expect(r.seat.view(r.clock.now).s).toBe("failing");
+    r.clock.now += EVERY;
+    await r.seat.tick();
+    expect(await r.seat.done("all quiet")).toBe("ok");
+    expect(r.seat.view(r.clock.now).s).toBe("running");
+    await r.seat.tick();
+    expect(r.seat.view(r.clock.now).s).toBe("idle");
+    r.seat.stop();
+  });
+
+  test("launch failures count: three throwing launches show failing, and a healthy round clears it", async () => {
+    const r = rig();
+    r.fail.launch = new Error("no tmux");
+    await r.seat.start();
+    for (let at = 0; at < 3; at++) {
+      r.clock.now = NOW + at * EVERY;
+      await r.seat.tick();
+    }
+    expect(r.seat.view(r.clock.now).s).toBe("failing");
+    // The log holds no entry for them, so a restart would read a clean tail; the view's e/n stay absent.
+    expect(r.rounds).toEqual([]);
+    expect(r.seat.view(r.clock.now)).toEqual({ s: "failing" });
+    r.fail.launch = null;
+    r.clock.now += EVERY;
+    await r.seat.tick();
+    expect(await r.seat.done("fine")).toBe("ok");
+    r.live.clear();
+    r.clock.now += MIN;
+    await r.seat.tick();
+    expect(r.seat.view(r.clock.now).s).toBe("idle");
+
+    const none = rig();
+    none.fail.pick = "no exclave";
+    await none.seat.start();
+    for (let at = 0; at < 3; at++) {
+      none.clock.now = NOW + at * EVERY;
+      await none.seat.tick();
+    }
+    // An empty pick is quota or auth, not the seat's fault: it never turns the row to failing.
+    expect(none.seat.view(none.clock.now).s).toBe("idle");
+    r.seat.stop();
+    none.seat.stop();
+  });
+
+  test("the view is not ready until start has read the log and the control file", async () => {
+    const r = rig();
+    expect(r.seat.ready()).toBe(false);
+    await r.seat.start();
+    expect(r.seat.ready()).toBe(true);
+    r.seat.stop();
+  });
+
+  test("a failing seat that is also paused still shows failing; a failed launch does not move e", async () => {
+    const r = rig();
+    r.rounds.push(entry({ end: 5_000_000 }), failed(NOW - 3 * MIN), failed(NOW - 2 * MIN), failed(NOW - MIN));
+    r.control.read = { pause: { at: 1, until: null }, unreadable: false };
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.seat.view(NOW).s).toBe("failing");
+    expect(r.seat.view(NOW).e).toBe(Math.floor((NOW - MIN + 1000) / 1000));
+    r.seat.stop();
+  });
+
+  test("onView fires when s, e or rc change, not once per tick; the view is published every tick without rc", async () => {
+    const r = rig();
+    await r.seat.start();
+    const afterStart = r.onView.calls;
+    await r.seat.tick();
+    // idle -> running
+    expect(r.onView.calls).toBe(afterStart + 1);
+    r.remote.id = `session_${"c".repeat(8)}`;
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.onView.calls).toBe(afterStart + 2);
+    r.clock.now = NOW + 2 * MIN;
+    await r.seat.tick();
+    await r.seat.tick();
+    expect(r.onView.calls).toBe(afterStart + 2);
+    expect(r.published.length).toBeGreaterThanOrEqual(4);
+    for (const published of r.published) expect(published).not.toHaveProperty("rc");
+    r.seat.stop();
   });
 });

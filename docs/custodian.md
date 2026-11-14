@@ -3,11 +3,12 @@
 **Status: spec; build order items 1 (the nothing-lost rule in `reap` and reap's defaults under a
 custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session events"), 3 (the
 seat and the round, now DESIGN.md, "The custodian's seat") and 4 (the `custodian` frame with `sessions`,
-`close`, `notes` and `done`, the round log, now DESIGN.md, "The custodian frame kind") built and folded
+`close`, `notes` and `done`, the round log, now DESIGN.md, "The custodian frame kind") and 5 (`MachineStatus.cu`, the Machines row and the shell's `status`, `log`, `round`,
+`pause` and `resume`, now DESIGN.md, "The custodian's status and the Machines row") built and folded
 into DESIGN.md. Rounds are held behind `ROUNDS_LIVE` (owner decision, 2026-11-14): the verbs bound only
 what goes through them, and a round's sandbox can still reach the tmux socket and the daemon's plain ops
 and read on-disk secrets, so item 4b (contain the round) comes before any round runs. What is left is 4b,
-the Machines row, the shell's status verbs, flags, nudge and interrupt (items 5–8).** Decided with the owner
+flags, the card's menu and the app op, nudge and interrupt (items 6–8).** Decided with the owner
 on 2026-11-12, 2026-11-13 and 2026-11-14. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
@@ -221,24 +222,25 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
 - **C42.** _Derived._ The last 20 rounds are kept in `stateDir()/custodian/rounds.jsonl` (0600):
   start, end, exclave, outcome, the daemon's own counts of each verb, and the agent's summary (at
   most 1 KiB). The summary may quote a pane, so it is read only on the machine
-  (`seanced custodian log`) and never crosses the wire or reaches a log. _Built (C40, C42's file):_ the
-  `done` verb and the log (DESIGN.md, "The custodian frame kind"); `seanced custodian log` is item 5.
+  (`seanced custodian log`) and never crosses the wire or reaches a log. _Built (C40, C42):_ the
+  `done` verb, the log and `seanced custodian log` (DESIGN.md, "The custodian frame kind" and "The custodian's status
+  and the Machines row"). C40's health also counts a launch failure and a pick that threw; a pick that found no host (quota, a lapsed login) is not the seat's fault and does not count.
 
 ### 9. What the owner sees and controls
 
-- **C43. Machines card.** Each machine with the capability gets one row: state (`idle`, `running`,
-  `paused`, `failing`), when the last round ended, and what it did ("closed 2 · nudged 1 · flagged
-  1"). While a round runs, the row links to its Remote Control session. A machine with no
+- **C43. Machines card.** _Built (custodian 5)._ Each machine with the capability gets one row: state
+  (`idle`, `running`, `paused`, `failing`), when the last round ended, and what it did ("closed 2 · nudged
+  1 · flagged 1"). While a round runs, the row links to its Remote Control session. A machine with no
   custodian configured shows no row.
 - **C44. On a task card.** A flagged task shows its flag: the reason, and the note when there is
   one. A `stuck` flag sends one push per flag, with fixed text per reason like every push.
 - **C45. Controls**, in the machine card's menu: "Round now", "Pause for 1 hour", "Pause until
-  resumed", "Resume". The same at the shell: `seanced custodian round | pause [--for 1h] | resume
-  | status | log`.
+  resumed", "Resume" (custodian 7). The same at the shell, _built (custodian 5):_ `seanced custodian round |
+  pause [--for 1h] | resume | status | log`.
 - **C46.** On, off, the model and every threshold stay in the machine's `config.json` (C2).
 - **C47.** _Derived._ How it travels:
   - `MachineStatus.cu` carries the state, the last round's end time and its three counts. It is
-    never trimmed by `fitStatus`, like `drn` and `cl`.
+    never trimmed by `fitStatus`, like `drn` and `cl`. _Built (custodian 5)._
   - A flag and the `failing` transition go to the leader as a sealed `custodian-event`. The leader
     honours a flag only from the machine the task is placed on, writes it onto the task record
     (reason, note, time) through the one task sealer, and sends the push. A flag on an untasked
@@ -439,8 +441,13 @@ delivery); nothing else here does.
      second listener or a different process (a daemon-spawned broker the round alone reaches) is the simpler
      home for (a); whether the round can keep `allowAllUnixSockets` at all once `/run`, `/var/run` and the
      agent dirs are masked, or Linux gets the inverted mount form or the other-user fallback.
-5. `MachineStatus.cu` and the Machines row; `seanced custodian status | log | round | pause |
-   resume` at the shell (C40, C43, C45).
+5. _Built_ (DESIGN.md, "The custodian's status and the Machines row"): `MachineStatus.cu` and the Machines
+   row; `seanced custodian status | log | round | pause | resume` at the shell (C40, C43, C45). What stays
+   here is 4b's two checks of it: in the drill, an owner verb typed in a round (`seanced custodian pause`,
+   through `bash -c` and through tmux `send-keys`) and a write of `custodian/state.json` or `round-request` are
+   refused, since until 4b only the fence's mistake guard stands; and the rc check on a live round written under the
+   sandbox, and on macOS through the `caffeinate -is` child (`roundRemoteId` binds to the pane's pid or its
+   direct child only).
 
 **Milestone 2 — flags and controls**
 
@@ -454,8 +461,6 @@ delivery); nothing else here does.
 
 ## Open details (build time)
 
-- **The live link.** `cu` is in a fixed-size frame; whether the round's Remote Control id rides
-  there or in a reply to a card's own request.
 - **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
   closed (C24); `seanced doctor` now warns about it (built). The retained state is per process, so a
   session already at rest when the daemon restarts is `unobserved` too until its next frame; `sessions` says
