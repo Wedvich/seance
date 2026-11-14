@@ -829,6 +829,7 @@ describe("deriveArchivist", () => {
       online: true,
       meta: "linux · last ingest just now",
       note: null,
+      warnings: [],
     });
     expect(card?.build).toBe(`${"a".repeat(12)} · committed 2h ago · main`);
     expect(card?.rows).toEqual([
@@ -864,8 +865,60 @@ describe("deriveArchivist", () => {
       meta: "offline · last seen 3h ago",
       rows: [],
       note: "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.",
+      warnings: [],
     });
     expect(card?.build).not.toBeNull();
+  });
+
+  describe("warnings", () => {
+    const HOUR = 3_600_000;
+    const warned = (over: Partial<ArchiveStatusResponse>, connected = true): readonly string[] | undefined =>
+      deriveArchivist({ ...entry, connected }, { deviceId: "arch-1", reply: { ...reply, ...over } }, NOW)?.warnings;
+    const fresh = { store: NOW - 5 * 60_000, registry: NOW, status: NOW, pull: null };
+
+    test("a store read older than an hour warns, however fresh the other sources; the meta line is unchanged", () => {
+      const lastIngest = { ...fresh, store: NOW - 3 * HOUR };
+      expect(warned({ lastIngest })).toEqual([
+        "Last task read from the relay store 3h ago. The archivist's journal says why.",
+      ]);
+      const card = deriveArchivist(entry, { deviceId: "arch-1", reply: { ...reply, lastIngest } }, NOW);
+      expect(card?.meta).toBe("linux · last ingest just now");
+    });
+
+    test("no store read an hour after coming online warns; within the hour, or with no onlineSince, it does not", () => {
+      const lastIngest = { ...fresh, store: null };
+      expect(warned({ lastIngest, onlineSince: NOW - 2 * HOUR })).toEqual([
+        "No task read from the relay store since it came online 2h ago. The archivist's journal says why.",
+      ]);
+      expect(warned({ lastIngest, onlineSince: NOW - 10 * 60_000 })).toEqual([]);
+      expect(warned({ lastIngest, onlineSince: null })).toEqual([]);
+    });
+
+    test("refused tasks warn, worded for one or many, scoped to this run", () => {
+      expect(warned({ lastIngest: fresh, refused: { tasks: 1, since: NOW - 3 * HOUR } })).toEqual([
+        "1 finished task could not be archived since 3h ago (this run). The archivist's journal says why.",
+      ]);
+      expect(warned({ lastIngest: fresh, refused: { tasks: 2, since: null } })).toEqual([
+        "2 finished tasks could not be archived (this run). The archivist's journal says why.",
+      ]);
+    });
+
+    test("both lines together, stale first", () => {
+      const lastIngest = { ...fresh, store: NOW - 2 * HOUR };
+      const lines = warned({ lastIngest, refused: { tasks: 3, since: NOW - 2 * HOUR } }) ?? [];
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toStartWith("Last task read");
+      expect(lines[1]).toStartWith("3 finished tasks");
+    });
+
+    test("none when refused is zero or absent (an older archivist), offline, or with no reply for this device", () => {
+      expect(warned({ lastIngest: fresh, refused: { tasks: 0, since: null } })).toEqual([]);
+      expect(warned({ lastIngest: fresh })).toEqual([]);
+      const bad = { lastIngest: { ...fresh, store: NOW - 3 * HOUR }, refused: { tasks: 2, since: NOW } };
+      expect(warned(bad, false)).toEqual([]);
+      expect(deriveArchivist(entry, { deviceId: "arch-2", reply: { ...reply, ...bad } }, NOW)?.warnings).toEqual([]);
+      expect(deriveArchivist(entry, null, NOW)?.warnings).toEqual([]);
+    });
   });
 
   test("an archivist with no source has no build line", () => {

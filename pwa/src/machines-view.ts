@@ -660,12 +660,21 @@ export interface ArchivistCard {
   readonly rows: readonly ArchivistRow[];
   /** Only offline: what is hidden until it is back. */
   readonly note: string | null;
+  /** Only online, from a reply held for this device: task reads gone stale, task rows refused (A36k). */
+  readonly warnings: readonly string[];
 }
 
 /** The role's name, not the host's: the card is the archivist whatever its machine is called. */
 const ARCHIVIST_NAME = "Archivist";
 const ARCHIVIST_OFFLINE_NOTE =
   "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.";
+
+/**
+ * A healthy collector reads the task listing at least every 10 min (`COLLECT_TIMINGS.pollMs`); an hour without
+ * one is a listing failing, which the newest-of-all "last ingest" in the meta line would hide behind the registry.
+ */
+export const ARCHIVIST_STORE_STALE_MS = 60 * 60_000;
+const JOURNAL_HINT = "The archivist's journal says why.";
 
 const dateFormat = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
@@ -717,6 +726,7 @@ export function deriveArchivist(
       build,
       rows: [],
       note: ARCHIVIST_OFFLINE_NOTE,
+      warnings: [],
     };
   }
   const reply = held?.deviceId === entry.deviceId ? held.reply : null;
@@ -739,5 +749,26 @@ export function deriveArchivist(
             { label: "Database", detail: "archive + metrics", ...database },
           ],
     note: null,
+    warnings: reply === null ? [] : archivistWarnings(reply, now),
   };
+}
+
+/** Both lines are this archivist process's own view: its clock and tally start empty at each restart. */
+function archivistWarnings(reply: ArchiveStatusResponse, now: number): string[] {
+  const warnings: string[] = [];
+  const { store } = reply.lastIngest;
+  if (store !== null && now - store > ARCHIVIST_STORE_STALE_MS) {
+    warnings.push(`Last task read from the relay store ${formatSeen(store, now)}. ${JOURNAL_HINT}`);
+  } else if (store === null && reply.onlineSince !== null && now - reply.onlineSince > ARCHIVIST_STORE_STALE_MS) {
+    warnings.push(
+      `No task read from the relay store since it came online ${formatSeen(reply.onlineSince, now)}. ${JOURNAL_HINT}`,
+    );
+  }
+  const refused = reply.refused;
+  if (refused !== undefined && refused.tasks > 0) {
+    const count = `${refused.tasks} finished task${refused.tasks === 1 ? "" : "s"}`;
+    const since = refused.since === null ? "" : ` since ${formatSeen(refused.since, now)}`;
+    warnings.push(`${count} could not be archived${since} (this run). ${JOURNAL_HINT}`);
+  }
+  return warnings;
 }
