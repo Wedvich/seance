@@ -10174,7 +10174,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   same message as `route: "send"`. A refusal at the gate says nothing was sent. An old daemon that rejects the
   `route` key as `invalid` is sent the frame once more without it and answers as PR 1 did. A routed send answers
   `routed` with a note that a receipt will arrive in this session's inbox (no receipt for an untasked sender, and
-  the answer says so); the text is held to `MESSAGE_ROUTE_MAX` of JSON-escaped bytes and `too_long` says which
+  the answer says it will not be told whether it landed: that includes a task that ran and ended on the sender's own
+  machine, which PR 1 answered `ended` at once and routing now hands to the leader, since the leader may hold a
+  continuation or successor the machine does not; decided, because the machine cannot know, and a tasked sender
+  gets the outcome in its receipt). After the fallback to an old daemon (above), an `unknown` or `ended` answer is
+  worded as that daemon predating cross-machine messages, not as a route nobody asked for; the text is held to `MESSAGE_ROUTE_MAX` of JSON-escaped bytes and `too_long` says which
   budget. The tool's description states all of this, so a model reads "through the scheduler", not "never leaves
   the machine". There is no
   list tool: `get_queue` names every task by id, title, machine and state. `read_messages` lives on the inbox
@@ -10761,7 +10765,10 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   `read_messages`. `MESSAGE_MAX` (64 KiB) is the hard cap. The spike found no cap on Claude's side (300 KB
   cost 300k tokens), so the cap is ours, far under the socket's 1 MiB frame cap.
 - **Rate limit** 20 a minute and 200 an hour per sending task, held in memory in the daemon. An untasked
-  sender's key is its pane (`pane:<id>`), so ids it makes up share one bucket.
+  sender's key is its pane (`pane:<id>`), so ids it makes up share one bucket. A `route: "ask"` frame that is
+  answered `remote` counts in a bucket of its own with the same limits (each costs a pane listing and a peer
+  walk, and a gate that refuses ends there), so one routed message is one count in the ask bucket and one in the
+  send bucket; the 21st ask in a minute is `rate_limited`.
 - **A session handling a request may itself send requests** (**decided here**, docs/messaging.md's open
   question 1): bounded by the rate limit above, and the wrapper names the message id a reply answers.
   Rejected: notes only until the turn ends, which the mod could enforce but which would stop a legitimate
@@ -10888,17 +10895,22 @@ nothing:
    list places on the sealer or reserves there (`sentFrom` is three-state: `here`; `elsewhere`, which drops the
    message with one warn line and no receipt, since a receipt would tell the sealer about a task it does not
    hold; and `absent`, a task the leader has pruned whose session may still live, which forwards without naming
-   `fromTask` and sends no receipt, so the receiver's wrapper never names a task the leader cannot bind).
+   `fromTask`, so the receiver's wrapper never names a task the leader cannot bind, and still sends the receipt to
+   the sealer: its own ledger bound that task, and its daemon places the note only in the pane carrying it, so a
+   sender is never left waiting on a note for a message that landed). The sender's machine name is the registry's,
+   any string, so the leader runs it through `displayTitle`'s scrub (it sits in backticks in the wrapper) and cuts
+   it to `ROUTING_ID_MAX_LENGTH`, which the target's parser holds `fromMachine` to; a name nothing survives of is
+   the device id. Without that, a machine with a long name could message no one.
 4. **The leader resolves** the target in the scheduler library (`resolveMessageTarget`,
    `scheduler/src/message-route.ts`, pure, over the leader's own task list):
 
    | Target task state                                                                         | Resolves to                                                                                    |
    | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-   | `running`, `needs-input`                                                                  | forward to the machine its `assignment` names                                                  |
+   | `running`, `needs-input`, `lost`                                                          | forward to the machine its `assignment` names                                                  |
    | `superseded`                                                                              | its `successor`, followed to the end of the chain (`holder`, as dependents follow it)          |
    | finished, a later task carries `continues` and has landed                                 | that continuation                                                                              |
    | finished, a continuation exists but has not landed                                        | `held`                                                                                         |
-   | finished, with an `assignment`                                                            | **forward, `settled`**: the machine it ran on answers a live pane `delivered` and none `ended` |
+   | finished (or `awaiting-merge`), with an `assignment`                                      | **forward, `settled`**: the machine it ran on answers a live pane `delivered` and none `ended` |
    | finished, no `assignment`                                                                 | `ended`                                                                                        |
    | `queued`, `ready`, `blocked`, `reserved`, or placed with no `assignment` yet              | `held`: answered at once, nothing kept                                                         |
    | not in the list, or a chain that cannot be read to its end (a cycle, a missing successor) | `unknown`                                                                                      |
@@ -10912,11 +10924,15 @@ nothing:
 5. **The leader forwards** `deliver-message` (`DeliverMessageRequest`: the resolved `taskId`, the `addressed` id the
    sender named, `fromMachine` the sender's machine name, `settled?`) to the machine holding the resolved task, in
    process when that is its own. It forwards only to a connected machine advertising both `messages` and
-   `messageRoute`, for the task its own resolution chose: an offline or unregistered target is `offline`, and a
+   `messageRoute` (the one exception is this leader's own machine when the registry lacks its entry: the leader
+   cannot read its own capabilities there, and it is that very daemon, which has `messageRoute` and answers for
+   its own panes), for the task its own resolution chose: an offline or unregistered target is `offline`, and a
    machine advertising `messages` without `messageRoute` is `unsupported` rather than forwarded, since every PR 1
    daemon advertises `messages` and none answers `deliver-message` (an unknown op never replies), so a forward
    would read as `offline` and invite a retry that can never land. A target that answers `undelivered` or
-   `unreachable` is `offline`; one that answers with another error code is `unsupported`, with one warn line.
+   `unreachable` is `offline`; one that refuses the frame (`unsupported`, `invalid_request`) is `unsupported`, with
+   one warn line; any other error (a handler that crashed, an oversized reply, a reply that did not parse) is
+   `offline` with the same line, since "needs `seanced update`" would be wrong for a daemon that is up to date.
 6. **The target daemon** (`handlers.ts` → `Messages.deliverRouted`) acts only on a `deliver-message` sealed `from`
    the scheduler (or the leader in process), parsed by `parseDeliverMessageRequest`, and delivers only to a live
    pane carrying the resolved task **that its own ledger holds a launch of**, by the listener write or hold a local
@@ -10927,7 +10943,8 @@ nothing:
    would otherwise deliver twice. Its `dir=in` audit line is a local message's.
 7. **The receipt.** Events are fire-and-forget, so the leader reports back with `message-receipt`
    (`MessageReceiptRequest`: id, the addressed `to`, the resolved `taskId`, `kind`, `outcome`, `reason?`, `fromTask`;
-   never text) to the sealing machine, and only when `fromTask` is bound. The sender's daemon
+   never text) to the sealing machine, and only when the sealer named a `fromTask` (one the leader has pruned
+   included, see step 3). The sender's daemon
    (`Messages.receipt`) acts only on one sealed `from` the scheduler (or in process) and hands it only to a live
    pane carrying the sending task its ledger holds a launch of (`dropped` otherwise: the sender's session ended, and
    nothing is kept for it). The note is one fixed line per outcome, `receiptNote` (`shared/src/messages.ts`), never
@@ -10939,7 +10956,9 @@ nothing:
    task"), `unsupported` ("the target machine's daemon cannot receive messages (it needs `seanced update`)")
    and `offline` ("the target machine is offline or did not answer; if it did land, a retry may duplicate it").
    It is placed as a note, which does not wake an idle session, and is not itself audited as a message: its record
-   is the one `dir=receipt` line.
+   is the one `dir=receipt` line. The sender's daemon **de-duplicates receipts by message id and outcome for
+   `REPLAY_RETAIN_MS`**, as the target does forwards: a second leader handed the same envelope would otherwise send a
+   second note. A receipt is a courtesy and the answer says so: without one, whether the message landed is unknown.
 
 **The size budget.** The relay's `ENVELOPE_MAX_CT_LENGTH` (64 KiB of base64) carries about 48 KiB of JSON, so
 `MESSAGE_MAX` (64 KiB) cannot cross it. A message that crosses machines is held to `MESSAGE_ROUTE_MAX` (40 000

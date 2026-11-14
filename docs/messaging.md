@@ -150,7 +150,7 @@ successor"). Built (PR 2) as `resolveMessageTarget` (`scheduler/src/message-rout
 
 | Target task state                                                                       | Resolves to                                                                                                                            |
 | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `running` / `needs-input`                                                               | forward to the machine its `assignment` names                                                                                          |
+| `running` / `needs-input` / `lost`                                                      | forward to the machine its `assignment` names                                                                                          |
 | `superseded`                                                                            | its `successor`, followed to the end of the chain (`holder`). A successor still `blocked` or otherwise waiting is `held` (below)       |
 | finished, and a later task carries `continues: { task: <id> }` and has landed           | that continuation, which resumes the same Claude conversation in the same worktree                                                     |
 | finished, a continuation exists but has not landed                                      | `held`                                                                                                                                 |

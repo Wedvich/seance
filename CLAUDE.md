@@ -441,23 +441,29 @@ green:
   other act, or binding by a field, is a threat-model change.
   **A message to a task not deliverable on its machine goes through the leader, which keeps nothing**
   (DESIGN.md, "Session messages", "Cross-machine"). A `message` frame carries `route` only as `"ask"` or
-  `"send"`: `ask` is answered `remote` (before the rate limit counts it) and `send` is accepted only after
-  `seanced mcp` found the **verified** leader advertising `CAPABILITIES.messageRoute` (`messageRouteGate`), never
-  on the daemon's own word; a frame with no `route` is answered as before (`unknown`/`ended`), never `remote`.
+  `"send"`: `ask` is answered `remote` (in a rate bucket of its own, same limits, so a loop of asks is bounded
+  and a routed message is one count in each bucket) and `seanced mcp` sends `send` only after it found the
+  **verified** leader advertising `CAPABILITIES.messageRoute` (`messageRouteGate`), never on the daemon's own
+  word. That gate is the client's: the daemon routes any `send` a bound pane makes, and what binds the message is
+  the leader's admit rule below, never an assumption that the sender was gated. A frame with no `route` is
+  answered as before (`unknown`/`ended`), never `remote`.
   A routed text is held to `MESSAGE_ROUTE_MAX` of JSON-escaped bytes. The daemon sends `session-message` only
   sealed `from` its own device id (or in process), with `fromTask` only for a task its own ledger holds. The leader
   honours it only when it is not sealed `from: "app"`, parsed by `parseSessionMessage` into a fresh value, past
   the one `schedulerGuard`, and sealed by a registered machine; a `fromTask` only when the leader's own list places
   or reserves that task on the sealer (`elsewhere` is dropped with no receipt; `absent`, a pruned task, is
-  forwarded without naming `fromTask` and gets no receipt). It resolves the target only through its own list
+  forwarded without naming `fromTask`, its receipt still going to the sealer, whose own ledger bound it). The
+  sender's machine name reaches the receiver's wrapper only through `displayTitle`'s scrub, cut to
+  `ROUTING_ID_MAX_LENGTH`. It resolves the target only through its own list
   (`resolveMessageTarget`), forwards `deliver-message` only to a connected machine advertising both `messages`
-  and `messageRoute`, for the task its own resolution chose (`settled` only for a finished record), sends
+  and `messageRoute` (this leader's own machine, when the registry lacks it, is delivered to in process: the
+  leader is that daemon), for the task its own resolution chose (`settled` only for a finished record), sends
   `message-receipt` (ids, kind and an outcome; never text) only to the machine that sealed the message, keeps
   nothing and logs no line per message, title or id, only a drop or a failed forward or receipt that names a task
   or machine id. A daemon acts on `deliver-message` and `message-receipt` only sealed `from` the scheduler (or in
   process), through their own parsers; delivers only to a live pane carrying a task its own launch ledger holds
-  (a `deliver-message` for another is `unknown`); de-duplicates a forward by message id for `REPLAY_RETAIN_MS`;
-  and hands a receipt only to the pane carrying the sending task, as the one fixed line `receiptNote` makes per
+  (a `deliver-message` for another is `unknown`); de-duplicates a forward by message id, and a receipt by id and
+  outcome, for `REPLAY_RETAIN_MS`; and hands a receipt only to the pane carrying the sending task, as the one fixed line `receiptNote` makes per
   outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
 - **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
   "The custodian frame kind"): the round's seven verbs `sessions`, `close <pane>`, `flag <pane>`, `nudge <pane>`, `interrupt <pane>`, `notes` and `done`, and no other
