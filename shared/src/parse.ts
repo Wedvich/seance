@@ -17,6 +17,7 @@ import {
   ATTACHMENTS_DEP_SENTINEL,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
+  CUSTODIAN_STATES,
   DECISION_MAX_CANDIDATES,
   DRAIN_REFUSALS,
   DEP_AFTER,
@@ -170,6 +171,7 @@ import {
   type Envelope,
   type ExclaveInfo,
   type MachineInfo,
+  type CustodianStatus,
   type MachineStatus,
   type MetricsReply,
   type MetricsRequest,
@@ -541,6 +543,33 @@ function parseUintPair(value: unknown): readonly [number, number] | null {
 }
 
 /**
+ * `MachineStatus.cu`. Null for anything off: the caller drops `cu` alone and keeps the status, since `cu` is a display
+ * row and a newer daemon may add a state this one does not know.
+ */
+export function parseCustodianStatus(value: unknown): CustodianStatus | null {
+  if (!isRecord(value)) return null;
+  const { s, e, n, rc } = value;
+  const state = CUSTODIAN_STATES.find((candidate) => candidate === s);
+  if (state === undefined) return null;
+  if (e !== undefined && !(isUint(e) && e > 0)) return null;
+  let counts: readonly [number, number, number] | undefined;
+  if (n !== undefined) {
+    if (!Array.isArray(n) || n.length !== 3) return null;
+    const [closed, nudged, flagged] = n;
+    const inRange = (x: unknown): x is number => isUint(x) && x <= 999;
+    if (!inRange(closed) || !inRange(nudged) || !inRange(flagged)) return null;
+    counts = [closed, nudged, flagged];
+  }
+  if (rc !== undefined && !(state === "running" && isRemoteSessionId(rc))) return null;
+  return {
+    s: state,
+    ...(e === undefined ? {} : { e }),
+    ...(counts === undefined ? {} : { n: counts }),
+    ...(rc === undefined ? {} : { rc }),
+  };
+}
+
+/**
  * The decrypted `status` blob. Strict where `parseMachineInfo` is lenient: a
  * status is regenerated every tick and renders nothing on its own, so one bad
  * field costs one tick rather than a half-read snapshot.
@@ -573,6 +602,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (drn !== undefined && drn !== true) return null;
   const { cl } = value;
   if (cl !== undefined && !(isFiniteNumber(cl) && cl > 0)) return null;
+  // Unlike `drn` and `cl`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
+  const cu = value["cu"] === undefined ? null : parseCustodianStatus(value["cu"]);
   return {
     at: value["at"],
     scan: value["scan"],
@@ -592,6 +623,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(tu === undefined ? {} : { tu }),
     ...(drn === undefined ? {} : { drn }),
     ...(cl === undefined ? {} : { cl }),
+    ...(cu === null ? {} : { cu }),
   };
 }
 

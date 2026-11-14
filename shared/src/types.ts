@@ -1138,8 +1138,9 @@ export interface MachineInfo {
  * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
  * (docs/messaging.md); advertised only where the host names a socket's peer.
  * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian`.
- * Configured, not checked: a host that fails the sandbox or agent checks runs no round and still advertises it.
- * Nothing reads it yet; the Machines row will (custodian PR 5).
+ * Configured, not checked: a host that fails the sandbox or agent checks runs no round and still advertises it
+ * (its `MachineStatus.cu` then says `failing`). The Machines card shows its Custodian row only for a machine that
+ * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1334,6 +1335,24 @@ export interface MachineStatus {
    * quota entry.
    */
   readonly cl?: number;
+  /**
+   * The custodian seat's view (docs/custodian.md; DESIGN.md, "The custodian's status and the Machines row"):
+   * display-only, never trimmed by `fitStatus`, absent from a daemon with no seat. Not `QuotaObservation.cu`
+   * (credits). `e` is the last round's end, unix **seconds** like `at`. `n` is the last round's closed, nudged and
+   * flagged counts, each capped at 999. `rc` is the running round's Remote Control id: present only while `s` is
+   * `running` and only as `isRemoteSessionId` passes it.
+   */
+  readonly cu?: CustodianStatus;
+}
+
+export const CUSTODIAN_STATES = ["idle", "running", "paused", "failing"] as const;
+export type CustodianState = (typeof CUSTODIAN_STATES)[number];
+
+export interface CustodianStatus {
+  readonly s: CustodianState;
+  readonly e?: number;
+  readonly n?: readonly [number, number, number];
+  readonly rc?: string;
 }
 
 /**

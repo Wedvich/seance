@@ -1,4 +1,10 @@
-import { startSlotTimer, STATUS_MIN_INTERVAL_MS, type MachineStatus, type SessionEntry } from "@seance/shared";
+import {
+  startSlotTimer,
+  STATUS_MIN_INTERVAL_MS,
+  type CustodianStatus,
+  type MachineStatus,
+  type SessionEntry,
+} from "@seance/shared";
 import type { Config } from "./config.ts";
 import { log } from "./log.ts";
 import type { MetricsStore } from "./metrics-store.ts";
@@ -28,6 +34,8 @@ export interface CollectorDeps {
   readonly draining?: () => boolean;
   /** The close time (`state.closed`): the status's `cl`. */
   readonly closed?: () => number | null;
+  /** The custodian seat's view, read late (the seat starts after the loop): the status's `cu`. */
+  readonly custodian?: () => CustodianStatus | null;
   /** Auth health's view: the status's `ax`/`ae`/`au`. */
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' pairs for the registered scan: the status's `tf`/`tu`. */
@@ -86,6 +94,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
     ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
     ...(collectors.closed === undefined ? {} : { closed: collectors.closed }),
+    ...(collectors.custodian === undefined ? {} : { custodian: collectors.custodian }),
     ...(collectors.auth === undefined ? {} : { auth: collectors.auth }),
     ...(collectors.traits === undefined ? {} : { traits: collectors.traits }),
   });

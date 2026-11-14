@@ -1,6 +1,6 @@
 import { readFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import type { MachineStatus, SessionEntry } from "@seance/shared";
+import type { CustodianStatus, MachineStatus, SessionEntry } from "@seance/shared";
 import type { AuthView } from "./auth-health.ts";
 import type { TraitLists } from "./trait-probes.ts";
 import type { ExclaveScan } from "./exclaves.ts";
@@ -77,6 +77,8 @@ export interface TelemetrySources {
   readonly draining?: () => boolean;
   /** When a person closed this machine to new scheduled work (ms), null while open: the status's `cl`. */
   readonly closed?: () => number | null;
+  /** The custodian seat's view (`cu`), null from no seat or one with nothing to say; absent reads as no `cu`. */
+  readonly custodian?: () => CustodianStatus | null;
   /** Auth health's view by exclave id (`ax`/`ae`/`au`); absent reads as no auth fields. */
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' failing and unknown pairs for the registered scan (`tf`/`tu`); absent reads as no trait fields. */

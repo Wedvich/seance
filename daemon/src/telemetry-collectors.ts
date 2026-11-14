@@ -79,6 +79,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   quotaCollector,
   drainCollector,
   closedCollector,
+  custodianCollector,
   authCollector,
   traitCollector,
 ];
@@ -140,6 +141,14 @@ function closedCollector(sources: CollectorSources): Collect {
   return () => {
     const at = sources.closed?.() ?? null;
     return Promise.resolve(at === null ? NO_CONTRIBUTION : { fields: { cl: at }, samples: [] });
+  };
+}
+
+/** `cu` from the seat's view; display-only, so no metric. Not `QuotaObservation.cu` (credits). */
+function custodianCollector(sources: CollectorSources): Collect {
+  return () => {
+    const cu = sources.custodian?.() ?? null;
+    return Promise.resolve(cu === null ? NO_CONTRIBUTION : { fields: { cu }, samples: [] });
   };
 }
 
