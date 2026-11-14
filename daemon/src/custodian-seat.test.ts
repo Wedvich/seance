@@ -58,8 +58,14 @@ describe("roundDue", () => {
     );
   });
 
-  test("a busy pane with a long-still screen is not due until a verb can act on it", () => {
-    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })] })).toBe(false);
+  test("a busy pane whose screen has stood still for the interval is due: nudge can act on it", () => {
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })] })).toBe(true);
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY + 1 })] })).toBe(false);
+    expect(roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: null })] })).toBe(false);
+    // A busy pane marked for a drain, hand-off or pass is no more due than an idle one.
+    expect(
+      roundDue({ ...baseDue, panes: [pane({ state: "busy", screenSince: NOW - EVERY })], untouchable: () => true }),
+    ).toBe(false);
   });
 
   test("each other condition alone makes it not due", () => {
@@ -357,6 +363,8 @@ const UNUSED_AUDIT = {
   removedWorktree: (): Promise<void> => Promise.resolve(),
   keptWorktree: (): Promise<void> => Promise.resolve(),
   flag: (): Promise<void> => Promise.resolve(),
+  nudge: (): Promise<void> => Promise.resolve(),
+  interrupt: (): Promise<void> => Promise.resolve(),
 };
 
 interface Rig {
@@ -1023,6 +1031,43 @@ describe("pause and the owner's round request (C45)", () => {
     r.seat.stop();
   });
 
+  test("a busy pane no verb could act on holds no round due: the verbs' own reach decides", async () => {
+    let reach = false;
+    const asked: number[] = [];
+    const r = rig({
+      activity: () => [pane({ state: "busy", screenSince: NOW - EVERY })],
+      busyReach: (_pane, stillMs) => {
+        asked.push(stillMs);
+        return Promise.resolve(reach);
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(asked).toEqual([EVERY]);
+    reach = true;
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    r.seat.stop();
+  });
+
+  test("no reach is asked while paused: no round could start, so the reads are not spent", async () => {
+    const asked: number[] = [];
+    const r = rig({
+      activity: () => [pane({ state: "busy", screenSince: NOW - EVERY })],
+      busyReach: (_pane, stillMs) => {
+        asked.push(stillMs);
+        return Promise.resolve(true);
+      },
+    });
+    r.control.read = { pause: { at: 0, until: null }, unreadable: false };
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(asked).toEqual([]);
+    r.seat.stop();
+  });
+
   test("a pause with no end holds, and an unreadable control file holds with one warning", async () => {
     const r = rig();
     r.control.read = { pause: { at: 0, until: null }, unreadable: true };
@@ -1191,6 +1236,14 @@ describe("the seat's view (C40, C41)", () => {
     r.rounds.push(entry({ end: 1_763_000_123_456, counts: { ...emptyCounts(), close: { ok: 4_000, refused: 1 } } }));
     await r.seat.start();
     expect(r.seat.view(NOW)).toEqual({ s: "idle", e: 1_763_000_123, n: [999, 0, 0] });
+    r.seat.stop();
+  });
+
+  test("n[1] is the last log entry's delivered nudges, capped at 999", async () => {
+    const r = rig();
+    r.rounds.push(entry({ end: 1_763_000_123_456, counts: { ...emptyCounts(), nudge: { ok: 2, refused: 7 } } }));
+    await r.seat.start();
+    expect(r.seat.view(NOW)).toEqual({ s: "idle", e: 1_763_000_123, n: [0, 2, 0] });
     r.seat.stop();
   });
 

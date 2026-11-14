@@ -886,3 +886,139 @@ describe("every audit line", () => {
     }
   });
 });
+
+const of = (target: Pane, taskId: string): { pid: number; taskId: string } => ({ pid: target.pid, taskId });
+
+describe("a custodian nudge", () => {
+  test("goes to the pane's listener as one request in the custodian's wrapper, audited from=custodian, never the text", async () => {
+    const messages = setup();
+    const receiver = await launched("nudge");
+    const target = await pane("nudge-target", receiver);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    texts.push("secret-nudge-text");
+    expect(await messages.deliverAsCustodian(target.id, "secret-nudge-text", of(target, receiver))).toEqual({
+      ok: true,
+      taskId: receiver,
+      outcome: "delivered",
+    });
+    const [, line] = listener.lines;
+    const delivered = lineOf(line);
+    expect(delivered.messageKind).toBe("request");
+    expect(delivered.push).toStartWith("The custodian on `testbox` (message `");
+    expect(delivered.push).toContain("```\nsecret-nudge-text\n```");
+    expect(delivered.push).not.toContain("send_message");
+    expect(delivered.body).toBeUndefined();
+    expect(audits).toEqual([
+      { dir: "in", from: { custodian: true }, to: receiver, kind: "request", bytes: 17, outcome: "delivered" },
+    ]);
+    expect(lines).toEqual([
+      `audit message origin=message dir=in from=custodian to="${receiver}" kind=request bytes=17 outcome=delivered`,
+    ]);
+  });
+
+  test("is held for a listener within the grace and delivered when one connects", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const receiver = await launched("nudgehold");
+    const target = await pane("nudgehold-target", receiver);
+    expect(await messages.deliverAsCustodian(target.id, "soon", of(target, receiver))).toEqual({
+      ok: true,
+      taskId: receiver,
+      outcome: "sent",
+    });
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(listener.lines.slice(1).map((raw) => lineOf(raw).push.endsWith("```\nsoon\n```"))).toEqual([true]);
+  });
+
+  test("a held nudge no listener claims within the grace expires audited nolistener, and a later one is refused no_listener", async () => {
+    // The hold's expiry is a real timer: the grace is short so the test waits on it, not on the fake clock.
+    const messages = setup({ graceMs: 80 });
+    const receiver = await launched("nudgeexpire");
+    const target = await pane("nudgeexpire-target", receiver);
+    expect(await messages.deliverAsCustodian(target.id, "soon", of(target, receiver))).toMatchObject({
+      outcome: "sent",
+    });
+    await pollUntil(() => inAudits("nolistener").length === 1, "the held nudge's grace to run out");
+    expect(inAudits("nolistener").map((a) => a.from)).toEqual([{ custodian: true }]);
+    clock.now += 1_000;
+    expect(await messages.deliverAsCustodian(target.id, "late", of(target, receiver))).toEqual({
+      ok: false,
+      code: "no_listener",
+    });
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(listener.lines.slice(1)).toEqual([]);
+  });
+
+  test("canDeliver answers what a delivery would find, and places and audits nothing", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const receiver = await launched("candeliver");
+    const target = await pane("candeliver-target", receiver);
+    // Inside the grace: a nudge would be held.
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(true);
+    // Past it, with no listener ever: no_listener.
+    clock.now += 120_000;
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(false);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(true);
+    // Another process or task, or a pane that is not there: the delivery would not land.
+    expect(await messages.canDeliver(target.id, { pid: target.pid + 1, taskId: receiver })).toBe(false);
+    expect(await messages.canDeliver("%99999", { pid: 1, taskId: "x" })).toBe(false);
+    expect(listener.lines.slice(1)).toEqual([]);
+    expect(audits).toEqual([]);
+  });
+
+  test("a pane carrying another process or task than the counts were written under is gone, nothing placed", async () => {
+    const messages = setup({ graceMs: 1e9 });
+    const receiver = await launched("nudgemoved");
+    const target = await pane("nudgemoved-target", receiver);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(await messages.deliverAsCustodian(target.id, "x", { pid: target.pid + 1, taskId: receiver })).toEqual({
+      ok: false,
+      code: "gone",
+    });
+    expect(await messages.deliverAsCustodian(target.id, "x", { pid: target.pid, taskId: "another" })).toEqual({
+      ok: false,
+      code: "gone",
+    });
+    expect(listener.lines.slice(1)).toEqual([]);
+  });
+
+  test("reaches only a live pane carrying a task this machine launched, under the push cap, and no sender's rate bucket", async () => {
+    const messages = setup({ graceMs: 1e9 });
+    const untagged = await pane("nudge-untasked");
+    const stranger = await pane("nudge-stranger", "task-never-launched-here");
+    expect(await messages.deliverAsCustodian(untagged.id, "x", of(untagged, "x"))).toEqual({
+      ok: false,
+      code: "untasked",
+    });
+    expect(await messages.deliverAsCustodian(stranger.id, "x", of(stranger, "task-never-launched-here"))).toEqual({
+      ok: false,
+      code: "untasked",
+    });
+    expect(await messages.deliverAsCustodian("%99999", "x", { pid: 1, taskId: "x" })).toEqual({
+      ok: false,
+      code: "gone",
+    });
+    const receiver = await launched("nudgecap");
+    const target = await pane("nudgecap-target", receiver);
+    expect(
+      await messages.deliverAsCustodian(target.id, "é".repeat(MESSAGE_PUSH_MAX / 2 + 1), of(target, receiver)),
+    ).toEqual({
+      ok: false,
+      code: "too_long",
+    });
+    for (let i = 0; i < 25; i++) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      expect((await messages.deliverAsCustodian(target.id, `n${i}`, of(target, receiver))).ok).toBe(true);
+    }
+    messages.stop();
+    expect(await messages.deliverAsCustodian(target.id, "x", of(target, receiver))).toEqual({
+      ok: false,
+      code: "stopping",
+    });
+  });
+});

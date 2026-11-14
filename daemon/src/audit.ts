@@ -758,14 +758,23 @@ export interface CustodianAudit {
     outcome: "ok" | "unsent" | CustodianReplyCode,
     by: "round" | "daemon",
   ) => Promise<void>;
+  /** A `nudge` (C26), taken (`delivered`, or `sent`: held for the pane's listener) or refused. Never the text. */
+  readonly nudge: (
+    pane: string,
+    taskId: string | null,
+    outcome: "delivered" | "sent" | CustodianReplyCode,
+  ) => Promise<void>;
+  /** An `interrupt` (C27): `sent` when tmux took the one Escape, else the refusal. */
+  readonly interrupt: (pane: string, taskId: string | null, outcome: "sent" | CustodianReplyCode) => Promise<void>;
   readonly removedWorktree: (pane: string, taskId: string, how: string) => Promise<void>;
   readonly keptWorktree: (pane: string, taskId: string, why: KeptWhy) => Promise<void>;
 }
 
 /**
- * One line per round start, kill and end, and per `close` and worktree decision the round's verbs make. A round has
- * no task id, so a start, kill and end name none; a close and a worktree line name the closed session's task. Nothing
- * read from a pane, the seed, the notes, the summary or the agent's text reaches a line, and no path or branch does.
+ * One line per round start, kill and end, and per `close`, `flag`, `nudge`, `interrupt` and worktree decision the round's
+ * verbs make. A round has no task id, so a start, kill and end name none; the verbs' lines name the session's task.
+ * Nothing read from a pane, the seed, the notes, the summary, a nudge's text or the agent's text reaches a line, and no
+ * path or branch does.
  */
 export function custodianAudit(sink: AuditSink): CustodianAudit {
   const origin: CustodianOrigin = "custodian";
@@ -788,6 +797,12 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
       await sink(
         `audit custodian origin=${origin} op=flag pane=${pane} task=${taskId ?? "-"} reason=${reason} outcome=${outcome} by=${by}`,
       );
+    },
+    nudge: async (pane, taskId, outcome) => {
+      await sink(`audit custodian origin=${origin} op=nudge pane=${pane} task=${taskId ?? "-"} outcome=${outcome}`);
+    },
+    interrupt: async (pane, taskId, outcome) => {
+      await sink(`audit custodian origin=${origin} op=interrupt pane=${pane} task=${taskId ?? "-"} outcome=${outcome}`);
     },
     removedWorktree: async (pane, taskId, how) => {
       await sink(`audit custodian origin=${origin} op=worktree pane=${pane} task=${taskId} outcome=removed how=${how}`);
@@ -862,10 +877,17 @@ export type MessageOutcome =
   | "rate_limited"
   | "unbound";
 
+/** The custodian round's nudge as a message's sender (`deliverAsCustodian`): no task, no pane, the daemon's own. */
+export const CUSTODIAN_SENDER = { custodian: true } as const;
+export type CustodianSender = typeof CUSTODIAN_SENDER;
+
 export type MessageAudit = (line: {
   readonly dir: "out" | "in";
-  /** A task id; null for an untasked sender; undefined when the sender could not be bound at all. */
-  readonly from: string | null | undefined;
+  /**
+   * A task id; null for an untasked sender; undefined when the sender could not be bound at all; `CUSTODIAN_SENDER` for
+   * a custodian nudge (written `from=custodian`).
+   */
+  readonly from: string | null | undefined | CustodianSender;
   readonly to: string;
   readonly kind: MessageKind;
   readonly bytes: number;
@@ -876,7 +898,14 @@ export type MessageAudit = (line: {
 export function messageAudit(sink: AuditSink): MessageAudit {
   const origin: MessageOrigin = "message";
   return async (line) => {
-    const from = line.from === undefined ? "-" : line.from === null ? "untasked" : quote(line.from);
+    const from =
+      line.from === undefined
+        ? "-"
+        : line.from === null
+          ? "untasked"
+          : typeof line.from === "string"
+            ? quote(line.from)
+            : "custodian";
     await sink(
       `audit message origin=${origin} dir=${line.dir} from=${from} to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes} outcome=${line.outcome}`,
     );

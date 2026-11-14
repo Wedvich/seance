@@ -60,7 +60,7 @@ import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
-import { createMessages } from "./messages.ts";
+import { createMessages, type Messages } from "./messages.ts";
 import { custodianRoundsPath, custodianSessionsPath, pruneLogPath, reapRefusalsPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
@@ -210,6 +210,8 @@ const flagStoreFor = (path: string, now: () => number): CustodianFlags => {
   return store;
 };
 const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
+/** The session-events capability's messaging, which the custodian's `nudge` delivers through (C26), read at each nudge. */
+const messagesOf = new WeakMap<WiringCtx, Messages>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -322,6 +324,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   });
   late.events = events;
   eventsOf.set(ctx, events);
+  messagesOf.set(ctx, messages);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
   return {
@@ -472,12 +475,20 @@ const custodianSeat: DaemonCapability = (ctx) => {
           roundPane: () => seat?.roundPane() ?? null,
           roundPanePids: listRoundPanePids,
           activity: paneActivity.activity,
+          sample: paneActivity.sample,
+          activityNow: paneActivity.now,
           retainedSince: () => retainedSince,
           untouchable,
           tasks: ctx.endedTasks,
           worktree: createWorktreeRule({ tasks: ctx.endedTasks, repos: ctx.repos, listPanes }),
           despawn,
           killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+          // Without messaging here (no session-events capability) a nudge has no delivery: `unsupported`.
+          deliver: (pane, text, expect) =>
+            messagesOf.get(ctx)?.deliverAsCustodian(pane, text, expect) ??
+            Promise.resolve({ ok: false, code: "unsupported" }),
+          canDeliver: (pane, expect) => messagesOf.get(ctx)?.canDeliver(pane, expect) ?? Promise.resolve(false),
+          keys: sendKeys,
           settings,
           flags,
           sendEvent,
@@ -513,6 +524,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
       untouchable,
+      ...(verbs === null ? {} : { busyReach: verbs.reach }),
       appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
       readRounds: () => readRounds(custodianRoundsPath()),
       readControl: () => readControl(),

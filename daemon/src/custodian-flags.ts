@@ -2,17 +2,21 @@ import { mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isRecord, isTaskId, parseTaskFlag, type CustodianEvent, type FlagReason, type TaskFlag } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
+import { PANE_ID } from "./pane-id.ts";
 import type { PaneActivity, TrackedState } from "./pane-activity.ts";
 
 /**
  * The daemon's open custodian flags (docs/custodian.md C30; DESIGN.md, "The custodian frame kind"): one entry per
  * flagged session in `stateDir()/custodian/sessions.json`, 0600 in the 0700 `custodian/` dir. Not `state.json`: that
  * file is the owner CLI's alone, an unreadable one there means "paused", and a daemon write racing the CLI's
- * read-modify-write could pause the seat. Nudge and interrupt counts join this file at item 8.
+ * read-modify-write could pause the seat. The same file holds each session's nudge and interrupt counts (C30), which
+ * the leader never sees: `{"v": 1, "flags": {…}, "counts": {…}}`, a file without `counts` reading as none.
  *
  * The key is the pane's task id, or its pane id for an untasked pane (a `%`, which a task id never starts with).
- * A pane id means nothing after the tmux server restarts, which reuses them, so pane-keyed entries are dropped at
- * load. Nothing here logs or returns the note except `get`, whose one caller (`custodian-verbs.ts`) never passes it on.
+ * A pane id means nothing after the tmux server restarts, which reuses them, so pane-keyed flags are dropped at
+ * load. A count carries the pane's pid instead and holds only while the pane carrying its key has that pid, so a reused
+ * pane id, or a task continued in a new pane, starts at zero. Nothing here logs or returns the note except `get`, whose
+ * one caller (`custodian-verbs.ts`) never passes it on.
  * Must not import `log.ts`: `warn` is a dependency, as `custodian-verbs.ts` takes it.
  */
 
@@ -24,6 +28,18 @@ export interface CustodianFlagsDeps {
 
 /** What `set` did: a flag for a reason the key did not hold, a changed note under the same reason, or nothing. */
 export type FlagSet = "new" | "note" | "same";
+
+/**
+ * One session's custodian counts (C26, C27, C30): written ahead of the act, so a write that fails stops it, and never by
+ * a frame's word. `round` is the pane of the round that last nudged it (a tmux id is never reused within a server, and
+ * a new server ends every session), for once per round.
+ */
+export interface SessionCounts {
+  readonly pid: number;
+  readonly nudges: number;
+  readonly interrupted: boolean;
+  readonly round: string | null;
+}
 
 export interface CustodianFlags {
   readonly get: (key: string) => Promise<TaskFlag | null>;
@@ -48,6 +64,29 @@ export interface CustodianFlags {
     readonly taskIds: ReadonlySet<string>;
     readonly panes: ReadonlySet<string>;
   }) => Promise<readonly (readonly [string, TaskFlag])[]>;
+  /** The session's counts: none (zero) when there is no entry or the entry is another pid's, an earlier session's. */
+  readonly counts: (key: string, pid: number) => Promise<SessionCounts>;
+  /** Replaces the key's counts; null removes them. */
+  readonly setCounts: (key: string, counts: SessionCounts | null) => Promise<void>;
+  /**
+   * Drops every count whose key no live `ours` pane carries with that pid: the session ended (C30). Nothing to settle
+   * first, unlike a flag: the counts are the daemon's alone. Returns how many went.
+   */
+  readonly pruneCounts: (live: ReadonlyMap<string, ReadonlySet<number>>) => Promise<number>;
+}
+
+/** Zero counts for the session in the pane with `pid`. */
+export const noCounts = (pid: number): SessionCounts => ({ pid, nudges: 0, interrupted: false, round: null });
+
+const wholeNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+function parseCounts(raw: unknown): SessionCounts | null {
+  if (!isRecord(raw)) return null;
+  const { pid, nudges, interrupted, round } = raw;
+  if (!wholeNumber(pid) || pid === 0 || !wholeNumber(nudges) || typeof interrupted !== "boolean") return null;
+  if (!(round === null || (typeof round === "string" && PANE_ID.test(round)))) return null;
+  return { pid, nudges, interrupted, round };
 }
 
 /** The reasons about a session's turn; `dirty` and `unpushed` are about its worktree, which a turn or a session's end leaves as it is. */
@@ -128,8 +167,15 @@ export async function clearOnNewTurn(deps: NewTurnDeps, key: string, taskId: str
   }
 }
 
+interface Held {
+  readonly flags: Map<string, TaskFlag>;
+  readonly counts: Map<string, SessionCounts>;
+}
+
+const isCountKey = (key: string): boolean => isTaskId(key) || PANE_ID.test(key);
+
 export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
-  let entries: Map<string, TaskFlag> | null = null;
+  let entries: Held | null = null;
   const revisions = new Map<string, number>();
   const turn = <T>(act: () => Promise<T>): Promise<T> => {
     const next = chain.then(act);
@@ -137,9 +183,10 @@ export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
     return next;
   };
 
-  const load = async (): Promise<Map<string, TaskFlag>> => {
+  const load = async (): Promise<Held> => {
     if (entries !== null) return entries;
     const loaded = new Map<string, TaskFlag>();
+    const counts = new Map<string, SessionCounts>();
     let text: string | null = null;
     try {
       text = await readFile(deps.path, "utf8");
@@ -159,38 +206,52 @@ export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
           // A bad entry is dropped alone; a pane id is dead after a restart.
           if (flag !== null && isTaskId(key)) loaded.set(key, flag);
         }
+        // Absent in a file written before custodian 8. A bad entry is dropped alone, as a flag is.
+        for (const [key, value] of Object.entries(isRecord(raw["counts"]) ? raw["counts"] : {})) {
+          const parsed = parseCounts(value);
+          if (parsed !== null && isCountKey(key)) counts.set(key, parsed);
+        }
       } else {
         // Never the content: it holds a note.
         deps.warn("custodian: the flags file is malformed and was read as empty");
       }
     }
-    entries = loaded;
-    return loaded;
+    entries = { flags: loaded, counts };
+    return entries;
   };
 
-  const persist = async (held: ReadonlyMap<string, TaskFlag>): Promise<void> => {
+  const persist = async (held: Held): Promise<void> => {
     await mkdir(dirname(deps.path), { recursive: true, mode: 0o700 });
-    await writeDurable(deps.path, `${JSON.stringify({ v: 1, flags: Object.fromEntries(held) })}\n`, 0o600);
+    const body = { v: 1, flags: Object.fromEntries(held.flags), counts: Object.fromEntries(held.counts) };
+    await writeDurable(deps.path, `${JSON.stringify(body)}\n`, 0o600);
+  };
+
+  const restore = <V>(map: Map<string, V>, before: ReadonlyMap<string, V>): void => {
+    map.clear();
+    for (const [key, value] of before) map.set(key, value);
   };
 
   /** A change applied to memory and then to disk; a write that fails leaves memory as the disk is. */
-  const changing = async <T>(change: (held: Map<string, TaskFlag>) => T | null): Promise<T | null> => {
+  const changingAll = async <T>(change: (held: Held) => T | null): Promise<T | null> => {
     const held = await load();
-    const before = new Map(held);
+    const flagsBefore = new Map(held.flags);
+    const countsBefore = new Map(held.counts);
     const result = change(held);
     if (result === null) return null;
     try {
       await persist(held);
     } catch (err) {
-      held.clear();
-      for (const [key, flag] of before) held.set(key, flag);
+      restore(held.flags, flagsBefore);
+      restore(held.counts, countsBefore);
       throw err;
     }
     return result;
   };
+  const changing = <T>(change: (flags: Map<string, TaskFlag>) => T | null): Promise<T | null> =>
+    changingAll((held) => change(held.flags));
 
   return {
-    get: (key) => turn(async () => (await load()).get(key) ?? null),
+    get: (key) => turn(async () => (await load()).flags.get(key) ?? null),
     revision: (key) => revisions.get(key) ?? 0,
     set: (key, reason, note) => {
       revisions.set(key, (revisions.get(key) ?? 0) + 1);
@@ -224,8 +285,30 @@ export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
       }),
     stale: (live) =>
       turn(async () =>
-        [...(await load())].filter(([key]) => !(isPaneKey(key) ? live.panes.has(key) : live.taskIds.has(key))),
+        [...(await load()).flags].filter(([key]) => !(isPaneKey(key) ? live.panes.has(key) : live.taskIds.has(key))),
       ),
+    counts: (key, pid) =>
+      turn(async () => {
+        const held = (await load()).counts.get(key);
+        return held !== undefined && held.pid === pid ? held : noCounts(pid);
+      }),
+    setCounts: (key, counts) =>
+      turn(async () => {
+        await changingAll<true>((held) => {
+          if (counts === null) return held.counts.delete(key) ? true : null;
+          held.counts.set(key, counts);
+          return true;
+        });
+      }),
+    pruneCounts: (live) =>
+      turn(async () => {
+        const gone = await changingAll<number>((held) => {
+          const stale = [...held.counts].filter(([key, entry]) => live.get(key)?.has(entry.pid) !== true);
+          for (const [key] of stale) held.counts.delete(key);
+          return stale.length === 0 ? null : stale.length;
+        });
+        return gone ?? 0;
+      }),
   };
 }
 

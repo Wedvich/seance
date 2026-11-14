@@ -293,6 +293,60 @@ describe("load", () => {
   });
 });
 
+describe("session counts", () => {
+  test("survive a restart, beside the flags, and hold only for the pid they were counted for", async () => {
+    const s = store();
+    await s.flags.set("t-1", "stuck", "hung");
+    await s.flags.setCounts("t-1", { pid: 41, nudges: 2, interrupted: true, round: "%90" });
+    await s.flags.setCounts("%7", { pid: 42, nudges: 0, interrupted: true, round: null });
+    const again = s.open();
+    expect(await again.counts("t-1", 41)).toEqual({ pid: 41, nudges: 2, interrupted: true, round: "%90" });
+    // A pane-keyed count survives a load, unlike a pane-keyed flag: the pid says whether it is the same session.
+    expect(await again.counts("%7", 42)).toEqual({ pid: 42, nudges: 0, interrupted: true, round: null });
+    // Another pid is another session (a continuation in a new pane, a reused pane id): it starts at zero.
+    expect(await again.counts("t-1", 99)).toEqual({ pid: 99, nudges: 0, interrupted: false, round: null });
+    expect(await again.get("t-1")).toMatchObject({ reason: "stuck" });
+    expect((await stat(s.path)).mode & 0o777).toBe(0o600);
+  });
+
+  test("a file from before custodian 8 has none, and a bad count is dropped alone", async () => {
+    const s = store();
+    await s.flags.setCounts("t-1", { pid: 41, nudges: 1, interrupted: false, round: null });
+    const text = JSON.parse(await readFile(s.path, "utf8"));
+    text.counts["t-2"] = { pid: 41, nudges: -1, interrupted: false, round: null };
+    text.counts["not a key"] = { pid: 41, nudges: 1, interrupted: false, round: null };
+    await writeFile(s.path, JSON.stringify(text));
+    const again = s.open();
+    expect((await again.counts("t-1", 41)).nudges).toBe(1);
+    expect((await again.counts("t-2", 41)).nudges).toBe(0);
+
+    await writeFile(s.path, JSON.stringify({ v: 1, flags: {} }));
+    expect((await s.open().counts("t-1", 41)).nudges).toBe(0);
+  });
+
+  test("a prune drops every count no live pane carries with that pid, and leaves the flags", async () => {
+    const s = store();
+    await s.flags.set("t-gone", "look", undefined);
+    await s.flags.setCounts("t-live", { pid: 41, nudges: 1, interrupted: false, round: null });
+    await s.flags.setCounts("t-gone", { pid: 42, nudges: 1, interrupted: false, round: null });
+    await s.flags.setCounts("t-moved", { pid: 43, nudges: 3, interrupted: true, round: null });
+    const pruned = await s.flags.pruneCounts(
+      new Map([
+        ["t-live", new Set([41])],
+        ["t-moved", new Set([77])],
+      ]),
+    );
+    expect(pruned).toBe(2);
+    const again = s.open();
+    expect((await again.counts("t-live", 41)).nudges).toBe(1);
+    expect((await again.counts("t-gone", 42)).nudges).toBe(0);
+    expect((await again.counts("t-moved", 43)).nudges).toBe(0);
+    expect(await again.get("t-gone")).not.toBeNull();
+    await s.flags.setCounts("t-live", null);
+    expect((await s.open().counts("t-live", 41)).nudges).toBe(0);
+  });
+});
+
 describe("isNewTurn", () => {
   test("a busy after an idle is a new turn, whether or not the idle ended one (a respawn's does not)", () => {
     expect(isNewTurn({ state: "idle" }, "busy")).toBe(true);

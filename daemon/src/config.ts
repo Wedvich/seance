@@ -252,13 +252,13 @@ export interface CustodianConfig {
   readonly effort: Effort;
   /** A round starts when a pane has stood idle or unchanged this long, and the last round ended this long ago. */
   readonly everyMinutes: number;
-  /** An idle session is a close candidate after this long (read by the verbs, PR 4). */
+  /** An idle session is a close candidate after this long (read by `close`). */
   readonly closeAfterMinutes: number;
   /** A round still running this long after it started is closed and counted failed. */
   readonly roundTimeoutMinutes: number;
-  /** Nudges per session before it is flagged (PR 4). */
+  /** Nudges per session before it is flagged (read by `nudge`). */
   readonly maxNudges: number;
-  /** A busy session with an unchanged screen this long may be interrupted (PR 4). */
+  /** A busy session with an unchanged screen this long may be interrupted (read by `interrupt`). */
   readonly interruptAfterMinutes: number;
 }
 

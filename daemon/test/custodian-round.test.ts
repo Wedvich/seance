@@ -636,6 +636,8 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       worktree: createWorktreeRule({ tasks: ended, repos: () => repos, listPanes }),
       despawn: (id, request) => despawnSession(id, request),
       killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+      deliver: () => Promise.resolve({ ok: false, code: "unsupported" }),
+      keys: () => Promise.resolve(false),
       settings: CUSTODIAN_DEFAULTS,
       seat: {
         count: (verb, ok) => r.seat.count(verb, ok),
@@ -763,6 +765,8 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       worktree: createWorktreeRule({ tasks: ended, repos: () => repos, listPanes }),
       despawn: (id, request) => despawnSession(id, request),
       killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+      deliver: () => Promise.resolve({ ok: false, code: "unsupported" }),
+      keys: () => Promise.resolve(false),
       settings: CUSTODIAN_DEFAULTS,
       seat: {
         count: (verb, ok) => r.seat.count(verb, ok),

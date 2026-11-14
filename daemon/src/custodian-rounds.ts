@@ -21,6 +21,8 @@ export interface RoundCounts {
   readonly sessions: VerbCount;
   readonly close: VerbCount;
   readonly flag: VerbCount;
+  readonly nudge: VerbCount;
+  readonly interrupt: VerbCount;
   readonly notes: VerbCount;
   readonly done: VerbCount;
   /** Flags the round's verb took plus the ones the daemon set itself after a close kept a worktree. */
@@ -47,6 +49,8 @@ export function emptyCounts(): RoundCounts {
     sessions: zero,
     close: zero,
     flag: zero,
+    nudge: zero,
+    interrupt: zero,
     notes: zero,
     done: zero,
     flagged: 0,
@@ -76,6 +80,9 @@ function countsOf(raw: unknown): RoundCounts | null {
   // Lines written before custodian 6 have neither key: absent is zero, present and malformed rejects the line.
   const flag = raw["flag"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["flag"]);
   const flagged = raw["flagged"] === undefined ? 0 : raw["flagged"];
+  // Nor, before custodian 8, these two.
+  const nudge = raw["nudge"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["nudge"]);
+  const interrupt = raw["interrupt"] === undefined ? { ok: 0, refused: 0 } : verbCountOf(raw["interrupt"]);
   const notes = verbCountOf(raw["notes"]);
   const done = verbCountOf(raw["done"]);
   const worktrees = raw["worktrees"];
@@ -84,6 +91,8 @@ function countsOf(raw: unknown): RoundCounts | null {
     close === null ||
     flag === null ||
     !wholeNumber(flagged) ||
+    nudge === null ||
+    interrupt === null ||
     notes === null ||
     done === null ||
     !isRecord(worktrees) ||
@@ -96,6 +105,8 @@ function countsOf(raw: unknown): RoundCounts | null {
     sessions,
     close,
     flag,
+    nudge,
+    interrupt,
     notes,
     done,
     flagged,

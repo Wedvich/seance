@@ -56,6 +56,18 @@ describe("parseRoundEntry", () => {
     expect(parseRoundEntry(line)).toEqual(entry(1));
   });
 
+  test("a line written before custodian 8 has no nudge or interrupt tally, and reads as zero", () => {
+    const { nudge: _nudge, interrupt: _interrupt, ...old } = emptyCounts();
+    const read = parseRoundEntry(JSON.stringify({ ...entry(1), counts: old }));
+    expect(read?.counts.nudge).toEqual({ ok: 0, refused: 0 });
+    expect(read?.counts.interrupt).toEqual({ ok: 0, refused: 0 });
+    expect(parseRoundEntry(JSON.stringify({ ...entry(1), counts: { ...emptyCounts(), nudge: null } }))).toBeNull();
+    expect(
+      parseRoundEntry(JSON.stringify({ ...entry(1), counts: { ...emptyCounts(), interrupt: { ok: 1 } } })),
+    ).toBeNull();
+    expect(countedVerb(emptyCounts(), "interrupt", true).interrupt).toEqual({ ok: 1, refused: 0 });
+  });
+
   test("a flag tally or flagged count that is present and malformed refuses the line", () => {
     for (const counts of [
       { ...emptyCounts(), flag: { ok: -1, refused: 0 } },

@@ -1,7 +1,7 @@
 import { COMMANDS, CUSTODIAN_OWNER_VERBS } from "./commands.ts";
 
 /**
- * The custodian round's shell fence, generated (docs/custodian.md, "The fence"; DESIGN.md, "The custodian's seat").
+ * The custodian round's shell fence, generated (DESIGN.md, "The custodian's seat", "The fence").
  * Pure: no I/O. The fence is for a cheap model's mistakes, never a boundary (C21) — a `bash -c` around a denied
  * command gets through — so the intended bound under injection is C19: every change goes through a verb the daemon
  * checks. It holds only once the round cannot reach the tmux socket and the daemon's plain ops (item 4b; rounds are

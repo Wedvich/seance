@@ -115,7 +115,7 @@ export function custodianStatePath(): string {
 
 /**
  * The daemon's open custodian flags (`custodian-flags.ts`), its own file beside the owner's `state.json` so the CLI
- * stays that file's only writer. Nudge and interrupt counts join it at item 8.
+ * stays that file's only writer, and its nudge and interrupt counts.
  */
 export function custodianSessionsPath(): string {
   return join(custodianDir(), "sessions.json");
