@@ -9,6 +9,7 @@ import {
 } from "@seance/shared";
 import type { Config, CustodianConfig } from "./config.ts";
 import type { CustodianVerb } from "./custodian-frame.ts";
+import { vsockFilter } from "./custodian-seccomp.ts";
 import { pausedAt, ROUND_REQUEST_MIN_GAP_MS, type PauseRead, type RoundRequest } from "./custodian-control.ts";
 import { countedVerb, emptyCounts, verbsUsed, type RoundEntry } from "./custodian-rounds.ts";
 import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
@@ -35,17 +36,22 @@ export interface CustodianSeatOpts {
 
 /**
  * Whether the round's sandbox has been drilled in this host's mode (docs/custodian.md item 4b; DESIGN.md, "The
- * custodian's seat"): macOS, and Linux where `/proc/sys` is read-only and bwrap runs in its weaker nested mode (an LXC
- * container). Linux's strict mode (`--proc /proc`, `--disable-userns`: bare metal or a VM) was never observed, so no
- * round runs there until a drill has proven it; lifting that is a change to this one function.
+ * custodian's seat"): macOS, Linux where `/proc/sys` is read-only and bwrap runs in its weaker nested mode (an LXC
+ * container), and Linux's strict mode (`--proc /proc`, `--disable-userns`: bare metal or a VM, drilled on WSL2) only
+ * under the outer seccomp filter (`vsockFilter`), which this host's arch must have: without it the WSL drill reached the
+ * Windows host over vsock. Lifting any other case is a change to this one function.
  */
-export function sandboxDrilled(platform: "darwin" | "linux", weakerNested: boolean): boolean {
-  return platform === "darwin" || weakerNested;
+export function sandboxDrilled(
+  platform: "darwin" | "linux",
+  weakerNested: boolean,
+  arch: string = process.arch,
+): boolean {
+  return platform === "darwin" || weakerNested || vsockFilter(arch) !== null;
 }
 
 /** The one text the seat's warning and `seanced doctor` give for a host in an undrilled sandbox mode. */
 export const SANDBOX_UNDRILLED =
-  "bwrap would run in its strict mode here (/proc/sys is writable: bare metal or a VM), which the round's containment was never drilled in — no rounds on this host";
+  "bwrap would run in its strict mode here (/proc/sys is writable: bare metal or a VM) on a CPU the round's vsock filter has no table for (x64 and arm64 only) — no rounds on this host";
 
 export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux" | null {
   return platform === "darwin" || platform === "linux" ? platform : null;

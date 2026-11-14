@@ -517,6 +517,23 @@ describe("roundCommand", () => {
     expect(script.endsWith("< '/s'\n")).toBe(true);
     expect(script.startsWith("#!/bin/sh\n")).toBe(true);
   });
+
+  test("strict-mode Linux runs the command under bwrap --seccomp with the filter file on fd 3", () => {
+    const script = roundScript({
+      claude: "claude",
+      caffeinate: false,
+      seccomp: "/tmp/seance-cu-abc/seccomp.bpf",
+      env: [],
+      binDir: "/b",
+      args: "--",
+      seed: "/s",
+    });
+    expect(script).toContain("\nexec bwrap --dev-bind / / --seccomp 3 -- /usr/bin/env -i ");
+    expect(script.endsWith("< '/s' 3< '/tmp/seance-cu-abc/seccomp.bpf'\n")).toBe(true);
+    const plain = roundScript({ claude: "claude", caffeinate: false, env: [], binDir: "/b", args: "--", seed: "/s" });
+    expect(plain).not.toContain("bwrap");
+    expect(plain).not.toContain("3<");
+  });
 });
 
 describe("ensureRoundDir", () => {
