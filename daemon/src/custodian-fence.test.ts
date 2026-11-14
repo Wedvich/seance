@@ -132,7 +132,11 @@ describe("DENY", () => {
 });
 
 describe("custodianFence", () => {
-  const base = { roundDir: "/r/.seance-custodian", socketDirs: ["/tmp/tmux-1", "/s/run"] } as const;
+  const base = {
+    roundDir: "/r/.seance-custodian",
+    flagsPath: "/s/custodian/sessions.json",
+    socketDirs: ["/tmp/tmux-1", "/s/run"],
+  } as const;
 
   test("macOS lists the socket directories and never allows every socket", () => {
     const fence = custodianFence({ ...base, platform: "darwin", weakerNested: false });
@@ -157,9 +161,11 @@ describe("custodianFence", () => {
     for (const platform of ["darwin", "linux"] as const) {
       const fence = custodianFence({ ...base, platform, weakerNested: false });
       expect(fence.sandbox.filesystem.denyWrite).toEqual([base.roundDir]);
+      // The flags file's notes quote pane text: neither the Read tool nor a sandboxed command reads them back.
+      expect(fence.sandbox.filesystem.denyRead).toEqual([base.flagsPath]);
+      expect(fence.permissions.deny).toEqual([...DENY, `Read(//s/custodian/sessions.json)`]);
       expect(fence.permissions.defaultMode).toBe("dontAsk");
       expect(fence.permissions.allow).toEqual(["Read", "Bash(seanced custodian *)"]);
-      expect(fence.permissions.deny).toBe(DENY);
       expect(fence.sandbox).toMatchObject({
         enabled: true,
         failIfUnavailable: true,

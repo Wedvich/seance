@@ -243,6 +243,12 @@ export interface FenceInput {
   readonly platform: "darwin" | "linux";
   /** The round's cwd: the one directory a sandboxed command may not write. */
   readonly roundDir: string;
+  /**
+   * The flags file (`custodian-flags.ts`): its notes quote untrusted pane text, which a later round must not read back
+   * (the `sessions` reply leaves them out for the same reason). Denied to `Read` and to the sandbox; a mistake guard
+   * like the rest, since until item 4b the round still reaches the tmux socket and every other file its uid can read.
+   */
+  readonly flagsPath: string;
   /** macOS only: the directories whose sockets the round may reach (tmux's, the daemon's run dir). */
   readonly socketDirs: readonly string[];
   /** Linux only: `/proc/sys` is read-only (a container), where `allowAllUnixSockets` needs the weaker nested mode. */
@@ -262,7 +268,7 @@ export interface CustodianFence {
     readonly autoAllowBashIfSandboxed: true;
     readonly enableWeakerNetworkIsolation: true;
     readonly enableWeakerNestedSandbox?: true;
-    readonly filesystem: { readonly denyWrite: readonly string[] };
+    readonly filesystem: { readonly denyWrite: readonly string[]; readonly denyRead: readonly string[] };
     readonly network: {
       readonly allowedDomains: readonly string[];
       readonly allowUnixSockets?: readonly string[];
@@ -282,7 +288,8 @@ export function custodianFence(input: FenceInput): CustodianFence {
     permissions: {
       defaultMode: "dontAsk",
       allow: ["Read", "Bash(seanced custodian *)"],
-      deny: DENY,
+      // `//` is the permission syntax for an absolute path.
+      deny: [...DENY, `Read(/${input.flagsPath})`],
     },
     sandbox: {
       enabled: true,
@@ -291,7 +298,7 @@ export function custodianFence(input: FenceInput): CustodianFence {
       autoAllowBashIfSandboxed: true,
       enableWeakerNetworkIsolation: true,
       ...(input.platform === "linux" && input.weakerNested ? { enableWeakerNestedSandbox: true as const } : {}),
-      filesystem: { denyWrite: [input.roundDir] },
+      filesystem: { denyWrite: [input.roundDir], denyRead: [input.flagsPath] },
       network: {
         allowedDomains: ["github.com", "api.github.com", "*.githubusercontent.com"],
         ...(input.platform === "darwin"
