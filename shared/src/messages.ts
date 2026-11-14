@@ -4,6 +4,8 @@
  * words live in one place and the mod, which cannot import outside its own folder, holds none of them.
  */
 
+import type { ReceiptOutcome } from "./types.ts";
+
 export const MESSAGE_KINDS = ["note", "question", "request"] as const;
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 
@@ -11,6 +13,18 @@ export type MessageKind = (typeof MESSAGE_KINDS)[number];
 export const MESSAGE_PUSH_MAX = 8 * 1024;
 /** Bytes of the sender's text (UTF-8). Past it any message is refused `too_long` at the sender. */
 export const MESSAGE_MAX = 64 * 1024;
+
+/**
+ * Bytes of the sender's text once JSON-escaped, for a message that crosses machines. `ENVELOPE_MAX_CT_LENGTH` (64 KiB of
+ * base64) carries about 48 KiB of JSON, so `MESSAGE_MAX` cannot cross the relay; 40 000 leaves room for the `Plain`
+ * wrapper and the leader's `from` fields, as `REPLY_JSON_BUDGET` does. A `TextEncoder`, not `Buffer`: shared is also
+ * loaded by the PWA and Raycast.
+ */
+export const MESSAGE_ROUTE_MAX = 40_000;
+
+export function routeBytes(text: string): number {
+  return new TextEncoder().encode(JSON.stringify(text)).length;
+}
 
 /** The daemon's per-pane hold while a listener is not yet connected; the mod sizes its own hold from the same numbers. */
 export const INBOX_MAX_MESSAGES = 32;
@@ -28,6 +42,40 @@ const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 export function isMessageId(value: unknown): value is string {
   return typeof value === "string" && MESSAGE_ID_PATTERN.test(value);
+}
+
+/**
+ * The note a leader's receipt becomes in the sender's inbox. One fixed line per outcome, never message text: the
+ * receipt is the leader's account of a message it did not keep.
+ */
+export function receiptNote(r: {
+  readonly id: string;
+  readonly to: string;
+  readonly taskId?: string;
+  readonly outcome: ReceiptOutcome;
+  readonly reason?: "nolistener";
+}): string {
+  const head = `Séance receipt: your message \`${r.id}\` to task \`${r.to}\``;
+  switch (r.outcome) {
+    case "delivered":
+      return `${head} was delivered to its session${
+        r.taskId !== undefined && r.taskId !== r.to ? ` (now carried by task \`${r.taskId}\`)` : ""
+      }.`;
+    case "sent":
+      return `${head} is waiting for its session's inbox listener (up to 120 s).`;
+    case "held":
+      return `${head} was not delivered: the task has not started yet, and nothing was kept; send again later.`;
+    case "ended":
+      return r.reason === "nolistener"
+        ? `${head} was not delivered: its session has no inbox listener (its account lacks the inbox mod).`
+        : `${head} was not delivered: the task has no live session.`;
+    case "unknown":
+      return `${head} was not delivered: the scheduler holds no such task.`;
+    case "unsupported":
+      return `${head} was not delivered: the target machine's daemon cannot receive messages (it needs \`seanced update\`).`;
+    case "offline":
+      return `${head} was not delivered: the target machine is offline or did not answer; if it did land, a retry may duplicate it.`;
+  }
 }
 
 /**

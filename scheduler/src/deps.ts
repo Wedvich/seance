@@ -64,7 +64,7 @@ export function isExpired(task: Task, now: number): boolean {
  * holding the work now. Null when the chain cannot be read to its end (a link pruned, unreadable or
  * missing, or one too long or looping): the dependent waits, never fails on a state it cannot see.
  */
-function holder(pred: Task, byId: ReadonlyMap<string, Task>): Task | null {
+export function holder(pred: Task, byId: ReadonlyMap<string, Task>): Task | null {
   let current = pred;
   for (let hops = 0; current.state === "superseded"; hops++) {
     const next = current.successor === undefined ? undefined : byId.get(current.successor);

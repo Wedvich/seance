@@ -47,6 +47,7 @@ import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { continuedChange } from "./continued.ts";
 import { admission } from "./deps.ts";
+import { resolveMessageTarget, type MessageRoute } from "./message-route.ts";
 import { branchChange, ended as settledEnd, prBound, prChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
@@ -686,6 +687,22 @@ export class Scheduler {
 
   task(id: string): Task | undefined {
     return this.#held.get(id)?.task;
+  }
+
+  /** Where a session message to `to` goes, from the leader's own list: the table is `resolveMessageTarget`'s. */
+  resolveMessage(to: string): MessageRoute {
+    return resolveMessageTarget(to, this.tasks());
+  }
+
+  /**
+   * Whether `deviceId` may speak as `taskId`: the task is assigned or reserved there (a session can send before its
+   * spawn reply is written). `absent` is a task this list does not hold (pruned while its session may live), which is
+   * not `elsewhere`: that one is a machine speaking for another's task.
+   */
+  sentFrom(taskId: string, deviceId: string): "here" | "elsewhere" | "absent" {
+    const task = this.task(taskId);
+    if (task === undefined) return "absent";
+    return task.assignment?.deviceId === deviceId || task.reservation?.deviceId === deviceId ? "here" : "elsewhere";
   }
 
   /** The newest routing outcome for a task, placed or not. */

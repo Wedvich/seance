@@ -1,4 +1,5 @@
 import type { AutonomyLevel } from "./autonomy.ts";
+import type { MessageKind } from "./messages.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -700,13 +701,14 @@ export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
 
 /**
  * Fire-and-forget ops — nothing correlates a reply: `update-available` a
- * broadcast, `session-event`, `session-pass` and `branch-state` reports to the scheduler, and
+ * broadcast, `session-event`, `session-pass`, `session-message` and `branch-state` reports to the scheduler, and
  * `queue-changed` the scheduler's nudge to every app.
  */
 export type EventOp =
   | "update-available"
   | "session-event"
   | "session-pass"
+  | "session-message"
   | "branch-state"
   | "queue-changed"
   | "custodian-event";
@@ -721,6 +723,8 @@ export type OpName =
   | "metrics"
   | "push-branch"
   | "pass-close"
+  | "deliver-message"
+  | "message-receipt"
   | "archive-status"
   | "archive-metrics"
   | "archive-tasks"
@@ -771,6 +775,7 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
  * about 175 s, about 195 s on a doubly lost create, which a client outlasting the window retries
  * safely (one pass per task at a time).
  * `pass-close` answers at once (the daemon arms a close and never waits for it).
+ * `deliver-message` and `message-receipt` each place one line in a pane's inbox, so one local round trip.
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
@@ -801,6 +806,8 @@ export const OP_TIMEOUT_MS = {
   amend: 10_000,
   "push-branch": 90_000,
   "pass-close": 10_000,
+  "deliver-message": 10_000,
+  "message-receipt": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -1146,6 +1153,10 @@ export interface MachineInfo {
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
  * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
  * (docs/messaging.md); advertised only where the host names a socket's peer.
+ * `messageRoute`: as a daemon, answers the leader's `deliver-message` and `message-receipt`; as a leader, routes a
+ * `session-message`. Advertised by every daemon (any may lead; receiving a forward needs no peer binding of its own).
+ * `send_message` checks the verified leader for it before sending a message off its machine, and the leader checks the
+ * target for it (with `messages`) before forwarding.
  * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian`.
  * Configured, not checked: a host that fails the sandbox or agent checks runs no round and still advertises it
  * (its `MachineStatus.cu` then says `failing`). The Machines card shows its Custodian row only for a machine that
@@ -1177,6 +1188,7 @@ export const CAPABILITIES = {
   drainPass: "drainPass",
   drainAsk: "drainAsk",
   messages: "messages",
+  messageRoute: "messageRoute",
   custodian: "custodian",
 } as const;
 
@@ -2020,6 +2032,78 @@ export type PassCloseErrorCode = (typeof PASS_CLOSE_ERROR_CODES)[number];
 export type PassCloseResponse =
   | { readonly ok: true }
   | { readonly ok: false; readonly code: PassCloseErrorCode; readonly message: string };
+
+/**
+ * `op: "session-message"`, a daemon → the scheduler (an event, sealed `from` the sending daemon's own device id, or the
+ * leader in process): a session's message to a task that is not deliverable on its machine (DESIGN.md, "Session
+ * messages", "Cross-machine"). `fromTask` is the sending pane's task as its own daemon bound it by peer pid; the leader
+ * honours it only for a task placed on the sealer. `text` is the message and is never logged anywhere.
+ */
+export interface SessionMessage {
+  readonly id: string;
+  readonly to: string;
+  readonly kind: MessageKind;
+  readonly text: string;
+  readonly fromTask?: string;
+  readonly fromTitle?: string;
+  readonly inReplyTo?: string;
+}
+
+/**
+ * `op: "deliver-message"`, scheduler → the daemon holding the resolved task, sealed `from: SCHEDULER_ID` (or the leader
+ * in process). `taskId` is the task the leader resolved; `addressed` is the id the sender named, which differs after a
+ * supersede or a continuation. `settled`: the leader's record of the task is finished, so the daemon's launch grace
+ * (a spawn that has not yet shown its pane) does not apply: no pane is `ended`, never `held`.
+ */
+export interface DeliverMessageRequest {
+  readonly id: string;
+  readonly taskId: string;
+  readonly addressed: string;
+  readonly kind: MessageKind;
+  readonly text: string;
+  readonly inReplyTo?: string;
+  readonly fromTask?: string;
+  readonly fromTitle?: string;
+  readonly fromMachine: string;
+  readonly settled?: true;
+}
+
+export const DELIVER_OUTCOMES = ["delivered", "sent", "held", "ended", "unknown"] as const;
+
+export type DeliverOutcome = (typeof DELIVER_OUTCOMES)[number];
+
+export const MESSAGE_ROUTE_ERROR_CODES = ["invalid_request", "unsupported", ...TRANSPORT_ERROR_CODES] as const;
+
+export type MessageRouteErrorCode = (typeof MESSAGE_ROUTE_ERROR_CODES)[number];
+
+/** `reason: "nolistener"` beside `ended`: the pane's account has no inbox mod, so nothing will ever read it. */
+export type DeliverMessageResponse =
+  | { readonly ok: true; readonly outcome: DeliverOutcome; readonly reason?: "nolistener" }
+  | { readonly ok: false; readonly code: MessageRouteErrorCode; readonly message: string };
+
+/** What the leader reports to the sender: the target daemon's outcomes, plus the two only the leader can say. */
+export const RECEIPT_OUTCOMES = [...DELIVER_OUTCOMES, "unsupported", "offline"] as const;
+
+export type ReceiptOutcome = (typeof RECEIPT_OUTCOMES)[number];
+
+/**
+ * `op: "message-receipt"`, scheduler → the sealing daemon, sealed `from: SCHEDULER_ID` (or in process): ids, kind and
+ * outcome, never text. `fromTask` is optional so a receipt for an untasked sender parses on a daemon that predates the
+ * one that sends it, and is dropped there.
+ */
+export interface MessageReceiptRequest {
+  readonly id: string;
+  readonly to: string;
+  readonly taskId?: string;
+  readonly kind: MessageKind;
+  readonly outcome: ReceiptOutcome;
+  readonly reason?: "nolistener";
+  readonly fromTask?: string;
+}
+
+export type MessageReceiptResponse =
+  | { readonly ok: true; readonly outcome: "delivered" | "sent" | "dropped" }
+  | { readonly ok: false; readonly code: MessageRouteErrorCode; readonly message: string };
 
 export interface SessionsResponse {
   readonly sessions: readonly SessionEntry[];

@@ -13,6 +13,7 @@ const ROOT = resolve(import.meta.dir, "../..");
 const LEADER_MODULES: ReadonlySet<string> = new Set([
   "daemon/src/leader.ts",
   "daemon/src/leader-adapters.ts",
+  "daemon/src/leader-messages.ts",
   "daemon/src/leader-requests.ts",
   "daemon/src/pr-status.ts",
   "daemon/src/queue-store.ts",
