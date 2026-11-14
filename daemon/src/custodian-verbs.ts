@@ -12,7 +12,7 @@ import type { CustodianAudit } from "./audit.ts";
 import { DespawnFailure, type SessionBackend } from "./backend.ts";
 import type { CustodianConfig } from "./config.ts";
 import { NOTES_MAX } from "./custodian-agent.ts";
-import type { CustodianFlags } from "./custodian-flags.ts";
+import { isPaneKey, isTurnFlag, liftEntry, type CustodianFlags, type LiftDeps } from "./custodian-flags.ts";
 import {
   parseCustodianFrame,
   SUMMARY_MAX,
@@ -237,29 +237,59 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
   };
 
   /**
-   * An entry whose session no longer exists is dropped, and its task's flag is lifted on the record: a finished task's
-   * `stuck` or `look` must not outlive the session it was about. A failure is a warning, never the verb's failure.
+   * An entry whose session no longer exists is settled on the record, then dropped, and only once the leader's event was
+   * taken, so a lost one is tried again on the next call. `stuck` and `look` are about the session, so its end lifts them
+   * (`unflag`). `dirty` and `unpushed` are about the worktree, which the session's end leaves as it is, so the record
+   * keeps them (as it does the daemon's own) and the entry is only sent again, as `flag`, until taken. A failure is a
+   * warning, never the verb's failure.
    */
   const pruneFlags = async (panes: readonly PaneInfo[]): Promise<void> => {
     try {
-      const dropped = await deps.flags.prune({
+      const gone = await deps.flags.stale({
         taskIds: new Set(panes.flatMap((pane) => (pane.taskId === null ? [] : [pane.taskId]))),
         panes: new Set(panes.map((pane) => pane.paneId)),
       });
-      await Promise.all(dropped.map((taskId) => send({ kind: "unflag", taskId, at: deps.now() })));
+      const held = await Promise.all(
+        gone.map(async ([key, entry]): Promise<boolean> => {
+          if (isTurnFlag(entry) || isPaneKey(key)) return !(await liftEntry(lifting, key, entry));
+          const sent = await send({
+            kind: "flag",
+            taskId: key,
+            reason: entry.reason,
+            ...(entry.note === undefined ? {} : { note: entry.note }),
+            at: deps.now(),
+          });
+          if (sent) await deps.flags.clear(key, entry);
+          return !sent;
+        }),
+      );
+      const kept = held.filter(Boolean).length;
+      if (kept > 0) deps.warn(`custodian: ${kept} flag event(s) were not taken; the entries stay for the next call`);
     } catch (err) {
       deps.warn(`custodian: pruning the flags failed (${err instanceof Error ? err.name : "error"})`);
     }
   };
 
-  /** A session closed with nothing to keep, or nothing worth a flag: its entry goes, and the record's flag with it. */
+  const lifting: LiftDeps = { flags: deps.flags, send, now: deps.now };
+
+  /**
+   * A session closed with nothing to keep, or nothing worth a flag: the record's flag goes, and its entry once that was
+   * taken. With no entry the record may still hold the daemon's own flag from an earlier close, so the `unflag` goes
+   * anyway.
+   */
   const lift = async (key: string, taskId: string | null): Promise<void> => {
     try {
-      await deps.flags.clear(key);
+      const entry = await deps.flags.get(key);
+      if (entry !== null) {
+        if (!(await liftEntry(lifting, key, entry))) {
+          deps.warn("custodian: an unflag was not taken; the entry stays for the next call");
+        }
+        return;
+      }
+      if (taskId !== null) await send({ kind: "unflag", taskId, at: deps.now() });
     } catch (err) {
       deps.warn(`custodian: clearing a flag failed (${err instanceof Error ? err.name : "error"})`);
     }
-    if (taskId !== null) await send({ kind: "unflag", taskId, at: deps.now() });
   };
 
   const sessions = async (): Promise<CustodianReply> => {
@@ -325,14 +355,16 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     deps.seat.countWorktree("kept");
     if (outcome.kept === "dirty" || outcome.kept === "unpushed") {
       // The daemon's own flag (C33): work that exists only in that worktree. The record's flag becomes this one, so the
-      // session's earlier entry goes without an `unflag`, which a later prune would otherwise send over it.
-      await send({ kind: "flag", taskId, reason: outcome.kept, at: deps.now() });
+      // session's earlier entry goes without an `unflag`, which a later prune would otherwise send over it. A send that
+      // nothing took leaves the entry as this flag instead, which a later `sessions` sends again until it is taken.
+      const sent = await send({ kind: "flag", taskId, reason: outcome.kept, at: deps.now() });
       deps.seat.countFlagged();
-      await deps.audit.flag(pane, taskId, outcome.kept, "ok", "daemon");
+      await deps.audit.flag(pane, taskId, outcome.kept, sent ? "ok" : "unsent", "daemon");
       try {
-        await deps.flags.clear(taskId);
+        if (sent) await deps.flags.clear(taskId);
+        else await deps.flags.set(taskId, outcome.kept, undefined);
       } catch (err) {
-        deps.warn(`custodian: clearing a flag failed (${err instanceof Error ? err.name : "error"})`);
+        deps.warn(`custodian: updating a flag entry failed (${err instanceof Error ? err.name : "error"})`);
       }
     }
     return outcome;

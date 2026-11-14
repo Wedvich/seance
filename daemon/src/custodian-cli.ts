@@ -48,7 +48,7 @@ async function clearNotes(): Promise<void> {
   console.log("notes cleared");
 }
 
-function frameFor(rest: readonly string[], text: () => Promise<string>): Promise<object> | null {
+export function frameFor(rest: readonly string[], text: () => Promise<string>): Promise<object> | null {
   const base = { v: CUSTODIAN_FRAME_VERSION, kind: CUSTODIAN_FRAME_KIND } as const;
   const [verb, ...args] = rest;
   if (verb === "sessions" && args.length === 0) return Promise.resolve({ ...base, verb });

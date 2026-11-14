@@ -2,7 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createCustodianFlags, isNewTurn } from "./custodian-flags.ts";
+import {
+  createCustodianFlags,
+  deliverEvent,
+  isNewTurn,
+  isTurnFlag,
+  liftEntry,
+  retainFrame,
+} from "./custodian-flags.ts";
 
 let dir = "";
 let n = 0;
@@ -80,27 +87,86 @@ describe("clear", () => {
   });
 });
 
-describe("prune", () => {
-  test("drops a task whose session is gone and reports its id, and a pane whose pane is gone without one", async () => {
+describe("clear with `only`", () => {
+  test("leaves an entry a round changed while the caller's send was out", async () => {
+    const s = store();
+    await s.flags.set("t-1", "stuck", "a");
+    const seen = await s.flags.get("t-1");
+    if (seen === null) throw new Error("no entry");
+    await s.flags.set("t-1", "stuck", "b");
+    expect(await s.flags.clear("t-1", seen)).toBe(false);
+    expect(await s.flags.get("t-1")).toEqual({ reason: "stuck", note: "b", at: 100 });
+    const now = await s.flags.get("t-1");
+    if (now === null) throw new Error("no entry");
+    expect(await s.flags.clear("t-1", now)).toBe(true);
+  });
+});
+
+describe("stale", () => {
+  test("names the entries whose session is gone and deletes none, writing nothing", async () => {
     const s = store();
     await s.flags.set("t-1", "stuck", undefined);
     await s.flags.set("t-2", "look", undefined);
     await s.flags.set("%7", "look", undefined);
-    expect(await s.flags.prune(live(["t-2"], ["%7"]))).toEqual(["t-1"]);
-    expect(await s.flags.get("t-1")).toBeNull();
-    expect(await s.flags.get("t-2")).not.toBeNull();
-    expect(await s.flags.get("%7")).not.toBeNull();
-    expect(await s.flags.prune(live([], []))).toEqual(["t-2"]);
-    expect(await s.flags.get("%7")).toBeNull();
-  });
-
-  test("writes only when something went", async () => {
-    const s = store();
-    await s.flags.set("t-1", "look", undefined);
     const before = (await stat(s.path)).mtimeMs;
     await Bun.sleep(15);
-    expect(await s.flags.prune(live(["t-1"]))).toEqual([]);
+    expect((await s.flags.stale(live(["t-2"], ["%7"]))).map(([key]) => key)).toEqual(["t-1"]);
+    expect(await s.flags.get("t-1")).not.toBeNull();
+    expect((await s.flags.stale(live([], []))).map(([key]) => key)).toEqual(["t-1", "t-2", "%7"]);
     expect((await stat(s.path)).mtimeMs).toBe(before);
+  });
+
+  test("nothing when every session is live", async () => {
+    const s = store();
+    await s.flags.set("t-1", "look", undefined);
+    expect(await s.flags.stale(live(["t-1"]))).toEqual([]);
+  });
+});
+
+describe("liftEntry", () => {
+  test("clears the entry only once the unflag was taken; a send nothing took keeps it", async () => {
+    const s = store();
+    await s.flags.set("t-1", "stuck", undefined);
+    const entry = await s.flags.get("t-1");
+    if (entry === null) throw new Error("no entry");
+    const sent: unknown[] = [];
+    let taken = false;
+    const deps = {
+      flags: s.flags,
+      now: () => 7,
+      send: (event: unknown): Promise<boolean> => {
+        sent.push(event);
+        return Promise.resolve(taken);
+      },
+    };
+    expect(await liftEntry(deps, "t-1", entry)).toBe(false);
+    expect(await s.flags.get("t-1")).not.toBeNull();
+    taken = true;
+    expect(await liftEntry(deps, "t-1", entry)).toBe(true);
+    expect(await s.flags.get("t-1")).toBeNull();
+    expect(sent).toEqual([
+      { kind: "unflag", taskId: "t-1", at: 7 },
+      { kind: "unflag", taskId: "t-1", at: 7 },
+    ]);
+  });
+
+  test("a pane-keyed entry has no record to tell: it is cleared and nothing is sent", async () => {
+    const s = store();
+    await s.flags.set("%7", "look", undefined);
+    const entry = await s.flags.get("%7");
+    if (entry === null) throw new Error("no entry");
+    const send = (): Promise<boolean> => Promise.reject(new Error("must not send"));
+    expect(await liftEntry({ flags: s.flags, now: () => 1, send }, "%7", entry)).toBe(true);
+    expect(await s.flags.get("%7")).toBeNull();
+  });
+});
+
+describe("isTurnFlag", () => {
+  test("stuck and look are about the turn; dirty and unpushed are about the worktree", () => {
+    expect(isTurnFlag({ reason: "stuck", at: 1 })).toBe(true);
+    expect(isTurnFlag({ reason: "look", at: 1 })).toBe(true);
+    expect(isTurnFlag({ reason: "dirty", at: 1 })).toBe(false);
+    expect(isTurnFlag({ reason: "unpushed", at: 1 })).toBe(false);
   });
 });
 
@@ -133,22 +199,93 @@ describe("load", () => {
 });
 
 describe("isNewTurn", () => {
-  const idle = { state: "idle", turnEnded: true } as const;
-
-  test("a busy after an idle that ended a turn is a new turn", () => {
-    expect(isNewTurn(idle, "busy")).toBe(true);
+  test("a busy after an idle is a new turn, whether or not the idle ended one (a respawn's does not)", () => {
+    expect(isNewTurn({ state: "idle" }, "busy")).toBe(true);
   });
 
-  test("busy to busy, needs-input to busy, an idle that did not end a turn, and an unobserved pane are not", () => {
-    expect(isNewTurn({ state: "busy", turnEnded: false }, "busy")).toBe(false);
-    expect(isNewTurn({ state: "needs-input", turnEnded: false }, "busy")).toBe(false);
-    expect(isNewTurn({ state: "idle", turnEnded: false }, "busy")).toBe(false);
-    expect(isNewTurn({ state: null, turnEnded: false }, "busy")).toBe(false);
-    expect(isNewTurn(null, "busy")).toBe(false);
+  test("a busy with no state retained is one: a restart forgot it, and a flag outlives it", () => {
+    expect(isNewTurn(null, "busy")).toBe(true);
+    expect(isNewTurn({ state: null }, "busy")).toBe(true);
+  });
+
+  test("busy to busy and needs-input to busy are the same turn", () => {
+    expect(isNewTurn({ state: "busy" }, "busy")).toBe(false);
+    expect(isNewTurn({ state: "needs-input" }, "busy")).toBe(false);
   });
 
   test("only a busy frame starts one", () => {
-    expect(isNewTurn(idle, "idle")).toBe(false);
-    expect(isNewTurn(idle, "needs-input")).toBe(false);
+    expect(isNewTurn({ state: "idle" }, "idle")).toBe(false);
+    expect(isNewTurn({ state: "idle" }, "needs-input")).toBe(false);
+    expect(isNewTurn(null, "idle")).toBe(false);
+  });
+});
+
+describe("retainFrame", () => {
+  const pane = (ours: boolean) => ({ id: "%1", ours, taskId: "t-1" });
+  function rig(held: { state: "idle" | "busy" | "needs-input" | null } | null) {
+    const calls: string[] = [];
+    let lift: ((p: ReturnType<typeof pane>) => void) | undefined = (p) => calls.push(`lift ${p.id}`);
+    const retain = retainFrame({
+      activity: () => {
+        calls.push("read");
+        return held;
+      },
+      observe: () => calls.push("observe"),
+      onNewTurn: () => lift,
+    });
+    return { retain, calls, noStore: () => (lift = undefined) };
+  }
+
+  test("reads the retained state before observe replaces it, then lifts on a new turn", () => {
+    const r = rig({ state: "idle" });
+    r.retain(pane(true), "busy", false);
+    expect(r.calls).toEqual(["read", "observe", "lift %1"]);
+  });
+
+  test("the same turn lifts nothing, and a pane séance did not start is neither read nor lifted", () => {
+    const same = rig({ state: "busy" });
+    same.retain(pane(true), "busy", false);
+    expect(same.calls).toEqual(["read", "observe"]);
+
+    // An unobserved pane counts as a new turn, which a foreign pane must not borrow.
+    const foreign = rig(null);
+    foreign.retain(pane(false), "busy", false);
+    expect(foreign.calls).toEqual(["observe"]);
+  });
+
+  test("frames are still retained while no seat holds the flag store", () => {
+    const r = rig({ state: "idle" });
+    r.noStore();
+    r.retain(pane(true), "busy", false);
+    expect(r.calls).toEqual(["read", "observe"]);
+  });
+});
+
+describe("deliverEvent", () => {
+  const event = { kind: "failing", at: 1 } as const;
+
+  test("a leading machine answers with what its running term said, and never touches the relay", async () => {
+    const relay = (): Promise<boolean> => Promise.reject(new Error("must not go to the relay"));
+    expect(await deliverEvent({ leads: () => true, inProcess: () => false, relay }, event)).toBe(false);
+    expect(await deliverEvent({ leads: () => true, inProcess: () => true, relay }, event)).toBe(true);
+  });
+
+  test("a following machine seals it to the scheduler", async () => {
+    const sent: unknown[] = [];
+    const reply = await deliverEvent(
+      {
+        leads: () => false,
+        inProcess: () => {
+          throw new Error("no term here");
+        },
+        relay: (e) => {
+          sent.push(e);
+          return Promise.resolve(true);
+        },
+      },
+      event,
+    );
+    expect(reply).toBe(true);
+    expect(sent).toEqual([event]);
   });
 });

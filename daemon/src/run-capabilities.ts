@@ -7,7 +7,14 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
-import { createCustodianFlags, isNewTurn, type CustodianFlags } from "./custodian-flags.ts";
+import {
+  createCustodianFlags,
+  deliverEvent,
+  isTurnFlag,
+  liftEntry,
+  retainFrame,
+  type CustodianFlags,
+} from "./custodian-flags.ts";
 import { dropRoundRequest, peekRoundRequest, readControl, writeSeatView } from "./custodian-control.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
@@ -179,11 +186,23 @@ const drainHoldsOf = new WeakMap<WiringCtx, DrainAsk["holds"]>();
  * own capability passes `seatEnabled`, read lazily at each frame, so the order the two capabilities start in is moot.
  */
 const flagsOf = new WeakMap<WiringCtx, CustodianFlags>();
+/**
+ * One flag store per file, per process: a store caches the file, so a second one (a config reload starts the seat's
+ * capability again) would write its map over the first's entries.
+ */
+let heldFlags: { readonly path: string; readonly store: CustodianFlags } | null = null;
+const flagStoreFor = (path: string, now: () => number): CustodianFlags => {
+  if (heldFlags?.path === path) return heldFlags.store;
+  const store = createCustodianFlags({ path, now, warn: (line) => log.warn(line) });
+  heldFlags = { path, store };
+  return store;
+};
 const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
 
 /**
- * The session started a new turn: its flag was about the last one, so the entry and the record's flag go. A failure is
- * a warning; the next `sessions` prune or the re-assignment lifts what this missed.
+ * The session started a new turn: a flag about the last one is stale, so the record's flag goes and then the entry, once
+ * the `unflag` was taken (a send nothing took leaves the entry, and the next new turn, prune or close tries again).
+ * `dirty` and `unpushed` are about the worktree, not the turn, and stay. A failure is a warning.
  */
 const clearOnNewTurn = async (
   ctx: WiringCtx,
@@ -192,8 +211,16 @@ const clearOnNewTurn = async (
   taskId: string | null,
 ): Promise<void> => {
   try {
-    if (!(await flags.clear(key)) || taskId === null) return;
-    await sendEventOf.get(ctx)?.({ kind: "unflag", taskId, at: ctx.now() });
+    const entry = await flags.get(key);
+    const send = sendEventOf.get(ctx);
+    if (entry === null || !isTurnFlag(entry) || send === undefined) return;
+    if (taskId === null) {
+      await flags.clear(key, entry);
+      return;
+    }
+    if (!(await liftEntry({ flags, send, now: ctx.now }, key, entry))) {
+      log.warn("custodian: an unflag on a new turn was not taken; the entry stays for the next call");
+    }
   } catch (err) {
     log.warn(`custodian: clearing a flag on a new turn failed (${err instanceof Error ? err.name : "error"})`);
   }
@@ -297,15 +324,15 @@ const sessionEvents: DaemonCapability = (ctx) => {
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     onEnded: messages.onEnded,
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
-    retain: (pane, state, turnEnded): void => {
-      // Read before `observe` replaces it: a new turn is a `busy` after an `idle` that ended one, which only the prior
-      // retained state says. `needs-input` to `busy` (a permission answered) and `busy` to `busy` are the same turn.
-      const before = pane.ours ? paneActivity.activity(pane.id) : null;
-      paneRetention.observe(pane, state, turnEnded);
-      const flags = flagsOf.get(ctx);
-      if (flags === undefined || !isNewTurn(before, state)) return;
-      void clearOnNewTurn(ctx, flags, pane.taskId ?? pane.id, pane.taskId);
-    },
+    retain: retainFrame({
+      activity: (paneId) => paneActivity.activity(paneId),
+      observe: (pane, state, turnEnded) => paneRetention.observe(pane, state, turnEnded),
+      onNewTurn: () => {
+        const flags = flagsOf.get(ctx);
+        if (flags === undefined) return undefined;
+        return (pane) => void clearOnNewTurn(ctx, flags, pane.taskId ?? pane.id, pane.taskId);
+      },
+    }),
   });
   late.events = events;
   eventsOf.set(ctx, events);
@@ -381,19 +408,20 @@ const custodianSeat: DaemonCapability = (ctx) => {
     return { stop: (): void => {} };
   }
 
-  const flags = createCustodianFlags({
-    path: custodianSessionsPath(),
-    now: ctx.now,
-    warn: (line) => log.warn(line),
-  });
-  // In process when this machine leads, else sealed to the scheduler; false when neither could take it.
-  const sendEvent = (event: CustodianEvent): Promise<boolean> => {
-    if (ctx.leader.term() !== null) {
-      ctx.leader.onCustodianEvent(event, ctx.deviceId);
-      return Promise.resolve(true);
-    }
-    return ctx.client.sendCustodianEvent(event);
-  };
+  const flags = flagStoreFor(custodianSessionsPath(), ctx.now);
+  // In process when this machine leads (false while its term is still taking over), else sealed to the scheduler.
+  // On the relay leg true is only that the envelope was written to the socket: no ack comes back, so a relay with no
+  // leader behind it loses the event, and the resends the callers keep (a held `failing`, a kept entry) are what covers
+  // the ordinary gap.
+  const sendEvent = (event: CustodianEvent): Promise<boolean> =>
+    deliverEvent(
+      {
+        leads: () => ctx.leader.term() !== null,
+        inProcess: (e) => ctx.leader.onCustodianEvent(e, ctx.deviceId),
+        relay: (e) => ctx.client.sendCustodianEvent(e),
+      },
+      event,
+    );
   flagsOf.set(ctx, flags);
   sendEventOf.set(ctx, sendEvent);
 

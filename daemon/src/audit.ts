@@ -747,14 +747,15 @@ export interface CustodianAudit {
   ) => Promise<void>;
   /**
    * A flag, by the round's `flag` verb (`by=round`, refused or taken) or the daemon's own after a close kept a
-   * worktree (`by=daemon`). There is no parameter for the note, so none can be passed by mistake; a reason the
+   * worktree (`by=daemon`, `unsent` when nothing took the event: the entry stays and a later `sessions` sends it again).
+   * There is no parameter for the note, so none can be passed by mistake; a reason the
    * round sent that is not a `FlagReason` is written as `-`.
    */
   readonly flag: (
     pane: string,
     taskId: string | null,
     reason: FlagReason | "-",
-    outcome: "ok" | CustodianReplyCode,
+    outcome: "ok" | "unsent" | CustodianReplyCode,
     by: "round" | "daemon",
   ) => Promise<void>;
   readonly removedWorktree: (pane: string, taskId: string, how: string) => Promise<void>;

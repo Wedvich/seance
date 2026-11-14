@@ -1,6 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { isRecord, isTaskId, parseTaskFlag, type FlagReason, type TaskFlag } from "@seance/shared";
+import { isRecord, isTaskId, parseTaskFlag, type CustodianEvent, type FlagReason, type TaskFlag } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
 import type { PaneActivity, TrackedState } from "./pane-activity.ts";
 
@@ -29,34 +29,70 @@ export interface CustodianFlags {
   readonly get: (key: string) => Promise<TaskFlag | null>;
   /** The same reason keeps its `at`. */
   readonly set: (key: string, reason: FlagReason, note: string | undefined) => Promise<FlagSet>;
-  /** True when there was an entry. Writes nothing for a missing key. */
-  readonly clear: (key: string) => Promise<boolean>;
   /**
-   * Drops every entry whose key is no live task id and no live pane id, and returns the task ids it dropped, for the
-   * caller to send `unflag` for: a finished task's flag must not outlive its session on the record. Writes only when
-   * something went.
+   * True when there was an entry. Writes nothing for a missing key. With `only`, an entry that has changed since the
+   * caller read it (another reason, note or time) is left: a send took a while, and what a round set meanwhile stands.
    */
-  readonly prune: (live: {
+  readonly clear: (key: string, only?: TaskFlag) => Promise<boolean>;
+  /**
+   * Every entry whose key is no live task id and no live pane id: the sessions are gone. Deletes nothing: an entry is
+   * the daemon's record of what the leader's task record holds, so the caller clears it (`clear`, with `only`) once
+   * the event that settles the record has been taken, and an event that was not taken leaves it for the next call.
+   */
+  readonly stale: (live: {
     readonly taskIds: ReadonlySet<string>;
     readonly panes: ReadonlySet<string>;
-  }) => Promise<readonly string[]>;
+  }) => Promise<readonly (readonly [string, TaskFlag])[]>;
+}
+
+/** The reasons about a session's turn; `dirty` and `unpushed` are about its worktree, which a turn or a session's end leaves as it is. */
+export const isTurnFlag = (flag: TaskFlag): boolean => flag.reason === "stuck" || flag.reason === "look";
+
+/**
+ * A bound `busy` frame after an `idle`, or with no state retained before it: the session was given work, so a flag about
+ * what it was doing is stale. An `idle` that did not end a turn counts (a respawn's, whose next prompt is a turn), and so
+ * does an unobserved pane (a daemon restart forgets the retained state, a flag outlives it, and a frame at all says the
+ * session is not stuck). Not `needs-input` to `busy` (a permission answered) and not `busy` to `busy`: the same turn.
+ * A turn the mod's pending report folded into one `busy` after another `busy` is not seen; the next round's prune or
+ * the re-assignment lifts that flag.
+ */
+export function isNewTurn(before: Pick<PaneActivity, "state"> | null, state: TrackedState): boolean {
+  return state === "busy" && (before === null || before.state === null || before.state === "idle");
 }
 
 /**
- * A bound `busy` frame after an `idle` that ended a turn: the session was given a new turn, so a flag about the last one
- * is stale. Not `needs-input` to `busy` (a permission answered), not `busy` to `busy`, and not an unobserved pane: with
- * no state before it there is nothing to say the last turn ended.
+ * Reads and writes both wait their turn, across every instance in the process: `writeDurable` is not serialized, and a
+ * lazy load must not race a set. Instances still cache separately, so the daemon holds one per file (`run-capabilities.ts`).
  */
-export function isNewTurn(before: Pick<PaneActivity, "state" | "turnEnded"> | null, state: TrackedState): boolean {
-  return state === "busy" && before?.state === "idle" && before.turnEnded;
+let chain: Promise<unknown> = Promise.resolve();
+
+export const isPaneKey = (key: string): boolean => key.startsWith("%");
+
+export interface LiftDeps {
+  readonly flags: Pick<CustodianFlags, "clear">;
+  /** True when something took the event: a leader's running term in process, or the socket on the relay leg. */
+  readonly send: (event: CustodianEvent) => Promise<boolean>;
+  readonly now: () => number;
 }
 
-const isPaneKey = (key: string): boolean => key.startsWith("%");
+/**
+ * Lifts an entry the way the record needs it: the leader's `unflag` first, and the entry only once that was taken, so a
+ * send that was not keeps the entry for the next prune, new turn or close to try again (the local entry is the source
+ * of truth for what the record holds). A pane-keyed entry has no record. True when the entry is gone.
+ */
+export async function liftEntry(deps: LiftDeps, key: string, flag: TaskFlag): Promise<boolean> {
+  if (isPaneKey(key)) {
+    await deps.flags.clear(key, flag);
+    return true;
+  }
+  if (!(await deps.send({ kind: "unflag", taskId: key, at: deps.now() }))) return false;
+  // `only`: a round may have set a new flag while the send was out.
+  await deps.flags.clear(key, flag);
+  return true;
+}
 
 export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
   let entries: Map<string, TaskFlag> | null = null;
-  // Reads and writes both wait their turn: `writeDurable` is not serialized, and a lazy load must not race a set.
-  let chain: Promise<unknown> = Promise.resolve();
   const turn = <T>(act: () => Promise<T>): Promise<T> => {
     const next = chain.then(act);
     chain = next.catch(() => {});
@@ -131,21 +167,65 @@ export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
         });
         return result ?? "same";
       }),
-    clear: (key) =>
+    clear: (key, only) =>
       turn(async () => {
-        const result = await changing<true>((held) => (held.delete(key) ? true : null));
+        const result = await changing<true>((held) => {
+          const was = held.get(key);
+          if (was === undefined) return null;
+          if (only !== undefined && !(was.reason === only.reason && was.note === only.note && was.at === only.at)) {
+            return null;
+          }
+          held.delete(key);
+          return true;
+        });
         return result === true;
       }),
-    prune: (live) =>
-      turn(async () => {
-        const dropped = await changing<readonly string[]>((held) => {
-          const gone = [...held.keys()].filter(
-            (key) => !(isPaneKey(key) ? live.panes.has(key) : live.taskIds.has(key)),
-          );
-          for (const key of gone) held.delete(key);
-          return gone.length === 0 ? null : gone.filter((key) => !isPaneKey(key));
-        });
-        return dropped ?? [];
-      }),
+    stale: (live) =>
+      turn(async () =>
+        [...(await load())].filter(([key]) => !(isPaneKey(key) ? live.panes.has(key) : live.taskIds.has(key))),
+      ),
   };
+}
+
+export interface RetainedPane {
+  readonly id: string;
+  readonly ours: boolean;
+}
+
+/**
+ * Session-events ingest's `retain` hook: the retained state is read before `observe` replaces it, since a new turn is a
+ * `busy` after what the pane showed last, which only the prior state says. Only a pane séance started is read: an
+ * unobserved pane is a new turn (`isNewTurn`), and a foreign pane has no flag to lift.
+ */
+export function retainFrame<P extends RetainedPane>(deps: {
+  /** The pane's retained state so far (`PaneActivityTracker.activity`). */
+  readonly activity: (paneId: string) => Pick<PaneActivity, "state"> | null;
+  readonly observe: (pane: P, state: TrackedState, turnEnded: boolean) => void;
+  /** Lifts the flag of a pane whose turn is new; undefined while no seat holds the flag store. */
+  readonly onNewTurn: () => ((pane: P) => void) | undefined;
+}): (pane: P, state: TrackedState, turnEnded: boolean) => void {
+  return (pane, state, turnEnded) => {
+    const before = pane.ours ? deps.activity(pane.id) : null;
+    deps.observe(pane, state, turnEnded);
+    const lift = deps.onNewTurn();
+    if (!pane.ours || lift === undefined || !isNewTurn(before, state)) return;
+    lift(pane);
+  };
+}
+
+/**
+ * Where a `custodian-event` goes: in process when this machine leads, which answers whether a running term took it (false
+ * while one is still taking over), else sealed to the scheduler over the relay, where true is only that the envelope was
+ * written to the socket: no ack comes back.
+ */
+export function deliverEvent(
+  deps: {
+    readonly leads: () => boolean;
+    readonly inProcess: (event: CustodianEvent) => boolean;
+    readonly relay: (event: CustodianEvent) => Promise<boolean>;
+  },
+  event: CustodianEvent,
+): Promise<boolean> {
+  if (deps.leads()) return Promise.resolve(deps.inProcess(event));
+  return deps.relay(event);
 }

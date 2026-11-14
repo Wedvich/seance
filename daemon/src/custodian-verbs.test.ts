@@ -897,6 +897,57 @@ describe("a flag's life beside the verbs", () => {
     expect(r.events).toEqual([]);
     expect(await r.flags.get("t-1")).not.toBeNull();
   });
+
+  test("an unflag nothing took leaves the entry and warns, and the next `sessions` sends it again", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", undefined);
+    r.state.panes = [];
+    r.state.sendOk = false;
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).not.toBeNull();
+    expect(r.warnings.join("\n")).toContain("were not taken");
+    r.state.sendOk = true;
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events.map((event) => event.kind)).toEqual(["unflag", "unflag"]);
+  });
+
+  test("a close whose unflag nothing took keeps the entry for the prune", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "look", undefined);
+    r.state.sendOk = false;
+    expect(await r.verbs.handle(close(), process.pid)).toMatchObject({ ok: true });
+    expect(await r.flags.get("t-1")).not.toBeNull();
+    expect(r.warnings.join("\n")).toContain("an unflag was not taken");
+  });
+
+  test("the daemon's dirty flag that nothing took is audited unsent and kept as the entry, which `sessions` sends again until taken", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "stuck", undefined);
+    r.state.worktree = { kept: "dirty" };
+    r.state.sendOk = false;
+    await r.verbs.handle(close(), process.pid);
+    expect(r.lines).toContain("flag %1 t-1 dirty unsent daemon");
+    expect(await r.flags.get("t-1")).toMatchObject({ reason: "dirty" });
+    // The session is gone and the entry is a worktree reason: the record is sent the flag, never an unflag.
+    r.state.panes = [];
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).not.toBeNull();
+    r.state.sendOk = true;
+    await r.verbs.handle(sessions, process.pid);
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events.map((event) => `${event.kind}`)).toEqual(["flag", "flag", "flag"]);
+    expect(r.events.at(-1)).toMatchObject({ kind: "flag", taskId: "t-1", reason: "dirty" });
+  });
+
+  test("a round's own dirty flag outlives its session on the record: the prune resends it, never lifts it", async () => {
+    const r = rig();
+    await r.flags.set("t-1", "dirty", "uncommitted edits");
+    r.state.panes = [];
+    await r.verbs.handle(sessions, process.pid);
+    expect(r.events).toEqual([{ kind: "flag", taskId: "t-1", reason: "dirty", note: "uncommitted edits", at: NOW }]);
+    expect(await r.flags.get("t-1")).toBeNull();
+  });
 });
 
 describe("what a screen, the notes and a summary never reach", () => {
