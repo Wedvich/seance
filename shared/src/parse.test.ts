@@ -3059,7 +3059,16 @@ describe("archive-status", () => {
   });
 
   test("an unreadable refused costs that field, not the reply", () => {
-    for (const refused of [{ tasks: -1, since: null }, { tasks: 1.5, since: 3 }, { tasks: 1, since: "x" }, "x", null]) {
+    for (const refused of [
+      { tasks: -1, since: null },
+      { tasks: 1.5, since: 3 },
+      { tasks: 1, since: "x" },
+      { tasks: 3, since: null },
+      { tasks: 0, since: 5 },
+      { tasks: 2, since: -1 },
+      "x",
+      null,
+    ]) {
       const parsed = parseArchiveStatusReply({ ...good, refused });
       expect(parsed).toEqual(good);
       expect(parsed).not.toHaveProperty("refused");

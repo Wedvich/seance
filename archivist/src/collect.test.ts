@@ -248,6 +248,35 @@ describe("collector", () => {
     }
   });
 
+  test("a record refused again keeps its first refusal time, and a get answering null leaves the id held", async () => {
+    const fake = script();
+    const tally = createRefusalTally();
+    const bad = { ...finished("t-b"), createdAt: 1.5 };
+    const gets: string[] = [];
+    const source: ArchiveSource = {
+      ...fake.source,
+      listTasks: () => Promise.resolve({ ok: true, tasks: [{ task: bad, version: 1 }], unreadable: [] }),
+      getTask: (id) => {
+        gets.push(id);
+        return Promise.resolve(id === "t-b" ? { ok: true, task: { task: bad, version: 2 } } : { ok: true, task: null });
+      },
+    };
+    const collector = await start(source, [], createIngestClock(), tally);
+    try {
+      await pollUntil(() => tally.snapshot().tasks === 1, "the listing's refusal tallied");
+      const first = tally.snapshot().since;
+      // Refused again by a named get: same id, so the count and the first time stand.
+      fake.nudge({ at: 2, tasks: ["t-b"] });
+      await pollUntil(() => gets.includes("t-b"), "the named get of the refused task");
+      expect(tally.snapshot()).toEqual({ tasks: 1, since: first });
+      fake.nudge({ at: 3, tasks: ["t-gone"] });
+      await pollUntil(() => gets.includes("t-gone"), "the get answering null");
+      expect(tally.snapshot()).toEqual({ tasks: 1, since: first });
+    } finally {
+      collector.stop();
+    }
+  });
+
   test("the ingest clock notes the store when a listing lands and the registry when a fleet is written", async () => {
     const fake = script();
     const clock = createIngestClock();

@@ -671,7 +671,8 @@ const ARCHIVIST_OFFLINE_NOTE =
 
 /**
  * A healthy collector reads the task listing at least every 10 min (`COLLECT_TIMINGS.pollMs`); an hour without
- * one is a listing failing, which the newest-of-all "last ingest" in the meta line would hide behind the registry.
+ * any task read is a listing failing, which the newest-of-all "last ingest" in the meta line would hide behind the
+ * registry. A named task get also counts as a read, so a listing that fails while nudged gets land stays silent.
  */
 export const ARCHIVIST_STORE_STALE_MS = 60 * 60_000;
 const JOURNAL_HINT = "The archivist's journal says why.";
@@ -753,22 +754,30 @@ export function deriveArchivist(
   };
 }
 
-/** Both lines are this archivist process's own view: its clock and tally start empty at each restart. */
+/**
+ * Both lines are this archivist process's own view: its clock and tally start empty at each restart. Staleness is
+ * judged against `countedAt`, the archivist's own clock when the counts were taken, never the viewer's: a phone
+ * with a skewed clock, or a reply held while the tab was hidden, then shows no false line. Before the first count
+ * pass there is no reference and no stale line.
+ */
 function archivistWarnings(reply: ArchiveStatusResponse, now: number): string[] {
   const warnings: string[] = [];
   const { store } = reply.lastIngest;
-  if (store !== null && now - store > ARCHIVIST_STORE_STALE_MS) {
-    warnings.push(`Last task read from the relay store ${formatSeen(store, now)}. ${JOURNAL_HINT}`);
-  } else if (store === null && reply.onlineSince !== null && now - reply.onlineSince > ARCHIVIST_STORE_STALE_MS) {
-    warnings.push(
-      `No task read from the relay store since it came online ${formatSeen(reply.onlineSince, now)}. ${JOURNAL_HINT}`,
-    );
+  const at = reply.countedAt;
+  if (at !== null) {
+    if (store !== null && at - store > ARCHIVIST_STORE_STALE_MS) {
+      warnings.push(`Last task read from the relay store ${formatSeen(store, at)}. ${JOURNAL_HINT}`);
+    } else if (store === null && reply.onlineSince !== null && at - reply.onlineSince > ARCHIVIST_STORE_STALE_MS) {
+      warnings.push(
+        `No task read from the relay store since it came online ${formatSeen(reply.onlineSince, at)}. ${JOURNAL_HINT}`,
+      );
+    }
   }
   const refused = reply.refused;
   if (refused !== undefined && refused.tasks > 0) {
     const count = `${refused.tasks} finished task${refused.tasks === 1 ? "" : "s"}`;
-    const since = refused.since === null ? "" : ` since ${formatSeen(refused.since, now)}`;
-    warnings.push(`${count} could not be archived${since} (this run). ${JOURNAL_HINT}`);
+    const first = refused.since === null ? "" : `; the first was refused ${formatSeen(refused.since, now)}`;
+    warnings.push(`${count} could not be archived${first}, since the archivist last started. ${JOURNAL_HINT}`);
   }
   return warnings;
 }

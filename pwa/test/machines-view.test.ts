@@ -896,11 +896,22 @@ describe("deriveArchivist", () => {
 
     test("refused tasks warn, worded for one or many, scoped to this run", () => {
       expect(warned({ lastIngest: fresh, refused: { tasks: 1, since: NOW - 3 * HOUR } })).toEqual([
-        "1 finished task could not be archived since 3h ago (this run). The archivist's journal says why.",
+        "1 finished task could not be archived; the first was refused 3h ago, since the archivist last started. The archivist's journal says why.",
       ]);
       expect(warned({ lastIngest: fresh, refused: { tasks: 2, since: null } })).toEqual([
-        "2 finished tasks could not be archived (this run). The archivist's journal says why.",
+        "2 finished tasks could not be archived, since the archivist last started. The archivist's journal says why.",
       ]);
+      expect(warned({ lastIngest: fresh, refused: { tasks: 1, since: NOW - 20_000 } })).toEqual([
+        "1 finished task could not be archived; the first was refused just now, since the archivist last started. The archivist's journal says why.",
+      ]);
+    });
+
+    test("staleness is judged on the archivist's clock: a skewed viewer clock or a reply held for hours adds no line", () => {
+      const lastIngest = { ...fresh, store: NOW - 5 * 60_000 };
+      const skewed = deriveArchivist(entry, { deviceId: "arch-1", reply: { ...reply, lastIngest } }, NOW + 5 * HOUR);
+      expect(skewed?.warnings).toEqual([]);
+      const none = { ...fresh, store: null };
+      expect(warned({ lastIngest: none, onlineSince: NOW - 2 * HOUR, countedAt: null })).toEqual([]);
     });
 
     test("both lines together, stale first", () => {

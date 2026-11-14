@@ -12803,10 +12803,18 @@ prompt text or any act on the fleet.
   newest of every source's `lastIngest`, and `store` was also noted by account reads. Now only a
   task listing or a named task get notes `store`, and the card adds a line in `.fleet-warn`
   (no new style, per A36a) under its rows, online only, from a reply held for that device, for
-  each of two signals. _Stale reads:_ `store` older than an hour (`ARCHIVIST_STORE_STALE_MS`;
-  the listing polls every 10 minutes), or null an hour after `onlineSince`. _Refused rows:_ the
-  reply's `refused.tasks` above 0, worded "N finished tasks could not be archived since <age>
-  (this run)". `refused` counts distinct tasks, not attempts (a refused record is refused again
+  each of two signals. _Stale reads:_ `store` more than an hour (`ARCHIVIST_STORE_STALE_MS`;
+  the listing polls every 10 minutes) before the reply's `countedAt`, or null an hour after
+  `onlineSince` by the same reference. The comparison stays on the archivist's clock (a skewed
+  phone, or a reply held while the tab was hidden, adds no line), and a reply with no `countedAt`
+  yet (first count pass pending) has none. It is "no task read at all": a named task get also
+  notes `store` (a real task read), so a listing failing while nudged gets land stays silent,
+  and `onlineSince` is the seat's last register, so a seat that re-registers more often than hourly
+  with no read ever landed hides the null line; both are accepted. A seat that reconnects after a
+  long outage can show the line for up to one 60 s refresh until its catch-up listing lands.
+  _Refused rows:_ the reply's `refused.tasks` above 0, worded "N finished tasks could not be
+  archived; the first was refused <age>, since the archivist last started" (no age clause when
+  `since` is null). The parser holds `since` null exactly when `tasks` is 0, else drops the field. `refused` counts distinct tasks, not attempts (a refused record is refused again
   every pass), and `since` is the oldest first refusal, since that says how long records have
   been at risk of A16's prune; ids stay in the archivist's memory and leave when a later write of
   the task goes through. Both signals are process-only: a restart empties the tally, and a
