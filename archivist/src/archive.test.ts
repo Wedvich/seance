@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ArchiveTasksRequest, Task } from "@seance/shared";
+import { ARCHIVE_TASK_OUTCOMES, statesIn, type ArchiveTasksRequest, type Task } from "@seance/shared";
 import {
   Archive,
   ARCHIVE_SCHEMA_VERSION,
@@ -78,6 +78,62 @@ describe("archive.sqlite", () => {
     expect((await stat(`${path}-wal`)).mode & 0o777).toBe(0o600);
   });
 
+  test("a schema-1 archive upgrades in place: every row and column kept, the index rebuilt, superseded admitted", async () => {
+    archive.close();
+    await rm(path);
+    await rm(`${path}-wal`, { force: true });
+    await rm(`${path}-shm`, { force: true });
+    const old = new Database(path, { strict: true });
+    // Schema 1 as migration 0 → 1 wrote it: the old file's frozen shape is what this test is about.
+    old.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, version INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('done', 'failed', 'cancelled')),
+        repo TEXT NOT NULL, title TEXT, created_at INTEGER NOT NULL, device_id TEXT, machine TEXT, account TEXT,
+        pr_url TEXT, pr_state TEXT, done_by TEXT, failure TEXT, record TEXT NOT NULL,
+        first_archived_at INTEGER NOT NULL, archived_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX tasks_created ON tasks (created_at);
+      CREATE TABLE accounts (key TEXT PRIMARY KEY, alias TEXT, version INTEGER NOT NULL,
+        first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) STRICT;
+      CREATE TABLE machines (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL, build TEXT,
+        connected INTEGER NOT NULL, in_registry INTEGER NOT NULL, first_seen_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL) STRICT;
+      CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('first_seen', 'connected', 'gone', 'build_changed', 'term_changed')),
+        device_id TEXT NOT NULL, name TEXT, build TEXT, previous_build TEXT, term INTEGER, previous_term INTEGER) STRICT;
+      CREATE INDEX events_at ON events (at);
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      INSERT INTO tasks VALUES ('t-full', 3, 'done', 'seance', 'Full', 100, 'dev-a', 'alpha', 'account:abc',
+        'https://github.com/o/r/pull/1', 'merged', 'merged', NULL, '{"id":"t-full"}', 200, 300);
+      INSERT INTO tasks VALUES ('t-bare', 1, 'failed', 'seance', NULL, 50, NULL, NULL, NULL,
+        NULL, NULL, NULL, 'dispatch_unconfirmed', '{"id":"t-bare"}', 60, 60);
+      INSERT INTO events (at, kind, device_id) VALUES (5, 'first_seen', 'dev-a');
+      PRAGMA user_version = 1;
+    `);
+    const all = (db: Database): unknown[] => db.query("SELECT * FROM tasks ORDER BY id").all();
+    const before = all(old);
+    old.close();
+
+    archive = await Archive.open(path);
+    expect(rows<{ user_version: number }>("PRAGMA user_version")[0]?.user_version).toBe(ARCHIVE_SCHEMA_VERSION);
+    const after = new Database(path, { readonly: true });
+    try {
+      expect(all(after)).toEqual(before);
+    } finally {
+      after.close();
+    }
+    expect(
+      rows<{ name: string; tbl_name: string }>("SELECT name, tbl_name FROM sqlite_schema WHERE type = 'index'"),
+    ).toContainEqual({ name: "tasks_created", tbl_name: "tasks" });
+    expect(rows<{ name: string }>("SELECT name FROM sqlite_schema WHERE name = 'tasks_v2'")).toEqual([]);
+    expect(rows<{ n: number }>("SELECT count(*) AS n FROM events")[0]?.n).toBe(1);
+    const superseded = taskRow(task({ id: "t-passed", state: "superseded" }), 2, context);
+    if (superseded === null) throw new Error("superseded refused");
+    expect(archive.upsertTask(superseded, 400)).toBe(true);
+    expect(archive.counts().tasks.rows).toBe(3);
+  });
+
   test("refuses a file at a schema newer than this build", async () => {
     archive.close();
     const db = new Database(path);
@@ -95,6 +151,17 @@ describe("task rows", () => {
     }
     for (const state of ["done", "failed", "cancelled"] as const) {
       expect(taskRow(task({ state }), 2, context)?.state).toBe(state);
+    }
+  });
+
+  test("every finished state is written to SQLite and found by its outcome filter", () => {
+    for (const state of statesIn("finished")) {
+      const row = taskRow(task({ id: `t-${state}`, state }), 2, context);
+      if (row === null) throw new Error(`${state} refused`);
+      expect(archive.upsertTask(row, 10)).toBe(true);
+    }
+    for (const outcome of ARCHIVE_TASK_OUTCOMES) {
+      expect(archive.queryTasks({ outcome }, 10).rows.map((r) => r.id)).toEqual([`t-${outcome}`]);
     }
   });
 

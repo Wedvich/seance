@@ -12,7 +12,8 @@ import {
 /**
  * `archive.sqlite`: the fleet's long-term history (DESIGN.md, Archivist, A16, A18,
  * A21, A23, A24). Append-only by construction — no statement here removes a row
- * (archivist/test/layering.test.ts holds that), none lowers a task's version or
+ * (archivist/test/layering.test.ts holds that, and pins migration 2's one rebuild
+ * drop, which moves rows), none lowers a task's version or
  * rewrites an event; a purge is SQL on the box. Times are ms since the epoch, as
  * the task record's own.
  */
@@ -30,7 +31,9 @@ const kindList = FLEET_EVENT_KINDS.map((kind) => `'${kind}'`).join(", ");
 /**
  * Entry `n` takes an archive at `PRAGMA user_version` n to n + 1, all in the
  * one transaction that opens it. History is never dropped by a migration: the
- * archive is the only copy of what the store has pruned.
+ * archive is the only copy of what the store has pruned. A table rebuild moves
+ * its rows, count-checked, before the old table goes. Entries are frozen: each
+ * builds the schema of its own version, never from a constant that moves later.
  */
 const MIGRATIONS: readonly ((db: Database) => void)[] = [
   // 0 → 1: tasks, accounts, machines, fleet events, and the last verified term.
@@ -86,6 +89,48 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
       CREATE INDEX events_at ON events (at);
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
     `),
+  // 1 → 2: `superseded` joins `state`'s CHECK. SQLite cannot alter a CHECK, so the table is rebuilt: every row copied,
+  // the count checked before the old table goes (a throw rolls the whole open back to schema 1), so the drop moves
+  // rows and never removes one.
+  (db) => {
+    db.exec(`
+      CREATE TABLE tasks_v2 (
+        id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('done', 'failed', 'cancelled', 'superseded')),
+        repo TEXT NOT NULL,
+        title TEXT,
+        created_at INTEGER NOT NULL,
+        device_id TEXT,
+        machine TEXT,
+        account TEXT,
+        pr_url TEXT,
+        pr_state TEXT,
+        done_by TEXT,
+        failure TEXT,
+        record TEXT NOT NULL,
+        first_archived_at INTEGER NOT NULL,
+        archived_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO tasks_v2 (id, version, state, repo, title, created_at, device_id, machine, account, pr_url, pr_state,
+          done_by, failure, record, first_archived_at, archived_at)
+        SELECT id, version, state, repo, title, created_at, device_id, machine, account, pr_url, pr_state,
+          done_by, failure, record, first_archived_at, archived_at
+        FROM tasks;
+    `);
+    const count = (table: "tasks" | "tasks_v2"): number =>
+      db.query<{ n: number }, []>(`SELECT count(*) AS n FROM ${table}`).get()?.n ?? 0;
+    const held = count("tasks");
+    const copied = count("tasks_v2");
+    if (copied !== held) {
+      throw new Error(`archive.sqlite migration 2 copied ${copied} of ${held} task rows — left at schema 1`);
+    }
+    db.exec(`
+      DROP TABLE tasks;
+      ALTER TABLE tasks_v2 RENAME TO tasks;
+      CREATE INDEX tasks_created ON tasks (created_at);
+    `);
+  },
 ];
 
 export const ARCHIVE_SCHEMA_VERSION = MIGRATIONS.length;
