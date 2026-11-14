@@ -58,8 +58,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - **docs/custodian.md** — spec, four parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
   Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
   and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
-  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind", so
-  rounds run on any machine with the `custodian` key; nudge, interrupt, flags, health and the Machines row are not built): the
+  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind";
+  rounds are held behind `ROUNDS_LIVE` until build item 4b, which contains the round's sandbox — the verbs bound
+  only what goes through them; nudge, interrupt, flags, health and the Machines row are not built): the
   custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
@@ -410,7 +411,9 @@ green:
   other act, or binding by a field, is a threat-model change.
 - **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
   "The custodian frame kind"): the round's four verbs `sessions`, `close <pane>`, `notes` and `done`, and no other
-  act. It is bound only by the kernel-reported peer pid, to a process of the one live pane carrying
+  act, built but held with the seat (`ROUNDS_LIVE`: no round runs, so the frame answers `unsupported`). The verbs
+  bound only what goes through them: a round's sandbox can still reach the tmux socket and the daemon's plain ops
+  until docs/custodian.md item 4b. It is bound only by the kernel-reported peer pid, to a process of the one live pane carrying
   `@seance-custodian` **that the seat record names as the running round** (`seat.roundPane()`), else `not_custodian`
   — as is every host that names no peer (`peerPidSupported`) and any pid not given, never a claimed pane, an env var
   or a field of the frame. A frame carries no path, branch, task id or session id. `close` re-reads the pane at the
@@ -435,7 +438,10 @@ green:
   while the daemon is not draining. A `custodian` config key lives only in the machine's own `config.json`.
   Its fence (`custodian-fence.ts`) is generated: the deny list comes from constants and the one `COMMANDS`
   table, so a new `seanced` command is denied to a round by default, and it is for a cheap model's mistakes,
-  never a boundary — what bounds an injected round is the daemon's own verbs. The daemon reads an exclave's
+  never a boundary. What would bound an injected round is the daemon's own verbs, but they bound only what goes
+  through them: today a round's sandbox can still reach the tmux socket (`capture-pane` needs it) and the daemon's
+  plain local ops, and read on-disk secrets with github.com reachable, so rounds stay held (`ROUNDS_LIVE`) until
+  docs/custodian.md item 4b contains the round. The daemon reads an exclave's
   `.claude.json` for the round dir's trust and never writes it. The round dir and the tmp dir are made 0700, the tmp
   dir under the literal `/tmp/seance-cu-` (never `tmpdir()`, whose length makes Claude Code fall back to a shared
   `/tmp`), and the seat record in `state.json` is validated (`custodianSeatOf`) before the daemon closes a pane

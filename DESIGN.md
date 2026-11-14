@@ -1061,8 +1061,11 @@ nothing checked it. The last is the gap they leave.
   directory and a short host list, its tools are `Bash` and `Read`, and `--permission-mode dontAsk` refuses what
   no rule allows instead of asking. The deny list (`custodian-fence.ts`) is generated from constants and the
   one `COMMANDS` table, so a new `seanced` command is denied to it by default, and it is **for a cheap model's
-  mistakes, never a boundary**: `bash -c` and interpreters get around it, and the daemon's verbs, which check
-  every act (custodian 4, built: "The custodian frame kind"), are what hold under injection. The round's seed, notes and agent text never reach a
+  mistakes, never a boundary**: `bash -c` and interpreters get around it. The daemon's verbs check every act that
+  goes through them (custodian 4, built: "The custodian frame kind"), and that is all they bound: **today a round's
+  sandbox can still reach the tmux socket and the daemon's plain local ops, and read on-disk secrets with
+  github.com reachable** (2026-11-14, code review of custodian 4), so rounds stay held (`ROUNDS_LIVE`) until
+  docs/custodian.md's build item 4b contains the round. The round's seed, notes and agent text never reach a
   log or an audit line; the seat's lines name an exclave id, a pane id, a reason and an outcome.
 - **A round is never a session** (2026-11-13). It carries the tmux pane option `@seance-custodian`, and every
   pane reader skips it through its format-field parse (`listClaudeSessions`, `listPanes`, `parsePanePids`,
@@ -8621,7 +8624,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   missed often enough that worktrees piled up, so "Nothing lost" adds one, as a further way to pass whose
   failure only keeps.
 
-## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), live with custodian 4
+## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), held until docs/custodian.md item 4b
 
 A daemon with a `custodian` key in its `config.json` holds one seat, decides once a minute with no model call
 that a round is due, picks the exclave to run it in, starts a fresh Claude session behind a generated fence,
@@ -8638,17 +8641,25 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   that is off does. One predicate, `seatEnabled` (`custodian-seat.ts`), says whether a seat exists, and both the
   capability bit (`buildInfo`) and the capability call it, so the two cannot disagree. It is true when
   `config.custodian` is set (the key lives only in the machine's own file, never in a frame, the PWA or another
-  machine), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
+  machine), rounds are live (`ROUNDS_LIVE`, below), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
   start a round in a developer's tmux), and the platform is macOS or Linux. WSL reports `linux`,
   gets the Linux fence and is untested.
-- **Rounds were held until the verbs existed (owner decision, 2026-11-13; lifted with custodian 4).** A round
-  with no verb could only look at the session list and idle to its deadline, re-running every ~25 minutes on any
-  machine whose `custodian` key was set for reap's defaults (C35), so the seat was off in production behind a
-  constant (`ROUNDS_LIVE`) and a test seam (`CustodianSeatOpts.live`). Both are gone: a `custodian` key now
-  means a seat, and so a sampler, retention, the capability bit and `doctor`'s probes. **A machine that carries
-  the key only for reap's defaults (`CUSTODIAN_REAP_DEFAULTS`) therefore starts running rounds on upgrade**, and
-  on a host that cannot (no `bwrap`, no trusted exclave) logs once and runs none. The cleanup path below still
-  closes the round a daemon without a seat left.
+- **Rounds are held: `ROUNDS_LIVE = false` (owner decisions, 2026-11-13 and 2026-11-14).** First held because no
+  verb existed; custodian 4 built the verbs, and the code review then showed they bound only what goes through
+  them: a live round's sandbox can still reach the tmux socket (it needs it for `capture-pane`) and the daemon's
+  plain local ops, and its reads are unrestricted with github.com reachable. An injected round could run code
+  outside the sandbox (`bash -c "tmux new-window '…'"`, `tmux run-shell`), `send-keys` into any pane (approving a
+  restricted session's permission prompt), send a raw `Plain` `despawn` with `force: true` that skips every
+  `close` check, and read the identity seed, `~/.ssh` and the `gh` credential and send them to GitHub. **The owner
+  decided on 2026-11-14 to hold rounds and contain the round next** (docs/custodian.md, build item 4b: take the
+  tmux socket away, a `capture` verb, the socket refusing other frame kinds from a round's process, `denyRead` for
+  the secrets), rejecting going live first. In production the seat is therefore off: no capability bit, no seat, no
+  sampler, no retention (they run only with a seat, so a held daemon keeps no pane facts), `doctor` quiet (one
+  `ok` line, none of its probes, the `session-events` warn included), the `custodian` frame answered
+  `unsupported`, and the key moves reap's defaults only (`CUSTODIAN_REAP_DEFAULTS`, unchanged). The verbs, the
+  notes, the round log, the round's own `seanced` and the agent's checklist are built and tested behind the seat.
+  `CustodianSeatOpts.live` is the test seam that turns it on. The cleanup path below still runs whenever the seat
+  is not live, so a round left by a daemon that had a seat is closed.
 - **The config (C2).** `model` (default `haiku`, a non-empty string of at most `TASK_REQUEST_LIMITS.model`
   characters), `effort` (default `low`, one of `EFFORTS`: `low`, `medium`, `high`, `xhigh`, `max`, now in
   `shared/src/types.ts` with `isEffort`, so the PWA, Raycast and the daemon validate against one list; Claude
@@ -8803,8 +8814,9 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
     `python3 -c` and other interpreters, and `xargs -n1 rm` (`xargs` with a flag is not unwrapped). The sandbox
     still confines their file writes to the scratch dir, but not `kill`, `tmux send-keys`, a `gh` write or a
     `seanced` command, which act through a signal, a socket or the network. **The fence is for a cheap model's
-    mistakes, never a boundary.** What holds under injection is C19: every change to a session or a worktree is a
-    verb the daemon checks ("The custodian frame kind"). On macOS `launchctl` talks to launchd over Mach, which the profile may
+    mistakes, never a boundary.** The intended bound under injection is C19: every change to a session or a worktree
+    is a verb the daemon checks ("The custodian frame kind"), and it holds only once the round cannot reach the tmux
+    socket or the daemon's plain ops (docs/custodian.md item 4b; rounds are held until then). On macOS `launchctl` talks to launchd over Mach, which the profile may
     allow (not tested).
   - **Platform keys.** macOS runs under `caffeinate -is` (the machine must not sleep mid-round) and lists the
     tmux socket's directory (`#{socket_path}`) and `runDir()` in `network.allowUnixSockets`; without it
@@ -8883,8 +8895,11 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   Claude Code lacks the `session-events` mod, installed and enabled** (`modMissing`, `claude-mod.ts`: the listing
   `seanced mod` already reads per target, `[]` where `claude` is missing or a listing unreadable, so doctor never
   invents a finding): without
-  its frames every session there is `unobserved` and `close` never acts on it. The probes run for any key, since
-  rounds now run for any key.
+  its frames every session there is `unobserved` and `close` never acts on it. **While rounds are held
+  (`ROUNDS_LIVE`) the section is one `ok` line saying so and none of the probes run, the `session-events` warn
+  included:** the key then only sets reap's defaults, and a machine that carries it for that must not start failing
+  `doctor` (and, on Linux, running a `bwrap` probe) for rounds that cannot start. The warn is for the day rounds go
+  live.
 - **Rejected, and why:** a registry role and relay secret as the archivist has (per machine and local: the
   relay has nothing to enforce); writing the trust entry ourselves (races `.claude.json`); counting a round as a session
   slot or skipping it when quota is tight (a full machine is when stuck sessions cost most); and growing
@@ -11471,7 +11486,7 @@ leg covers it) and a real Claude Code session driving the mod end to end. The mo
 own tests drive its hooks through `claude plugin test`, and the daemon suite drives
 the binding with real panes.
 
-### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4)
+### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4), held with the seat
 
 The local socket's sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the
 custodian round's four verbs, `sessions`, `close <pane>`, `notes` and `done` (docs/custodian.md §5, C23–C25,
@@ -11479,6 +11494,13 @@ C31–C34, C37–C39, C40, C42). `seanced custodian <verb>` (`custodian-cli.ts`)
 reply as JSON. Nudge, interrupt and flag (C26–C29), the round's pause and health, and the Machines row are not
 built; the `sessions` reply carries `nudges: 0`, `interrupted: false` and `flag: null` as placeholders so its shape
 does not change when they land.
+
+**Held with the seat.** Nothing here runs in production: the verbs answer only for the round the seat names, and
+a held seat (`ROUNDS_LIVE`, "The custodian's seat") has none, so the frame answers `unsupported`. **The verbs bound
+only what goes through them.** Today a round's sandbox can still reach the tmux socket and the daemon's plain local
+ops, and read on-disk secrets with github.com reachable (docs/custodian.md, build item 4b, is the containment
+that closes these), so an injected round is not limited to the four verbs. What the checks below enforce is what a
+frame can do, not what the round can.
 
 - **The frame is bound by the kernel, to the round the seat record names, and nothing else.** `{v: 1, kind:
   "custodian", verb, …}` with the exact key set for the verb (`parseCustodianFrame`; a `close`'s `pane` must be
@@ -11566,8 +11588,8 @@ does not change when they land.
   section. CRLF reads as LF. The kept text is written 0600 under a 0700 dir through `writeDurable`, in a module-level
   chain since `writeDurable` is not serialized. The reply says the kept keys and the dropped count, never the text.
   `seanced custodian notes --clear` is **the owner's act and never the daemon's** (C39): the CLI truncates the file
-  itself, in the owner's own shell, with no frame sent, so an injected round cannot wipe or probe it (and its
-  sandbox cannot write the state dir anyway); a file that is not there stays absent.
+  itself, in the owner's own shell, with no frame sent, so no frame offers a round a way to wipe it (its sandbox
+  cannot write the state dir, though it can read it until item 4b (d)); a file that is not there stays absent.
 - **`done` (C40, `CustodianSeat.done`)** takes a summary of at most `SUMMARY_MAX` (1 KiB; `too_long`). It is `too_late`
   at or past the round's deadline and `not_custodian` with no round. Accepted, it marks the seat record's round
   `done: true` and then appends the round's **healthy** entry to the round log (code review F7: a `done` the seat could
@@ -11597,16 +11619,22 @@ does not change when they land.
   facts and, where it must, its screen through `tmux capture-pane`, `close` the finished ones, write `notes` as
   `## <pane or task id>` sections plus `## standing`, then `done` with a summary of at most 1 KiB. It nudges and
   flags nothing yet.
-- **Threat model.** The round reads untrusted text and may call any verb with any argument; the bounds are these
-  checks. A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The
+- **Threat model.** The round reads untrusted text and may call any verb with any argument; these checks bound
+  every act that goes through a verb, and nothing else (see "Held with the seat" above: until item 4b the round's
+  sandbox can reach the tmux socket and the daemon's plain ops, so rounds stay held). A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The
   frame has four acts and takes no path, branch, session id, task id or command: a pane id (re-read and bound to
   `ours` by the daemon), text that is stored or counted and never executed, and a summary. Notes persist
   model-written text for the next round, the one way an injection could outlive a round, bounded by the cap, the
   key rules, the per-key pruning, never being logged, never leaving the machine, and the owner's `--clear`. The
   same-uid process that makes itself a descendant of the round's pane can call the verbs; it could already type into
   any pane. A frame's `close` cannot reach a foreign pane, a marked one, the round's own, a pane whose last state
-  is `needs-input` or `busy`, or one with a draft.
-- **Rejected, and why:** binding by `$TMUX_PANE` or any field of the frame (an env var and a claim, both the
+  is `needs-input` or `busy`, or one with a draft. What no frame check can bound, and item 4b (a)–(d) is to: the
+  round's `bash -c` reaching the tmux socket (`send-keys`, `run-shell`, `new-window`), the daemon's other frame
+  kinds from the round's process (a `Plain` `despawn` with `force: true` skips `close`'s checks), and the
+  round's reads of `state.json`'s identity seed, `~/.ssh` and the `gh` credential with github.com reachable.
+- **Rejected, and why:** going live before item 4b (owner, 2026-11-14: verbs that look like a bound while the
+  round has a wider reach would make `doctor`, the docs and this threat model say the round is contained when it is
+  not); binding by `$TMUX_PANE` or any field of the frame (an env var and a claim, both the
   sender's own); a `close` that takes a task id (a task's pane is not unique across a continuation, and the pane id
   is what the daemon re-reads); `rm`/`git worktree remove` left to the agent, which C19 forbids and the fence
   only advises; `--force` on the removal, or removing a dirty worktree after a warning; clearing the notes through

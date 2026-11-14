@@ -27,8 +27,8 @@ const usage = (): void => {
 };
 
 /**
- * C39's owner act: truncated here, from the owner's own shell, never through the daemon — an injected round must not be
- * able to wipe the notes, and its sandbox cannot write the state dir anyway. A file that is not there is left absent.
+ * C39's owner act: truncated here, from the owner's own shell, never through the daemon — no frame offers a round a
+ * way to wipe the notes, and its sandbox cannot write the state dir. A file that is not there is left absent.
  */
 async function clearNotes(): Promise<void> {
   const path = custodianNotesPath();

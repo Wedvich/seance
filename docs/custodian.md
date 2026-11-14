@@ -4,8 +4,11 @@
 custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session events"), 3 (the
 seat and the round, now DESIGN.md, "The custodian's seat") and 4 (the `custodian` frame with `sessions`,
 `close`, `notes` and `done`, the round log, now DESIGN.md, "The custodian frame kind") built and folded
-into DESIGN.md. Rounds run on any machine whose config carries the `custodian` key; what is left is the
-Machines row, the shell's status verbs, flags, nudge and interrupt (items 5–8).** Decided with the owner on 2026-11-12 and 2026-11-13. Like
+into DESIGN.md. Rounds are held behind `ROUNDS_LIVE` (owner decision, 2026-11-14): the verbs bound only
+what goes through them, and a round's sandbox can still reach the tmux socket and the daemon's plain ops
+and read on-disk secrets, so item 4b (contain the round) comes before any round runs. What is left is 4b,
+the Machines row, the shell's status verbs, flags, nudge and interrupt (items 5–8).** Decided with the owner
+on 2026-11-12, 2026-11-13 and 2026-11-14. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -85,7 +88,8 @@ Each is the owner's unless marked _derived_.
 
 - **C18–C21.** Built: DESIGN.md, "The custodian's seat". The deny list there is generated, with the additions
   the launch battery found (tmux's shell runners and state setters, `gh`'s further write verbs). C19 is
-  what holds under injection, and is the verbs' (item 4, built: DESIGN.md, "The custodian frame kind").
+  what is meant to hold under injection, and is the verbs' (item 4, built: DESIGN.md, "The custodian frame
+  kind"); it holds only once the round can reach nothing but the verbs (item 4b).
 - **C22.** Raw keystrokes into another session's pane are never the custodian's. docs/messaging.md
   rejected `send-keys` delivery on evidence (an injected Enter approved a permission prompt,
   pasted text answered an AskUserQuestion, text merged into a draft); a nudge goes through that
@@ -259,10 +263,17 @@ To be folded into DESIGN.md's as each part lands. The round as a reader of untru
 fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat model).
 
 - **A new reader of untrusted text that can act.** The agent reads every session's screen. Assume
-  an injection can make it call any verb with any argument. The bounds are the verbs' own checks:
-  a close only of a session at rest for the grace period, with the worktree removed only under
+  an injection can make it call any verb with any argument. The verbs' own checks bound only what goes
+  through them: a close only of a session at rest for the grace period, with the worktree removed only under
   C32; a nudge only as a message, counted; one Escape, only on a long-unchanged busy session, never
   on one waiting on the owner; a flag, bounded.
+- **What the verbs do not bound (why rounds are held).** Today a round's sandbox can reach the tmux
+  socket (it needs it for `capture-pane`) and the daemon's plain local ops, and its reads are unrestricted
+  with github.com reachable. An injected round can therefore run code outside the sandbox
+  (`bash -c "tmux new-window '…'"`, `tmux run-shell`, which the deny list does not stop), `send-keys` into
+  any pane (approving a restricted session's permission prompt, which C22 rejected for nudges), send a raw
+  `Plain` `despawn` frame with `force: true` that skips every `close` check, and read on-disk secrets
+  (`state.json`'s identity seed, `~/.ssh`, the `gh` credential) and send them to GitHub. Item 4b closes each.
 - **A wrong close is the worst accepted outcome.** It costs a continuation of the task, never work:
   C32 keeps anything that exists only locally.
 - **Nudge text is a new path from one session's output into another's input**, through a model.
@@ -271,7 +282,8 @@ fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat 
 - **Notes persist model-written text** (C39).
 - **Peer binding.** Only the round's own pane may call the verbs. A same-user process that can
   make itself a descendant of that pane can call them; that process could already type into any
-  pane.
+  pane. This is not the converse: nothing yet stops the round's own pane from calling the other
+  frame kinds (item 4b (c)).
 
 ## Rejected alternatives
 
@@ -299,6 +311,13 @@ fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat 
 - **A registry role with a relay secret, as the archivist has.** The archivist is one seat per
   fleet that the relay must refuse a second of. The custodian is per machine and local; the relay
   has nothing to enforce.
+- **Going live before item 4b (a)–(d).** Rejected by the owner on 2026-11-14. The verbs are the
+  intended bound, but a round's sandbox reaches the tmux socket and the daemon's plain ops and reads
+  on-disk secrets with github.com reachable, so an injection into any session's screen text could run
+  code outside the sandbox, approve a restricted session's prompts, force-despawn any pane or exfiltrate
+  the identity seed or the `gh` token. Shipping verbs that look like a bound while the round has a
+  wider reach is worse than shipping none: the doctor, the docs and the threat model would all say the
+  round is contained when it is not.
 - **Names.** `janitor` (not the theme), `reaper` (`seanced reap` is a different mechanism, and it
   names only the closing half), `sentinel` and `warden` (the watch without the cleanup), `cerberus`
   (one entity, not a job held per machine), `familiar`, `sexton`, `acolyte`, `nightwatch`. A run is
@@ -319,7 +338,35 @@ delivery); nothing else here does.
    with its agent definition and fence, the deadline, and audit origin `custodian` (C1–C4,
    C8–C17, C18–C21).~~ Built 2026-11-13 (`daemon/src/custodian-seat.ts`).
 4. ~~The `custodian` frame kind with `sessions`, `close`, `notes` and `done`, and the round log
-   (C23–C25, C37–C39, C42).~~ Built 2026-11-14 (`daemon/src/custodian-verbs.ts`); rounds are live.
+   (C23–C25, C37–C39, C42).~~ Built 2026-11-14 (`daemon/src/custodian-verbs.ts`); rounds stay held
+   (`ROUNDS_LIVE`) until 4b.
+   4b. **Contain the round**, then remove `ROUNDS_LIVE`. Decided with the owner on 2026-11-14 after the
+   code review of item 4 showed the reach in the threat model above. Four changes, one PR (they are
+   one claim, that the round can reach only the verbs):
+   - **(a) Take the tmux socket from the round's sandbox.** macOS: drop tmux's socket dir from
+     `allowUnixSockets` (keep the daemon's run dir, which the verbs need). Linux has no per-path
+     socket filter (`allowAllUnixSockets` is all-or-nothing), so mask the tmux socket's dir with
+     `denyRead`. This needs a spike on a real round first, to prove bwrap's mask stops `connect()` and
+     not only `stat`; if it does not, the fallback is a second tmux server the round alone can reach,
+     never a wider fence.
+   - **(b) A `seanced custodian capture <pane>` verb.** The round can no longer run `capture-pane`, so
+     the daemon does: it already captures the screen to hash it. The verb returns the text to the
+     round only, for `ours` panes and never the round's own, is never logged or audited with text, and
+     replaces `tmux capture-pane` in the agent's checklist (`daemon/custodian/agent.md`) and the
+     fence's allowances.
+   - **(c) The local socket refuses every non-`custodian` frame kind** (Plain ops, broker,
+     `session-event`, `message`, `inbox`) from a peer whose ancestors include a `@seance-custodian`
+     pane, by the same kernel peer pid the verbs bind by. Refused where the host names no peer, as
+     the verbs are.
+   - **(d) `denyRead` for `stateDir()`** (identity seed, `state.json`; the round's own verbs and
+     notes are the daemon's, reached over the socket), **`~/.ssh`, `~/.config/gh` and Claude's
+     credential stores.** The round's `gh` token for reads and its writes must come some other way
+     than a file it can read; check where macOS keeps `gh`'s credential (keychain storage is not a
+     path to deny, and may need the round's `gh` run through a daemon-side verb or a scoped token).
+     Then remove `ROUNDS_LIVE`, `CustodianSeatOpts.live` and `seatLive`, and fold the held-branch tests
+     into ones that run rounds. The dev check is a real round on Linux and macOS: the `--agents` tools
+     shape, the peer pid under bwrap and Seatbelt, and Bun running the round's own `seanced` inside the
+     sandbox, plus an injected-round drill that tries each of the reaches above and is refused.
 5. `MachineStatus.cu` and the Machines row; `seanced custodian status | log | round | pause |
    resume` at the shell (C40, C43, C45).
 

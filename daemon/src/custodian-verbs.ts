@@ -31,10 +31,12 @@ import { capturePane } from "./tmux.ts";
 
 /**
  * The custodian round's verbs, the `custodian` frame kind on the local socket (docs/custodian.md §5; DESIGN.md, "The
- * custodian frame kind"). They are what bounds an injected round: a frame is acted on only for a process of the
+ * custodian frame kind"). They bound only what goes through them: a frame is acted on only for a process of the
  * live pane the seat record names as the running round, found by the kernel's peer pid and never by a field, and
  * `close` acts only on a session at rest, through the graceful despawn, the exit-status harvest or a `closing`-first
- * kill. Everything outside effects goes through `CustodianVerbDeps`. Nothing a pane's screen, the notes or the
+ * kill. They do not bound a round's other reach (the tmux socket, the daemon's plain ops, on-disk secrets), which is
+ * why rounds stay held (`ROUNDS_LIVE`) until docs/custodian.md item 4b. Everything outside effects goes through
+ * `CustodianVerbDeps`. Nothing a pane's screen, the notes or the
  * summary held is ever logged, audited or returned: a screen is read in memory to judge it and dropped.
  */
 
