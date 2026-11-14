@@ -98,7 +98,7 @@ describe("manifestOf", () => {
       name,
       type,
       size,
-      upload: { kind: "stored" as const, id: `0000000${i}-0000-4000-8000-000000000000`, hash: "h".repeat(43) },
+      upload: { kind: "stored" as const, id: `0000000${i}-0000-4000-8000-000000000000`, hash: "h".repeat(43), at: 0 },
     }));
     const partly = stored.map((f, i) => (i === 0 ? { ...f, upload: { kind: "uploading" as const, percent: 50 } } : f));
     expect(manifestOf(partly)).toBeNull();

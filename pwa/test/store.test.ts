@@ -59,6 +59,7 @@ import { OLDER_READ_ON_MAX, OLDER_SEARCH_MS } from "../src/older-store.ts";
 import { deriveOlder } from "../src/older-view.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { VERIFY_WAIT_MS } from "../src/upload-queue.ts";
+import { notRestoredText, restoredFile, STORED_MAX_AGE_MS } from "../src/attachments.ts";
 import { pollUntil } from "./poll.ts";
 import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
@@ -4015,6 +4016,51 @@ describe("attachments", () => {
     expect(store.getState().attachments).toEqual([]);
     // The preview is told files ride along, as a flag: never the manifest.
     expect(client.previews.at(-1)).toMatchObject({ attachments: true });
+  });
+
+  test("a file restored after a reload queues with the task as stored, never uploaded again", async () => {
+    const client = capable();
+    const ref = { id: crypto.randomUUID(), name: "shot.png", type: "image/png", size: 6, hash: "h".repeat(43) };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "look at this" }, [], {
+      files: [restoredFile(ref, Date.now())],
+      dropped: 1,
+    });
+    expect(statuses(store)).toEqual(["PNG · 6 B"]);
+    // The prompt may name the file that didn't come back.
+    expect(store.getState().attachNotice).toBe(notRestoredText(1));
+    // No bytes, so no preview: the chip shows its glyph.
+    expect(deriveView(store.getState(), 0).attachments.files[0]?.image).toBeNull();
+    store.addFiles([file("b.txt", "second")]);
+    await settled(() => client.uploads.length === 1, "the new file's upload");
+    await store.spawn();
+    expect(client.uploads.map(decode)).toEqual(["second"]);
+    expect(firstCreate(client).spec.attachments?.[0]).toEqual(ref);
+    expect(store.getState().attachments).toEqual([]);
+  });
+
+  test("at Queue, a file stored too long ago uploads again if its bytes are here, and fails if restored without them", async () => {
+    const client = capable();
+    const old = Date.now() - STORED_MAX_AGE_MS - 1;
+    const ref = { id: crypto.randomUUID(), name: "old.png", type: "image/png", size: 6, hash: "h".repeat(43) };
+    const restored = restoredFile(ref, old);
+    // A form left open past the bound: the file's bytes are still held.
+    const heldId = crypto.randomUUID();
+    const held = {
+      ...restoredFile({ ...ref, id: heldId, name: "held.txt" }, old),
+      file: new Blob(["held"]),
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "look" }, [], { files: [held, restored], dropped: 0 });
+    await store.spawn();
+    expect(client.uploads.map(decode)).toEqual(["held"]);
+    expect(client.creates).toEqual([]);
+    const [again, failed] = store.getState().attachments;
+    expect(again?.upload).toMatchObject({ kind: "stored" });
+    expect(again?.upload).not.toMatchObject({ id: heldId });
+    expect(failed?.upload).toMatchObject({ kind: "failed", code: "stale" });
+    // A second press does not send the bytes-less file through an upload that can only fail as unread.
+    await store.spawn();
+    expect(client.uploads).toHaveLength(1);
+    expect(store.getState().attachments[1]?.upload).toMatchObject({ kind: "failed", code: "stale" });
   });
 
   test("a refused upload shows on its chip and blocks the queue with why; the next Queue press retries only it", async () => {

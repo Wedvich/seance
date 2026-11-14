@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { parseTask } from "@seance/shared";
 // Type-only, so erased: the module itself loads below, after the localStorage fake.
 import type { HeldTask } from "../src/state.ts";
+import type { PickedFile } from "../src/attachments.ts";
 
 /**
  * localStorage is an external boundary Bun does not provide, so it is faked here
@@ -25,19 +26,23 @@ Object.defineProperty(globalThis, "localStorage", {
 });
 
 const {
+  dropFormAttachments,
   dropLegacyHeld,
   dropLegacyHidden,
   dropLegacyPending,
   FORM_FILES_FRESH_MS,
   readForm,
+  readFormAttachments,
   readFormFiles,
   readHeld,
+  trackFormAttachments,
   trackFormFiles,
   trackHeld,
   writeForm,
   writeFormFiles,
   writeHeld,
 } = await import("../src/persist.ts");
+const { STORED_MAX_AGE_MS } = await import("../src/attachments.ts");
 const { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, WORKTREE_REPOS_MAX } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -356,7 +361,7 @@ describe("the form's files before a share", () => {
   });
 
   test("tracks the form, and restamps on hide", () => {
-    let attachments: readonly unknown[] = [];
+    let attachments: readonly Pick<PickedFile, "upload">[] = [];
     let spawning = false;
     const listeners: (() => void)[] = [];
     let flush = (): void => {};
@@ -370,12 +375,119 @@ describe("the form's files before a share", () => {
       },
     );
     expect(readFormFiles()).toEqual({ files: 0, submitting: false });
-    attachments = [1, 2];
+    // A stored file comes back after the reload, so it is no cost of one.
+    attachments = [{ upload: { kind: "waiting" } }, { upload: { kind: "uploading", percent: 3 } }, storedFile(0)];
     spawning = true;
     for (const listener of listeners) listener();
     expect(readFormFiles()).toEqual({ files: 2, submitting: true });
     store.clear();
     flush();
     expect(readFormFiles()).toEqual({ files: 2, submitting: true });
+  });
+});
+
+function storedFile(i: number, at: number = Date.now()): PickedFile {
+  return {
+    key: `k${i}`,
+    file: new Blob(["x"]),
+    name: `shot-${i}.png`,
+    type: "image/png",
+    size: 1,
+    upload: { kind: "stored", id: `0000000${i}-0000-4000-8000-000000000000`, hash: "h".repeat(43), at },
+  };
+}
+
+function refOf(file: PickedFile): Record<string, unknown> {
+  if (file.upload.kind !== "stored") throw new Error("not stored");
+  return { id: file.upload.id, name: file.name, type: file.type, size: file.size, hash: file.upload.hash };
+}
+
+function writeRaw(value: unknown): void {
+  store.set("seance:form-attachments", JSON.stringify(value));
+}
+
+describe("the form's stored files across a reload", () => {
+  function track(initial: readonly PickedFile[]): { set(next: readonly PickedFile[]): void } {
+    let attachments = initial;
+    const listeners: (() => void)[] = [];
+    trackFormAttachments({
+      subscribe: (listener) => void listeners.push(listener),
+      getState: () => ({ attachments }),
+    });
+    return {
+      set(next) {
+        attachments = next;
+        for (const listener of listeners) listener();
+      },
+    };
+  }
+
+  test("only stored files come back, as stored chips without bytes", () => {
+    const form = track([]);
+    const waiting: PickedFile = { ...storedFile(1), upload: { kind: "waiting" } };
+    form.set([storedFile(0, 5_000), waiting, storedFile(2, 6_000)]);
+    const { files: back, dropped } = readFormAttachments(7_000);
+    expect(dropped).toBe(0);
+    const hash = "h".repeat(43);
+    expect(back.map((f) => [f.name, f.file, f.upload])).toEqual([
+      ["shot-0.png", null, { kind: "stored", id: "00000000-0000-4000-8000-000000000000", hash, at: 5_000 }],
+      ["shot-2.png", null, { kind: "stored", id: "00000002-0000-4000-8000-000000000000", hash, at: 6_000 }],
+    ]);
+    expect(new Set(back.map((f) => f.key)).size).toBe(2);
+  });
+
+  test("removing the last stored file, or queueing it, clears the key", () => {
+    const form = track([]);
+    form.set([storedFile(0)]);
+    expect(store.has("seance:form-attachments")).toBe(true);
+    form.set([]);
+    expect(store.has("seance:form-attachments")).toBe(false);
+  });
+
+  test("a progress tick costs no write", () => {
+    const form = track([storedFile(0)]);
+    store.delete("seance:form-attachments");
+    form.set([storedFile(0), { ...storedFile(1), upload: { kind: "uploading", percent: 40 } }]);
+    expect(store.has("seance:form-attachments")).toBe(false);
+  });
+
+  test("a file past the age bound, or stamped ahead, is dropped, and the boot write clears it", () => {
+    writeRaw([
+      { ...refOf(storedFile(0)), at: 1_000 },
+      { ...refOf(storedFile(1)), at: 1_000 + STORED_MAX_AGE_MS },
+      { ...refOf(storedFile(2)), at: 3_000 + STORED_MAX_AGE_MS },
+    ]);
+    const { files, dropped } = readFormAttachments(2_000 + STORED_MAX_AGE_MS);
+    expect(files.map((f) => f.name)).toEqual(["shot-1.png"]);
+    expect(dropped).toBe(2);
+    track(readFormAttachments(10 * STORED_MAX_AGE_MS).files);
+    expect(store.has("seance:form-attachments")).toBe(false);
+  });
+
+  test("anything the manifest parser would refuse restores nothing, and says how many", () => {
+    const at = Date.now();
+    const bad: unknown[] = [
+      [{ ...refOf(storedFile(0)), at, hash: "short" }],
+      [
+        { ...refOf(storedFile(0)), at },
+        { ...refOf(storedFile(0)), at },
+      ],
+      [{ ...refOf(storedFile(0)), at: "now" }],
+      [null],
+      { not: "a list" },
+    ];
+    for (const value of bad) {
+      writeRaw(value);
+      expect(readFormAttachments()).toEqual({ files: [], dropped: Array.isArray(value) ? value.length : 1 });
+    }
+    // Unparseable storage holds nothing it could count.
+    store.set("seance:form-attachments", "{");
+    expect(readFormAttachments()).toEqual({ files: [], dropped: 0 });
+  });
+
+  test("a new key or relay clears the stored files", () => {
+    track([storedFile(0)]);
+    dropFormAttachments();
+    expect(readFormAttachments()).toEqual({ files: [], dropped: 0 });
   });
 });

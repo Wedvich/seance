@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import { dropFormAttachments } from "../persist.ts";
 import { storeBearer, storePsk, storeRelayUrl } from "../relay/keys.ts";
 
 /** Stands in for a secret that is already stored: the PSK cannot be read back, and the bearer is not worth showing. */
@@ -59,6 +60,9 @@ export function useCredentials(stored: { relayUrl: string; hasBearer: boolean; h
         return false;
       }
     }
+    // Files stored under another key or on another relay would only come back as a spawn refused
+    // `attachment_unavailable`.
+    if (nextPsk !== "" || relayUrl.trim() !== stored.relayUrl) dropFormAttachments();
     storeRelayUrl(relayUrl.trim());
     if (nextBearer !== "") storeBearer(nextBearer);
     void navigator.storage?.persist?.();

@@ -1,5 +1,5 @@
 import type { RelayClient } from "@seance/shared";
-import { uploadFailureShort, uploadRefusalText, type PickedFile, type UploadState } from "./attachments.ts";
+import { isStale, uploadFailureShort, uploadRefusalText, type PickedFile, type UploadState } from "./attachments.ts";
 import { attachmentsBlock, attachmentsWithdrawn, deriveAttachmentsAvailability, type AppState } from "./view.ts";
 
 /**
@@ -93,6 +93,7 @@ export class UploadQueue {
   settle(): Promise<void> {
     this.#halted = null;
     this.#requeue(() => true);
+    this.#expireStale(Date.now());
     return new Promise((resolve) => {
       this.#waiters.push(resolve);
       this.#pump();
@@ -146,9 +147,29 @@ export class UploadQueue {
     this.#verifySpent = false;
   }
 
-  /** Puts failed files whose code `again` accepts back in line. */
+  /**
+   * A form left open can hold a stored file until its object nears expiry (`isStale`): one whose
+   * bytes are here goes again under a fresh id, one restored without them fails, to be attached again.
+   */
+  #expireStale(now: number): void {
+    const stale = (f: PickedFile): boolean => f.upload.kind === "stored" && isStale(f.upload.at, now);
+    const { attachments } = this.#getState();
+    if (!attachments.some(stale)) return;
+    const resent = withUpload(attachments, (f) => stale(f) && f.file !== null, { kind: "waiting" });
+    this.#patch({
+      attachments: withUpload(resent, stale, {
+        kind: "failed",
+        code: "stale",
+        short: "too old, attach again",
+        message:
+          "A file on the form was uploaded too long ago to be fetched in time. Remove the one marked failed and attach it again. Nothing was queued.",
+      }),
+    });
+  }
+
+  /** Puts failed files whose code `again` accepts back in line; never one without bytes, which can't go again. */
   #requeue(again: (code: string) => boolean): void {
-    const retried = (f: PickedFile): boolean => f.upload.kind === "failed" && again(f.upload.code);
+    const retried = (f: PickedFile): boolean => f.upload.kind === "failed" && f.file !== null && again(f.upload.code);
     const { attachments } = this.#getState();
     if (attachments.some(retried)) this.#patch({ attachments: withUpload(attachments, retried, { kind: "waiting" }) });
   }
@@ -162,6 +183,8 @@ export class UploadQueue {
     try {
       let bytes: Uint8Array<ArrayBuffer>;
       try {
+        // A restored file is stored, so never waiting; were one ever, its bytes are gone like an unreadable file's.
+        if (picked.file === null) throw new Error("restored file has no bytes");
         bytes = new Uint8Array(await picked.file.arrayBuffer());
       } catch {
         this.#set(key, {
@@ -182,7 +205,7 @@ export class UploadQueue {
             percent: total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : 0,
           }),
       });
-      if (reply.ok) this.#set(key, { kind: "stored", id: reply.id, hash: reply.hash });
+      if (reply.ok) this.#set(key, { kind: "stored", id: reply.id, hash: reply.hash, at: Date.now() });
       // A removed file's outcome is dropped by #set; one still on the form goes back in line.
       else if (reply.code === "aborted") this.#set(key, { kind: "waiting" });
       else {
