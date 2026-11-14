@@ -9034,7 +9034,15 @@ decision is recorded here.
     `denyWrite`. A Linux uid of 1000 or more makes the path 33 characters or more, between the measured 32 and
     35; the Linux run passed with this prefix, so do not lengthen it. The round's own environment sets `TMPDIR` to
     this dir as well (above), so the sandbox's temp files land in the one place it may write. The fallback is silent and the daemon
-    cannot see the sandbox's `$TMPDIR`. Claude Code's own process is not sandboxed: it still writes `.claude/` into
+    cannot see the sandbox's `$TMPDIR`. **Not every temp file honours `$TMPDIR`**: macOS's `/bin/bash` 3.2 makes a
+    here-document's (and a here-string's) temp file in `/var/tmp`, `/tmp`, `/usr/tmp` or the cwd, never `$TMPDIR`,
+    and a round may write none of them, so every heredoc there fails before its command runs (`cannot create temp
+    file for here document`; the 4b drill, and a Seatbelt profile that denies writes outside `$TMPDIR`). The text
+    verbs are therefore fed by a pipe, `printf '%s\n' '<line>' … | seanced custodian notes` (the agent's checklist,
+    below), which needs no file on either platform. Rejected: a writable round dir (its write deny is what keeps a
+    round from planting the next one's config), a `cd "$TMPDIR" &&` before the heredoc (Claude Code refuses a `cd`
+    out of the project under `dontAsk`, measured with `claude -p`), and zsh as the round's shell (Claude Code points
+    zsh's `TMPPREFIX` into its temp dir, but that is a second shell, with its own startup files, for one verb's input). Claude Code's own process is not sandboxed: it still writes `.claude/` into
     the cwd (a real round left only `.claude/.cc-writes`, which `roundDirPlanted` does not refuse) and the
     transcript into the config dir.
   - **The deny list** is generated (`DENY`) and is **for a cheap model's mistakes, never a boundary**: `rm`, `rmdir`,
@@ -12338,7 +12346,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   lifts one later, and reap removing that worktree sends no `unflag`, so the card can say "kept" for one that has
   since gone. Accepted: the line is true when written and a person reading it can look.
 - **`notes` (C37, C38, `pruneNotes`)** takes the text on stdin. Over `NOTES_MAX` (8 KiB) is `too_long`, and an empty
-  or blank text is `invalid` (a slipped heredoc must not wipe the file; C38's "a round that writes none keeps the old
+  or blank text is `invalid` (a pipe that lost its text must not wipe the file; C38's "a round that writes none keeps the old
   file"). The file is sections keyed `## <key>`; a section is kept when its key is `standing`, a task id some
   current pane carries or a pane id that exists, **once per key**, and anything else is dropped and counted: an
   unknown key, a repeat, text before the first heading. A heading with more words after the key is body text, not a
@@ -12385,8 +12393,10 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   session that is stuck the stuck path (C26–C28): `nudge` it with what it observed, `interrupt` only one hung inside a
   command and then nudge it in the same round, and once its nudges are spent (`limit`) `flag` it `stuck` and leave it;
   write `notes` as `## <pane or task id>` sections plus `## standing`, `flag` a session it leaves that needs its owner
-  (`stuck` or `look`, with a one-line note), then `done` with a summary of at most 1 KiB. **Never killed for being
-  stuck (C28):** no verb force-closes a busy session, and none ends, requeues or continues a task.
+  (`stuck` or `look`, with a one-line note), then `done` with a summary of at most 1 KiB. The text of `nudge`, `notes`
+  and `done` goes in on stdin through a pipe from `printf`, never a heredoc ("Writes: one directory" above says why);
+  `custodian-agent.test.ts` runs every such example in the checklist under a profile that denies all writes on macOS.
+  **Never killed for being stuck (C28):** no verb force-closes a busy session, and none ends, requeues or continues a task.
 - **Threat model.** The round reads untrusted text and may call any verb with any argument; these checks bound
   every act that goes through a verb, and **the round's sandbox bounds the rest** (4b, built, drill pending): see
   "The custodian's seat" for the masks, the built environment and the per-reach table. A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The

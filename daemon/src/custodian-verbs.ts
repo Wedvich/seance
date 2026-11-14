@@ -875,7 +875,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
   const notes = async (text: string): Promise<CustodianReply> => {
     if (deps.seat.isDone()) return { ok: false, code: "round_done" };
     if (Buffer.byteLength(text) > NOTES_MAX) return { ok: false, code: "too_long" };
-    // An empty heredoc is the likely slip, and C38 says a round that writes none keeps the old file.
+    // An empty stdin (a pipe that lost its text) is the likely slip, and C38 says a round that writes none keeps the old file.
     if (text.trim() === "") return { ok: false, code: "invalid" };
     let panes: readonly PaneInfo[];
     try {
