@@ -1,6 +1,7 @@
 import type { NeedsInputReason, SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
 import { KEY_GAP_MS } from "./despawn.ts";
+import { INPUT_BOX_RULE } from "./pane-activity.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { log } from "./log.ts";
 import type { BoundPane } from "./session-events.ts";
@@ -40,7 +41,6 @@ export const DRAIN_SKIP_MS = 30_000;
 const SCREEN_CHECK_TRIES = 7;
 
 const NORMALIZE = /\s+/gu;
-const RULE = /^─{8,}$/u;
 /**
  * What Claude Code puts in the box for a paste or an image, the owner's own content however it is styled: not measured
  * here, so a match counts as typed whatever its colour (fails closed on wording; a release that rewords it only
@@ -49,14 +49,14 @@ const RULE = /^─{8,}$/u;
 const PLACEHOLDER = /\[(?:Pasted text|Image|\.\.\.Truncated text)[^\]]*#\d+/iu;
 
 /**
- * The text in the screen's input box (between the last two full-width `─` rules, as Claude Code draws it), after the
+ * The text in the screen's input box (between the last two full-width `─` rules, as Claude Code draws it, the top one labelled for a named session), after the
  * `❯`, wrapped lines joined and whitespace collapsed; `""` for an empty box. Null when there is no box: a permission
  * dialog, a question or the Rewind menu replaces it. Read in memory, never returned to a wire, logged or audited.
  */
 export function inputBoxText(screen: string): string | null {
   const lines = screen.split("\n").map((line) => line.trimEnd());
   const rules: number[] = [];
-  for (const [index, line] of lines.entries()) if (RULE.test(line.trim())) rules.push(index);
+  for (const [index, line] of lines.entries()) if (INPUT_BOX_RULE.test(line)) rules.push(index);
   const open = rules.at(-2);
   const close = rules.at(-1);
   if (open === undefined || close === undefined) return null;
@@ -154,7 +154,7 @@ export function inputBoxDraft(styled: string): string | null {
       .trimEnd(),
   );
   const rules: number[] = [];
-  for (const [index, line] of text.entries()) if (RULE.test(line.trim())) rules.push(index);
+  for (const [index, line] of text.entries()) if (INPUT_BOX_RULE.test(line)) rules.push(index);
   const open = rules.at(-2);
   const close = rules.at(-1);
   if (open === undefined || close === undefined) return null;
