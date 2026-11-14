@@ -418,7 +418,7 @@ green:
   — as is every host that names no peer (`peerPidSupported`) and any pid not given, never a claimed pane, an env var
   or a field of the frame. A frame carries no path, branch, task id or session id. `close` re-reads the pane at the
   act and acts only on a session at rest by the daemon's own facts (`closeVerdict`: never the round's own pane,
-  one that is `foreign` or `marked`, `needs-input`, `busy`, unobserved, or whose input box holds any text or can't
+  one that is `foreign` or `marked`, `needs-input`, `busy`, unobserved, or whose input box holds any typed text (a faint or grey prompt suggestion, through `capture-pane -e`, is not: `inputBoxDraft`; a paste or image placeholder is) or can't
   be found — `waiting`, since the despawn's Escape and Ctrl+C would clear a draft) through the graceful despawn;
   it then removes the task's worktree only for one its own launch ledger noted, under its clone's
   `.claude/worktrees/`, by `git worktree remove` **without `--force`**, after `nothingLost`, never one touched since

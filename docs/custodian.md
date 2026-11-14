@@ -253,7 +253,9 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
 
 - **C48.** Every round start, end and kill, and every close, nudge, interrupt, flag and worktree
   removal, is audited under origin `custodian`, through the one formatter. A line carries the pane,
-  the task id and the outcome or refusal code.
+  the task id and the outcome or refusal code. A close refused to an unbound sender (not the round) is collapsed:
+  one line per pid a minute and a bounded number overall, then one warn naming how many were not written
+  (DESIGN.md, "The custodian frame kind").
 - **C49.** Never logged or audited: nudge text, a flag's note, the notes file, a round's summary,
   and anything read from a pane.
 
@@ -461,7 +463,9 @@ delivery); nothing else here does.
 - **Prompt suggestions.** `close` reads the box through `capture-pane -e` and ignores faint and grey cells
   (DESIGN.md, "The custodian frame kind"). Measure the attributes a real Claude Code release draws the suggestion
   with: a style the daemon does not list reads as a draft and the session is refused `waiting`, which is safe and
-  silent.
+  silent. A paste or image placeholder in the box (`[Pasted text #1 +40 lines]`, `[Image #1]`) counts as a draft by its
+  wording whatever its style; measure how a real release draws those too, and drop the wording match only if it is
+  drawn unlike a suggestion.
 - **What "unchanged on screen" cannot see.** The change hash drops Claude's input box and footer and masks
   elapsed timers and the spinner glyph (DESIGN.md, "Per-pane retention"), matched on wording from Claude
   Code 2.1.x. A release that rewords them, or a repaint nobody has listed (a rotating tip, a clock in the

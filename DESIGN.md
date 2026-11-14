@@ -8878,10 +8878,9 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   line or the record's write) closes that pane and counts the round as ended, `kill reason=stray`: a round no
   record names has no deadline and no reader can reach it (C10); if that close throws too, the pane is put on
   the record for its deadline. A pick that throws backs off like one that found nothing. Stopping a seat never closes its round, so a
-  reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key,
-  an unsupported platform, or a host whose checks fail) closes whatever round is left (`reason=off`), removes its tmp
+  reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key, an unsupported platform, a host whose checks fail, or rounds held, `ROUNDS_LIVE`) closes whatever round is left (`reason=off`), removes its tmp
   dir, audits `end reason=lost` and saves `{ lastEndedAt }`; the round log (below) gets a `failed`/`lost` entry
-  unless the round had already called `done`, whose healthy entry stands and whose end is audited `healthy`.
+  unless the round had already called `done`, whose healthy entry stands and whose end is audited `healthy`; a `done` whose log line was never written (the append failed, or the daemon died between the record and the log) gets a healthy entry without its summary from the end or the sweep, since the upsert never replaces a healthy line.
 - **Audit (C48, C49).** `custodianAudit` (`audit.ts`), origin `custodian`, through the daemon's one sink: `audit
   custodian origin=custodian op=start exclave=<quoted id> pane=<id|-> outcome=started|launch_failed`, `op=kill
   pane=<id> reason=deadline|exited|stray|off|done outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=healthy|failed
@@ -11518,7 +11517,7 @@ frame can do, not what the round can.
   answers `internal`. A refusal is a warning naming the verb and a pid, and, for a `close`, an audit line with the
   pane id the frame named (a `%n` that passed `PANE_ID`, so safe), `outcome=not_custodian`. Any same-uid process can
   send a frame, so those lines are collapsed (code review F9): one per pid per minute, and at most 20 a minute
-  whatever the senders; the reply is the same. The daemon answers `unsupported` when it holds no seat, its backend has
+  whatever the senders, then one warn when a window that dropped some rolls over, naming how many; the reply is the same. The daemon answers `unsupported` when it holds no seat, its backend has
   no `despawn`, or the seat's checks failed (no sandbox tools, a sandbox probe failure, an unreadable agent file:
   code review F10, since no round will ever run to be named); the verbs exist before the seat's async checks
   finish, and answer `not_custodian` until a round is recorded.
@@ -11560,11 +11559,11 @@ frame can do, not what the round can.
   **leaving out the cells Claude Code draws as a prompt suggestion** (code review F2): faint (SGR 2) or a grey
   foreground (`90`, `38;5;8` and the mid greys of the 256 ramp, equal-channel `38;2` between 80 and 170), and the
   cursor's inverse first cell when more suggestion text follows. **Any other text, or a box that cannot be found (a
-  dialog, a menu), is `waiting`**: a cell whose attribute is not recognised counts as typed, so a Claude Code release
+  dialog, a menu), is `waiting`**, as is a paste or image placeholder (`[Pasted text #1 …]`, `[Image #1]`) however it is styled (a wording match, review round 2 F6: its styling is not measured, and a box whose every cell is grey is otherwise a suggestion); a cell whose attribute is not recognised counts as typed (the underline colour `58;…` is skipped with its parameters, as `38`/`48` are, so its numbers are never read as standalone codes), so a Claude Code release
   that restyles the suggestion costs a later round (the session is refused `waiting`), never an owner's draft. The
   styled capture is read in memory for this check only and is never hashed, logged or audited. The grey values are
   what Claude Code's themes use as far as is known, not measured on a release here: `daemon/test/capture-styled.test.ts`
-  proves what tmux emits for them, not what Claude Code draws. Not checked for `exit-prompt` panes (no box) or `dead` ones.
+  proves what tmux emits for the faint attribute and for each grey form listed (`90`, `38;5;8`, `38;5;244`, `38;2;153;153;153`), not what Claude Code draws. The screen is read last, after the worktree's stat reads, so the draft check and the busy re-check are both the final reads before the despawn's keys (review round 2 F8). Not checked for `exit-prompt` panes (no box) or `dead` ones.
 - **The worktree (C31–C34, `custodian-worktree.ts`)** is decided after a successful close, for a task whose launch
   this machine's ledger holds a worktree of (`EndedTasks.worktree`, the one authority on a path: a frame never names
   one), and nothing is decided for a here-mode task or a worktree already gone. In order, the worktree is kept as:
