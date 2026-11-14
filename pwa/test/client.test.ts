@@ -2188,6 +2188,48 @@ describe("store", () => {
     }
   });
 
+  test("the custodian controls send the op to a machine advertising custodian, and show a refusal as fixed text", async () => {
+    const seated = await newDeviceId();
+    const plain = await newDeviceId();
+    const asked: unknown[] = [];
+    let refuse = false;
+    const daemon = await startFakeDaemon(
+      relay,
+      key,
+      seated,
+      { ...machineInfo("Seated"), capabilities: ["custodian"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        custodian: (payload) => {
+          asked.push(payload);
+          if (refuse) return { ok: false, code: "held", message: "daemon text, never shown" };
+          return {
+            ok: true,
+            pause: payload !== null && typeof payload === "object" && "minutes" in payload ? { until: 1 } : null,
+          };
+        },
+      },
+    );
+    const { store, waitForApp, stop } = startStore({ machine: seated });
+    try {
+      await waitForApp(online(seated), "seated machine online");
+      await store.custodianControl(seated, { act: "pause", minutes: 60 });
+      expect(asked).toEqual([{ act: "pause", minutes: 60 }]);
+      // Held as asked until the seat's cu agrees, so the menu offers Resume meanwhile.
+      expect(store.getState().custodian).toEqual({ [seated]: { kind: "sent", act: "pause", paused: true } });
+      refuse = true;
+      await store.custodianControl(seated, { act: "round" });
+      expect(store.getState().custodian[seated]).toEqual({ kind: "failed", text: "Rounds are held on Seated for now" });
+      // Never sent to a machine the registry doesn't show advertising it (no second daemon: the file's relay caps its registry).
+      await store.custodianControl(plain, { act: "resume" });
+      expect(asked).toHaveLength(2);
+      expect(store.getState().custodian[plain]?.kind).toBe("failed");
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
   test("a drain-now close sends now to a drainAsk machine under a drain leader, and is refused locally for one without", async () => {
     const leaderId = listed.autoLeader;
     const info = await seal(

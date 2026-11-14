@@ -35,6 +35,7 @@ import {
   type PreviewState,
   type QueueState,
   type AvailabilityState,
+  type CustodianControlState,
   type RescanState,
   type SessionsView,
   type SheetKind,
@@ -251,6 +252,8 @@ export interface AppState {
   readonly rescan: RescanState;
   /** The Machines screen's open/close switch. */
   readonly availability: AvailabilityState;
+  /** The Machines card's custodian controls. */
+  readonly custodian: CustodianControlState;
   readonly verdict: Verdict | null;
   /** Tasks queued while the relay was unreachable, oldest first; persisted (`writeHeld`). */
   readonly held: readonly HeldTask[];

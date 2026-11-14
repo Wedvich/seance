@@ -976,12 +976,20 @@ describe("the custodian row", () => {
   });
 
   test("with the capability and no cu yet: no report", () => {
-    expect(rowOf(seated(undefined))).toEqual({ state: null, ended: null, counts: null, link: null, warn: false });
+    expect(rowOf(seated(undefined))).toEqual({
+      state: null,
+      paused: false,
+      ended: null,
+      counts: null,
+      link: null,
+      warn: false,
+    });
   });
 
   test("idle with a last round: its age and counts", () => {
     expect(rowOf(seated({ s: "idle", e: S - 600, n: [3, 1, 2] }))).toEqual({
       state: "idle",
+      paused: false,
       ended: "last round ended 10m ago",
       counts: "closed 3 · nudged 1 · flagged 2",
       link: null,
@@ -1015,5 +1023,20 @@ describe("the custodian row", () => {
     }
     expect(rowOf(seated({ s: "paused", rc: RC }))?.link).toBeNull();
     expect(rowOf(seated({ s: "idle", rc: RC }))?.link).toBeNull();
+  });
+
+  test("paused is the paused state, or p behind a running round or a failing host", () => {
+    expect(rowOf(seated({ s: "paused" }))?.paused).toBe(true);
+    expect(rowOf(seated({ s: "running", p: true }))?.paused).toBe(true);
+    expect(rowOf(seated({ s: "failing", p: true }))?.paused).toBe(true);
+    expect(rowOf(seated({ s: "running" }))?.paused).toBe(false);
+    expect(rowOf(seated({ s: "idle" }))?.paused).toBe(false);
+  });
+
+  test("the menu's controls are offered only for a connected machine advertising custodian", () => {
+    const controls = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.custodianControls;
+    expect(controls(seated({ s: "idle" }))).toBe(true);
+    expect(controls(seated({ s: "idle" }, ["metrics"]))).toBe(false);
+    expect(controls(machine({ capabilities: [CAPABILITIES.custodian], connected: false }))).toBe(false);
   });
 });
