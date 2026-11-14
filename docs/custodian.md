@@ -170,9 +170,12 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
 - **C29. `flag`** _(built, custodian 6: DESIGN.md, "The custodian frame kind")_ records a reason from the fixed set and an optional note of at most 200
   characters. `dirty` and `unpushed` are also set by the daemon itself when a close keeps a
   worktree (§6). `stuck` and `look` are about the session: they clear when it starts a new turn (a `busy` after an
-  `idle`, or with no state retained), when it closes with nothing kept, and when its session is gone. `dirty` and
-  `unpushed` are about the worktree, which a new turn or the session's end leaves as it is, so they stay on the
-  record, the round's as the daemon's (only a close that removes the worktree, or a re-assignment, lifts one).
+  `idle` this process saw; a pane with no state retained, after a restart or a reload, is not a new turn), when it
+  closes with nothing kept, and when its session is gone. `dirty` and `unpushed` are about the worktree, which a new
+  turn or the session's end leaves as it is, so they stay on the record, the round's as the daemon's, whoever set them:
+  only a close that leaves nothing kept (the worktree removed, or none to decide on, as for a `here` task) or a
+  re-assignment lifts one. A round's `dirty` on a session that then ends some other way (a hand-off, a cancel) stays
+  until the re-assignment, like the daemon's after reap removes the worktree: accepted, the line was true when written.
 - **C30.** _Derived._ Nudge and interrupt counts and open flags are the daemon's, persisted in
   `stateDir()/custodian/sessions.json` (0600; not `state.json`, the owner CLI's alone) keyed by task id, or by pane for
   an untasked session, and dropped when the session ends. The agent cannot reset them, and they survive a daemon

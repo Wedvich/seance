@@ -11628,7 +11628,7 @@ frame can do, not what the round can.
   still taking over), never an error. An untasked pane is flagged in the file under its pane id and sent nowhere
   (a task id is what the record is keyed by). Every call, taken or refused, is one audit line, `custodian
   origin=custodian op=flag pane=<id> task=<id|-> reason=<reason|-> outcome=<ok|unsent|code> by=<round|daemon>`, and the note
-  is in none.
+  is in none. `unsent` is a flag nothing took, the round's as the daemon's; an untasked pane's is `ok`, it has no record to tell.
 - **The flags file (C30, `custodian-flags.ts`)** is `stateDir()/custodian/sessions.json`, 0600 under the 0700 dir,
   through `writeDurable`, **not** `state.json`. C30's text names `state.json`, but that file is the owner CLI's alone
   (its pause; one the daemon cannot read loads as paused indefinitely), and a daemon write racing the CLI's
@@ -11643,14 +11643,19 @@ frame can do, not what the round can.
 - **When a flag lifts.** Never from a session event on the leader: the record's flag is removed only by the
   daemon's `unflag` or by a re-assignment (`advance` to `ready`, Scheduler). The daemon sends `unflag` when (a) a
   bound `busy` frame arrives for a pane whose retained state was `idle` (turn ended or not: a respawn's idle is
-  followed by a turn too) or none: **a new turn** (the session-events `retain` hook, `isNewTurn`; `needs-input` to
+  followed by a turn too): **a new turn** (the session-events `retain` hook, `isNewTurn`; `needs-input` to
   `busy`, a permission answered, and `busy` to `busy` are the same turn and clear nothing; a pane with no state
-  retained, which a daemon restart leaves while the flag outlives it, counts, since a frame at all says the session is
-  not stuck; a turn the mod's pending report folded into a `busy` after another `busy` is not seen, and the prune or
+  retained is **not** a new turn, whether a restart, a config reload or a seat that never started left none: a stuck
+  session sends `busy` after every permission it is asked, so lifting on the first frame would let the next round flag
+  it again and push twice. The flag lifts at the next genuine new turn or a clean close instead. A turn the mod's
+  pending report folded into a `busy` after another `busy` is not seen either, and the next new turn, close or
   re-assignment lifts that one). Only `stuck` and `look` lift here and in (c): `dirty` and `unpushed` are about the
   worktree, not the turn or the session, whichever set them, so a round's own is sent again as `flag` until taken and
-  never lifted when its session ends; (b) a close finds nothing
-  kept: a removed worktree, none to decide on, or an untasked pane; (c) a `sessions` or `flag` finds an entry whose
+  never lifted when its session ends, and a new turn leaves it. Only (b) lifts one, or a re-assignment; a round's
+  `dirty` on a session that ended some other way (a hand-off, a cancel) therefore stays until the re-assignment, like
+  the daemon's after reap removes the worktree, since the daemon cannot tell it from a flag for a worktree still kept
+  (accepted: the line was true when written); (b) a close finds nothing
+  kept: a removed worktree, none to decide on (a `here` task, or a worktree already gone), or an untasked pane; (c) a `sessions` or `flag` finds an entry whose
   task is no live pane's, so a finished task's `stuck` does not outlive its session. The daemon's own
   `dirty`/`unpushed` flag is the exception: it is sent as `flag` and the round's earlier local entry for that task is
   cleared **without** an `unflag`, since a later prune would otherwise send one over the daemon's flag.
@@ -11659,11 +11664,16 @@ frame can do, not what the round can.
   next new turn, `sessions` prune or close sends it again; a daemon `dirty`/`unpushed` flag nothing took is audited
   `outcome=unsent` and left as the entry, which `sessions` resends as `flag` (the leader writes nothing for what the
   record already holds) until taken; and `clear` after the send runs with `only`, so a flag the round set while the
-  send was out stands. **Taken** means: in process, a running term took it (`Leader.onCustodianEvent` answers `false`
-  while a term is still taking over, so a `failing` or flag raised then is held or kept); over the relay, the envelope
+  send was out stands, a repeat of the same flag included (`CustodianFlags.revision`, a count of `set` calls that
+  `clear` compares, since a repeat leaves the entry byte for byte as it was yet its event may land after the `unflag`).
+  **Taken** means: in process, a running term took it and, for a flag or unflag, its write resolved
+  (`Leader.onCustodianEvent` answers `false` while a term is still taking over, before the registry's first push for a
+  `failing`, when a `failing`'s push had no room in the parked alerts, and when the write threw, so an event raised then is held or
+  kept); over the relay, the envelope
   was written to the socket, and there is no ack, so a relay with no leader behind it still loses one. The resends are
   what cover that gap; no outbox is built. The leader takes a `failing` only from a machine its registry lists (never
-  the archivist seat's id), and pushes at most one per sealer per 30 minutes.
+  the archivist seat's id), and pushes at most one per sealer per 30 minutes, the time stamped only once the push was
+  sent or parked (one the parked list had no room for is answered `false`, so the seat sends it again).
 - **The leader's side (`Scheduler.onFlag`, `daemon/src/leader.ts` `onCustodianEvent`).** The leader acts only while a
   term runs (an event with none is dropped and logged: kind and sender only) and only on an event a daemon sealed,
   never one sealed `from: "app"`. `flag` and `unflag` are written through `#update` and the one task sealer, **only

@@ -395,7 +395,7 @@ green:
   `get_queue`).
   While this machine is closed, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
-  A bound `busy` following that pane's `idle` or with no state retained (`isNewTurn`) also lifts the pane's own
+  A bound `busy` following an `idle` this process retained for that pane (`isNewTurn`; a pane with no state retained is not a new turn) also lifts the pane's own
   `stuck` or `look` flag, by one `unflag` at the leader and then in the flags file: an act on the pane's own entry
   only, never one a frame names.
   Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, only while a
@@ -445,8 +445,9 @@ green:
   not the round's pane (`foreign` is refused; `marked` is not, since a flag acts on no pane), stores `{reason, note, at}` only in `custodian/sessions.json` (0600, the daemon's own
   file, never the owner CLI's `state.json`, keyed by task id or pane id, pane keys dropped at load) and tells the leader
   by one sealed, fire-and-forget `custodian-event`. `stuck` and `look` lift on the session's next turn (a bound `busy` after an
-  `idle`, or with no state retained), on a close that kept nothing, or when no live session holds it, and `dirty` and
-  `unpushed` only when a close removes the worktree: each only after the leader's `unflag` was taken, or the entry
+  `idle` this process saw), on a close that kept nothing, or when no live session holds it, and `dirty` and
+  `unpushed` (whoever set them) only on a close that leaves nothing kept (the worktree removed, or none to decide on) or
+  a re-assignment, never by a new turn or the session's end otherwise: each only after the leader's `unflag` was taken, or the entry
   stays for the next try; the flags file is denied to the round's `Read` and sandbox (a mistake guard until item
   4b); the note is
   display-only and never logged, audited, pushed, archived, put in `get_queue` or returned by `sessions`. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
