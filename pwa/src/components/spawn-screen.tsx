@@ -515,17 +515,17 @@ function ActiveSheet(props: {
         <SheetItem
           label="Auto"
           sub={auto.reason ?? auto.note ?? "the scheduler picks the machine"}
-          dot={auto.available ? "auto" : "off"}
+          dot={view.autoDot}
           selected={view.machine === null}
           disabled={!auto.available}
           onClick={() => actions.pickMachine(null)}
         />
-        {view.machineChoices.map(({ machine, sub, disabled, selected, canRescan, rescanDisabled }) => (
+        {view.machineChoices.map(({ machine, sub, disabled, selected, canRescan, rescanDisabled, dot }) => (
           <SheetItem
             key={machine.deviceId}
             label={machine.name}
             sub={sub}
-            dot={machine.connected ? "ok" : "off"}
+            dot={dot}
             selected={selected}
             disabled={disabled}
             // Only offered while offline: the relay refuses to forget a machine
@@ -548,7 +548,7 @@ function ActiveSheet(props: {
         <SheetItem
           label="Auto"
           sub="the scheduler picks the account"
-          dot={view.autoAvailability.available ? "auto" : "off"}
+          dot={view.autoDot}
           selected={view.account === null}
           disabled={!view.autoAvailability.available}
           onClick={() => actions.pickAccount(null)}

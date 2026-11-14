@@ -57,8 +57,12 @@ export type Tone = "fg2" | "err";
 
 export type ConnectionState = "connected" | "connecting" | "offline";
 
-/** A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike. */
-export type Dot = "ok" | "off" | "auto";
+/**
+ * A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike.
+ * `unreachable` is the relay's own hollow red, worn while the relay is unreachable: the registry
+ * then is the last one heard, so a green dot would claim a presence nobody can see.
+ */
+export type Dot = "ok" | "off" | "auto" | "unreachable";
 
 export interface Tile {
   readonly label: string;
@@ -111,6 +115,7 @@ export interface MachineChoice {
   readonly rescanDisabled: boolean;
   /** Set only on the row of the machine being rescanned, or whose rescan failed. */
   readonly rescan: "scanning" | "failed" | null;
+  readonly dot: Dot;
 }
 
 /** One row of the Account sheet: an account some exclave reports signed in. */
@@ -217,6 +222,8 @@ export interface ViewModel {
   /** Every repo in scope of the pins. */
   readonly repos: readonly AutoRepo[];
   readonly autoAvailability: AutoAvailability;
+  /** The Auto tile's and row's dot, both pickers'. */
+  readonly autoDot: Dot;
   readonly machineChoices: readonly MachineChoice[];
   readonly accountChoices: readonly AccountChoice[];
   /** The preview asks a leader to route the form, which drops a pin: it is shown with both pickers on auto only. */
@@ -322,6 +329,11 @@ function sessionCount(state: AppState, deviceId: string): number | null {
 }
 
 /** The settings screen's status line: connection only, no machine counts. */
+/** `relayState`'s `offline`, not a settling re-dial, overrides the dot. */
+function presenceDot(relay: RelayState, dot: Dot): Dot {
+  return relay.status !== "open" && !relay.settling ? "unreachable" : dot;
+}
+
 function deriveRelayLine(relay: RelayState): string {
   if (relay.rejection === "unauthorized") return "bearer token rejected";
   if (relay.rejection === "bad-request") return "no bearer token";
@@ -775,6 +787,7 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         canRescan: machine.connected,
         rescanDisabled: rescan.kind === "scanning",
         rescan: here,
+        dot: presenceDot(relay, machine.connected ? "ok" : "off"),
       };
     });
 }
@@ -795,7 +808,7 @@ function deriveAccountChoices(state: AppState): readonly AccountChoice[] {
         sub: away ? `not signed in on ${pinned.name}` : `on ${where.join(", ")}`,
         disabled: away,
         selected: accountId === form.account,
-        dot: relay.machines.some((m) => m.connected && hasAccount(m, accountId)) ? "ok" : "off",
+        dot: presenceDot(relay, relay.machines.some((m) => m.connected && hasAccount(m, accountId)) ? "ok" : "off"),
       };
     })
     .toSorted((a, b) => collator.compare(a.label, b.label));
@@ -1001,6 +1014,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
   const availability = deriveAutoAvailability(relay);
   const known = formAccounts(relay.machines, form);
   const signedIn = account !== null && relay.machines.some((m) => hasAccount(m, account));
+  const autoDot = presenceDot(relay, availability.available ? "auto" : "off");
 
   return {
     meta: deriveMeta(state),
@@ -1009,22 +1023,34 @@ export function deriveView(state: AppState, now: number): ViewModel {
     banner: deriveBanner(state),
     machineTile:
       form.machine === null
-        ? { label: "MACHINE", value: "Auto", mono: false, dot: availability.available ? "auto" : "off", tag: null }
+        ? {
+            label: "MACHINE",
+            value: "Auto",
+            mono: false,
+            dot: autoDot,
+            tag: null,
+          }
         : {
             label: "MACHINE",
             value: machine?.name ?? "Unknown machine",
             mono: false,
-            dot: machine?.connected === true ? "ok" : "off",
+            dot: presenceDot(relay, machine?.connected === true ? "ok" : "off"),
             tag: null,
           },
     accountTile:
       account === null
-        ? { label: "ACCOUNT", value: "Auto", mono: false, dot: availability.available ? "auto" : "off", tag: null }
+        ? {
+            label: "ACCOUNT",
+            value: "Auto",
+            mono: false,
+            dot: autoDot,
+            tag: null,
+          }
         : {
             label: "ACCOUNT",
             value: `${accountNameIn(known, account, aliasOf(state.accounts.aliases, account))}${signedIn ? "" : " · signed in nowhere"}`,
             mono: false,
-            dot: signedIn ? "ok" : "off",
+            dot: presenceDot(relay, signedIn ? "ok" : "off"),
             tag: null,
           },
     repoTile: {
@@ -1082,6 +1108,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     repo,
     repos,
     autoAvailability: availability,
+    autoDot,
     machineChoices: deriveMachineChoices(state, now),
     accountChoices: deriveAccountChoices(state),
     previewShown: previewAsked(form),

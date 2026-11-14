@@ -124,6 +124,13 @@
   background: var(--auto);
 }
 
+/* The relay dot's offline ring (`.relay-dot-offline`), on a tile or row while the relay is unreachable. */
+.dot-unreachable {
+  box-sizing: border-box;
+  background: transparent;
+  border: 2px solid var(--err);
+}
+
 /* Sized off .dot so the relay reads at the same weight as the MACHINE card's dot. */
 .relay-dot-wrap {
   position: relative;
