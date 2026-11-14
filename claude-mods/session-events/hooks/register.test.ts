@@ -225,6 +225,31 @@ describe("reports", () => {
     expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "busy" }, { state: "busy" }]);
   });
 
+  test("a bridge id first seen at idle waits for the next turn: a repeated turn end would close a session", async ($, on) => {
+    const env: Record<string, string> = { TMUX_PANE: "%7" };
+    const sent = record(on, { env });
+    tools($, on, { verdict: "allow" });
+    await $.turn.start({ ...turn, text: "hi" });
+    await $.turn.complete(answered);
+    await settled(sent, 2);
+    env["CLAUDE_CODE_BRIDGE_SESSION_ID"] = "session_01Own";
+    // A background subagent's call, after the main loop's turn ended.
+    await $.tool.call({ tool: "Bash", command: "ls", agentId: "a1" });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 3);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "idle", turnEnded: true }]);
+  });
+
+  test("an empty bridge id is no id", async ($, on) => {
+    const sent = record(on, { env: { TMUX_PANE: "%7", CLAUDE_CODE_BRIDGE_SESSION_ID: "" } });
+    tools($, on, { verdict: "allow" });
+    await $.turn.start({ ...turn, text: "hi" });
+    await $.tool.call({ tool: "Bash", command: "ls" });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }]);
+  });
+
   test("a question to the person needs input, as a question, until it is answered", async ($, on) => {
     const sent = record(on);
     on("tool.call", () => ({ result: { answers: {} } }));

@@ -11291,11 +11291,14 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   has none, and a later one fills it in. The bridge connects a second or so after the seeded
   prompt's turn starts (measured 2026-11-14: absent at `session.start` and `turn.start`, present
   at the first `tool.call`), and a busy turn changes no state until it ends, so the mod also reads
-  the variable (`$.env.get`, live) at each `tool.call` and sends the unchanged state once when the
-  id is new to it: the link appears within the first tool call, not at the first turn's end. The
-  same read corrects a session that inherited another's id (a tmux server booted from inside a
-  Claude session) once its own bridge replaces it. The mod's read only decides that a report goes;
-  the id itself is still the CLI's, from the env it inherits. It is the session's claim,
+  the variable (`$.env.get`, live, unawaited so no tool waits on it) at each `tool.call` and sends
+  the unchanged state once when the id is new to it: the link appears within the first tool call,
+  not at the first turn's end. A turn with no tool call still waits for its end. Never at idle: an
+  idle carrying `turnEnded` is a turn's end to the daemon (a hand-off's or a pass's close, the
+  drain ask), so an id first seen there waits for the next `turn.start`. A session that inherited
+  another's id (a tmux server booted from inside a Claude session) reports it until its own bridge
+  connects and replaces it, and for good if that never happens. The mod's read only decides that a
+  report goes; the id itself is still the CLI's, from the env it inherits. It is the session's claim,
   and a display-only one: it binds nothing and moves no state, and the task is still the pane's
   `@seance-task`. It is kept only as `isRemoteSessionId` (`shared/src/parse.ts`) passes it, at
   ingest, at the leader's `parseSessionEvent` and at `parseTask`: `session_` and base62 alone,

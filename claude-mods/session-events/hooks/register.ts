@@ -274,6 +274,15 @@ async function noteBridge($: EngineInterface, t: Tracker): Promise<void> {
   }
 }
 
+/**
+ * A bridge id that is new since the last report, outside idle. An idle report is a turn's end to the
+ * daemon (a hand-off's or a pass's close, the drain ask's prompt) when it carries `turnEnded`, so it
+ * is never repeated for an id alone: the main loop's next `turn.start` carries the id instead.
+ */
+function shouldSendBridge(t: Tracker): boolean {
+  return t.bridge !== t.lastBridge && current(t) !== "idle";
+}
+
 function dropMain(t: Tracker): void {
   for (const [id, loop] of t.outstanding) {
     if (loop !== undefined) continue;
@@ -336,12 +345,19 @@ export const register: Register = (on) => {
     const isQuestion = e.tool === "AskUserQuestion";
     // Core's own check for AskUserQuestion settles ask/person under this id too.
     const id = e.tool_use_id ?? (isQuestion ? `question-${++t.anonymous}` : undefined);
-    await noteBridge($, t);
     if (isQuestion && id !== undefined) {
       t.outstanding.set(id, e.agentId);
       t.questions.add(id);
+      sendCurrent($, t);
     }
-    if ((isQuestion && id !== undefined) || t.bridge !== t.lastBridge) sendCurrent($, t);
+    // Unawaited, like every report: the tool never waits on the read.
+    noteBridge($, t)
+      .then(() => {
+        if (shouldSendBridge(t)) sendCurrent($, t);
+      })
+      .catch(() => {
+        // noteBridge already swallows; this only keeps a bug here from going unhandled.
+      });
     /** Closes `id`; a dialog closing or a PR found reports the state the session is in now. */
     const finish = (prUrl?: string): void => {
       const wasOpen = id !== undefined && t.outstanding.delete(id);
