@@ -1912,6 +1912,61 @@ describe("leader push", () => {
     expect(lines.some((line) => line.includes("pruned a subscription host=fcm.googleapis.com status=410"))).toBe(true);
     expect(lines.some((line) => line.includes("/fcm/send/") || line.includes("vapid t="))).toBe(false);
   });
+
+  test("a stuck flag alert maps to ids and its reason only: no note, no message", () => {
+    expect(alertToPush({ kind: "flag", taskId: "t-1", reason: "stuck", message: "m NOTE-SENTINEL" }, 6)).toEqual({
+      v: 1,
+      kind: "flag",
+      at: 6,
+      taskId: "t-1",
+      reason: "stuck",
+    });
+  });
+
+  test("a custodian event lands from the placed machine and pushes once; failing pushes under the sealer's id; the note is never in a log line", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings([sub("live")]);
+    const store = new MemoryQueueStore();
+    // Finished: a session outlives its task's `done`, and a flag is taken all the same.
+    await store.put("t-1", 0, task("t-1", { state: "done", assignment: { deviceId: "a", ...target, pane: "%1" } }));
+    const { leader } = leaderOver(relay, store, undefined, undefined, settings.store, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+    );
+    const flag = { kind: "flag", taskId: "t-1", reason: "stuck", note: "NOTE-SENTINEL", at: 1 } as const;
+    const lines = await captureLog(async () => {
+      try {
+        // No term yet: dropped, and said so.
+        leader.onCustodianEvent(flag, "a");
+        leader.lead(1);
+        await leader.settled();
+        // Another machine's flag moves nothing.
+        leader.onCustodianEvent(flag, "b");
+        leader.onCustodianEvent(flag, "a");
+        await pollUntil(async () => (await store.get("t-1"))?.body?.flag?.reason === "stuck", "the flag on the record");
+        await push.waitForRequests(1);
+        // The same flag again, as the daemon resends it: nothing new written, nothing pushed.
+        leader.onCustodianEvent(flag, "a");
+        await Bun.sleep(150);
+        expect(push.requests()).toHaveLength(1);
+        leader.onCustodianEvent({ kind: "failing", at: 2 }, "a");
+        await push.waitForRequests(2);
+        leader.onCustodianEvent({ kind: "unflag", taskId: "t-1", at: 3 }, "a");
+        await pollUntil(async () => (await store.get("t-1"))?.body?.flag === undefined, "the flag cleared");
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+      }
+    });
+    expect(lines.some((line) => line.includes("custodian-event kind=flag") && line.includes("dropped"))).toBe(true);
+    // One write line, one alert line, one unflag line: the resend and the other machine's flag wrote nothing.
+    expect(lines.filter((line) => line.includes('reason=stuck from="a"'))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("scheduler: flag: task="))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("unflag: task="))).toHaveLength(1);
+    expect(lines.some((line) => line.includes('custodian failing: device="a"'))).toBe(true);
+    expect(lines.join("\n")).not.toContain("NOTE-SENTINEL");
+  });
 });
 
 describe("leader disk alerts", () => {
@@ -2593,6 +2648,47 @@ describe("leader in the daemon", () => {
       expect(line).not.toContain("SECRET-RECORD");
       expect(line).not.toContain("feature/x");
     }
+  });
+
+  test("a custodian-event lands from a daemon through the leg; a malformed one and one from an app are dropped", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    // Finished, so takeover has no session of its own to ask `b` about.
+    await store.put("t-1", 0, task("t-1", { state: "done", assignment: { deviceId: "b", ...target, pane: "%1" } }));
+    const lines = await captureLog(async () => {
+      const { daemon, deviceId } = await startLeaderDaemon(relay, store);
+      try {
+        relay.lead(deviceId, 1);
+        await daemon.leader.settled();
+        const send = async (from: string, payload: unknown): Promise<void> => {
+          const env = await seal(
+            key,
+            { to: SCHEDULER_ID, from },
+            { id: crypto.randomUUID(), ts: Date.now(), op: "custodian-event", payload },
+          );
+          relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
+        };
+        const valid = { kind: "flag", taskId: "t-1", reason: "look", note: "NOTE-SENTINEL", at: Date.now() };
+        await send("b", { ...valid, reason: "nope" });
+        await send(APP_ID, valid);
+        // The relay's lead nudge may land before the takeover has run, and an event then is dropped: send until it lands.
+        await pollUntil(async () => {
+          await daemon.leader.settled();
+          await send("b", valid);
+          await Bun.sleep(20);
+          return (await store.get("t-1"))?.body?.flag?.reason === "look";
+        }, "the leader to write the flag");
+      } finally {
+        daemon.stop();
+        relay.stop();
+      }
+    });
+    const droppedFromApp = lines.filter(
+      (line) => line.includes('dropped op="custodian-event"') && line.includes(`from="${APP_ID}"`),
+    );
+    expect(droppedFromApp).toHaveLength(1);
+    expect(lines.some((line) => line.includes('dropped op="custodian-event"') && line.includes('from="b"'))).toBe(true);
+    expect(lines.join("\n")).not.toContain("NOTE-SENTINEL");
   });
 
   test("with no term running, an app's scheduler request is answered not_leader from this machine", async () => {

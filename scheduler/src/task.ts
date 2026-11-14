@@ -93,7 +93,7 @@ function keepsSuccessor(to: TaskState): boolean {
  * from `reserved` into `lost`. Finishing drops the PR reading (`pr`) unless it
  * is merged: any other reading can go stale (open, or closed and reopened) and
  * the poller reads the finished task once more (`wantsPrReading`), but a
- * merge can't un-merge.
+ * merge can't un-merge. `flag` goes with the assignment it was raised on.
  */
 export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Task {
   if (!canTransition(task.state, to)) throw new Error(`task ${task.id}: ${task.state} → ${to} is not a transition`);
@@ -112,6 +112,7 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     drained,
     continuedBy,
     successor,
+    flag,
     ...rest
   } = task;
   const keepsReservedAt = to === "reserved" || (to === "lost" && task.state === "reserved");
@@ -122,6 +123,9 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     ...(to !== "ready" && assignment !== undefined ? { assignment } : {}),
     // A session's, as the assignment is: back to `ready`, the next session gets its own.
     ...(to !== "ready" && remoteSession !== undefined ? { remoteSession } : {}),
+    // The custodian's flag on that session, kept through finishing (a session often outlives its task's `done`);
+    // back to `ready` it names a machine the task no longer holds.
+    ...(to !== "ready" && flag !== undefined ? { flag } : {}),
     ...(pr !== undefined && (TASK_PHASES[to] !== "finished" || pr.state === "merged") ? { pr } : {}),
     // The dedupe stamp of an alert about a PR still waiting to merge: nothing is left to repeat once finished.
     ...(prAlert !== undefined && TASK_PHASES[to] !== "finished" ? { prAlert } : {}),

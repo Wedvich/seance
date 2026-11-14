@@ -2,6 +2,7 @@ import {
   quote,
   taskPrBlock,
   type FleetQuotaEntry,
+  type FlagReason,
   type Machine,
   type PrBlockedReason,
   type QuotaAlertReason,
@@ -37,6 +38,13 @@ export type SchedulerAlert =
       readonly escalated: boolean;
       /** The first alert, raised at once because the session waits on an AskUserQuestion (`questionAlert`). */
       readonly question?: true;
+      readonly message: string;
+    }
+  | {
+      /** The custodian flagged the task; only a new `stuck` is raised (`Scheduler.onFlag`). `message` carries no note. */
+      readonly kind: "flag";
+      readonly taskId: string;
+      readonly reason: FlagReason;
       readonly message: string;
     }
   | {

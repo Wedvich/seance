@@ -23,6 +23,8 @@ import {
   DEP_AFTER,
   DONE_SIGNALS,
   EXIT_STATUS_MAX,
+  FLAG_NOTE_MAX,
+  FLAG_REASONS,
   FLEET_QUOTA_MAX_ACCOUNTS,
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
@@ -115,6 +117,9 @@ import {
   type PauseReply,
   type PauseRequest,
   type ContinuedBy,
+  type CustodianEvent,
+  type FlagReason,
+  type TaskFlag,
   type DrainedStamp,
   type PrAlertStamp,
   type QuotaExhaustedStamp,
@@ -1007,6 +1012,60 @@ export function parseSessionPass(value: unknown): SessionPass | null {
   };
 }
 
+/**
+ * A flag note: one short line of printable text. The refused set (control, format, surrogate, line and
+ * paragraph separator) is the one the owner CLI's `printable` replaces, so a note that passes here
+ * reaches a terminal and a card unchanged; it also refuses a newline and a bidi or zero-width mark.
+ * Model-written from untrusted pane text, so display-only everywhere (never logged, pushed or archived).
+ */
+export function isFlagNote(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value !== "" &&
+    value.length <= FLAG_NOTE_MAX &&
+    !/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(value)
+  );
+}
+
+export function isFlagReason(value: unknown): value is FlagReason {
+  return FLAG_REASONS.some((reason) => reason === value);
+}
+
+/** A stored flag, built field by field: null for an unknown key, reason, a bad `at` or a bad note. */
+export function parseTaskFlag(value: unknown): TaskFlag | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "reason" || key === "note" || key === "at")) {
+    return null;
+  }
+  const { reason, note, at } = value;
+  if (!isFlagReason(reason) || !isFiniteNumber(at)) return null;
+  if (note !== undefined && !isFlagNote(note)) return null;
+  return { reason, at, ...(note === undefined ? {} : { note }) };
+}
+
+const CUSTODIAN_EVENT_KEYS = {
+  flag: ["kind", "taskId", "reason", "note", "at"],
+  unflag: ["kind", "taskId", "at"],
+  failing: ["kind", "at"],
+} as const;
+
+/**
+ * The leader's check on a forwarded `custodian-event`, as `parseSessionPass` is: exact keys per kind and
+ * built field by field. The `reason` and `note` are the round's claim, so both are held to the same
+ * rule as a stored flag, and a note that fails nulls the event rather than being cut.
+ */
+export function parseCustodianEvent(value: unknown): CustodianEvent | null {
+  if (!isRecord(value)) return null;
+  const { kind, taskId, reason, note, at } = value;
+  if (kind !== "flag" && kind !== "unflag" && kind !== "failing") return null;
+  if (!Object.keys(value).every((key) => (CUSTODIAN_EVENT_KEYS[kind] as readonly string[]).includes(key))) return null;
+  if (!isFiniteNumber(at)) return null;
+  if (kind === "failing") return { kind, at };
+  if (!isTaskId(taskId)) return null;
+  if (kind === "unflag") return { kind, taskId, at };
+  if (!isFlagReason(reason) || (note !== undefined && !isFlagNote(note))) return null;
+  return { kind, taskId, reason, at, ...(note === undefined ? {} : { note }) };
+}
+
 function isBoundedString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.length <= max;
 }
@@ -1732,6 +1791,8 @@ export function parseTask(value: unknown): Task | null {
   const continuedBy = value["continuedBy"] === undefined ? null : parseContinuedBy(value["continuedBy"]);
   // Dropped, never fatal, and only a `running` task's: a lost one costs a release until the next `idle`.
   const idleRelease = known === "running" ? parseIdleRelease(value["idleRelease"]) : null;
+  // Dropped, never fatal, like `prAlert`: display-only.
+  const flag = value["flag"] === undefined ? null : parseTaskFlag(value["flag"]);
   const { remoteSession, inputReason, inputTool } = value;
   const waiting = known === "needs-input" || known === "lost";
   return {
@@ -1755,6 +1816,7 @@ export function parseTask(value: unknown): Task | null {
     ...(drained === null ? {} : { drained }),
     ...(continuedBy === null ? {} : { continuedBy }),
     ...(idleRelease === null ? {} : { idleRelease }),
+    ...(flag === null ? {} : { flag }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in
@@ -2005,6 +2067,8 @@ const PUSH_ALERT_KEYS = {
   "pass-refused": ["v", "kind", "at", "taskId"],
   auth: ["v", "kind", "at", "deviceId", "exclave", "state"],
   archivist: ["v", "kind", "at", "since"],
+  flag: ["v", "kind", "at", "taskId", "reason"],
+  "custodian-failing": ["v", "kind", "at", "deviceId"],
 } as const;
 
 /**
@@ -2076,6 +2140,16 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     const { since } = value;
     if (!known(PUSH_ALERT_KEYS.archivist) || !isFiniteNumber(since)) return null;
     return { v: 1, kind, at, since };
+  }
+  if (kind === "flag") {
+    const { taskId, reason } = value;
+    if (!known(PUSH_ALERT_KEYS.flag) || !isTaskId(taskId) || !isFlagReason(reason)) return null;
+    return { v: 1, kind, at, taskId, reason };
+  }
+  if (kind === "custodian-failing") {
+    const { deviceId } = value;
+    if (!known(PUSH_ALERT_KEYS["custodian-failing"]) || !isRoutingId(deviceId)) return null;
+    return { v: 1, kind, at, deviceId };
   }
   return null;
 }

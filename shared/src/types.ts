@@ -703,7 +703,13 @@ export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
  * broadcast, `session-event`, `session-pass` and `branch-state` reports to the scheduler, and
  * `queue-changed` the scheduler's nudge to every app.
  */
-export type EventOp = "update-available" | "session-event" | "session-pass" | "branch-state" | "queue-changed";
+export type EventOp =
+  | "update-available"
+  | "session-event"
+  | "session-pass"
+  | "branch-state"
+  | "queue-changed"
+  | "custodian-event";
 
 export type OpName =
   | "sessions"
@@ -2102,6 +2108,31 @@ export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
 export const TOOL_NAME_MAX_LENGTH = 64;
 
 /**
+ * Why the custodian flagged a session for its owner (docs/custodian.md, C29). `stuck` and `look` are
+ * the round's call; `dirty` and `unpushed` are the daemon's own, after a close kept a worktree because
+ * the nothing-lost rule failed. A reader that does not know a reason drops the flag.
+ */
+export const FLAG_REASONS = ["stuck", "dirty", "unpushed", "look"] as const;
+
+export type FlagReason = (typeof FLAG_REASONS)[number];
+
+/**
+ * Bounds a flag's note, in UTF-16 units (`.length`, as `SUCCESSOR_RECORD_MAX`): display-only, model-written
+ * from untrusted pane text, so never logged, audited, pushed, archived or shown by MCP (`isFlagNote`).
+ */
+export const FLAG_NOTE_MAX = 200;
+
+/**
+ * A custodian flag on a task record. `at` is the leader's clock, ms. Display-only: no reader binds,
+ * routes, moves or settles anything by it.
+ */
+export interface TaskFlag {
+  readonly reason: FlagReason;
+  readonly note?: string;
+  readonly at: number;
+}
+
+/**
  * `op: "session-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`,
  * fire-and-forget. Every field is the daemon's own, never what the session
  * claimed: `session` and `taskId` from its pane map, `exclave` from the pane's
@@ -2162,6 +2193,24 @@ export interface SessionPass {
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
+
+/**
+ * `op: "custodian-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`, fire-and-forget (DESIGN.md, "The
+ * custodian frame kind"). Like `SessionEvent`, every field is the daemon's own (the task id from its pane
+ * map or launch ledger), except `reason` and `note`: the round's claim, `note` display-only and never
+ * logged or pushed. `failing` is sent once per run of `FAILING_AFTER` failed rounds; the leader pushes it
+ * with the sealer's device id.
+ */
+export type CustodianEvent =
+  | {
+      readonly kind: "flag";
+      readonly taskId: string;
+      readonly reason: FlagReason;
+      readonly note?: string;
+      readonly at: number;
+    }
+  | { readonly kind: "unflag"; readonly taskId: string; readonly at: number }
+  | { readonly kind: "failing"; readonly at: number };
 
 /**
  * A git ref name's length at most, as `branch-state` and a task record carry one.
@@ -3054,6 +3103,14 @@ export interface Task {
   readonly inputReason?: NeedsInputReason;
   readonly inputTool?: string;
   /**
+   * The custodian's flag, written only by the leader from a `custodian-event` sealed by the machine the
+   * task is placed on. Display-only. `stuck`/`look` and the daemon's `dirty`/`unpushed` all stay through
+   * finishing (a session often outlives its task's `done`); the daemon's `unflag` (a new turn, a clean
+   * close, a session gone) and a re-assignment remove it. Dropped, never fatal, when malformed, and by
+   * an older reader's parser.
+   */
+  readonly flag?: TaskFlag;
+  /**
    * Its session's idle release ("Routing caps" in DESIGN.md): when the stay at its prompt began
    * and on which machine, written by the leader once the stay passes `idleReleaseAfterMs` and
    * dropped by the write that ends it, so a new leader seeds its clock from it instead of counting
@@ -3806,7 +3863,15 @@ export type PushAlert =
       readonly at: number;
       /** When the archivist's absence began (ms). No id: a fleet has one seat. */
       readonly since: number;
-    };
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "flag";
+      readonly at: number;
+      readonly taskId: string;
+      readonly reason: FlagReason;
+    }
+  | { readonly v: 1; readonly kind: "custodian-failing"; readonly at: number; readonly deviceId: string };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */
 export const PUSH_ALERT_MAX_BYTES = 1024;

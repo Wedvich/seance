@@ -12,6 +12,7 @@ import {
   APP_ID,
   isSchedulerOp,
   parseBranchState,
+  parseCustodianEvent,
   parseSessionEvent,
   parseSessionPass,
   QUEUE_MAX_TASKS,
@@ -19,6 +20,7 @@ import {
   quote,
   STORE_PREFIXES,
   type BranchState,
+  type CustodianEvent,
   type Envelope,
   type Plain,
   type PushAlert,
@@ -215,6 +217,13 @@ export interface Leader {
    */
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
   /**
+   * A `custodian-event` from this machine, in process (`run-capabilities.ts`), as `onSession` is; other
+   * machines' arrive through the term's leg. `from` is the sealing daemon: a `flag` or `unflag` moves only a
+   * task placed on it (`Scheduler.onFlag`), and a `failing` is pushed under its id. Dropped outside a
+   * running term, logged at info with the kind and never the note.
+   */
+  readonly onCustodianEvent: (event: CustodianEvent, from: string) => void;
+  /**
    * The relay's nudge after an app-leg write to the store (`store-changed`;
    * `RelayClient`'s `onStoreChanged`): refreshes that one task, then ticks.
    * Buffered while the term is taking over, so a create landing between
@@ -236,6 +245,7 @@ interface TermRun {
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   readonly onBranchState: (state: BranchState, from: string) => void;
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
+  readonly onCustodianEvent: (event: CustodianEvent, from: string) => void;
   readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
 }
@@ -296,6 +306,8 @@ export function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
     }
     case "pr-blocked":
       return { v: 1, kind: "pr-blocked", at, taskId: alert.taskId, reason: alert.reason };
+    case "flag":
+      return { v: 1, kind: "flag", at, taskId: alert.taskId, reason: alert.reason };
     case "quota-exhausted": {
       const { taskId, window, reason } = alert;
       return { v: 1, kind: "quota-exhausted", at, taskId, window, ...(reason === undefined ? {} : { reason }) };
@@ -391,6 +403,20 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   };
   const onBranchState = (state: BranchState, from: string): void => {
     if (live && running) scheduler.onBranchState(state, from).catch(fail);
+  };
+  // The custodian's flag, unflag and failing: a flag's note is display-only and never logged here, nor pushed.
+  // Declared before the leg that calls it; it reads `scheduler` and `sendPush` only once a term is running.
+  const onCustodianEvent = (event: CustodianEvent, from: string): void => {
+    if (!live || !running) {
+      log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
+      return;
+    }
+    if (event.kind === "failing") {
+      log.warn(`scheduler: custodian failing: device=${quote(from)}`);
+      sendPush({ v: 1, kind: "custodian-failing", at: now(), deviceId: from });
+      return;
+    }
+    scheduler.onFlag(event, from).catch(fail);
   };
   // The session's own pass: the record is prompt text and is never logged, nor is the branch it names.
   const onSessionPass = (pass: SessionPass, from: string): boolean => {
@@ -488,7 +514,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       plain.re === undefined &&
       plain.op !== "branch-state" &&
       plain.op !== "session-event" &&
-      plain.op !== "session-pass"
+      plain.op !== "session-pass" &&
+      plain.op !== "custodian-event"
     ) {
       log.warn(`scheduler: refused op=${quote(plain.op)} from=${quote(from)} — not an op this leader handles`);
       void opts.reply(from, {
@@ -516,6 +543,16 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         return;
       }
       onSessionPass(pass, from);
+      return;
+    }
+    // Only a daemon's, as `branch-state`: it moves a task's record on the strength of what its machine saw.
+    if (plain.op === "custodian-event" && from !== APP_ID) {
+      const custodianEvent = parseCustodianEvent(plain.payload);
+      if (custodianEvent === null) {
+        log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a custodian event`);
+        return;
+      }
+      onCustodianEvent(custodianEvent, from);
       return;
     }
     const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
@@ -607,6 +644,12 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
           log,
           onError: fail,
         });
+  // A pass's alerts and the custodian's `failing` share one path: parked while the settings load is pending.
+  const sendPush = (push: PushAlert): void => {
+    if (pushSender === null) return;
+    if (settingsState !== "pending") pushSender.send(push);
+    else if (parked.length < PARKED_ALERTS_MAX) parked.push(push);
+  };
   // Disk, login and archivist alerts ride the registry, not the scheduler: the record's `diskAlerts`, `authAlerts`
   // and `archivistSilence` are what keep a new term from repeating one, and an alert is raised only once that
   // write has landed. Nothing the scheduler reads learns of the archivist (A4).
@@ -654,10 +697,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     log: (line) => log.info(line),
     onAlert: (alert) => {
       log.warn(`scheduler: ${alert.message}`);
-      if (pushSender === null) return;
-      const push = alertToPush(alert, now());
-      if (settingsState !== "pending") pushSender.send(push);
-      else if (parked.length < PARKED_ALERTS_MAX) parked.push(push);
+      sendPush(alertToPush(alert, now()));
     },
     onIdleChange: nudge.note,
     // The name is the task's own, from its `requires` (parsed through `isTraitName`: [a-z0-9-], 32 at most, so
@@ -802,6 +842,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     onSession,
     onBranchState,
     onSessionPass,
+    onCustodianEvent,
     onStoreChanged,
     end: () => {
       live = false;
@@ -868,6 +909,13 @@ export function createLeader(options: LeaderOpts): Leader {
     onSession: async (taskId, state, from, prUrl) => current?.onSession(taskId, state, from, prUrl),
     onBranchState: (state, from) => current?.onBranchState(state, from),
     onSessionPass: (pass, from) => current?.onSessionPass(pass, from) ?? false,
+    onCustodianEvent: (event, from) => {
+      if (current !== null) {
+        current.onCustodianEvent(event, from);
+        return;
+      }
+      log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
+    },
     onStoreChanged: (key, version) => current?.onStoreChanged(key, version),
     term: () => current?.term ?? null,
     settled: async () => current?.settled,

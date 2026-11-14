@@ -1001,3 +1001,101 @@ describe("pr-blocked", () => {
     });
   });
 });
+
+describe("the custodian's flag, through onFlag", () => {
+  const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as const;
+  const NOTE = "NOTE-SENTINEL";
+  const flag = (reason: "stuck" | "look" | "dirty" | "unpushed" = "stuck", note?: string) =>
+    ({ kind: "flag", taskId: "t", reason, ...(note === undefined ? {} : { note }), at: 1 }) as const;
+  const unflag = { kind: "unflag", taskId: "t", at: 1 } as const;
+  const seed = async (store: MemoryQueueStore, fields: Partial<Task> = {}): Promise<void> => {
+    const write = await store.put("t", 0, {
+      id: "t",
+      spec: spec(),
+      state: "running",
+      createdAt: NOW,
+      assignment: ON_A,
+      ...fields,
+    });
+    if (!write.ok) throw new Error(`seed: ${write.code}`);
+  };
+
+  test("the placed machine's flag is written with the leader's clock, and a new stuck alerts once with no note", async () => {
+    const { alerts, scheduler, store } = setup();
+    await seed(store);
+    await scheduler.load();
+    await scheduler.onFlag(flag("stuck", NOTE), "a");
+    expect((await stored(store, "t")).body.flag).toEqual({ reason: "stuck", note: NOTE, at: NOW });
+    expect(alerts).toEqual([{ kind: "flag", taskId: "t", reason: "stuck", message: 'flag: task="t" reason=stuck' }]);
+    expect(JSON.stringify(alerts)).not.toContain(NOTE);
+  });
+
+  test("another machine's flag, and an unflag from one, change nothing", async () => {
+    const { alerts, scheduler, store } = setup();
+    await seed(store, { flag: { reason: "look", at: NOW - 1 } });
+    await scheduler.load();
+    const before = (await stored(store, "t")).version;
+    await scheduler.onFlag(flag("stuck"), "b");
+    await scheduler.onFlag(unflag, "b");
+    expect(await stored(store, "t")).toMatchObject({ version: before, body: { flag: { reason: "look" } } });
+    expect(alerts).toEqual([]);
+  });
+
+  test("it is taken in any state: a session outlives its task's done", async () => {
+    for (const state of ["awaiting-merge", "done"] as const) {
+      const { scheduler, store } = setup();
+      await seed(store, { state, endedAt: NOW, ...(state === "done" ? { doneBy: "reported" as const } : {}) });
+      await scheduler.load();
+      await scheduler.onFlag(flag("look"), "a");
+      expect((await stored(store, "t")).body.flag).toEqual({ reason: "look", at: NOW });
+    }
+  });
+
+  test("a repeat of the same flag writes nothing and pushes nothing; a note change keeps `at` and does not alert", async () => {
+    const { alerts, clock, scheduler, store } = setup();
+    await seed(store);
+    await scheduler.load();
+    await scheduler.onFlag(flag("stuck", "one"), "a");
+    const written = (await stored(store, "t")).version;
+    clock.now = NOW + 5_000;
+    await scheduler.onFlag(flag("stuck", "one"), "a");
+    expect((await stored(store, "t")).version).toBe(written);
+    await scheduler.onFlag(flag("stuck", "two"), "a");
+    expect((await stored(store, "t")).body.flag).toEqual({ reason: "stuck", note: "two", at: NOW });
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("only stuck alerts; a new reason after another one does", async () => {
+    const { alerts, scheduler, store } = setup();
+    await seed(store);
+    await scheduler.load();
+    await scheduler.onFlag(flag("dirty"), "a");
+    await scheduler.onFlag(flag("look"), "a");
+    expect(alerts).toEqual([]);
+    await scheduler.onFlag(flag("stuck"), "a");
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("unflag clears, and clearing nothing writes nothing", async () => {
+    const { alerts, scheduler, store } = setup();
+    await seed(store, { flag: { reason: "stuck", at: NOW - 1 } });
+    await scheduler.load();
+    await scheduler.onFlag(unflag, "a");
+    expect((await stored(store, "t")).body).not.toHaveProperty("flag");
+    const cleared = (await stored(store, "t")).version;
+    await scheduler.onFlag(unflag, "a");
+    expect((await stored(store, "t")).version).toBe(cleared);
+    expect(alerts).toEqual([]);
+  });
+
+  test("a write that conflicts and retries still alerts exactly once", async () => {
+    const { alerts, scheduler, store } = setup();
+    await seed(store);
+    await scheduler.load();
+    const entry = await stored(store, "t");
+    expect((await store.put("t", entry.version, entry.body)).ok).toBe(true);
+    await scheduler.onFlag(flag("stuck"), "a");
+    expect(alerts).toHaveLength(1);
+    expect((await stored(store, "t")).body.flag?.reason).toBe("stuck");
+  });
+});
