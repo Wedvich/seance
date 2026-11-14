@@ -18,6 +18,7 @@ import { emptyCounts, type RoundEntry } from "./custodian-rounds.ts";
 import { ROUND_REQUEST_MIN_GAP_MS, type PauseRead, type RoundRequest } from "./custodian-control.ts";
 import type { Exclave, ExclaveScan } from "./exclaves.ts";
 import { newestReadings } from "./fleet-quota.ts";
+import { pollUntil } from "../test/fixtures.ts";
 import type { TrackedActivity } from "./pane-activity.ts";
 
 const MIN = 60_000;
@@ -1399,5 +1400,68 @@ describe("the seat's view (C40, C41)", () => {
     expect(r.published.length).toBeGreaterThanOrEqual(4);
     for (const published of r.published) expect(published).not.toHaveProperty("rc");
     r.seat.stop();
+  });
+
+  test("a pause behind running or failing shows as p; paused and idle never carry it", async () => {
+    const r = rig();
+    await r.seat.start();
+    await r.seat.tick();
+    // Paused while the round runs: the pause stops the due check, never a running round.
+    r.control.read = { pause: { at: 1, until: null }, unreadable: false };
+    await r.seat.tick();
+    expect(r.seat.view(NOW)).toMatchObject({ s: "running", p: true });
+    r.control.read = { pause: null, unreadable: false };
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.seat.view(r.clock.now)).not.toHaveProperty("p");
+    r.seat.stop();
+
+    const failing = rig({ activity: () => [] });
+    failing.rounds.push(failed(NOW - 3 * MIN), failed(NOW - 2 * MIN), failed(NOW - MIN));
+    failing.control.read = { pause: { at: 1, until: NOW + MIN }, unreadable: false };
+    await failing.seat.start();
+    expect(failing.seat.view(NOW)).toMatchObject({ s: "failing", p: true });
+    expect(failing.seat.view(NOW + MIN)).not.toHaveProperty("p");
+    failing.seat.stop();
+
+    const paused = rig({ activity: () => [] });
+    paused.control.read = { pause: { at: 1, until: null }, unreadable: false };
+    await paused.seat.start();
+    expect(paused.seat.view(NOW)).toEqual({ s: "paused" });
+    paused.seat.stop();
+  });
+
+  test("poke reads the control file now and tells the status; one landing mid-pass runs another after it", async () => {
+    const r = rig({ activity: () => [] });
+    await r.seat.start();
+    const calls = r.onView.calls;
+    r.control.read = { pause: { at: NOW, until: null }, unreadable: false };
+    r.seat.poke();
+    await pollUntil(() => r.seat.view(NOW).s === "paused", "the poke read the pause");
+    await pollUntil(() => r.onView.calls === calls + 1, "the status was told");
+
+    // A pass held mid-step: the poke waits for it, then runs its own and sees the resume.
+    const gate = Promise.withResolvers<void>();
+    let reads = 0;
+    const held = rig({
+      activity: () => [],
+      readControl: async () => {
+        reads++;
+        if (reads === 2) await gate.promise;
+        return held.control.read;
+      },
+    });
+    held.control.read = { pause: { at: NOW, until: null }, unreadable: false };
+    await held.seat.start();
+    const running = held.seat.tick();
+    await pollUntil(() => reads === 2, "the pass is reading");
+    held.control.read = { pause: null, unreadable: false };
+    held.seat.poke();
+    gate.resolve();
+    await running;
+    await pollUntil(() => reads === 3, "the poke's own pass ran");
+    await pollUntil(() => held.seat.view(NOW).s === "idle", "it read the resume");
+    r.seat.stop();
+    held.seat.stop();
   });
 });

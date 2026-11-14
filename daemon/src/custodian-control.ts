@@ -10,8 +10,9 @@ import { writeDurable } from "./durable-write.ts";
  * and imports no `log.ts`: the CLI writes the first two and the seat reads them, and the seat writes the third and
  * the CLI reads it. Files 0600 in the 0700 `custodian/` dir, written atomically.
  *
- * Not the main `state.json`: the CLI must not race the daemon's writes there. Today the CLI is the only writer of
- * `pause`; a second writer (the app op, custodian 7) serialises through one writer or moves the pause to its own file.
+ * Not the main `state.json`: the CLI must not race the daemon's writes there. The pause has two writers, the CLI and
+ * the daemon's app op, each a whole-file atomic rename that keeps the file's other keys: the later act wins (DESIGN.md,
+ * "The custodian's status and the Machines row").
  */
 
 /** ms. `until` null holds until `resume`. */

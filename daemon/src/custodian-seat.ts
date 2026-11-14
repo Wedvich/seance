@@ -310,6 +310,11 @@ export interface CustodianSeat {
   readonly start: () => Promise<void>;
   /** One pass now (the interval's own); a call while one runs does nothing. For tests. */
   readonly tick: () => Promise<void>;
+  /**
+   * The owner changed the control files (the `custodian` app op): a pass now, or right after the one running, so the
+   * pause and a round request are read at once rather than at the next interval, and the status hears of it.
+   */
+  readonly poke: () => void;
   readonly stop: () => void;
   /**
    * The pane of the round this seat is running, null when none is or the seat is stopped: what the `custodian` frame
@@ -404,13 +409,15 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
 
   const view = (now: number): CustodianStatus => {
     const round = d.record().round;
-    const shared = lastRoundView(lastRound);
+    const paused = pausedAt(control, now);
+    // `running` and `failing` outrank `paused`: `p` keeps the pause visible behind them, so the card offers Resume.
+    const shared = { ...lastRoundView(lastRound), ...(paused ? { p: true as const } : {}) };
     if (round !== undefined) {
       const id = remote !== null && round.pane !== null && remote.key === roundKey(round) ? remote.id : null;
       return { s: "running", ...shared, ...(id !== null && isRemoteSessionId(id) ? { rc: id } : {}) };
     }
     if (failures >= FAILING_AFTER) return { s: "failing", ...shared };
-    return { s: pausedAt(control, now) ? "paused" : "idle", ...shared };
+    return { s: paused ? "paused" : "idle", ...lastRoundView(lastRound) };
   };
 
   /** Tells the status loop when `s`, `e` or `rc` moved, and publishes the view for the owner's commands. */
@@ -645,6 +652,9 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     await finish(round, "exited");
   };
 
+  /** A poke that landed while a pass ran (or before `start` finished): that pass may have read the files before the change. */
+  let pokedWhileBusy = false;
+
   const tick = async (): Promise<void> => {
     if (busy || d.stopped()) return;
     busy = true;
@@ -657,6 +667,22 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     }
     await flushFailing();
     await notify();
+    afterBusy();
+  };
+
+  const afterBusy = (): void => {
+    if (!pokedWhileBusy) return;
+    pokedWhileBusy = false;
+    void tick();
+  };
+
+  const poke = (): void => {
+    if (timer === null || d.stopped()) return;
+    if (busy) {
+      pokedWhileBusy = true;
+      return;
+    }
+    void tick();
   };
 
   return {
@@ -687,9 +713,11 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         .finally(() => {
           busy = false;
         })
-        .then(notify);
+        .then(notify)
+        .then(afterBusy);
     },
     tick,
+    poke,
     ready: () => ready,
     // Never closes the round: a reload or restart adopts it (C4).
     stop: (): void => {

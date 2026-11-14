@@ -10,14 +10,16 @@ import type {
   MachineCard,
   MachinesView,
 } from "../machines-view.ts";
+import { custodianMenu } from "../machines-view.ts";
 import {
   type AccountsState,
   type AvailabilityState,
+  type CustodianControlState,
   type HistoryRange,
   type HistoryTarget,
   type HistoryView,
 } from "../state.ts";
-import { ACCOUNT_ALIAS_MAX_LENGTH, type Machine } from "@seance/shared";
+import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
 import { canDrainNow, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
@@ -49,6 +51,9 @@ export function MachinesScreen(props: {
   history: HistoryView | null;
   accounts: AccountsState;
   availability: AvailabilityState;
+  custodian: CustodianControlState;
+  /** Round now, pause or resume a machine's custodian (the card's menu, for a machine advertising `custodian`). */
+  onCustodian: (deviceId: string, request: CustodianRequest) => void;
   /** Asks a machine to close (false) or reopen (true); `now` is the close sheet's "Drain now". The confirm sheet for a close is this screen's. */
   onSetOpen: (deviceId: string, open: boolean, now?: boolean) => void;
   /** The registry, which the confirm sheet's words are derived from (`closeSheet`). */
@@ -76,6 +81,8 @@ export function MachinesScreen(props: {
     history,
     accounts,
     availability,
+    custodian,
+    onCustodian,
     onSetOpen,
     machines,
     closeSheet,
@@ -129,6 +136,8 @@ export function MachinesScreen(props: {
             history={history?.target.kind === "machine" && history.target.deviceId === card.deviceId ? history : null}
             ranges={view.ranges.machine}
             availability={availability}
+            custodian={custodian}
+            onCustodian={(request) => onCustodian(card.deviceId, request)}
             onShowHistory={onShowHistory}
             onHideHistory={onHideHistory}
             onToggleOpen={(open) => {
@@ -195,18 +204,23 @@ function MachineCardView(props: {
   history: HistoryView | null;
   ranges: readonly HistoryRange[];
   availability: AvailabilityState;
+  custodian: CustodianControlState;
+  onCustodian: (request: CustodianRequest) => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
   /** The switch's new state: true reopens at once, false asks for confirmation first. */
   onToggleOpen: (open: boolean) => void;
 }): JSX.Element {
-  const { card, history, ranges, availability, onShowHistory, onHideHistory, onToggleOpen } = props;
+  const { card, history, ranges, availability, custodian, onCustodian, onShowHistory, onHideHistory, onToggleOpen } =
+    props;
   // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
   const here = availability[card.deviceId] ?? null;
   const asked = here?.kind === "sending" || here?.kind === "sent" ? here.open : null;
   const switchOn = asked ?? card.openSwitch === "on";
   const closed = here?.kind === "sent" ? !here.open : card.closed;
-  const offersMenu = card.charts || history !== null || card.openSwitch !== null;
+  const asking = custodian[card.deviceId] ?? null;
+  const custodianState = custodianMenu(card, asking);
+  const offersMenu = card.charts || history !== null || card.openSwitch !== null || card.custodianControls;
   const target: HistoryTarget = { kind: "machine", deviceId: card.deviceId };
   const menu = useMenu();
   // Kept while a chart is open even if its source drops: the item is the chart's only close.
@@ -242,7 +256,18 @@ function MachineCardView(props: {
                   onToggle={() => onToggleOpen(!switchOn)}
                 />
               )}
-              {card.openSwitch !== null && offersHistory && <MenuDivider />}
+              {card.custodianControls && (
+                <>
+                  {card.openSwitch !== null && <MenuDivider />}
+                  <CustodianItems
+                    paused={custodianState.paused}
+                    running={custodianState.running}
+                    sending={custodianState.sending}
+                    onCustodian={onCustodian}
+                  />
+                </>
+              )}
+              {(card.openSwitch !== null || card.custodianControls) && offersHistory && <MenuDivider />}
               {offersHistory && (
                 <HistoryItem history={history} onShow={() => onShowHistory(target)} onHide={onHideHistory} />
               )}
@@ -274,7 +299,13 @@ function MachineCardView(props: {
           ))}
         </div>
       )}
-      {card.custodian !== null && <CustodianLine row={card.custodian} />}
+      {asking?.kind === "failed" && (
+        <p className="fleet-note fleet-warn" role="alert">
+          {asking.text}
+        </p>
+      )}
+      {custodianState.roundRequested && <p className="fleet-note">Round requested</p>}
+      {card.custodian !== null && <CustodianLine row={card.custodian} paused={custodianState.paused} />}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
       {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
 
@@ -406,6 +437,51 @@ function AccountCardView(props: {
         <HistoryChart history={history} ranges={ranges} onPick={(range) => onShowHistory(target, range)} />
       )}
     </section>
+  );
+}
+
+/** Round now, then pause (for an hour or until resumed) or resume, by what the seat reports or was last asked. */
+function CustodianItems(props: {
+  paused: boolean;
+  running: boolean;
+  /** A request is out: the store takes one per machine at a time. */
+  sending: boolean;
+  onCustodian: (request: CustodianRequest) => void;
+}): JSX.Element {
+  const { paused, running, sending, onCustodian } = props;
+  return (
+    <>
+      <MenuItem
+        label="Round now"
+        icon={<RoundIcon />}
+        disabled={sending || running}
+        {...(running ? { sub: "A round is running" } : {})}
+        onClick={() => onCustodian({ act: "round" })}
+      />
+      {paused ? (
+        <MenuItem
+          label="Resume"
+          icon={<ResumeIcon />}
+          disabled={sending}
+          onClick={() => onCustodian({ act: "resume" })}
+        />
+      ) : (
+        <>
+          <MenuItem
+            label="Pause for 1 hour"
+            icon={<PauseIcon />}
+            disabled={sending}
+            onClick={() => onCustodian({ act: "pause", minutes: 60 })}
+          />
+          <MenuItem
+            label="Pause until resumed"
+            icon={<PauseIcon />}
+            disabled={sending}
+            onClick={() => onCustodian({ act: "pause" })}
+          />
+        </>
+      )}
+    </>
   );
 }
 
@@ -557,6 +633,32 @@ function WorkIcon(): JSX.Element {
       <path d="M5 8h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" />
       <path d="M9 8V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
       <path d="M4 13h16" />
+    </StrokeIcon>
+  );
+}
+
+function RoundIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v4h-4" />
+    </StrokeIcon>
+  );
+}
+
+function PauseIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M9 6v12" />
+      <path d="M15 6v12" />
+    </StrokeIcon>
+  );
+}
+
+function ResumeIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M8 5l11 7-11 7z" />
     </StrokeIcon>
   );
 }
@@ -718,15 +820,22 @@ function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] })
 
 const CUSTODIAN_STATE_WORDS = { idle: "Idle", running: "Running", paused: "Paused", failing: "Failing" } as const;
 
+/** A pause behind a running round or a failing host (`cu.p`), or one just asked, shows beside the state. */
+function custodianWord(state: CustodianRow["state"], paused: boolean): string {
+  if (state === null) return "no report yet";
+  if (!paused || state === "paused") return CUSTODIAN_STATE_WORDS[state];
+  return state === "idle" ? CUSTODIAN_STATE_WORDS.paused : `${CUSTODIAN_STATE_WORDS[state]}, paused`;
+}
+
 /**
  * Each part is one unbreakable span, so a narrow card wraps between parts, never inside one. The ` · ` leads each
  * later part inside its span (it wraps with its part), and a text space between the spans keeps `textContent` and
  * screen readers from running the words together; flex layout ignores that whitespace.
  */
-function CustodianLine({ row }: { readonly row: CustodianRow }): JSX.Element {
+function CustodianLine({ row, paused }: { readonly row: CustodianRow; readonly paused: boolean }): JSX.Element {
   return (
     <p className={`fleet-note custodian-row${row.warn ? " fleet-warn" : ""}`}>
-      <span>Custodian · {row.state === null ? "no report yet" : CUSTODIAN_STATE_WORDS[row.state]}</span>
+      <span>Custodian · {custodianWord(row.state, paused)}</span>
       {row.ended !== null && (
         <>
           {" "}

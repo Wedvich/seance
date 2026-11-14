@@ -143,6 +143,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       history={state.history}
       accounts={state.accounts}
       availability={state.availability}
+      custodian={state.custodian}
+      onCustodian={(deviceId, request) => void store.custodianControl(deviceId, request)}
       closeSheet={(machine) =>
         deriveCloseSheet(machine, {
           passes: deriveDrainAvailability(state.relay),

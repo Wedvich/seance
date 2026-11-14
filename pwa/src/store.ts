@@ -8,6 +8,8 @@ import type {
   MetricsReply,
   MetricsRequest,
   AvailabilityResponse,
+  CustodianRequest,
+  CustodianResponse,
   RescanResponse,
   SessionsResponse,
   SpawnClient,
@@ -24,6 +26,8 @@ import {
   failureReasonText,
   METRICS_STEPS,
   parseAvailabilityResponse,
+  parseCustodianResponse,
+  CAPABILITIES,
   queuedTask,
   RequestFailure,
   sentence,
@@ -52,6 +56,7 @@ import {
   isArchiveRange,
   RANGE_SPANS,
   AVAILABILITY_IDLE,
+  CUSTODIAN_CONTROL_IDLE,
   RESCAN_IDLE,
   TARGET_METRICS,
   withWorktree,
@@ -63,6 +68,7 @@ import {
   type HistoryTarget,
   type HistoryView,
   type DeviceAvailability,
+  type DeviceCustodian,
   type Model,
   type PersistedForm,
   type OlderPick,
@@ -166,6 +172,37 @@ function enqueueFailureText(failure: RequestFailure): string {
 }
 
 const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that settle on a done report yet.";
+
+const CUSTODIAN_ACT_WORDS = {
+  round: "ask for a round on",
+  pause: "pause the custodian on",
+  resume: "resume the custodian on",
+} as const;
+
+/**
+ * A custodian refusal as the card says it: fixed text per code, never the daemon's message. A reply that did not parse,
+ * or a transport failure, reads as not reached.
+ */
+export function custodianRefusalText(reply: CustodianResponse | null, name: string, request: CustodianRequest): string {
+  if (reply === null) return `Couldn't ${CUSTODIAN_ACT_WORDS[request.act]} ${name}`;
+  if (reply.ok) return "";
+  switch (reply.code) {
+    case "held":
+      return `Rounds are held on ${name} for now`;
+    case "unconfigured":
+      return `${name} has no custodian configured`;
+    case "host_failed":
+      return `${name}'s custodian can't run a round: its host checks failed`;
+    case "running":
+      return "A round is already running";
+    case "too_soon":
+      return reply.after === undefined
+        ? "A round ran recently: ask again later"
+        : `A round ran recently: ask again after ${new Date(reply.after).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    default:
+      return `Couldn't ${CUSTODIAN_ACT_WORDS[request.act]} ${name}`;
+  }
+}
 
 /** How long a close or reopen's asked state is held for the machine's status to catch up (the relay's floor is ~10 s). */
 const AVAILABILITY_HOLD_MS = 20_000;
@@ -271,6 +308,7 @@ export class Store {
       spawning: false,
       rescan: RESCAN_IDLE,
       availability: AVAILABILITY_IDLE,
+      custodian: CUSTODIAN_CONTROL_IDLE,
       verdict: null,
       held,
       preview: null,
@@ -1193,6 +1231,44 @@ export class Store {
         text: `Couldn't ${open ? "reopen" : "close"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  /**
+   * Round now, pause or resume one machine's custodian seat (`custodian`), from its card's menu. Offered only for a
+   * machine advertising `custodian`, checked again here. A pause or resume is held as asked (`sent`) until the seat's
+   * `cu` says so; a refusal is shown as fixed text by its code.
+   */
+  async custodianControl(deviceId: string, request: CustodianRequest): Promise<void> {
+    if (this.#state.custodian[deviceId]?.kind === "sending") return;
+    const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+    if (machine?.capabilities?.includes(CAPABILITIES.custodian) !== true) {
+      this.#setCustodian(deviceId, { kind: "failed", text: "This machine has no custodian" });
+      return;
+    }
+    this.#setCustodian(deviceId, { kind: "sending", act: request.act });
+    let parsed: CustodianResponse | null;
+    try {
+      parsed = parseCustodianResponse(await this.#client.request<CustodianResponse>(deviceId, "custodian", request));
+    } catch {
+      parsed = null;
+    }
+    if (parsed === null || !parsed.ok) {
+      this.#setCustodian(deviceId, { kind: "failed", text: custodianRefusalText(parsed, machine.name, request) });
+      return;
+    }
+    const held: DeviceCustodian = { kind: "sent", act: request.act, paused: parsed.pause !== null };
+    this.#setCustodian(deviceId, held);
+    // Only this act's own hold: a later act's must not be cut short by this timer.
+    const timer = setTimeout(() => {
+      if (this.#state.custodian[deviceId] === held) this.#setCustodian(deviceId, null);
+    }, AVAILABILITY_HOLD_MS);
+    // Bun's timer is an object that would hold a test run open; a browser's is a number.
+    if (typeof timer === "object") timer.unref();
+  }
+
+  #setCustodian(deviceId: string, entry: DeviceCustodian | null): void {
+    const rest = Object.fromEntries(Object.entries(this.#state.custodian).filter(([id]) => id !== deviceId));
+    this.#patch({ custodian: entry === null ? rest : { ...rest, [deviceId]: entry } });
   }
 
   #setAvailability(deviceId: string, entry: DeviceAvailability | null): void {

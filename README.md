@@ -201,7 +201,8 @@ Edit `~/.config/seance/config.json`:
   `log` prints the last rounds (summaries included, which the Machines screen never sees), `pause [--for 1h]` and
   `resume` hold and release it, and `round` asks for one now (honoured even while paused, refused while a round runs or
   within 15 minutes of the last round's start or end, and dropped if not taken within 10). Once rounds go live the Machines card shows a Custodian row
-  for the machine.
+  for the machine, and its menu offers the same Round now, Pause for 1 hour, Pause until resumed and Resume from
+  the PWA; the thresholds, the model and on/off stay in this file.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
   account's cached quota may get before the daemon refreshes it with `claude -p /usage`.
   Values under 1 are refused: Claude Code debounces `/usage` for 60 s anyway.

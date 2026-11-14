@@ -22,9 +22,19 @@ import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
 import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
 import { attachmentsRoot, taskAttachments } from "./attachments.ts";
-import { createHandler, createLocalOps, type HandlerContext, type MachineAvailability } from "./handlers.ts";
+import {
+  createHandler,
+  createLocalOps,
+  type CustodianControl,
+  type HandlerContext,
+  type MachineAvailability,
+} from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
-import { seatEnabled, type CustodianSeatOpts } from "./custodian-seat.ts";
+import type { SeatView } from "./custodian-control.ts";
+import { ownerAct } from "./custodian-owner.ts";
+import { readRounds } from "./custodian-rounds.ts";
+import { seatEnabled, seatLive, type CustodianSeatOpts } from "./custodian-seat.ts";
+import { custodianRoundsPath } from "./paths.ts";
 import { createLeader, type Leader, type QueueStore, type SchedulerConfig } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -37,7 +47,7 @@ import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
-import { startCapabilities } from "./run-capabilities.ts";
+import { startCapabilities, type CustodianHost } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { checkoutRoot, readSource } from "./selfsource.ts";
@@ -512,8 +522,60 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       return run;
     },
   };
+  // Read late: the seat starts with the capabilities, after the handler context.
+  const custodianSeat: {
+    poke?: () => void;
+    host?: () => CustodianHost;
+    status?: (now: number) => CustodianStatus | null;
+  } = {};
+  // What the daemon itself knows of its seat, as the file view the shell reads: that file is stale once a failed
+  // seat stopped writing it, and says nothing while the seat's checks still run.
+  const liveSeatView = (): Promise<SeatView | null> => {
+    const at = now();
+    const host = custodianSeat.host?.() ?? "starting";
+    if (host === "starting") return Promise.resolve(null);
+    const view = host === "failed" ? null : (custodianSeat.status?.(at) ?? null);
+    return Promise.resolve({
+      s: view?.s ?? "failing",
+      ...(view?.e === undefined ? {} : { e: view.e }),
+      ...(view?.n === undefined ? {} : { n: view.n }),
+      at,
+      failed: host === "failed",
+      version: source?.sha ?? "unknown",
+    });
+  };
+  // The op's acts one at a time in this process. The shell's verbs are another process and are not serialised with
+  // these: each write is one whole-file atomic rename of a file that holds only the pause, so the later owner act wins
+  // (DESIGN.md, "The custodian's status and the Machines row").
+  let acting: Promise<unknown> = Promise.resolve();
+  const custodian: CustodianControl = {
+    act: (request, audit) => {
+      const run = acting.then(async () => {
+        const reply = await ownerAct(
+          request,
+          {
+            now,
+            live: seatLive(opts.custodian ?? {}),
+            configured: () => Promise.resolve(config.custodian !== undefined),
+            seatView: liveSeatView,
+            seatReady: () => (custodianSeat.host?.() ?? "starting") !== "starting",
+            seatRecord: () => Promise.resolve(custodianSeatOf(state)),
+            rounds: () => readRounds(custodianRoundsPath()),
+          },
+          audit,
+        );
+        // So the row follows within the status floor rather than at the seat's next minute.
+        if (reply.ok) custodianSeat.poke?.();
+        return reply;
+      });
+      acting = run.catch(() => {});
+      return run;
+    },
+  };
   const handlerCtx: HandlerContext = {
     availability,
+    // Only where this daemon runs a seat: elsewhere the op answers `unsupported`, never an act nothing reads.
+    ...(custodianOn ? { custodian } : {}),
     armPassClose: (taskId) =>
       passClose.arm?.(taskId) ??
       Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" }),
@@ -540,7 +602,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   };
 
   // The seat starts with the capabilities, after the loop it reports to: read late, like `drainAsk`.
-  let custodianView: ((now: number) => CustodianStatus | null) | undefined;
   // Created before the client, whose every register samples at once; reads it late.
   const status = startStatusLoop(
     metrics,
@@ -552,7 +613,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       httpFetch,
       draining: () => endedTasks.draining,
       closed: () => closedOf(state),
-      custodian: () => custodianView?.(now()) ?? null,
+      custodian: () => custodianSeat.status?.(now()) ?? null,
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
@@ -757,7 +818,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   });
 
   passClose.arm = capabilities.armPassClose;
-  custodianView = capabilities.custodianStatus;
+  if (capabilities.custodianPoke !== undefined) custodianSeat.poke = capabilities.custodianPoke;
+  if (capabilities.custodianHost !== undefined) custodianSeat.host = capabilities.custodianHost;
+  custodianSeat.status = capabilities.custodianStatus;
   drainAsk.wire(capabilities.drainAsk, closedOf(state));
 
   // After the relay leg, because the local surface is the optional one: it never

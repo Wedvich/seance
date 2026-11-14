@@ -14,7 +14,14 @@ import {
   retainFrame,
   type CustodianFlags,
 } from "./custodian-flags.ts";
-import { dropRoundRequest, peekRoundRequest, readControl, writeSeatView } from "./custodian-control.ts";
+import {
+  dropRoundRequest,
+  pausedAt,
+  peekRoundRequest,
+  readControl,
+  writeSeatView,
+  type PauseRead,
+} from "./custodian-control.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
 import { createWorktreeRule } from "./custodian-worktree.ts";
@@ -137,7 +144,13 @@ export interface Started {
   readonly drainAsk?: DrainAsk;
   /** The custodian seat's view for the status's `cu`, read late by `run.ts`; absent where no seat is enabled. */
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
+  /** The seat reads the owner's control files now (`CustodianSeat.poke`), read late by `run.ts`'s `custodian` op. */
+  readonly custodianPoke?: () => void;
+  /** Whether the seat exists: `starting` while its async checks run, `failed` once they declined. The op reads it, never the file view. */
+  readonly custodianHost?: () => CustodianHost;
 }
+
+export type CustodianHost = "starting" | "failed" | "ready";
 
 /** One optional subsystem `startDaemon` wires once the relay client exists. */
 export type DaemonCapability = (ctx: WiringCtx) => Started;
@@ -417,6 +430,17 @@ const custodianSeat: DaemonCapability = (ctx) => {
   let seatFailed = false;
   /** What the status shows for a failed seat: `failing`, with the log's last round (read once, when it failed). */
   let failedLast: Pick<CustodianStatus, "e" | "n"> = {};
+  /** The pause as last read once the seat failed (no seat's `view` reads it then): `p` keeps it visible behind `failing`. */
+  let failedControl: PauseRead = { pause: null, unreadable: false };
+  const readFailedControl = (): void => {
+    void readControl()
+      .then((read) => {
+        failedControl = read;
+        return null;
+      })
+      .catch(() => {})
+      .finally(() => ctx.refreshStatus?.());
+  };
   const publish = (view: CustodianStatus, failed: boolean): Promise<void> =>
     writeSeatView({
       s: view.s,
@@ -428,6 +452,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     });
   const markFailed = (): void => {
     seatFailed = true;
+    readFailedControl();
     void readRounds(custodianRoundsPath())
       .then((entries) => {
         failedLast = lastRoundView(entries.at(-1));
@@ -559,7 +584,14 @@ const custodianSeat: DaemonCapability = (ctx) => {
       release();
     },
     custodianStatus: (now) =>
-      seatFailed ? { s: "failing", ...failedLast } : seat?.ready() === true ? seat.view(now) : null,
+      seatFailed
+        ? { s: "failing", ...failedLast, ...(pausedAt(failedControl, now) ? { p: true as const } : {}) }
+        : seat?.ready() === true
+          ? seat.view(now)
+          : null,
+    // A failed seat has no tick to read the owner's act: re-read the pause for the row.
+    custodianPoke: () => (seatFailed ? readFailedControl() : seat?.poke()),
+    custodianHost: () => (seatFailed ? "failed" : seat?.ready() === true ? "ready" : "starting"),
     ...(verbs === null
       ? {}
       : {
@@ -692,6 +724,8 @@ export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
   readonly drainAsk?: DrainAsk;
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
+  readonly custodianPoke?: () => void;
+  readonly custodianHost?: () => CustodianHost;
   readonly local: LocalSurfaces;
   readonly stop: () => void;
 }
@@ -711,6 +745,8 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
     let armPassClose: Started["armPassClose"];
     let drainAsk: Started["drainAsk"];
     let custodianStatus: Started["custodianStatus"];
+    let custodianPoke: Started["custodianPoke"];
+    let custodianHost: Started["custodianHost"];
     for (const capability of capabilities) {
       const entry = capability(ctx);
       started.push(entry);
@@ -718,6 +754,8 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       armPassClose ??= entry.armPassClose;
       drainAsk ??= entry.drainAsk;
       custodianStatus ??= entry.custodianStatus;
+      custodianPoke ??= entry.custodianPoke;
+      custodianHost ??= entry.custodianHost;
     }
     return {
       local,
@@ -725,6 +763,8 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       ...(armPassClose === undefined ? {} : { armPassClose }),
       ...(drainAsk === undefined ? {} : { drainAsk }),
       ...(custodianStatus === undefined ? {} : { custodianStatus }),
+      ...(custodianPoke === undefined ? {} : { custodianPoke }),
+      ...(custodianHost === undefined ? {} : { custodianHost }),
     };
   } catch (err) {
     // Already-started ones hold timers and sockets nothing else will stop.

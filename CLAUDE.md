@@ -55,16 +55,17 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — spec, six parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
+- **docs/custodian.md** — spec, seven parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
   Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
   and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
   and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind";
   the `flag` verb, the flags file, `custodian-event`, `Task.flag`, the card's flag and the `stuck` and `failing` pushes,
   C29, C33's flags, C41's push, C44 and C47's event, in DESIGN.md, "The custodian frame kind" (its leader's-side bullet); `MachineStatus.cu`, the Machines row and the owner's
   shell verbs `status`, `log`, `round`, `pause` and `resume`, C40, C43, C45 and C47's status, in DESIGN.md, "The
-  custodian's status and the Machines row";
+  custodian's status and the Machines row"; the `custodian` app op and the card's menu, C45 and C47's controls, in the
+  same section;
   rounds are held behind `ROUNDS_LIVE` until build item 4b, which contains the round's sandbox — the verbs bound
-  only what goes through them; nudge, interrupt and the card's menu are not built): the
+  only what goes through them; nudge and interrupt are not built): the
   custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
@@ -331,6 +332,17 @@ green:
   advertising `CAPABILITIES.close` under a verified leader advertising `CAPABILITIES.drain`. `availability`'s
   `now` is `true` only, honoured only by a daemon advertising `CAPABILITIES.drainAsk`, offered only to such a target
   (refused locally otherwise, before anything is sent), and never persisted.
+- **The custodian's controls are the owner's sealed act too** (DESIGN.md, "The custodian's status and the Machines
+  row"): the daemon answers `custodian` (round now, pause, resume) only when sealed `from: "app"` on the relay leg,
+  parsed by `parseCustodianRequest`, audited without a payload, and neither `LOCAL_OPS`, `BROKER_OPS` nor MCP carries
+  it. It acts only through the shell verbs' one implementation (`daemon/src/custodian-owner.ts`: never a second), which
+  writes the pause or a round request in `custodian/` and nothing else; a daemon running no seat (rounds held
+  included) or one still starting answers `unsupported`, one whose host checks failed refuses a round `host_failed`,
+  reading the seat's own state, never `seat.json`; a round is refused `held` while rounds are held and meets the
+  shell's spacing and refusals; the daemon runs the op's acts on one chain, and against the shell
+  the later owner act wins (each write one atomic rename of a file holding only the pause). The PWA offers the
+  controls only for a connected machine advertising `CAPABILITIES.custodian` and shows a refusal as fixed text by its
+  code; thresholds, the model and on/off stay in `config.json` (C46), never the op's.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
   `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
   `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not

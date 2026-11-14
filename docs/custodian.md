@@ -5,11 +5,11 @@ custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session
 seat and the round, now DESIGN.md, "The custodian's seat") and 4 (the `custodian` frame with `sessions`,
 `close`, `notes` and `done`, the round log, now DESIGN.md, "The custodian frame kind") and 5 (`MachineStatus.cu`, the Machines row and the shell's `status`, `log`, `round`,
 `pause` and `resume`, now DESIGN.md, "The custodian's status and the Machines row") and 6 (the `flag` verb, `custodian-event`,
-`Task.flag`, the card's flag and the `stuck` and `failing` pushes, now DESIGN.md, "The custodian frame kind" (its leader's-side bullet) and "The custodian's status and the Machines row") built and folded
-into DESIGN.md. Rounds are held behind `ROUNDS_LIVE` (owner decision, 2026-11-14): the verbs bound only
+`Task.flag`, the card's flag and the `stuck` and `failing` pushes, now DESIGN.md, "The custodian frame kind" (its leader's-side bullet) and "The custodian's status and the Machines row") and 7 (the `custodian` app op and the card's
+menu, now DESIGN.md, "The custodian's status and the Machines row") built and folded into DESIGN.md. Rounds are held behind `ROUNDS_LIVE` (owner decision, 2026-11-14): the verbs bound only
 what goes through them, and a round's sandbox can still reach the tmux socket and the daemon's plain ops
 and read on-disk secrets, so item 4b (contain the round) comes before any round runs. What is left is 4b,
-the card's menu and the app op, nudge and interrupt (items 7–8).** Decided with the owner
+nudge and interrupt (item 8).** Decided with the owner
 on 2026-11-12, 2026-11-13 and 2026-11-14. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
@@ -81,8 +81,7 @@ Each is the owner's unless marked _derived_.
 ### 3. A round
 
 - **C8–C14.** Built: DESIGN.md, "The custodian's seat".
-  C14's due check is narrowed there to the panes C7 allows and a built verb could act on (today: idle since a turn's end), and
-  "Round now" and the pause (§9) are not built yet.
+  C14's due check is narrowed there to the panes C7 allows and a built verb could act on (today: idle since a turn's end).
 - **C15.** Built: DESIGN.md, "Session events", "Per-pane retention and the screen sampler".
 - **C16, C17.** Built: DESIGN.md, "The custodian's seat".
 
@@ -242,9 +241,8 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
   custodian configured shows no row.
 - **C44. On a task card.** _Built (custodian 6)._ A flagged task shows its flag: the reason, and the note when there is
   one. A `stuck` flag sends one push per flag, with fixed text per reason like every push.
-- **C45. Controls**, in the machine card's menu: "Round now", "Pause for 1 hour", "Pause until
-  resumed", "Resume" (custodian 7). The same at the shell, _built (custodian 5):_ `seanced custodian round |
-  pause [--for 1h] | resume | status | log`.
+- **C45. Controls.** _Built (custodian 5 at the shell, custodian 7 in the card's menu):_ DESIGN.md, "The custodian's
+  status and the Machines row".
 - **C46.** On, off, the model and every threshold stay in the machine's `config.json` (C2).
 - **C47.** _Derived._ How it travels:
   - `MachineStatus.cu` carries the state, the last round's end time and its three counts. It is
@@ -253,9 +251,8 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
     honours a flag only from the machine the task is placed on, writes it onto the task record
     (reason, note, time) through the one task sealer, and sends the push. A flag on an untasked
     session stays on its machine and shows only in the card's count.
-  - The controls are a `custodian` op, answered only when sealed `from: "app"` on the relay leg,
-    parsed by its own parser and audited, like `availability`. Neither `LOCAL_OPS` nor `BROKER_OPS`
-    carries it. A pause is persisted in `state.json`; one the daemon cannot read loads as paused.
+  - _Built (custodian 7)._ The controls are the `custodian` app op: DESIGN.md, "The custodian's status and the
+    Machines row".
   - A flag's note is display-only: bounded, never logged, never in a push, and never used to bind,
     route, move or settle anything. _Built (custodian 6)._
 
@@ -463,7 +460,8 @@ delivery); nothing else here does.
    the task record and card, the `stuck` push, and the `failing` push (C29, C41, C44, C47). The flags live in
    `custodian/sessions.json`, the daemon's own file beside the owner CLI's `state.json`, not in `state.json`
    as C30 first said; the nudge and interrupt counts join it at item 8.
-7. The `custodian` app op and the card's menu (C45, C47).
+7. _Built_ (DESIGN.md, "The custodian's status and the Machines row"): the `custodian` app op and the card's menu
+   (C45, C47).
 
 **Milestone 3 — nudge and interrupt**
 

@@ -38,6 +38,8 @@ import {
   parseMachineInfo,
   parseAvailabilityRequest,
   parseAvailabilityResponse,
+  parseCustodianRequest,
+  parseCustodianResponse,
   parseMachineStatus,
   parseMetricsReply,
   parseMetricsResponse,
@@ -2407,6 +2409,67 @@ describe("M4 shapes", () => {
       expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, cu })).toEqual({ at: 1, scan: 2, cpu: 40 });
     const extra = parseMachineStatus({ at: 1, scan: 2, cu: { s: "idle", extra: "x" } });
     expect(extra?.cu).toEqual({ s: "idle" });
+  });
+
+  test("cu's p is a pause behind running or failing, kept only as true beside those", () => {
+    for (const s of ["running", "failing"] as const) {
+      expect(parseMachineStatus({ at: 1, scan: 2, cu: { s, p: true } })?.cu).toEqual({ s, p: true });
+    }
+    for (const cu of [
+      { s: "paused", p: true },
+      { s: "idle", p: true },
+      { s: "running", p: false },
+      { s: "failing", p: 1 },
+    ]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, cu })).toEqual({ at: 1, scan: 2 });
+    }
+  });
+
+  test("custodian: an act, minutes only beside pause and in range; a reply keeps its pause or its code and after", () => {
+    expect(parseCustodianRequest({ act: "round" })).toEqual({ act: "round" });
+    expect(parseCustodianRequest({ act: "resume" })).toEqual({ act: "resume" });
+    expect(parseCustodianRequest({ act: "pause" })).toEqual({ act: "pause" });
+    expect(parseCustodianRequest({ act: "pause", minutes: 60 })).toEqual({ act: "pause", minutes: 60 });
+    expect(parseCustodianRequest({ act: "pause", minutes: 43_200 })).toEqual({ act: "pause", minutes: 43_200 });
+    expect(parseCustodianRequest({ act: "round", extra: "x" })).toEqual({ act: "round" });
+    for (const bad of [
+      { act: "pause", minutes: 0 },
+      { act: "pause", minutes: 43_201 },
+      { act: "pause", minutes: 1.5 },
+      { act: "pause", minutes: "60" },
+      { act: "round", minutes: 60 },
+      { act: "resume", minutes: 60 },
+      { act: "stop" },
+      {},
+      "round",
+      null,
+    ]) {
+      expect(parseCustodianRequest(bad)).toBeNull();
+    }
+    expect(parseCustodianResponse({ ok: true, pause: null })).toEqual({ ok: true, pause: null });
+    expect(parseCustodianResponse({ ok: true, pause: { until: null } })).toEqual({ ok: true, pause: { until: null } });
+    expect(parseCustodianResponse({ ok: true, pause: { until: 5 } })).toEqual({ ok: true, pause: { until: 5 } });
+    expect(parseCustodianResponse({ ok: false, code: "too_soon", message: "m", after: 9 })).toEqual({
+      ok: false,
+      code: "too_soon",
+      message: "m",
+      after: 9,
+    });
+    expect(parseCustodianResponse({ ok: false, code: "held", message: "m" })).toEqual({
+      ok: false,
+      code: "held",
+      message: "m",
+    });
+    for (const bad of [
+      { ok: true },
+      { ok: true, pause: { until: 0 } },
+      { ok: true, pause: 5 },
+      { ok: false, code: "nope", message: "m" },
+      { ok: false, code: "too_soon", message: "m", after: "soon" },
+      3,
+    ]) {
+      expect(parseCustodianResponse(bad)).toBeNull();
+    }
   });
 
   test("availability: open is required, now is kept only as true, a reply keeps its time or code", () => {

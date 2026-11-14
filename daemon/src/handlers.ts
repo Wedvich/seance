@@ -9,6 +9,8 @@ import type {
   MetricsSeries,
   PassCloseResponse,
   AvailabilityResponse,
+  CustodianRequest,
+  CustodianResponse,
   Plain,
   PushBranchErrorCode,
   PushBranchResponse,
@@ -30,6 +32,7 @@ import {
   parseAttachmentManifest,
   parsePassCloseRequest,
   parseAvailabilityRequest,
+  parseCustodianRequest,
   parsePushBranchRequest,
   quote,
   REPLY_JSON_BUDGET,
@@ -42,9 +45,11 @@ import {
   despawnAudit,
   passCloseAudit,
   availabilityAudit,
+  custodianOwnerAudit,
   pushAudit,
   spawnAudit,
   type AuditSink,
+  type CustodianOwnerAudit,
   type DespawnAudit,
   type PushAudit,
   type SpawnAudit,
@@ -98,6 +103,15 @@ export interface HandlerContext {
   readonly armPassClose?: (taskId: string) => Promise<PassCloseResponse>;
   /** Closed-to-new-work state (docs/drain.md); absent, `availability` answers `unsupported` and no spawn is gated. */
   readonly availability?: MachineAvailability;
+  /**
+   * The owner's acts on this machine's custodian seat (`custodian-owner.ts`), one at a time; absent, the `custodian`
+   * op answers `unsupported`. Audits through the given trail; throws when a control file cannot be written.
+   */
+  readonly custodian?: CustodianControl;
+}
+
+export interface CustodianControl {
+  readonly act: (request: CustodianRequest, audit: CustodianOwnerAudit) => Promise<CustodianResponse>;
 }
 
 export interface MachineAvailability {
@@ -753,6 +767,40 @@ async function handleAvailability(
 }
 
 /**
+ * `custodian`: round now, pause or resume this machine's custodian seat (docs/custodian.md C45, C47). The owner's act,
+ * as `availability` is: only an app, on the relay leg, never the scheduler or the local socket (the shell has its own
+ * verbs, `seanced custodian round | pause | resume`, which run the same code from files).
+ */
+async function handleCustodian(
+  ctx: HandlerContext,
+  audit: CustodianOwnerAudit,
+  payload: unknown,
+  from: string | undefined,
+  origin: SpawnOrigin,
+): Promise<CustodianResponse> {
+  if (origin !== "relay" || from !== APP_ID) {
+    await audit.refused(null, "refused");
+    return { ok: false, code: "refused", message: "only an app may control the custodian" };
+  }
+  const request = parseCustodianRequest(payload);
+  if (request === null) {
+    await audit.refused(null, "invalid_request");
+    return { ok: false, code: "invalid_request", message: "malformed custodian request" };
+  }
+  if (ctx.custodian === undefined) {
+    await audit.refused(request.act, "unsupported");
+    return { ok: false, code: "unsupported", message: "this daemon has no custodian control" };
+  }
+  try {
+    return await ctx.custodian.act(request, audit);
+  } catch (err) {
+    await audit.refused(request.act, "internal_error");
+    log.error(`custodian: could not write its control files: ${String(err)}`);
+    return { ok: false, code: "internal_error", message: "could not write the custodian's control files" };
+  }
+}
+
+/**
  * One decimal: the units are whole percent, MiB and KiB/s, and a rollup's
  * average otherwise serializes to seventeen digits — a third of the reply.
  */
@@ -937,6 +985,7 @@ export function createHandler(
   const pushTrail = pushAudit(origin, ctx.auditSink);
   const passCloseTrail = passCloseAudit(origin, ctx.auditSink);
   const availabilityTrail = availabilityAudit(origin, ctx.auditSink);
+  const custodianTrail = custodianOwnerAudit(origin, ctx.auditSink);
   return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
@@ -963,6 +1012,8 @@ export function createHandler(
           return { payload: await handlePassClose(ctx, passCloseTrail, plain.payload, from === SCHEDULER_ID) };
         case "availability":
           return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
+        case "custodian":
+          return { payload: await handleCustodian(ctx, custodianTrail, plain.payload, from, origin) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {

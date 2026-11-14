@@ -11,6 +11,7 @@ import {
   type ArchivedTask,
   type ArchivistEntry,
   type AutonomyLevel,
+  type CustodianAct,
   METRIC_NAMES,
   type MetricName,
   type MetricsSeries,
@@ -88,6 +89,22 @@ export type AvailabilityState = Readonly<Record<string, DeviceAvailability>>;
 
 /** One shared object, as `RESCAN_IDLE`. */
 export const AVAILABILITY_IDLE: AvailabilityState = {};
+
+/**
+ * The Machines card's custodian controls (the `custodian` op), per machine, as `DeviceAvailability`: inline on the card
+ * they were asked from. A `sent` pause or resume holds `paused` (what was asked) until the seat's `cu` agrees or the
+ * store drops it, so the row and the menu do not flip back meanwhile; a `sent` round says it was requested. A refusal
+ * is fixed text by its code, never the daemon's message.
+ */
+export type DeviceCustodian =
+  | { readonly kind: "sending"; readonly act: CustodianAct }
+  | { readonly kind: "sent"; readonly act: CustodianAct; readonly paused: boolean }
+  | { readonly kind: "failed"; readonly text: string };
+
+export type CustodianControlState = Readonly<Record<string, DeviceCustodian>>;
+
+/** One shared object, as `RESCAN_IDLE`. */
+export const CUSTODIAN_CONTROL_IDLE: CustodianControlState = {};
 
 export type Verdict =
   /**

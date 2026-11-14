@@ -39,7 +39,13 @@ import {
 } from "@seance/shared";
 import { METRIC_LABELS } from "./chart.ts";
 import { taskTitle } from "./task-title.ts";
-import { historyRanges, type ArchiveReach, type HistoryRange, type HistoryTarget } from "./state.ts";
+import {
+  historyRanges,
+  type ArchiveReach,
+  type DeviceCustodian,
+  type HistoryRange,
+  type HistoryTarget,
+} from "./state.ts";
 import { canDrainNow, formatSeen } from "./view.ts";
 
 /**
@@ -102,6 +108,12 @@ export interface MachineCard {
   readonly drain: DrainRow | null;
   /** The custodian seat's row: null unless the machine advertises `custodian`. */
   readonly custodian: CustodianRow | null;
+  /**
+   * Round now, pause and resume in the card's menu (the `custodian` op): only for a connected machine advertising
+   * `custodian`, which every daemon answering the op does and none before it did. Thresholds, the model and on/off
+   * stay in its config.json (C46).
+   */
+  readonly custodianControls: boolean;
 }
 
 /**
@@ -110,6 +122,8 @@ export interface MachineCard {
  */
 export interface CustodianRow {
   readonly state: CustodianState | null;
+  /** A pause holds: `paused`, or `p` behind `running` or `failing`. The menu offers Resume for it. */
+  readonly paused: boolean;
   /** "last round ended 5m ago", or "no round yet"; null while there is no report. */
   readonly ended: string | null;
   /** "closed 3 · nudged 1", or "nothing closed"; null with no counts. */
@@ -126,7 +140,7 @@ const CLAUDE_CODE_URL = "https://claude.ai/code/";
 export function custodianRow(machine: Machine, status: MachineStatus | undefined, now: number): CustodianRow | null {
   if (machine.capabilities?.includes(CAPABILITIES.custodian) !== true) return null;
   const cu = custodianOf(status);
-  if (cu === null) return { state: null, ended: null, counts: null, link: null, warn: false };
+  if (cu === null) return { state: null, paused: false, ended: null, counts: null, link: null, warn: false };
   const [closed, nudged, flagged] = cu.n ?? [];
   const parts =
     closed === undefined
@@ -134,10 +148,31 @@ export function custodianRow(machine: Machine, status: MachineStatus | undefined
       : [`closed ${closed}`, ...(nudged ? [`nudged ${nudged}`] : []), ...(flagged ? [`flagged ${flagged}`] : [])];
   return {
     state: cu.s,
+    paused: cu.s === "paused" || cu.p === true,
     ended: cu.e === undefined ? "no round yet" : `last round ended ${formatSeen(cu.e * 1000, now)}`,
     counts: parts.length === 0 ? null : parts.join(" · ") === "closed 0" ? "nothing closed" : parts.join(" · "),
     link: cu.s === "running" && isRemoteSessionId(cu.rc) ? `${CLAUDE_CODE_URL}${cu.rc}` : null,
     warn: cu.s === "failing",
+  };
+}
+
+/** What the card's custodian menu items and notes show: the store's `asking` entry for the device over the seat's `cu`. */
+export interface CustodianMenu {
+  /** A `sent` pause or resume shows as asked until the seat's `cu` agrees (the relay's status floor); else what `cu` says. */
+  readonly paused: boolean;
+  readonly running: boolean;
+  /** A request is out: the store takes one per machine at a time. */
+  readonly sending: boolean;
+  /** A round was asked and accepted. */
+  readonly roundRequested: boolean;
+}
+
+export function custodianMenu(card: Pick<MachineCard, "custodian">, asking: DeviceCustodian | null): CustodianMenu {
+  return {
+    paused: asking?.kind === "sent" ? asking.paused : (card.custodian?.paused ?? false),
+    running: card.custodian?.state === "running",
+    sending: asking?.kind === "sending",
+    roundRequested: asking?.kind === "sent" && asking.act === "round",
   };
 }
 
@@ -459,6 +494,7 @@ function machineCard(
     openSwitch: !canClose ? null : closed ? "off" : canDrain ? "on" : null,
     drain: drainRow(machine, drains),
     custodian: custodianRow(machine, status, now),
+    custodianControls: machine.connected && machine.capabilities?.includes(CAPABILITIES.custodian) === true,
   };
 }
 

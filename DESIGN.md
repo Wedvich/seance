@@ -1044,6 +1044,15 @@ nothing checked it. The last is the gap they leave.
   daemon's gate runs before any fetch or ledger write, and `routesClosed` is accepted only as `true`.
   `now` is `true` only, honoured only by a daemon advertising `drainAsk`, offered only to such a target and never
   persisted: it moves a deadline earlier and grants nothing else.
+- **The custodian's controls are the owner's act, sealed, and never reachable without the app role** (2026-11-14,
+  Daemon, "The custodian's status and the Machines row"). The daemon answers `custodian` (round now, pause, resume)
+  only when sealed `from: "app"` on the relay leg, parsed by `parseCustodianRequest`, audited without a payload
+  (`audit custodian origin=relay op=<act> …`, the shell's lines under its own origin); neither `LOCAL_OPS`, `BROKER_OPS`
+  nor MCP carries it. It acts only through the shell verbs' one implementation (`daemon/src/custodian-owner.ts`): it
+  writes the pause or a round request in the 0700 `custodian/` dir and nothing else, never starts a round itself, and
+  while rounds are held (`ROUNDS_LIVE`) a round is refused `held`. A round request is still spaced and expires as the
+  shell's is, so a holder of the PSK gains at most a round per 15 minutes it could not already ask for at a machine's
+  shell; thresholds, the model and on/off stay in `config.json` (C46), out of its reach.
 - **The drain's session ask is constant keys, into ledger-bound panes, while closed** (2026-11-13, Daemon, "The
   drain's session ask"; `CLAUDE.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
@@ -1479,6 +1488,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
 | op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
 | op `availability` (built 2026-11-13; `now?` with drain 3/3)         | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seanced close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                         | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
+| op `custodian` (built 2026-11-14, custodian 7)                      | `pwa/src/store.ts` `custodianControl`, from the Machines card's menu, over the relay as app-role only                                                                                                                                                                                                                                                                              | `daemon/src/handlers.ts` `handleCustodian` → `CustodianControl` in `daemon/src/run.ts` → `ownerAct` (`daemon/src/custodian-owner.ts`); sealed `from: "app"` only; writes `custodian/state.json` or `round-request` and pokes the seat (Daemon, "The custodian's status and the Machines row")                                                                                                           |
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector; `cl` through the `closed` collector, from `state.json`)                                                             | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
@@ -1841,6 +1851,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
+- `custodian { act, minutes? }` → `{ ok: true, pause: { until: number | null } | null } | { ok: false, code, message, after? }`; app-sealed only (Daemon, "The custodian's status and the Machines row"). `act` is `round`, `pause` or `resume`; `minutes` (1 to 30 days) only beside `pause`, and a pause without it holds until resumed. `pause` is the pause after the act; `after` (unix ms) only beside `too_soon`.
 - `metrics { from, to, step, names?, labels? }` → `{ series }` or `{ ok: false, code, message }`
   — history from the daemon's local store (Telemetry, under Daemon), Prometheus
   series at the tier `step` names, limited to the `METRIC_NAMES` in `names`.
@@ -11766,19 +11777,21 @@ frame can do, not what the round can.
   clear it on a permission answered); a state gate on the leader's flag write (a session often outlives its task's
   `done`, and the daemon's own `dirty`/`unpushed` flag is sent after the session has closed).
 
-### The custodian's status and the Machines row (`custodian-control.ts`, `custodian-owner-cli.ts`, `custodian-remote.ts`) — built 2026-11-14 (custodian 5), held with the seat
+### The custodian's status and the Machines row (`custodian-control.ts`, `custodian-owner.ts`, `custodian-owner-cli.ts`, `custodian-remote.ts`) — built 2026-11-14 (custodian 5 and 7), held with the seat
 
 Built: `MachineStatus.cu`, the Machines card's Custodian row, and the owner's shell commands `seanced custodian status |
 log | round | pause [--for <n>m|h|d] | resume`. Held with the seat: while `ROUNDS_LIVE` is false no seat runs, no
 `CAPABILITIES.custodian` is advertised and no card shows the row. Custodian 6 added the flagged count and the `failing`
-push (below). Not built: the card's menu and the `custodian` app op (custodian 7).
+push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
 
 - **`cu` on the wire** (`CustodianStatus`, `shared/src/types.ts`): `s` (`idle`, `running`, `paused`, `failing`), `e` (the last
   round's end, unix seconds like `at`), `n` (`[closed, nudged, flagged]`, each capped at 999) and `rc`, the running
   round's Remote Control id. It is display-only and is never trimmed by `fitStatus`, like `drn` and `cl`. **A bad `cu` is
   dropped alone** (`parseCustodianStatus`): the status around it stays, since a card row is not worth a status's
   scheduling fields (`drn` and `cl` reject the whole status because they gate routing). `rc` is kept only beside
-  `running` and only as `isRemoteSessionId` passes it. (`QuotaObservation.cu`, the credits, is an unrelated name.)
+  `running` and only as `isRemoteSessionId` passes it. `p` (`true` only, custodian 7) says a pause holds behind `running`
+  or `failing`, which outrank `paused` in `s`; it is kept only beside those two, so the menu can offer Resume while a
+  round runs. (`QuotaObservation.cu`, the credits, is an unrelated name.)
 - **State.** `paused` while `custodian/state.json` carries a pause; `failing` after `FAILING_AFTER` (3) failed rounds in a
   row, where a failed log entry, a launch failure and a throwing pick each count and a healthy round resets
   the count (an empty pick, with every exclave over quota or signed out, is not the seat's fault: it backs the pick off
@@ -11823,8 +11836,13 @@ push (below). Not built: the card's menu and the `custodian` app op (custodian 7
   `round` treat a view older than five minutes as no report, so neither a stopped daemon's leftover `failed` nor a
   fixed host's old one is read as current. **An unreadable `state.json` loads as paused indefinitely** (the `closed`
   precedent: a fault never starts a round the owner paused). `state.json` is deliberately not the daemon's `state.json`:
-  the shell is its only writer today, and sharing the daemon's would race its writes. Custodian 7's app-op pause must
-  serialise with the CLI's or give the pause one owner.
+  the shell and the app op are its writers, and sharing the daemon's would race the daemon's own writes. **The later
+  owner act wins:** the daemon runs the op's acts one at a time on one chain, and the shell's verbs, another process,
+  are not serialised with them. Each write is one whole-file atomic rename of the file (keeping any other key it holds), so a
+  pause and a resume from the two in the same instant leave one of them, whole, and the row says which within the
+  status floor. _Rejected:_ a lock file the shell and the daemon share (a stale lock after a crash holds the owner's
+  pause hostage, for two writers one person drives) and routing the shell through the daemon's socket (a stopped
+  daemon must still take a pause).
 - **Pause and `round`.** A pause stops the due check; it does not stop a round already running. `round` writes the request
   and the seat honours it on its next tick, **even while paused (the pause stays)**: asking for a round is the owner
   overriding their own pause for one round. A request is spaced by `ROUND_REQUEST_MIN_GAP_MS` (15 min) from the newest
@@ -11835,6 +11853,36 @@ push (below). Not built: the card's menu and the `custodian` app op (custodian 7
   checks failed, while a round runs, and inside the spacing (naming when one can be asked for); nothing is requested
   then. A launch attempt that failed is in the seat's memory only, so a request right after one can still be dropped
   (the seat's log says so); the success line says "at its next tick", never that it will start.
+- **The `custodian` app op (custodian 7).** The card's four controls (round now, pause for one hour, pause until
+  resumed, resume) are one request op, `custodian { act, minutes? }`, answered only when sealed `from: "app"` on the
+  relay leg and parsed by `parseCustodianRequest` (an unknown act, `minutes` beside anything but `pause`, or outside 1
+  to 30 days is `invalid_request`). `LOCAL_OPS`, `BROKER_OPS` and MCP do not carry it: the shell has its own verbs, and
+  a keyless box has no app role. It runs the shell verbs' one implementation, `custodian-owner.ts`'s `ownerAct` over
+  `ownerRound`, `ownerPause` and `ownerResume`, which `custodian-owner-cli.ts` calls too; the inputs differ only in
+  that the daemon reads the seat record and the seat's view from its memory (`custodianHost`: `starting` while the
+  seat's checks run, `failed` once they declined, else `ready`), never `seat.json`, which a failed seat stops writing and
+  so goes stale. **The op is wired only where this daemon runs a seat** (`seatEnabled`, the capability bit's predicate):
+  elsewhere it answers `unsupported` (no control), never an `ok` for a file nothing reads; a `round` while the seat is
+  still `starting` answers `unsupported` too, and `host_failed` once the checks failed, however long ago. A failed seat
+  still reports `p` in `cu` (it re-reads the pause when asked and at the failure), so the card offers Resume behind
+  `failing`. **No per-op rate limit beyond the round's spacing:** every act pokes the seat, but a poke is one tick, the
+  seat runs one pass at a time with at most one queued, and the due check's spacing bounds rounds, so an app-role holder
+  can only cost file reads and status refreshes (already floored by the relay), which the holder of the PSK could cost
+  through any op. So while rounds are held a round is refused `held` and a
+  pause or resume still writes, and a round meets the same checks and refusals as the shell's (`unconfigured`,
+  `host_failed`, `running`, `too_soon` with `after`, the time one can be asked for). A refusal before the act (not from
+  an app, unparsable, no control) is audited `audit custodian origin=relay op=<act|-> outcome=refused|invalid_request|
+  unsupported|internal_error`; an act audits the shell's lines under `origin=relay`. The reply carries the pause after
+  the act and nothing of the round log or the view. An act that wrote pokes the seat (`poke`), which publishes a fresh
+  `cu` now, or after the tick it is in, so the row follows within the relay's status floor.
+  **No new capability bit:** `CAPABILITIES.custodian` now also means the op is answered. No daemon ever advertised it
+  without the op, since `ROUNDS_LIVE` has never been true on a released build.
+- **The card's menu (C45, C47).** Offered only for a connected machine advertising `custodian` (`custodianControls`):
+  Round now (disabled while a round runs), then Pause for 1 hour and Pause until resumed, or Resume while a pause holds
+  (`s` is `paused`, or `p`). A pause or resume shows as asked until the next `cu` agrees, as the open switch does
+  (`DeviceCustodian`, held up to 20 s); a round request shows `Round requested`. A refusal shows on the card as fixed
+  text by its code, never the daemon's message. Thresholds, the model and on/off stay in the machine's `config.json`
+  (C46): the card writes no config.
 - **The CLI** is not `custodian-cli.ts` (the round's five verbs). `main.ts` dispatches `CUSTODIAN_OWNER_VERBS` to
   `custodian-owner-cli.ts` by dynamic import, outside the round CLI's import closure, because this one logs and audits and
   that closure must never reach `log.ts` (`daemon/test/message-layering.test.ts`). Every verb works from files (the
