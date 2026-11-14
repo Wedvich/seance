@@ -482,6 +482,8 @@ describe("the capability bit", () => {
   });
 });
 
+const ROUND_IDLE_SCRIPT = "exec sleep 600";
+
 const ROUND_VERBS_SCRIPT = `
 out="$SEANCE_STATE_DIR/verbs"
 mkdir -p "$out"
@@ -530,6 +532,113 @@ describe("the verbs, over the socket, from the round's own pane", () => {
     await pollUntil(async () => (await paneInfo(pane))?.titled === true, `${name} to be titled`);
     return pane;
   }
+
+  test("a frame from the test process, a session pane or a second round pane is refused, and nothing is closed", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = await scriptStub(base, "round-idle", ROUND_IDLE_SCRIPT);
+    const ledger = LaunchLedger.memory();
+    await ledger.record("t-r");
+    await ledger.note("t-r", { repo: fx.repoPath, path: await fx.pushBranch("feat-refused") });
+    const ended = new EndedTasks(ledger);
+    const target = await sessionPane("sess-r", "t-r");
+    const turnEnded = Date.now();
+    const closeAfter = CUSTODIAN_DEFAULTS.closeAfterMinutes * MIN;
+    const audit: string[] = [];
+    const r = seatOver();
+    const repos = await scanRepos([fx.root]);
+    const verbs = createCustodianVerbs({
+      roundPane: () => r.seat.roundPane(),
+      roundPanePids: listRoundPanePids,
+      activity: (pane) =>
+        pane === target
+          ? { state: "idle", stateSince: turnEnded, turnEnded: true, screenSince: turnEnded, sampledAt: turnEnded }
+          : null,
+      retainedSince: () => turnEnded - closeAfter,
+      untouchable: () => false,
+      tasks: ended,
+      worktree: createWorktreeRule({ tasks: ended, repos: () => repos, listPanes }),
+      despawn: (id, request) => despawnSession(id, request),
+      killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+      settings: CUSTODIAN_DEFAULTS,
+      seat: {
+        count: (verb, ok) => r.seat.count(verb, ok),
+        countWorktree: (kind) => r.seat.countWorktree(kind),
+        done: (summary) => r.seat.done(summary),
+        isDone: () => r.seat.isDone(),
+      },
+      now: () => turnEnded + 2 * closeAfter,
+      audit: custodianAudit((line) => {
+        audit.push(line.replaceAll(/ pane=%\d+/gu, " pane=%N"));
+        return Promise.resolve();
+      }),
+      onKept: (): void => {},
+      warn: () => {},
+    });
+    const socket = await startLocalSocket({ handle: () => Promise.resolve(null), custodian: verbs.handle });
+    const out = join(process.env["SEANCE_STATE_DIR"] ?? "", "refused");
+    try {
+      await r.seat.start();
+      await r.seat.tick();
+      const roundPane = await onlyRound();
+      const shim = join(r.saved.record.round?.tmpDir ?? "", "bin", "seanced");
+      await mkdir(out, { recursive: true });
+
+      // From this process, which is no pane at all.
+      const frame = { v: 1, kind: "custodian", verb: "close", pane: target };
+      const fromHere = await exchange(frame, {
+        path: socketPath(),
+        timeoutMs: 5_000,
+        timeoutText: "no answer",
+        restartGraceMs: 0,
+      });
+      expect(fromHere).toEqual({ ok: false, code: "not_custodian" });
+
+      // From a window that looks like a session (`--remote-control`) and from a second pane tagged as a round that the
+      // seat record does not name: each runs the round's own shim and writes what it was told.
+      const asks = async (name: string, tagged: boolean): Promise<string> => {
+        const pane = (
+          await tmuxOk([
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            `${session}:`,
+            "-n",
+            name,
+            "-c",
+            base,
+            `: --remote-control; ${shim} custodian close ${target} > ${out}/${name}.out 2> ${out}/${name}.err; echo $? > ${out}/${name}.rc; exec sleep 600`,
+          ])
+        ).trim();
+        if (tagged) await tmuxOk(["set-option", "-p", "-t", pane, "@seance-custodian", "1"]);
+        await pollUntil(() => tmpExists(join(out, `${name}.rc`)), `${name}'s close to be answered`);
+        return pane;
+      };
+      const impostor = await asks("impostor-session", false);
+      const second = await asks("impostor-round", true);
+      for (const name of ["impostor-session", "impostor-round"]) {
+        expect((await readFile(join(out, `${name}.rc`), "utf8")).trim()).toBe("1");
+        expect(await readFile(join(out, `${name}.err`), "utf8")).toContain("refused not_custodian");
+      }
+
+      expect(await paneInfo(target)).not.toBeNull();
+      expect(audit.filter((line) => line.includes("op=close"))).toEqual(
+        Array.from({ length: 3 }, () => "audit custodian origin=custodian op=close pane=%N task=- outcome=not_custodian"),
+      );
+      expect(roundPane).not.toBe(second);
+      await tmux(["kill-pane", "-t", impostor]);
+      await tmux(["kill-pane", "-t", second]);
+      await tmux(["kill-pane", "-t", target]);
+      // The round's own end, so the next test finds one round pane.
+      expect(await r.seat.done("refusals checked")).toBe("ok");
+      await r.seat.tick();
+      await noRounds();
+    } finally {
+      socket.stop();
+      r.seat.stop();
+    }
+  }, 60_000);
 
   test("a round's own seanced runs sessions, close, notes and done; the seat then ends it healthy", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = roundScript;
