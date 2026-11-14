@@ -275,6 +275,24 @@ describe("sendMessage", () => {
       }
     });
 
+    test("after the fallback, a task the old daemon does not hold is worded as that daemon predating routing", async () => {
+      for (const code of ["unknown", "ended"] as const) {
+        const fake = scripted(`old-${code}.sock`, [
+          JSON.stringify({ ok: false, code: "invalid" }),
+          JSON.stringify({ ok: false, code }),
+        ]);
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- one double per code
+          const result = await sendMessage(note, { path: fake.path, routeGate: gateOk });
+          expect(result.ok).toBe(false);
+          expect(result.text).toContain("predates cross-machine messages (`seanced update`)");
+          expect(result.text).not.toContain("no scheduler route was asked");
+        } finally {
+          fake.stop();
+        }
+      }
+    });
+
     test("an untasked sender is told no receipt follows, and a route-budget refusal is worded as one", async () => {
       const untasked = scripted("untasked.sock", [
         remote,

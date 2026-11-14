@@ -30,6 +30,13 @@ export function routeBytes(text: string): number {
 export const INBOX_MAX_MESSAGES = 32;
 export const INBOX_MAX_BYTES = 4 * MESSAGE_MAX;
 
+/**
+ * How long a session may still be starting, or a listener reconnecting, before a missing listener means the
+ * session has no inbox mod. Measured from the ledger's launch record or from the listener's disconnect. Here because
+ * `send_message` and a receipt's note both word it, and neither may load a module that logs.
+ */
+export const LISTENER_GRACE_MS = 120_000;
+
 /** Per sending task, held in its daemon's memory. */
 export const MESSAGE_RATE = { perMinute: 20, perHour: 200 } as const;
 
@@ -62,7 +69,7 @@ export function receiptNote(r: {
         r.taskId !== undefined && r.taskId !== r.to ? ` (now carried by task \`${r.taskId}\`)` : ""
       }.`;
     case "sent":
-      return `${head} is waiting for its session's inbox listener (up to 120 s).`;
+      return `${head} is waiting for its session's inbox listener (up to ${LISTENER_GRACE_MS / 1_000} s).`;
     case "held":
       return `${head} was not delivered: the task has not started yet, and nothing was kept; send again later.`;
     case "ended":

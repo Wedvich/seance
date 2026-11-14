@@ -1,16 +1,12 @@
 // Apart from `messages.ts` so `seanced mcp` (`send-message.ts`) and `seanced inbox` (`inbox-cli.ts`) load only these
 // and not the daemon's side (tmux, the launch ledger, the FFI parent walk), and neither reaches `log.ts`: one is
 // the MCP server's JSON-RPC channel, the other the inbox mod's data channel.
-import { isMessageId, isRecord, isTaskId, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
+import { isMessageId, isRecord, isTaskId, LISTENER_GRACE_MS, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
 
 export const MESSAGE_FRAME_VERSION = 1;
 
-/**
- * How long a session may still be starting, or a listener reconnecting, before a missing listener means the
- * session has no inbox mod. Measured from the ledger's launch record or from the listener's disconnect. Here, not
- * in `messages.ts`, because `send_message` words it and must not load a module that logs.
- */
-export const LISTENER_GRACE_MS = 120_000;
+// In `shared` (a receipt's note words it too); re-exported for the daemon's modules that already import it from here.
+export { LISTENER_GRACE_MS };
 
 /** A session's message to another task on this machine, sent by `seanced mcp`'s `send_message`. */
 export const MESSAGE_FRAME_KIND = "message";

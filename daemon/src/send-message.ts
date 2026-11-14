@@ -85,9 +85,13 @@ const SENT = (to: string, id: string): string =>
 const ROUTED = (to: string, id: string, receipt: boolean): string =>
   `sent through the scheduler to task ${to} as message ${id}; ${
     receipt
-      ? "a receipt note saying whether it was delivered follows in your conversation, and no note means it was not"
-      : "no receipt follows: this session has no task"
+      ? "a receipt note saying whether it was delivered follows in your conversation; a receipt is a courtesy, so without one whether it landed is unknown, and a resend may duplicate it"
+      : "no receipt follows: this session has no task, so you will not be told whether it was delivered"
   }`;
+
+/** The daemon answered a frame sent without `route` after the first, with `route`, was rejected: it cannot route. */
+const PREDATES_ROUTING = (to: string): string =>
+  `task ${to} is not deliverable on this machine, and this machine's daemon predates cross-machine messages (\`seanced update\`); nothing was sent`;
 
 function parseReply(raw: unknown): MessageReply | null {
   if (!isRecord(raw)) return null;
@@ -164,9 +168,11 @@ export async function sendMessage(
 
   const { routeGate } = opts;
   let first = await exchangeFrame(routeGate === undefined ? undefined : "ask");
+  let fellBack = false;
   // A daemon that predates routing rejects the unknown `route` key and delivered nothing: ask once more without it.
   if (routeGate !== undefined && "reply" in first && !first.reply.ok && first.reply.code === "invalid") {
     first = await exchangeFrame(undefined);
+    fellBack = true;
   }
   if ("failed" in first) return first.failed;
   let { reply } = first;
@@ -188,6 +194,10 @@ export async function sendMessage(
   if (!reply.ok) {
     if (reply.reason === "nolistener") return { ok: false, text: NO_LISTENER(to) };
     if (reply.reason === "route" && reply.code === "too_long") return { ok: false, text: TOO_LONG_ROUTE };
+    // That daemon cannot route, so a task it does not hold is not "unknown" or "ended" for want of a route asked.
+    if (fellBack && (reply.code === "unknown" || reply.code === "ended")) {
+      return { ok: false, text: PREDATES_ROUTING(to) };
+    }
     return { ok: false, text: REFUSED[reply.code](to) };
   }
   if (reply.outcome === "routed")
