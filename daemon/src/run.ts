@@ -22,9 +22,19 @@ import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
 import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
 import { attachmentsRoot, taskAttachments } from "./attachments.ts";
-import { createHandler, createLocalOps, type HandlerContext, type MachineAvailability } from "./handlers.ts";
+import {
+  createHandler,
+  createLocalOps,
+  type CustodianControl,
+  type HandlerContext,
+  type MachineAvailability,
+} from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
-import { seatEnabled, type CustodianSeatOpts } from "./custodian-seat.ts";
+import { readSeatView } from "./custodian-control.ts";
+import { ownerAct } from "./custodian-owner.ts";
+import { readRounds } from "./custodian-rounds.ts";
+import { seatEnabled, seatLive, type CustodianSeatOpts } from "./custodian-seat.ts";
+import { custodianRoundsPath } from "./paths.ts";
 import { createLeader, type Leader, type QueueStore, type SchedulerConfig } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -512,8 +522,38 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       return run;
     },
   };
+  // Read late: the seat starts with the capabilities, after the handler context.
+  const custodianSeat: { poke?: () => void } = {};
+  // The op's acts one at a time in this process. The shell's verbs are another process and are not serialised with
+  // these: each write is one whole-file atomic rename of a file that holds only the pause, so the later owner act wins
+  // (DESIGN.md, "The custodian's status and the Machines row").
+  let acting: Promise<unknown> = Promise.resolve();
+  const custodian: CustodianControl = {
+    act: (request, audit) => {
+      const run = acting.then(async () => {
+        const reply = await ownerAct(
+          request,
+          {
+            now,
+            live: seatLive(opts.custodian ?? {}),
+            configured: () => Promise.resolve(config.custodian !== undefined),
+            seatView: () => readSeatView(),
+            seatRecord: () => Promise.resolve(custodianSeatOf(state)),
+            rounds: () => readRounds(custodianRoundsPath()),
+          },
+          audit,
+        );
+        // So the row follows within the status floor rather than at the seat's next minute.
+        if (reply.ok) custodianSeat.poke?.();
+        return reply;
+      });
+      acting = run.catch(() => {});
+      return run;
+    },
+  };
   const handlerCtx: HandlerContext = {
     availability,
+    custodian,
     armPassClose: (taskId) =>
       passClose.arm?.(taskId) ??
       Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" }),
@@ -758,6 +798,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   passClose.arm = capabilities.armPassClose;
   custodianView = capabilities.custodianStatus;
+  if (capabilities.custodianPoke !== undefined) custodianSeat.poke = capabilities.custodianPoke;
   drainAsk.wire(capabilities.drainAsk, closedOf(state));
 
   // After the relay leg, because the local surface is the optional one: it never

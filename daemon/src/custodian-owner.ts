@@ -1,3 +1,4 @@
+import type { CustodianRequest, CustodianResponse } from "@seance/shared";
 import type { CustodianOwnerAudit } from "./audit.ts";
 import {
   pausedAt,
@@ -92,6 +93,40 @@ export async function ownerPause(
 export async function ownerResume(audit: CustodianOwnerAudit, path?: string): Promise<void> {
   await writePause(null, path);
   await audit.resume();
+}
+
+const ROUND_CODES = {
+  held: { code: "held", message: "rounds are held on this build" },
+  unconfigured: { code: "unconfigured", message: "no custodian is configured on this machine" },
+  failed: { code: "host_failed", message: "this host's checks failed, so no round can run" },
+  running: { code: "running", message: "a round is running" },
+} as const;
+
+/**
+ * The `custodian` app op's act (`handlers.ts` parses and gates it; `run.ts` runs it one at a time): the same
+ * functions the shell's verbs call, its refusals as codes. The reply carries the pause that holds after the act.
+ */
+export async function ownerAct(
+  request: CustodianRequest,
+  inputs: Omit<OwnerRoundInputs, "now"> & { readonly now: () => number; readonly path?: string },
+  audit: CustodianOwnerAudit,
+): Promise<CustodianResponse> {
+  const now = inputs.now();
+  if (request.act === "pause") {
+    const until = request.minutes === undefined ? null : now + request.minutes * 60_000;
+    await ownerPause(now, until, audit, inputs.path);
+    return { ok: true, pause: { until } };
+  }
+  if (request.act === "resume") {
+    await ownerResume(audit, inputs.path);
+    return { ok: true, pause: null };
+  }
+  const decided = await ownerRound({ ...inputs, now }, audit);
+  if (decided.outcome === "requested") return { ok: true, pause: await pauseNow(now, inputs.path) };
+  if (decided.outcome === "too_soon") {
+    return { ok: false, code: "too_soon", message: "a round started or ended too recently", after: decided.after };
+  }
+  return { ok: false, ...ROUND_CODES[decided.outcome] };
 }
 
 /** The pause that holds now, as the op's reply says it: an unreadable file holds indefinitely. */

@@ -144,6 +144,11 @@ describe("parseBrokerRequest refuses everything off the allowlist", () => {
       request({ remoteOp: "availability", payload: { open: false } }),
       "op_not_allowed",
     ],
+    [
+      "remote custodian (the owner's app act, never brokered)",
+      request({ remoteOp: "custodian", payload: { act: "pause" } }),
+      "op_not_allowed",
+    ],
     ["remote update-available", request({ remoteOp: "update-available" }), "op_not_allowed"],
     ["remote machine-info", request({ remoteOp: "machine-info" }), "op_not_allowed"],
     ["a forget smuggled in as an op", request({ remoteOp: "forget" }), "op_not_allowed"],

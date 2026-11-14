@@ -816,7 +816,7 @@ export interface CustodianOwnerAudit {
   ) => Promise<void>;
 }
 
-export function custodianOwnerAudit(origin: "cli" | "relay", sink: AuditSink): CustodianOwnerAudit {
+export function custodianOwnerAudit(origin: SpawnOrigin, sink: AuditSink): CustodianOwnerAudit {
   return {
     pause: async (until) => {
       await sink(
