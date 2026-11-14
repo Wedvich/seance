@@ -366,6 +366,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,
+        // Unconditional: any daemon may lead, and receiving a forward binds no peer (the leader checks `messages` too).
+        CAPABILITIES.messageRoute,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
         // so it could not receive.
         ...(peerPidSupported() && (await peerBindingProblem()) === null ? [CAPABILITIES.messages] : []),
@@ -486,6 +488,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // audits through one formatter" true as surfaces are added.
   // Read late: session events start after the handler context, and a `pass-close` can only arrive once they run.
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
+  // And the leader's forwarded messages and receipts: the messaging that serves them starts with session events.
+  const routedMessages: { current?: NonNullable<HandlerContext["messages"]> } = {};
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
   // A `now` landing before the wiring is replayed there, since `start()` asks without it.
   const drainAsk = createLateDrainAsk();
@@ -579,6 +583,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     armPassClose: (taskId) =>
       passClose.arm?.(taskId) ??
       Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" }),
+    messages: {
+      deliverRouted: (request) =>
+        routedMessages.current?.deliverRouted(request) ??
+        Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no messaging" }),
+      receipt: (request) =>
+        routedMessages.current?.receipt(request) ??
+        Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no messaging" }),
+    },
     backend: opts.backend ?? createBackend(config, { home }),
     getRepos: () => state.repos,
     rescan,
@@ -818,6 +830,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   });
 
   passClose.arm = capabilities.armPassClose;
+  routedMessages.current = capabilities.messages;
   if (capabilities.custodianPoke !== undefined) custodianSeat.poke = capabilities.custodianPoke;
   if (capabilities.custodianHost !== undefined) custodianSeat.host = capabilities.custodianHost;
   custodianSeat.status = capabilities.custodianStatus;

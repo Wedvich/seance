@@ -36,6 +36,7 @@ import {
   type RelayToDaemonFrame,
   type SchedulerError,
   type SessionEvent,
+  type SessionMessage,
   type SessionPass,
   type StoreReplyFrame,
   type StoreRequestFrame,
@@ -291,9 +292,17 @@ export class RelayClient {
     return this.#toScheduler("custodian-event", event);
   }
 
+  /**
+   * Fire-and-forget like `sendToScheduler`, for the `session-message` op; false when it was not sent. The text rides
+   * inside the sealed envelope only: the `wire send` line below names no payload.
+   */
+  sendSessionMessage(message: SessionMessage): Promise<boolean> {
+    return this.#toScheduler("session-message", message);
+  }
+
   async #toScheduler(
-    op: "session-event" | "branch-state" | "session-pass" | "custodian-event",
-    payload: SessionEvent | BranchState | SessionPass | CustodianEvent,
+    op: "session-event" | "branch-state" | "session-pass" | "custodian-event" | "session-message",
+    payload: SessionEvent | BranchState | SessionPass | CustodianEvent | SessionMessage,
   ): Promise<boolean> {
     if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };

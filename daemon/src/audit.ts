@@ -863,9 +863,15 @@ export type MessageOrigin = "message";
 /**
  * `out` outcomes are the sender's answer (`sent`: held for a listener that has not connected; `held`: the task has
  * no pane yet, nothing kept); `in` outcomes are what became of the message at the receiving pane. `dropped` is a
- * daemon-inbox cap drop, which the record's three `in` outcomes do not cover.
+ * daemon-inbox cap drop, which the record's three `in` outcomes do not cover. `routed` is a send handed to the
+ * scheduler leader and `no_leader` one that could not be; a `receipt` line carries what the leader reported (so also
+ * `offline` and `unsupported`), never text.
  */
 export type MessageOutcome =
+  | "routed"
+  | "no_leader"
+  | "offline"
+  | "unsupported"
   | "delivered"
   | "sent"
   | "held"
@@ -882,7 +888,7 @@ export const CUSTODIAN_SENDER = { custodian: true } as const;
 export type CustodianSender = typeof CUSTODIAN_SENDER;
 
 export type MessageAudit = (line: {
-  readonly dir: "out" | "in";
+  readonly dir: "out" | "in" | "receipt";
   /**
    * A task id; null for an untasked sender; undefined when the sender could not be bound at all; `CUSTODIAN_SENDER` for
    * a custodian nudge (written `from=custodian`).
@@ -890,7 +896,8 @@ export type MessageAudit = (line: {
   readonly from: string | null | undefined | CustodianSender;
   readonly to: string;
   readonly kind: MessageKind;
-  readonly bytes: number;
+  /** Absent on a `receipt` line, which carries no text of its own. */
+  readonly bytes?: number;
   readonly outcome: MessageOutcome;
 }) => Promise<void>;
 
@@ -907,7 +914,7 @@ export function messageAudit(sink: AuditSink): MessageAudit {
             ? quote(line.from)
             : "custodian";
     await sink(
-      `audit message origin=${origin} dir=${line.dir} from=${from} to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes} outcome=${line.outcome}`,
+      `audit message origin=${origin} dir=${line.dir} from=${from} to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes ?? "-"} outcome=${line.outcome}`,
     );
   };
 }

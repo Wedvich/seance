@@ -15,14 +15,20 @@ import {
   isRecord,
   OP_TIMEOUT_MS,
   parseInterrupted,
+  parseDeliverMessageResponse,
+  parseMessageReceiptResponse,
   parsePassCloseResponse,
   parsePushBranchResponse,
   parseTaskProgressList,
   quote,
   RequestFailure,
+  type DeliverMessageRequest,
+  type DeliverMessageResponse,
   type DespawnResponse,
   type ErrorResponse,
   type FailureReason,
+  type MessageReceiptRequest,
+  type MessageReceiptResponse,
   type SessionsResponse,
   type SpawnResponse,
   type Task,
@@ -216,6 +222,63 @@ export function termFleet(o: TermFleetOpts): Fleet {
       const reply: unknown = await remote<unknown>(deviceId, "pass-close", request);
       if (isNoAnswer(reply)) return reply;
       return parsePassCloseResponse(reply) ?? malformedPassClose;
+    },
+  };
+}
+
+export interface TermMessages {
+  readonly deliverMessage: (
+    deviceId: string,
+    request: DeliverMessageRequest,
+  ) => Promise<DeliverMessageResponse | NoAnswer>;
+  readonly messageReceipt: (
+    deviceId: string,
+    request: MessageReceiptRequest,
+  ) => Promise<MessageReceiptResponse | NoAnswer>;
+}
+
+/**
+ * The leader's two message ops over the same leg and rules as `termFleet`, on an object of their own: the library's
+ * `Fleet` port is not grown for a concern only this host has. Either is refused once the term ends. A remote's reply is
+ * a daemon's payload, trusted only once parsed; the answer to a machine that never replied is `termFleet`'s no-answer.
+ */
+export function termMessages(o: TermFleetOpts): TermMessages {
+  const remote = async (deviceId: string, op: "deliver-message" | "message-receipt", payload: unknown) => {
+    try {
+      return await o.relay.request<unknown>(deviceId, op, payload);
+    } catch (err) {
+      if (!(err instanceof RequestFailure)) throw err;
+      if (err.reason === "not_leader") o.demote(`the relay refused ${op} to ${quote(deviceId)} as not_leader`);
+      return NEVER_DELIVERED.has(err.reason) ? undelivered(err.message) : unreachable(err.message);
+    }
+  };
+  const ended = unreachable("the scheduler term has ended");
+  return {
+    deliverMessage: async (deviceId, request) => {
+      if (!o.live()) return ended;
+      if (deviceId === o.selfDeviceId) return o.local.deliverMessage(request);
+      const reply = await remote(deviceId, "deliver-message", request);
+      if (isNoAnswer(reply)) return reply;
+      return (
+        parseDeliverMessageResponse(reply) ?? {
+          ok: false,
+          code: "internal_error",
+          message: "malformed deliver-message reply",
+        }
+      );
+    },
+    messageReceipt: async (deviceId, request) => {
+      if (!o.live()) return ended;
+      if (deviceId === o.selfDeviceId) return o.local.messageReceipt(request);
+      const reply = await remote(deviceId, "message-receipt", request);
+      if (isNoAnswer(reply)) return reply;
+      return (
+        parseMessageReceiptResponse(reply) ?? {
+          ok: false,
+          code: "internal_error",
+          message: "malformed message-receipt reply",
+        }
+      );
     },
   };
 }

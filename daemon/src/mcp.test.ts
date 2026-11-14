@@ -37,9 +37,10 @@ import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } 
 import { brokerFleet, relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import type { handOff, passToSuccessor, reportDone } from "./report-done.ts";
-import type { sendMessage } from "./send-message.ts";
+import type { RouteGate, sendMessage } from "./send-message.ts";
 import {
   buildMcpServer,
+  messageRouteGate,
   decisionText,
   isLocalRef,
   mcpBunPath,
@@ -3090,7 +3091,7 @@ describe("send_message", () => {
     return { client: connected, stop: () => lazy.stop() };
   }
 
-  test("is always offered, not read-only, and names the caps, the rate and the remote-target limit", async () => {
+  test("is always offered, not read-only, and names the caps, the rate and the routing", async () => {
     const { client: c, stop } = await client(() => Promise.resolve({ ok: true, text: "" }));
     try {
       const { tools } = await c.listTools();
@@ -3098,7 +3099,10 @@ describe("send_message", () => {
       expect(tool?.annotations?.readOnlyHint).toBe(false);
       expect(tool?.description).toContain("8192");
       expect(tool?.description).toContain("65536");
-      expect(tool?.description).toContain("unknown");
+      expect(tool?.description).toContain("40000 bytes once JSON-escaped");
+      expect(tool?.description).toContain("receipt note");
+      expect(tool?.description).toContain("through the scheduler");
+      expect(tool?.description).not.toContain("never leaves the machine");
       expect(tool?.description).toContain("never logged");
       expect(tool?.description).toContain("20 messages a minute");
     } finally {
@@ -3134,6 +3138,58 @@ describe("send_message", () => {
     } finally {
       stop();
     }
+  });
+
+  test("the tool hands the sender a route gate that the verified leader's capability decides", async () => {
+    const gates: (RouteGate | undefined)[] = [];
+    const { client: c, stop } = await client((_message, opts) => {
+      gates.push(opts?.routeGate);
+      return Promise.resolve({ ok: true, text: "sent" });
+    });
+    try {
+      await c.callTool({ name: "send_message", arguments: { to: TO, kind: "note", text: "hi" } });
+      expect(gates).toHaveLength(1);
+      expect(typeof gates[0]).toBe("function");
+    } finally {
+      stop();
+    }
+  });
+
+  describe("messageRouteGate", () => {
+    async function gate(machines: readonly Machine[], leading: boolean): Promise<Awaited<ReturnType<RouteGate>>> {
+      const fake = fakeRelay(machines, () => new Error("unexpected op"));
+      if (leading) fake.setState({ scheduler: LEADING });
+      const lazy = new LazyRelay({ create: () => fake });
+      try {
+        return await messageRouteGate(relayFleet(lazy))();
+      } finally {
+        lazy.stop();
+      }
+    }
+    const capable = (): Machine[] => {
+      const [leader, box] = autoMachines();
+      return [machine({ ...leader, capabilities: [CAPABILITIES.messageRoute] }), machine({ ...box })];
+    };
+
+    test("passes only when a verified leader advertises messageRoute", async () => {
+      expect(await gate(capable(), true)).toEqual({ ok: true });
+    });
+
+    test("a leader without the capability is told to update, and nothing is sent", async () => {
+      const [leader, box] = autoMachines();
+      const result = await gate([machine({ ...leader }), machine({ ...box })], true);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.text).toContain("`seanced update`");
+        expect(result.text).toContain("nothing was sent");
+      }
+    });
+
+    test("no verified leader is its own refusal, and a capable machine that is not leading counts for nothing", async () => {
+      const result = await gate(capable(), false);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.text).toContain("no verified scheduler is leading");
+    });
   });
 
   test("the strict schema refuses an unknown key, an unknown kind and empty text", async () => {

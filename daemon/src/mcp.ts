@@ -7,6 +7,7 @@ import {
   CAPABILITIES,
   MESSAGE_KINDS,
   MESSAGE_MAX,
+  MESSAGE_ROUTE_MAX,
   MESSAGE_PUSH_MAX,
   MESSAGE_RATE,
   fleetTraits,
@@ -112,7 +113,7 @@ import {
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
-import { sendMessage } from "./send-message.ts";
+import { sendMessage, type RouteGate } from "./send-message.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -505,6 +506,42 @@ function failureText(op: string, err: unknown): string {
 /** Why the fleet could not be opened at all. A keyless box's reason is self-explanatory; a direct failure is the relay's. */
 function openFailureText(err: unknown): string {
   return err instanceof FleetUnreachable ? err.message : failureText("connecting to the relay", err);
+}
+
+/**
+ * `send_message`'s routing check (`sendMessage`'s `routeGate`), run only when the daemon says the task is not on its
+ * machine: the verified leader must advertise `messageRoute`, or an older one would drop the message unseen. Its own
+ * lease, so the idle clock sees it like any tool call. Exported because the e2e builds the gate exactly as the tool
+ * does, over a real fleet.
+ */
+export function messageRouteGate(fleet: Fleet): RouteGate {
+  return async () => {
+    let lease: FleetLease;
+    try {
+      lease = await fleet.open();
+    } catch (err) {
+      return { ok: false, text: openFailureText(err) };
+    }
+    try {
+      if (lease.scheduler === null) {
+        return {
+          ok: false,
+          text: `can't confirm a scheduler leader routes messages (${SCHEDULER_NEEDS_NEWER_DAEMON}); nothing was sent`,
+        };
+      }
+      const availability = lease.scheduler.availability();
+      if (advertises(lease.machines, availability, CAPABILITIES.messageRoute)) return { ok: true };
+      return {
+        ok: false,
+        text:
+          availability.kind === "ready"
+            ? "the scheduler's leader cannot route messages yet — its daemon needs `seanced update`; nothing was sent"
+            : "no verified scheduler is leading, so a message to another machine cannot be routed — try again once one leads; nothing was sent",
+      };
+    } finally {
+      lease.release();
+    }
+  };
 }
 
 /**
@@ -1725,8 +1762,8 @@ export function buildMcpServer(
   server.registerTool(
     SEND_MESSAGE_TOOL,
     {
-      title: "Message another séance session's task on this machine",
-      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them). It goes to this machine's own daemon, bound to this session's pane, and never leaves the machine: today only tasks running on this machine can be reached, and any other answers \`unknown\`. The receiver is told your task id, title and machine. Kinds: \`note\` is information, added to the receiver's conversation at once (read within a turn already running) and never waking an idle receiver; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`.`,
+      title: "Message another séance session's task",
+      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them). It goes to this machine's own daemon, bound to this session's pane. A task on this machine is delivered directly; a task on another machine is reached through the scheduler leader, which resolves it (a task passed to a successor, or continued, reaches the session that carries the work now), forwards the message and keeps nothing: the answer is then \`sent through the scheduler\`, which is not delivery, and a receipt note follows in your conversation (only when this session has a task) saying whether it was delivered, or why not. A message to another machine is at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped. The receiver is told your task id, title and machine. Kinds: \`note\` is information, added to the receiver's conversation at once (read within a turn already running) and never waking an idle receiver; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`.`,
       inputSchema: z.strictObject({
         to: z.string().describe("the receiving task's id (get_queue lists them)"),
         kind: z
@@ -1740,7 +1777,10 @@ export function buildMcpServer(
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     async ({ to, kind, text, inReplyTo }) => {
-      const result = await sendMsg({ to, kind, text, ...(inReplyTo === undefined ? {} : { inReplyTo }) });
+      const result = await sendMsg(
+        { to, kind, text, ...(inReplyTo === undefined ? {} : { inReplyTo }) },
+        { routeGate: messageRouteGate(fleet) },
+      );
       return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );

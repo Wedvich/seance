@@ -2,7 +2,16 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INBOX_MAX_BYTES, INBOX_MAX_MESSAGES, MESSAGE_MAX, MESSAGE_PUSH_MAX } from "@seance/shared";
+import {
+  INBOX_MAX_BYTES,
+  INBOX_MAX_MESSAGES,
+  MESSAGE_MAX,
+  MESSAGE_PUSH_MAX,
+  receiptNote,
+  type DeliverMessageRequest,
+  type MessageReceiptRequest,
+  type SessionMessage,
+} from "@seance/shared";
 import { messageAudit, type MessageAudit } from "../src/audit.ts";
 import { exec } from "../src/exec.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
@@ -1023,5 +1032,346 @@ describe("a custodian nudge", () => {
       ok: false,
       code: "stopping",
     });
+  });
+});
+
+/** A `message` frame that names its routing step, as `sendMessage` sends one. */
+function routedFrame(
+  to: string,
+  route: "ask" | "send",
+  text: string,
+  messageKind: "note" | "question" | "request" = "note",
+): object {
+  texts.push(text);
+  return { v: 1, kind: "message", to, messageKind, text, route };
+}
+
+describe("routing a message for a task that is not on this machine", () => {
+  test("an ask for a task this ledger lacks is remote, audits nothing and counts no frame against the rate", async () => {
+    const routed: SessionMessage[] = [];
+    const messages = setup({
+      route: (m) => {
+        routed.push(m);
+        return Promise.resolve(true);
+      },
+    });
+    const sender = await launched("askfrom");
+    const from = await pane("ask-from", sender);
+    for (let i = 0; i < 25; i++) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered asks
+      expect(await messages.send(routedFrame("task-elsewhere", "ask", "x"), from.pid)).toEqual({
+        ok: false,
+        code: "remote",
+      });
+    }
+    expect(audits).toEqual([]);
+    expect(routed).toEqual([]);
+    // 25 asks would have exhausted the minute's 20 had they counted.
+    expect(await messages.send(routedFrame("task-elsewhere", "send", "now"), from.pid)).toMatchObject({
+      ok: true,
+      outcome: "routed",
+    });
+  });
+
+  test("a send hands the leader one SessionMessage and audits routed; a refused route is no_leader; no route dep is unsupported", async () => {
+    const seen: SessionMessage[] = [];
+    const messages = setup({
+      route: (m) => {
+        seen.push(m);
+        return Promise.resolve(true);
+      },
+    });
+    const sender = await launched("sendfrom");
+    const from = await pane("send-from", sender);
+    const reply = await messages.send(routedFrame("task-elsewhere", "send", "hello", "question"), from.pid);
+    expect(reply).toMatchObject({ ok: true, outcome: "routed" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      id: reply.ok ? reply.id : "",
+      to: "task-elsewhere",
+      kind: "question",
+      text: "hello",
+      fromTask: sender,
+      fromTitle: "Sender",
+    });
+    expect(audits).toEqual([
+      { dir: "out", from: sender, to: "task-elsewhere", kind: "question", bytes: 5, outcome: "routed" },
+    ]);
+
+    const refused = setup({ route: () => Promise.resolve(false) });
+    expect(await refused.send(routedFrame("task-elsewhere", "send", "x"), from.pid)).toEqual({
+      ok: false,
+      code: "no_leader",
+    });
+    expect(audits.at(-1)).toMatchObject({ dir: "out", outcome: "no_leader" });
+
+    const none = setup();
+    expect(await none.send(routedFrame("task-elsewhere", "send", "x"), from.pid)).toEqual({
+      ok: false,
+      code: "unsupported",
+    });
+  });
+
+  test("an untasked sender is routed with no fromTask and told no receipt follows", async () => {
+    const seen: SessionMessage[] = [];
+    const messages = setup({
+      route: (m) => {
+        seen.push(m);
+        return Promise.resolve(true);
+      },
+    });
+    const from = await pane("untasked-from");
+    expect(await messages.send(routedFrame("task-elsewhere", "send", "hi"), from.pid)).toMatchObject({
+      ok: true,
+      outcome: "routed",
+      receipt: false,
+    });
+    expect(seen[0]).not.toHaveProperty("fromTask");
+    expect(seen[0]).not.toHaveProperty("fromTitle");
+  });
+
+  test("a text within the hard cap that is over the route budget once escaped is too_long with reason route", async () => {
+    const messages = setup({ route: () => Promise.resolve(true) });
+    const sender = await launched("budgetfrom");
+    const from = await pane("budget-from", sender);
+    // 20 001 bytes of UTF-8, 40 004 once each quote is escaped.
+    const text = '"'.repeat(20_001);
+    expect(await messages.send(routedFrame("task-elsewhere", "send", text), from.pid)).toEqual({
+      ok: false,
+      code: "too_long",
+      reason: "route",
+    });
+    expect((await messages.send(routedFrame("task-elsewhere", "send", '"'.repeat(19_999)), from.pid)).ok).toBe(true);
+  });
+
+  test("a local target is delivered locally whatever the route step, and the route is not used", async () => {
+    const messages = setup({ route: () => Promise.reject(new Error("must not route")) });
+    const receiver = await launched("localask");
+    const sender = await launched("localaskfrom");
+    const target = await pane("localask-target", receiver);
+    const from = await pane("localask-from", sender);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    for (const route of ["ask", "send"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      expect(await messages.send(routedFrame(receiver, route, `via ${route}`), from.pid)).toMatchObject({
+        ok: true,
+        outcome: "delivered",
+      });
+    }
+    expect(listener.lines).toHaveLength(3);
+  });
+
+  test("a launched task with no pane is held within the grace, and remote past it", async () => {
+    const messages = setup({ graceMs: 60_000, route: () => Promise.resolve(true) });
+    const sender = await launched("starting-from");
+    const from = await pane("starting-from", sender);
+    const starting = await launched("starting");
+    expect(await messages.send(routedFrame(starting, "ask", "x"), from.pid)).toEqual({ ok: false, code: "held" });
+    clock.now += 61_000;
+    expect(await messages.send(routedFrame(starting, "ask", "x"), from.pid)).toEqual({ ok: false, code: "remote" });
+    // Without a route step it is PR 1's answer.
+    expect(await messages.send(message(starting, "note", "x"), from.pid)).toEqual({ ok: false, code: "ended" });
+  });
+});
+
+describe("a message the leader routed here", () => {
+  const request = (taskId: string, extra: Partial<DeliverMessageRequest> = {}): DeliverMessageRequest => ({
+    id: crypto.randomUUID(),
+    taskId,
+    addressed: taskId,
+    kind: "note",
+    text: "routed text",
+    fromMachine: "MsgBox",
+    fromTask: "t-remote-sender",
+    fromTitle: "Remote title",
+    ...extra,
+  });
+
+  test("goes to the live listener in a wrapper naming the remote machine and task, audited in", async () => {
+    const messages = setup();
+    const receiver = await launched("routed");
+    const target = await pane("routed-target", receiver);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    texts.push("routed text");
+    expect(await messages.deliverRouted(request(receiver))).toEqual({ ok: true, outcome: "delivered" });
+    const push = lineOf(listener.lines[1]).push;
+    expect(push).toContain("MsgBox");
+    expect(push).toContain("t-remote-sender");
+    expect(push).toContain("Remote title");
+    expect(push).toContain("routed text");
+    expect(audits).toEqual([
+      {
+        dir: "in",
+        from: "t-remote-sender",
+        to: receiver,
+        kind: "note",
+        bytes: 11,
+        outcome: "delivered",
+      },
+    ]);
+  });
+
+  test("is held within the grace for a launch with no pane, and a settled task never is", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const starting = await launched("routedstart");
+    expect(await messages.deliverRouted(request(starting))).toEqual({ ok: true, outcome: "held" });
+    expect(await messages.deliverRouted(request(starting, { settled: true }))).toEqual({
+      ok: true,
+      outcome: "ended",
+    });
+    clock.now += 61_000;
+    expect(await messages.deliverRouted(request(starting))).toEqual({ ok: true, outcome: "ended" });
+  });
+
+  test("a task this ledger never launched is unknown, and a pane with no listener past the grace is ended/nolistener", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    expect(await messages.deliverRouted(request("task-never-launched"))).toEqual({ ok: true, outcome: "unknown" });
+    const receiver = await launched("routednolisten");
+    await pane("routednolisten-target", receiver);
+    clock.now += 600_000;
+    expect(await messages.deliverRouted(request(receiver))).toEqual({
+      ok: true,
+      outcome: "ended",
+      reason: "nolistener",
+    });
+  });
+
+  test("a message held for a listener is sent, and flushed when one connects", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const receiver = await launched("routedhold");
+    const target = await pane("routedhold-target", receiver);
+    expect(await messages.deliverRouted(request(receiver))).toEqual({ ok: true, outcome: "sent" });
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(listener.lines).toHaveLength(2);
+    expect(inAudits("delivered")).toHaveLength(1);
+  });
+
+  test("the same id twice inside the replay window is one delivery with the same reply, and is taken again after it", async () => {
+    const messages = setup();
+    const receiver = await launched("routeddup");
+    const target = await pane("routeddup-target", receiver);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    const first = request(receiver);
+    const [a, b] = await Promise.all([messages.deliverRouted(first), messages.deliverRouted(first)]);
+    expect(a).toEqual({ ok: true, outcome: "delivered" });
+    expect(b).toEqual(a);
+    clock.now += 60_000;
+    expect(await messages.deliverRouted(first)).toEqual(a);
+    expect(listener.lines).toHaveLength(2);
+    expect(inAudits("delivered")).toHaveLength(1);
+    clock.now += 61_000;
+    expect(await messages.deliverRouted(first)).toEqual({ ok: true, outcome: "delivered" });
+    expect(listener.lines).toHaveLength(3);
+  });
+
+  test("an oversize note arrives as a stub the receiver pulls, as a local one does", async () => {
+    const messages = setup();
+    const receiver = await launched("routedstub");
+    const target = await pane("routedstub-target", receiver);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    const text = "x".repeat(MESSAGE_PUSH_MAX + 1);
+    texts.push(text);
+    await messages.deliverRouted(request(receiver, { text }));
+    const line = lineOf(listener.lines[1]);
+    expect(line.body).toContain(text);
+    expect(line.push).not.toContain(text);
+  });
+});
+
+describe("a receipt the leader sent here", () => {
+  const receiptFor = (
+    fromTask: string | undefined,
+    over: Partial<MessageReceiptRequest> = {},
+  ): MessageReceiptRequest => ({
+    id: crypto.randomUUID(),
+    to: "t-0123456789abcdef",
+    kind: "note",
+    outcome: "delivered",
+    ...(fromTask === undefined ? {} : { fromTask }),
+    ...over,
+  });
+
+  test("is one fixed-text note in the sending task's pane, audited as a receipt with no byte count", async () => {
+    const messages = setup();
+    const sender = await launched("receipt");
+    const target = await pane("receipt-target", sender);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    const request = receiptFor(sender, { outcome: "offline" });
+    expect(await messages.receipt(request)).toEqual({ ok: true, outcome: "delivered" });
+    const line = lineOf(listener.lines[1]);
+    expect(line.push).toBe(receiptNote(request));
+    expect(line.messageKind).toBe("note");
+    expect(audits).toEqual([
+      { dir: "receipt", from: sender, to: "t-0123456789abcdef", kind: "note", outcome: "offline" },
+    ]);
+    expect(lines).toEqual([
+      `audit message origin=message dir=receipt from="${sender}" to="t-0123456789abcdef" kind=note bytes=- outcome=offline`,
+    ]);
+  });
+
+  test("is dropped when no pane carries the task, the task was never launched here, or the sender was untasked", async () => {
+    const messages = setup();
+    const gone = await launched("receiptgone");
+    expect(await messages.receipt(receiptFor(gone))).toEqual({ ok: true, outcome: "dropped" });
+    expect(await messages.receipt(receiptFor("task-never-launched"))).toEqual({ ok: true, outcome: "dropped" });
+    expect(await messages.receipt(receiptFor(undefined))).toEqual({ ok: true, outcome: "dropped" });
+    expect(audits).toEqual([]);
+  });
+
+  test("is held for a listener within the grace and never audited as a message the receiver got", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const sender = await launched("receiptheld");
+    const target = await pane("receiptheld-target", sender);
+    expect(await messages.receipt(receiptFor(sender))).toEqual({ ok: true, outcome: "sent" });
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(listener.lines).toHaveLength(2);
+    expect(inAudits("delivered")).toEqual([]);
+  });
+});
+
+describe("every audit line of a routed message", () => {
+  test("carry ids, kind and a byte count (or none for a receipt), and none carries message text or a title", async () => {
+    const messages = setup({ route: () => Promise.resolve(true) });
+    const receiver = await launched("fmtroute");
+    const sender = await launched("fmtroutesend");
+    const target = await pane("fmtroute-target", receiver);
+    const from = await pane("fmtroute-from", sender);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    texts.push("routed-secret-text");
+    await messages.send(routedFrame("task-elsewhere", "send", "routed-secret-text"), from.pid);
+    await messages.deliverRouted({
+      id: crypto.randomUUID(),
+      taskId: receiver,
+      addressed: receiver,
+      kind: "note",
+      text: "forwarded-secret-text",
+      fromMachine: "MsgBox",
+      fromTask: "t-remote-sender",
+      fromTitle: "Secret Title",
+    });
+    await messages.receipt({
+      id: crypto.randomUUID(),
+      to: "t-0123456789abcdef",
+      kind: "note",
+      outcome: "ended",
+      fromTask: receiver,
+    });
+    expect(lines.length).toBeGreaterThanOrEqual(3);
+    for (const line of lines) {
+      expect(line).toMatch(
+        /^audit message origin=message dir=(out|in|receipt) from=("[^"]+"|untasked|-) to="[^"]+" kind=\w+ bytes=(\d+|-) outcome=\w+$/u,
+      );
+      for (const text of ["routed-secret-text", "forwarded-secret-text", "Secret Title", "MsgBox", "Sender"]) {
+        expect(line).not.toContain(text);
+      }
+    }
   });
 });
