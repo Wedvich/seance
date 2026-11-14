@@ -15,6 +15,7 @@ import {
 } from "@seance/shared";
 import { isRowRefusal, taskRow, type Archive, type Fleet } from "./archive.ts";
 import type { IngestClock } from "./ingest-clock.ts";
+import type { RefusalTally } from "./refusal-tally.ts";
 
 /**
  * The read slice of the shared app-role client the collector uses — reads and
@@ -57,8 +58,10 @@ export interface CollectorOpts {
   /** The seat's own id: never a machine (A9), whatever a registry says. */
   readonly selfId: string;
   readonly log: { readonly info: (line: string) => void; readonly warn: (line: string) => void };
-  /** Noted when data lands (a listing or a get answered, a fleet written), never on an attempt. */
+  /** Noted when task data lands (a task listing or get answered) or a fleet is written, never on an attempt. */
   readonly clock: IngestClock;
+  /** Which tasks' rows SQLite refused and have not archived since: what the card reports of them (A36k). */
+  readonly refusals: RefusalTally;
   readonly timings?: Partial<CollectTimings>;
 }
 
@@ -151,7 +154,7 @@ export function fleetOf(state: RelayState, selfId: string): Fleet {
  * leaves the store leaves its row as it was.
  */
 export function startCollector(opts: CollectorOpts): Collector {
-  const { source, archive, accountKey, selfId, log, clock } = opts;
+  const { source, archive, accountKey, selfId, log, clock, refusals: tally } = opts;
   const timings = { ...COLLECT_TIMINGS, ...opts.timings };
   let stopped = false;
   const accountKeys = new Map<string, Promise<string>>();
@@ -209,9 +212,12 @@ export function startCollector(opts: CollectorOpts): Collector {
     return {
       archive: async (record, seenAt) => {
         try {
-          return await archiveTask(record, seenAt);
+          const archived = await archiveTask(record, seenAt);
+          tally.cleared(record.task.id);
+          return archived;
         } catch (err) {
           if (!isRowRefusal(err)) throw err;
+          tally.refused(record.task.id);
           count += 1;
           if (count === 1) first = err.message;
           return false;
@@ -268,7 +274,6 @@ export function startCollector(opts: CollectorOpts): Collector {
       if (stopped) return true;
       const now = Date.now();
       for (const { key, record } of answer.accounts) archive.upsertAccount(key, record.alias, record.version, now);
-      clock.note("store");
       if (answer.unreadable.length > 0) log.info(`accounts: skipped ${answer.unreadable.length} unreadable`);
       return true;
     }),
@@ -349,7 +354,6 @@ export function startCollector(opts: CollectorOpts): Collector {
       const answer = await source.getAccountRecord(key);
       if (answer === null || !answer.ok) return refusal("account read", answer);
       const { entry } = answer;
-      clock.note("store");
       if (entry === null || stopped) return true;
       if ("reason" in entry) {
         log.info(`accounts: skipped 1 unreadable (${entry.reason})`);

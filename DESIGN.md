@@ -9504,8 +9504,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Accounts, built only from the flagged registry entry whose `info` blob is sealed `from` its own
   id and parses as `ArchivistInfo` (`RelayState.archivist`; an impostor's blob leaves it null).
   Online it shows the platform, last ingest, the build line and Tasks, Samples, Events and
-  Database rows from the last `archive-status` reply held for that same device; offline, `offline ·
-  last seen`, no rows and a line on what is hidden. No menu, no spawn, no gauges. The counts are
+  Database rows from the last `archive-status` reply held for that same device, and under them,
+  in the warning colour, a line when task reads have gone stale and one when task rows were
+  refused (A36k); offline, `offline · last seen`, no rows, no warnings and a line on what is hidden. No menu, no spawn, no gauges. The counts are
   read when the Machines screen is visible (tab shown, socket open) and the archivist connected, then every 60 s while it
   stays so (`pwa/src/archivist-store.ts`), dropped when the seat moves or goes offline; a timeout
   or error leaves the card without rows and does not mark it offline — the card follows the
@@ -12268,9 +12269,13 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   (item 5, below), and `archive-status` (item 6): answered only when sealed `from: "app"`
   (anything else, or a frame carrying `re`, is dropped with a warning), parsed by
   `parseArchiveStatusRequest`, through the leg's replay guard, with `{onlineSince, lastIngest,
-  tasks, samples, events, database, countedAt}` — counts, byte sizes and timestamps, never a row.
+  tasks, samples, events, database, countedAt, refused}` — counts, byte sizes and timestamps, never a row.
   `lastIngest` is per source (`store`, `registry`, `status`, `pull`) and per process: null until
-  that source's first success since the archivist started. Row counts of the sample tiers
+  that source's first success since the archivist started. `store` is noted only when a task
+  listing or a named task get lands, never an account listing or get (A36k). `refused` is
+  `{tasks, since}`: how many finished tasks' rows SQLite refused and have not archived since, and
+  when the oldest of them was first refused, this process only — never an id or SQLite's text. It is
+  optional on the wire: an older archivist sends none, and the parser drops a malformed one alone. Row counts of the sample tiers
   (`WITHOUT ROWID`, tens of millions of rows) are never taken in the request path: a background
   pass at start and every 5 minutes counts them in bounded `ts` ranges, yielding a macrotask
   between chunks so the heartbeat and collectors keep running, and the answer reads the last
@@ -12458,7 +12463,9 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   one held. A record that leaves the store leaves its row as it was. A row SQLite refuses (a
   constraint, a datatype or a size: `isRowRefusal`) skips that task and the pass goes on,
   counted in one warning per pass with SQLite's message (schema text, nothing of the record);
-  the store is still noted as ingested. A refusal of that kind does not heal on a retry, and
+  the store is still noted as ingested. The task's id is also held in memory until a later
+  write of it goes through (`RefusalTally`, `archivist/src/refusal-tally.ts`), which is what
+  `archive-status`'s `refused` counts (A36k). A refusal of that kind does not heal on a retry, and
   before 2026-11-14 one such record kept every record after it out of the archive. Any other
   write failure (busy, I/O, a full disk) ends the pass and the pacer retries, since every
   later write would fail too and `busy_timeout` would block the thread on each. The account is resolved when
@@ -12791,6 +12798,32 @@ prompt text or any act on the fleet.
   Dates tiles (A36h), archived cards carry no action (A36i), and it pages 20 at a time (A36j). As
   built: PWA, "The archivist has a card, never a target", and above, "The PWA's charts" and "The PWA's
   task history".
+- **A36k. The card says when tasks are not being archived** (2026-11-14). On 2026-11-14 a CHECK
+  refused every `superseded` task for about a day and the card stayed green: its meta line is the
+  newest of every source's `lastIngest`, and `store` was also noted by account reads. Now only a
+  task listing or a named task get notes `store`, and the card adds a line in `.fleet-warn`
+  (no new style, per A36a) under its rows, online only, from a reply held for that device, for
+  each of two signals. _Stale reads:_ `store` more than an hour (`ARCHIVIST_STORE_STALE_MS`;
+  the listing polls every 10 minutes) before the reply's `countedAt`, or null an hour after
+  `onlineSince` by the same reference. The comparison stays on the archivist's clock (a skewed
+  phone, or a reply held while the tab was hidden, adds no line), and a reply with no `countedAt`
+  yet (first count pass pending) has none. It is "no task read at all": a named task get also
+  notes `store` (a real task read), so a listing failing while nudged gets land stays silent,
+  and `onlineSince` is the seat's last register, so a seat that re-registers more often than hourly
+  with no read ever landed hides the null line; both are accepted. A seat that reconnects after a
+  long outage can show the line for up to one 60 s refresh until its catch-up listing lands.
+  _Refused rows:_ the reply's `refused.tasks` above 0, worded "N finished tasks could not be
+  archived; the first was refused <age>, since the archivist last started" (no age clause when
+  `since` is null). The parser holds `since` null exactly when `tasks` is 0, else drops the field. `refused` counts distinct tasks, not attempts (a refused record is refused again
+  every pass), and `since` is the oldest first refusal, since that says how long records have
+  been at risk of A16's prune; ids stay in the archivist's memory and leave when a later write of
+  the task goes through. Both signals are process-only: a restart empties the tally, and a
+  record still in the store is refused again at the first listing, so the line returns within
+  minutes, but one the store pruned before the restart drops from the count. No push: A37's
+  alert is the leader watching registry presence, and the leader holds no `archive-status`
+  client while the archivist sends nothing, so a refusal push would make the leader poll the
+  archivist — a new surface. Nothing shows for an older archivist (no `refused`); an older app
+  ignores the field.
 
 **The silence alert.**
 
@@ -12823,6 +12856,13 @@ prompt text or any act on the fleet.
   and A29 moves the seat later; the separation that matters on a shared box is the Unix user (A27a).
 - **Names.** `ledger` (the launch ledger), `codex` (an existing tool), `familiar` (acts for its
   master). `archivist` says what it does, like `scheduler` and `relay`.
+- **For the refused-rows signal (A36k):** a raw count of refusals (every pass refuses the same
+  record again, so it climbs while nothing changes); the task ids or SQLite's message in the reply
+  (the reply carries counts, sizes and timestamps only; the journal has the message); a table of
+  refused ids in `archive.sqlite` to survive a restart (clearing one is a statement that removes a
+  row, which A23 forbids there, and a schema change for a diagnostic); a push through the leader
+  (it would poll the archivist); turning the card's dot grey or red (the dot is presence, which the
+  registry decides).
 - **For the silence alert:** a `since` taken from memory or the relay's `lastSeen` at every check (a new
   leader would restart the clock, and an entry that vanished has no `lastSeen`), and a device id in the
   payload (one seat per fleet; nothing for the worker to show or check).

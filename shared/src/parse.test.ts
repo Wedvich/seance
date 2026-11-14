@@ -3048,6 +3048,33 @@ describe("archive-status", () => {
     expect(parseArchiveStatusReply({ ...good, lastIngest: "x" })).toBeNull();
   });
 
+  test("refused parses when present and is left out when absent", () => {
+    const withRefused = { ...good, refused: { tasks: 2, since: 7 } };
+    expect(parseArchiveStatusReply(withRefused)).toEqual(withRefused);
+    expect(parseArchiveStatusReply({ ...good, refused: { tasks: 0, since: null } })).toEqual({
+      ...good,
+      refused: { tasks: 0, since: null },
+    });
+    expect(parseArchiveStatusReply(good)).not.toHaveProperty("refused");
+  });
+
+  test("an unreadable refused costs that field, not the reply", () => {
+    for (const refused of [
+      { tasks: -1, since: null },
+      { tasks: 1.5, since: 3 },
+      { tasks: 1, since: "x" },
+      { tasks: 3, since: null },
+      { tasks: 0, since: 5 },
+      { tasks: 2, since: -1 },
+      "x",
+      null,
+    ]) {
+      const parsed = parseArchiveStatusReply({ ...good, refused });
+      expect(parsed).toEqual(good);
+      expect(parsed).not.toHaveProperty("refused");
+    }
+  });
+
   test("the request is any record", () => {
     expect(parseArchiveStatusRequest({ later: 1 })).toEqual({});
     expect(parseArchiveStatusRequest([])).toBeNull();

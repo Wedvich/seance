@@ -1470,6 +1470,16 @@ export interface ArchiveTableStatus {
   readonly oldest: number | null;
 }
 
+/**
+ * Finished tasks whose row SQLite refused and that have not archived since, this process only (A36k):
+ * a count and a time, never an id.
+ */
+export interface ArchiveRefusals {
+  readonly tasks: number;
+  /** Ms the oldest of them was first refused in this process; null when `tasks` is 0. */
+  readonly since: number | null;
+}
+
 /** Counts, sizes and timestamps only: no id, name, prompt or account crosses in it. */
 export interface ArchiveStatusResponse {
   readonly ok: true;
@@ -1486,6 +1496,8 @@ export interface ArchiveStatusResponse {
   readonly database: { readonly archiveBytes: number; readonly metricsBytes: number };
   /** Ms the counts were taken; null with them. */
   readonly countedAt: number | null;
+  /** Absent from an archivist that predates it, or when unreadable: the card then shows nothing for it. */
+  readonly refused?: ArchiveRefusals;
 }
 
 export const ARCHIVE_STATUS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;

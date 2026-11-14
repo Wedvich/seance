@@ -337,6 +337,11 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
         </ul>
       )}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
+      {card.warnings.map((line) => (
+        <p key={line} className="fleet-note fleet-warn">
+          {line}
+        </p>
+      ))}
     </section>
   );
 }

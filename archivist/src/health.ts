@@ -9,6 +9,7 @@ import { answerApp } from "./answer.ts";
 import type { Archive } from "./archive.ts";
 import type { IngestClock } from "./ingest-clock.ts";
 import type { MetricsArchive } from "./metrics-archive.ts";
+import type { RefusalTally } from "./refusal-tally.ts";
 
 /**
  * Counts are taken in the background, never in a request: the sample tiers are
@@ -85,6 +86,7 @@ export function startCountRefresher(deps: RefresherDeps): CountRefresher {
 export interface HealthDeps {
   readonly counts: () => Counted | null;
   readonly clock: IngestClock;
+  readonly refusals: Pick<RefusalTally, "snapshot">;
   /** Ms the seat socket last registered; null while it is down. */
   readonly onlineSince: () => number | null;
   readonly archivePath: string;
@@ -119,6 +121,7 @@ export function createStatusAnswer(deps: HealthDeps): () => Promise<ArchiveStatu
       events: counted?.events ?? null,
       database: { archiveBytes, metricsBytes },
       countedAt: counted?.countedAt ?? null,
+      refused: deps.refusals.snapshot(),
     };
   };
 }
