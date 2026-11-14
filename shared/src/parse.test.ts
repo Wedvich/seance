@@ -2290,7 +2290,7 @@ describe("M4 shapes", () => {
 
   test("a status carries the custodian's view as `cu`; a bad one is dropped alone and the rest of the status stays", () => {
     const rc = `session_${"A".repeat(64)}`;
-    const good = { s: "running", e: 1_763_000_000, n: [999, 0, 3], rc };
+    const good = { s: "running", e: 1_763_000_000, n: [999, 0, 3], rc } as const;
     expect(parseMachineStatus({ at: 1, scan: 2, cu: good })).toEqual({ at: 1, scan: 2, cu: good });
     expect(parseMachineStatus({ at: 1, scan: 2, cu: { s: "idle" } })).toEqual({ at: 1, scan: 2, cu: { s: "idle" } });
     expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("cu");

@@ -5,6 +5,7 @@ import {
   importPsk,
   ReplayGuard,
   STATUS_INTERVAL_MS,
+  type CustodianStatus,
   type Envelope,
   type MachineInfo,
   type UpdateAvailable,
@@ -538,6 +539,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : {}),
   };
 
+  // The seat starts with the capabilities, after the loop it reports to: read late, like `drainAsk`.
+  let custodianView: ((now: number) => CustodianStatus | null) | undefined;
   // Created before the client, whose every register samples at once; reads it late.
   const status = startStatusLoop(
     metrics,
@@ -549,6 +552,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       httpFetch,
       draining: () => endedTasks.draining,
       closed: () => closedOf(state),
+      custodian: () => custodianView?.(now()) ?? null,
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
@@ -743,6 +747,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     },
     stopped: () => stopped,
     closed: () => closedOf(state),
+    refreshStatus: () => status.refresh(),
+    version: source?.sha ?? null,
     now,
     httpFetch,
     ...(opts.rescanIntervalMs === undefined ? {} : { rescanIntervalMs: opts.rescanIntervalMs }),
@@ -751,6 +757,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   });
 
   passClose.arm = capabilities.armPassClose;
+  custodianView = capabilities.custodianStatus;
   drainAsk.wire(capabilities.drainAsk, closedOf(state));
 
   // After the relay leg, because the local surface is the optional one: it never

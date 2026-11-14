@@ -105,6 +105,24 @@ export function custodianNotesPath(): string {
   return join(custodianDir(), "notes.md");
 }
 
+/**
+ * The owner's pause (`custodian-control.ts`): written by `seanced custodian pause|resume`, read by the seat. Under
+ * `stateDir()`, which a round's sandbox cannot write.
+ */
+export function custodianStatePath(): string {
+  return join(custodianDir(), "state.json");
+}
+
+/** `seanced custodian round` writes it, the seat reads and drops it. */
+export function custodianRoundRequestPath(): string {
+  return join(custodianDir(), "round-request");
+}
+
+/** The seat's own view of itself, written by the seat and read by `seanced custodian status` and `round`. */
+export function custodianSeatViewPath(): string {
+  return join(custodianDir(), "seat.json");
+}
+
 export function socketPath(): string {
   return join(runDir(), "seanced.sock");
 }

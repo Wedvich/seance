@@ -1,4 +1,4 @@
-import type { QuotaReading, RepoEntry } from "@seance/shared";
+import type { CustodianStatus, QuotaReading, RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
 import { custodianAudit, daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
 import { DespawnFailure, type SessionBackend } from "./backend.ts";
@@ -7,9 +7,16 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
+import {
+  dropRoundRequest,
+  peekRoundRequest,
+  readControl,
+  writeSeatView,
+} from "./custodian-control.ts";
+import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
 import { createWorktreeRule } from "./custodian-worktree.ts";
-import { countedVerb, emptyCounts, upsertRound } from "./custodian-rounds.ts";
+import { countedVerb, emptyCounts, readRounds, upsertRound } from "./custodian-rounds.ts";
 import {
   ensureRoundDir,
   exclaveRootExists,
@@ -28,7 +35,9 @@ import {
   createPick,
   type CustodianSeat,
   custodianPlatform,
+  lastRoundView,
   seatEnabled,
+  seatLive,
   type CloseOutcome,
   type CustodianSeatOpts,
   type SeatRecord,
@@ -103,6 +112,10 @@ export interface WiringCtx {
   readonly stopped: () => boolean;
   /** This machine's `cl`, or null while open (`closedOf(state)`): a session pass sent then carries `drain`. */
   readonly closed: () => number | null;
+  /** The status loop's `refresh`, late-bound: the seat's view moved and the row should turn over within a beat. */
+  readonly refreshStatus?: () => void;
+  /** The running source's sha, for `custodian/seat.json`; null when unknown. */
+  readonly version: string | null;
   readonly now: () => number;
   /** The outbound HTTP seam, for a capability that polls or pushes (M4). */
   readonly httpFetch: Fetch;
@@ -121,6 +134,8 @@ export interface Started {
   readonly armPassClose?: SessionEvents["armPassClose"];
   /** The drain's session ask, once session events run: `run.ts`'s availability reads it late. */
   readonly drainAsk?: DrainAsk;
+  /** The custodian seat's view for the status's `cu`, read late by `run.ts`; absent where no seat is enabled. */
+  readonly custodianStatus?: (now: number) => CustodianStatus | null;
 }
 
 /** One optional subsystem `startDaemon` wires once the relay client exists. */
@@ -356,6 +371,29 @@ const custodianSeat: DaemonCapability = (ctx) => {
 
   /** The seat's checks failed or it could not start: no round will ever run here, so the verbs say `unsupported`. */
   let seatFailed = false;
+  /** What the status shows for a failed seat: `failing`, with the log's last round (read once, when it failed). */
+  let failedLast: Pick<CustodianStatus, "e" | "n"> = {};
+  const publish = (view: CustodianStatus, failed: boolean): Promise<void> =>
+    writeSeatView({
+      s: view.s,
+      ...(view.e === undefined ? {} : { e: view.e }),
+      ...(view.n === undefined ? {} : { n: view.n }),
+      at: ctx.now(),
+      held: !seatLive(opts),
+      failed,
+      version: ctx.version ?? "unknown",
+    });
+  const markFailed = (): void => {
+    seatFailed = true;
+    void readRounds(custodianRoundsPath())
+      .then((entries) => {
+        failedLast = lastRoundView(entries.at(-1));
+      })
+      .catch(() => {})
+      .then(() => publish({ s: "failing", ...failedLast }, true))
+      .catch((err: unknown) => log.warn(`custodian: publishing the seat's view failed: ${String(err)}`))
+      .finally(() => ctx.refreshStatus?.());
+  };
   // The verbs exist before the seat does (its checks are async) and answer `not_custodian` until it names a round.
   const { despawn } = ctx.backend;
   const verbs: CustodianVerbs | null =
@@ -388,7 +426,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
     if (problem !== null) {
       log.warn(`custodian: no rounds on this host — ${problem}`);
-      seatFailed = true;
+      markFailed();
       // A host that cannot run a round is as off as a seat that is not configured: a round the last process left
       // would otherwise run on with no deadline. Not after a `stop`, whose incoming instance adopts it.
       if (!cancelled) sweepLeftovers();
@@ -406,6 +444,20 @@ const custodianSeat: DaemonCapability = (ctx) => {
       activity: paneActivity.all,
       untouchable,
       appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
+      readRounds: () => readRounds(custodianRoundsPath()),
+      readControl: () => readControl(),
+      peekRoundRequest: (now) => peekRoundRequest(now),
+      dropRoundRequest: () => dropRoundRequest(),
+      remoteId: async (round) => {
+        const exclave = ctx.exclaveScan().exclaves.find((entry) => entry.id === round.exclave);
+        if (exclave === undefined || round.pane === null) return null;
+        const pids = await listRoundPanePids().catch(() => null);
+        const panePid = [...(pids ?? [])].find(([, pane]) => pane === round.pane)?.[0];
+        if (panePid === undefined) return null;
+        return roundRemoteId(exclave.configDir, { panePid, startedAt: round.startedAt });
+      },
+      publishView: (view) => publish(view, false),
+      ...(ctx.refreshStatus === undefined ? {} : { onView: ctx.refreshStatus }),
       draining: () => ctx.endedTasks.draining,
       stopped: ctx.stopped,
       record: ctx.custodianSeat,
@@ -450,7 +502,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   };
   void begin().catch((err: unknown) => {
     log.warn(`custodian: the seat did not start: ${String(err)}`);
-    seatFailed = true;
+    markFailed();
     release();
     if (!cancelled) sweepLeftovers();
   });
@@ -460,6 +512,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       seat?.stop();
       release();
     },
+    custodianStatus: (now) => (seatFailed ? { s: "failing", ...failedLast } : (seat?.view(now) ?? null)),
     ...(verbs === null
       ? {}
       : {
@@ -591,6 +644,7 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
 export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
   readonly drainAsk?: DrainAsk;
+  readonly custodianStatus?: (now: number) => CustodianStatus | null;
   readonly local: LocalSurfaces;
   readonly stop: () => void;
 }
@@ -609,18 +663,21 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
     let local: LocalSurfaces = {};
     let armPassClose: Started["armPassClose"];
     let drainAsk: Started["drainAsk"];
+    let custodianStatus: Started["custodianStatus"];
     for (const capability of capabilities) {
       const entry = capability(ctx);
       started.push(entry);
       local = mergeSurfaces(local, entry);
       armPassClose ??= entry.armPassClose;
       drainAsk ??= entry.drainAsk;
+      custodianStatus ??= entry.custodianStatus;
     }
     return {
       local,
       stop,
       ...(armPassClose === undefined ? {} : { armPassClose }),
       ...(drainAsk === undefined ? {} : { drainAsk }),
+      ...(custodianStatus === undefined ? {} : { custodianStatus }),
     };
   } catch (err) {
     // Already-started ones hold timers and sockets nothing else will stop.
