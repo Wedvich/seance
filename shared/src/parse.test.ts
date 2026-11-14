@@ -3008,7 +3008,7 @@ describe("archive-tasks", () => {
   });
 
   test("every finished state is an outcome filter, so the archive's list cannot fall behind the phases", () => {
-    expect(ARCHIVE_TASK_OUTCOMES.toSorted()).toEqual(statesIn("finished").toSorted());
+    expect(statesIn("finished").toSorted()).toEqual(ARCHIVE_TASK_OUTCOMES.toSorted());
     for (const outcome of ARCHIVE_TASK_OUTCOMES) expect(parseArchiveTasksRequest({ outcome })).toEqual({ outcome });
   });
 
