@@ -1,10 +1,11 @@
 # The custodian — spec
 
 **Status: spec; build order items 1 (the nothing-lost rule in `reap` and reap's defaults under a
-custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session events") and 3 (the
-seat and the round, now DESIGN.md, "The custodian's seat") built 2026-11-13 and folded into DESIGN.md.
-Rounds are held until item 4 (`ROUNDS_LIVE`, owner decision 2026-11-13): the seat is built and tested,
-and runs nothing in production until the verbs exist.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
+custodian, now DESIGN.md, Reap, "Nothing lost"), 2 (C15, now DESIGN.md, "Session events"), 3 (the
+seat and the round, now DESIGN.md, "The custodian's seat") and 4 (the `custodian` frame with `sessions`,
+`close`, `notes` and `done`, the round log, now DESIGN.md, "The custodian frame kind") built and folded
+into DESIGN.md. Rounds run on any machine whose config carries the `custodian` key; what is left is the
+Machines row, the shell's status verbs, flags, nudge and interrupt (items 5–8).** Decided with the owner on 2026-11-12 and 2026-11-13. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -75,8 +76,8 @@ Each is the owner's unless marked _derived_.
 ### 3. A round
 
 - **C8–C14.** Built: DESIGN.md, "The custodian's seat".
-  C14's due check is narrowed there to the panes C7 allows, and "Round now" and the pause (§9) are
-  not built yet.
+  C14's due check is narrowed there to the panes C7 allows and to panes with an observed state, and
+  "Round now" and the pause (§9) are not built yet.
 - **C15.** Built: DESIGN.md, "Session events", "Per-pane retention and the screen sampler".
 - **C16, C17.** Built: DESIGN.md, "The custodian's seat".
 
@@ -84,7 +85,7 @@ Each is the owner's unless marked _derived_.
 
 - **C18–C21.** Built: DESIGN.md, "The custodian's seat". The deny list there is generated, with the additions
   the launch battery found (tmux's shell runners and state setters, `gh`'s further write verbs). C19 is
-  what holds under injection, and is the verbs' (item 4).
+  what holds under injection, and is the verbs' (item 4, built: DESIGN.md, "The custodian frame kind").
 - **C22.** Raw keystrokes into another session's pane are never the custodian's. docs/messaging.md
   rejected `send-keys` delivery on evidence (an injected Enter approved a permission prompt,
   pasted text answered an AskUserQuestion, text merged into a draft); a nudge goes through that
@@ -111,12 +112,19 @@ moment of the act.
 | `notes`            | Replaces the notes file, text on stdin (§7)                 | `too_long`                                                                                       |
 | `done`             | Reports the round finished, summary on stdin                | `too_long`                                                                                       |
 
+**Built (item 4): `sessions`, `close`, `notes` and `done`**, DESIGN.md, "The custodian frame kind". The
+refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close` and `notes`, `invalid` to
+`notes` (an empty text) and `too_late` to `done`, and every verb `not_custodian` and `unsupported`.
+`nudge`, `interrupt` and `flag` are items 6 and 8.
+
 - **C23. `sessions`** answers, per pane: tmux id, window name, `ours` or `foreign`, classification
   (`live`, `dead`, `shell`, `starting`, `exit-prompt`, `background-prompt`), last state and how
   long, how long the screen has been unchanged, task id and title, PR URL, worktree path, nudges
   sent, whether it was interrupted, its open flag, and any mark that makes it untouchable. It also
   lists the worktrees `reap` last refused and why (§6), so the round's report says what is holding
-  disk.
+  disk. _Built:_ with a task id and no title (a pane's title is the scheduler's), `nudges`, `interrupted` and
+  `flag` as placeholders until those verbs exist, and each pane's `close` verdict as it would be answered
+  right then, plus when retention began (a pane with no state before it is unobserved, not hung).
 - **C24. `close`** is allowed only when the daemon's own facts agree the session is at rest:
   - a `live` pane whose last frame is a turn-ended `idle` (an `idle` carrying `turnEnded`) that
     has stood for `closeAfterMinutes`. A live pane the daemon has no events for is `unobserved`
@@ -125,7 +133,11 @@ moment of the act.
 
   It then runs the existing graceful despawn (`daemon/src/despawn.ts`), audited
   `origin=custodian`. A task session closed this way settles exactly as one the owner typed
-  `/exit` into: nothing about task state is the custodian's.
+  `/exit` into: nothing about task state is the custodian's. _Built, with two additions:_ a `live` pane whose
+  input box holds any text, or whose box cannot be found, is `waiting` (the despawn clears the box with
+  Escape and Ctrl+C, and nothing else sees a draft: a grey prompt suggestion reads as one, so such a session is
+  refused until it is gone), and a dead task pane is harvested (its exit status noted, then closed) rather than
+  killed.
 
 - **C25. What "finished" means** is the agent's judgement, from the screen and the session's last
   message, within C24's bounds:
@@ -161,13 +173,17 @@ moment of the act.
 
 - **C31.** A close removes the session's worktree when nothing would be lost. The owner cannot
   recall wanting a closed session's worktree back; the disk is the point.
-- **C32. The rule** is built: `nothingLost` in `daemon/src/reap-git.ts`, used by `reap` and, from
-  PR 4, by the close. Its record, the `gh` lookup's shape included, is DESIGN.md, Reap, "Nothing
-  lost".
+- **C32. The rule** is built: `nothingLost` in `daemon/src/reap-git.ts`, used by `reap` and by the
+  close. Its record, the `gh` lookup's shape included, is DESIGN.md, Reap, "Nothing lost". The close
+  adds guards the rule does not know (DESIGN.md, "The custodian frame kind"): the worktree must sit under
+  its clone's `.claude/worktrees/`, not have been touched since the turn ended, not be locked by anyone but
+  a dead Claude, and have no pane in it.
 - **C33.** When the rule fails, the worktree is kept, the session is still closed, and the daemon
   flags it `dirty` or `unpushed`. When the rule cannot be evaluated, the worktree is kept and
   nothing is flagged; `reap` tries again later. _Built:_ the rule's three-way verdict and `reap`'s
-  keeping (DESIGN.md, Reap, "Nothing lost"). _Not built:_ the close and its flags (PRs 4 and 6).
+  keeping (DESIGN.md, Reap, "Nothing lost"), and the close's keeping and its reply and audit line
+  (`kept why=dirty|unpushed|…`). _Not built:_ the flags (item 6): a no-op seam (`onKept`) marks where
+  they go.
 - **C34.** The local branch is left for `reap`'s merged-branch sweep. A later `continue` of the
   task re-adds the worktree at its old path from that branch (DESIGN.md, "Continuing a session",
   "Re-adding a removed worktree"), so the conversation resumes. That covers pushed-but-unmerged work
@@ -188,7 +204,8 @@ moment of the act.
   writes none or one over the cap. It cannot grow without bound.
 - **C39.** _Derived._ Notes are model-written from untrusted pane text, so they are the one way an
   injection could outlive a round. They are capped, never logged, never leave the machine, and
-  `seanced custodian notes --clear` empties them.
+  `seanced custodian notes --clear` empties them. _Built (C37–C39):_ the `notes` verb and the pruning;
+  `--clear` is done by the CLI in the owner's shell, never through the daemon.
 
 ### 8. Health
 
@@ -200,7 +217,8 @@ moment of the act.
 - **C42.** _Derived._ The last 20 rounds are kept in `stateDir()/custodian/rounds.jsonl` (0600):
   start, end, exclave, outcome, the daemon's own counts of each verb, and the agent's summary (at
   most 1 KiB). The summary may quote a pane, so it is read only on the machine
-  (`seanced custodian log`) and never crosses the wire or reaches a log.
+  (`seanced custodian log`) and never crosses the wire or reaches a log. _Built (C40, C42's file):_ the
+  `done` verb and the log (DESIGN.md, "The custodian frame kind"); `seanced custodian log` is item 5.
 
 ### 9. What the owner sees and controls
 
@@ -299,10 +317,9 @@ delivery); nothing else here does.
    (`daemon/src/pane-activity.ts`); its read API is `activity(paneId)`.
 3. ~~The seat: config, `CAPABILITIES.custodian`, the due check, the exclave pick, the round's launch
    with its agent definition and fence, the deadline, and audit origin `custodian` (C1–C4,
-   C8–C17, C18–C21).~~ Built 2026-11-13 (`daemon/src/custodian-seat.ts`), held behind `ROUNDS_LIVE =
-   false`; item 4 turns it on with the verbs.
-4. The `custodian` frame kind with `sessions`, `close`, `notes` and `done`, and the round log
-   (C23–C25, C37–C39, C42).
+   C8–C17, C18–C21).~~ Built 2026-11-13 (`daemon/src/custodian-seat.ts`).
+4. ~~The `custodian` frame kind with `sessions`, `close`, `notes` and `done`, and the round log
+   (C23–C25, C37–C39, C42).~~ Built 2026-11-14 (`daemon/src/custodian-verbs.ts`); rounds are live.
 5. `MachineStatus.cu` and the Machines row; `seanced custodian status | log | round | pause |
    resume` at the shell (C40, C43, C45).
 
@@ -321,9 +338,12 @@ delivery); nothing else here does.
 - **The live link.** `cu` is in a fixed-size frame; whether the round's Remote Control id rides
   there or in a reply to a card's own request.
 - **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
-  closed (C24). Whether `seanced doctor` should warn about it. The retained state is per process, so a
-  session already at rest when the daemon restarts is `unobserved` too until its next frame; whether
-  `sessions` (C23) should say why.
+  closed (C24); `seanced doctor` now warns about it (built). The retained state is per process, so a
+  session already at rest when the daemon restarts is `unobserved` too until its next frame; `sessions` says
+  when retention began (`retainedSince`), which is how the round can tell, though not why per pane.
+- **Prompt suggestions.** A grey suggestion in an otherwise empty input box reads as a draft, so `close` refuses
+  such a session `waiting` (DESIGN.md, "The custodian frame kind"). Measure how often a finished session shows
+  one, and whether the box's styling (not in a plain `capture-pane`) could tell them apart.
 - **What "unchanged on screen" cannot see.** The change hash drops Claude's input box and footer and masks
   elapsed timers and the spinner glyph (DESIGN.md, "Per-pane retention"), matched on wording from Claude
   Code 2.1.x. A release that rewords them, or a repaint nobody has listed (a rotating tip, a clock in the

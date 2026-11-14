@@ -55,9 +55,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — spec, three parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
+- **docs/custodian.md** — spec, four parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
   Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
-  and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat", held behind `ROUNDS_LIVE` until the verbs exist): the
+  and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
+  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind", so
+  rounds run on any machine with the `custodian` key; nudge, interrupt, flags, health and the Machines row are not built): the
   custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
@@ -182,7 +184,7 @@ green:
   the daemon's reap timer, `probe` for the daemon's trait probes, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
-  `custodian` for the daemon's seat starting, closing or ending a custodian round,
+  `custodian` for the daemon's seat starting, closing or ending a custodian round and for a round's `close` and the worktree it decides,
   `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
@@ -406,6 +408,25 @@ green:
   Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
+- **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
+  "The custodian frame kind"): the round's four verbs `sessions`, `close <pane>`, `notes` and `done`, and no other
+  act. It is bound only by the kernel-reported peer pid, to a process of the one live pane carrying
+  `@seance-custodian` **that the seat record names as the running round** (`seat.roundPane()`), else `not_custodian`
+  — as is every host that names no peer (`peerPidSupported`) and any pid not given, never a claimed pane, an env var
+  or a field of the frame. A frame carries no path, branch, task id or session id. `close` re-reads the pane at the
+  act and acts only on a session at rest by the daemon's own facts (`closeVerdict`: never the round's own pane,
+  one that is `foreign` or `marked`, `needs-input`, `busy`, unobserved, or whose input box holds any text or can't
+  be found — `waiting`, since the despawn's Escape and Ctrl+C would clear a draft) through the graceful despawn;
+  it then removes the task's worktree only for one its own launch ledger noted, under its clone's
+  `.claude/worktrees/`, by `git worktree remove` **without `--force`**, after `nothingLost`, never one touched since
+  the turn ended (`TOUCH_SLACK_MS`), locked in git (bar Claude's own lock whose process is gone) or with a pane in
+  it (`custodian-worktree.ts`). `notes` is stored only through `pruneNotes` (sections by `standing`, a live task id
+  or a live pane, once each) within `NOTES_MAX`, and `seanced custodian notes --clear` is the owner's shell's act,
+  never a frame. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
+  `seanced` is its own `<tmp>/bin/seanced`, first on its `PATH`. Nothing a pane, the notes or the summary held is
+  logged or audited (the `custodian` origin's lines are `op=close` and `op=worktree` with ids, outcomes and
+  reasons), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
+  (`daemon/test/message-layering.test.ts`). A new verb, or any other act, is a threat-model change.
 - **The custodian's round is a fenced reader of untrusted text and never a session** (DESIGN.md, "The
   custodian's seat"). Its pane carries the tmux pane option `@seance-custodian`, every pane reader skips it
   through its format-field parse (`listClaudeSessions`, `listPanes`, `parsePanePids`, `despawnSession`), only
