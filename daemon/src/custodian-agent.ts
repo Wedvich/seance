@@ -1,5 +1,5 @@
 /**
- * The custodian round's agent definition and seed (docs/custodian.md, "The command"). The definition is a markdown
+ * The custodian round's agent definition and seed (DESIGN.md, "The custodian's seat"). The definition is a markdown
  * file in the repo (`daemon/custodian/agent.md`: frontmatter and a prompt body) that the daemon turns into the
  * `--agents` JSON on argv: `--agents <file>` is read only with `--print`, and `--add-dir` would widen the sandbox's
  * write scope. Nothing here reads a pane, and nothing it returns is ever logged.

@@ -8731,10 +8731,13 @@ and an index of where each decision is recorded here.
   gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (the mod's `session.start`,
   raised on a reload, an install or a hooks-worker respawn, leaves a finished session so). `close` answers both
   `unobserved` (C24), and a round they kept due would run every `everyMinutes` to do nothing. So the due check has
-  two terms (`actionable`, `custodian-seat.ts`): a pane idle since its turn ended for `everyMinutes`, and (custodian 8) a pane `busy` whose screen has stood still for `everyMinutes`, which `nudge` can act on (C26; `interrupt` waits
-  longer, `interruptAfterMinutes`). A stuck session whose nudges are spent and which is flagged keeps the second
-  term true, so a round runs every `everyMinutes` while it stays stuck: accepted, the round is cheap and the
-  session may have moved on; the seat does not read the counts, which would put the verbs' file in its due check. A pause and the owner's round request (custodian 5, "The custodian's status and
+  two terms (`actionable`, `custodian-seat.ts`): a pane idle since its turn ended for `everyMinutes`, and (custodian 8) a pane `busy` whose screen has stood still for `everyMinutes` **and that a verb could act on**
+  (`CustodianVerbs.reach`, asked through `SeatDeps.busyReach` for only those panes): `nudge` on a session with a task
+  this machine launched and nudges left (C26), or `interrupt` once the screen has stood still `interruptAfterMinutes`
+  and the session was not interrupted. A hand-started session on a long build is therefore not due until the
+  interrupt's threshold, and one whose nudges are spent is not due at all (code review F3). A healthy session on a long
+  quiet command still counts: a still screen cannot tell it from a hung one, the agent is the judge, and each nudge
+  costs one of `maxNudges`. A `reach` that cannot read its facts answers false, so an error never holds a round due. A pause and the owner's round request (custodian 5, "The custodian's status and
   the Machines row") enter the check as `paused` and `requested`. A round is not held
   back on a closed machine (`cl`): closing a machine routes work away and asks its sessions to pass, and the
   sessions it still holds are the ones a round tidies; only a restart drain stops a launch, because the daemon
@@ -8953,7 +8956,7 @@ and an index of where each decision is recorded here.
   `seanced mod` already reads per target, `[]` where `claude` is missing or a listing unreadable, so doctor never
   invents a finding): without
   its frames every session there is `unobserved` and `close` never acts on it. **And one per exclave lacking the
-  `inbox` mod** (custodian 8): `nudge` delivers through its listener and answers `unsupported` without one. **While
+  `inbox` mod** (custodian 8): `nudge` delivers through its listener and answers `no_listener` without one. **While
   rounds are held (`ROUNDS_LIVE`) the section is one `ok` line saying so and none of the probes run, the two mod
   warns included:** the key then only sets reap's defaults, and a machine that carries it for that must not start failing
   `doctor` (and, on Linux, running a `bwrap` probe) for rounds that cannot start. The warn is for the day rounds go
@@ -11683,12 +11686,23 @@ frame can do, not what the round can.
   `round_done`; `too_long` (over `MESSAGE_PUSH_MAX`, 8 KiB of UTF-8, the request cap: a request is always pushed);
   `invalid` (blank); `marked` (a nudge, close or interrupt of that pane in flight, the round's own pane, a round pane,
   or a hand-off, pass or drain mark); `gone` (not there, dead, or no pid); `foreign`; `waiting` (last state
-  `needs-input`: C7, the alert's); `untasked` (no task, or one this machine's launch ledger holds no launch of:
+  `needs-input`, or the screen is the background-work dialog or an exit prompt: C7, the alert's, the same screens
+  `close` leaves to the owner; any other pane that is not `live` is `unobserved`); `untasked` (no task, or one this machine's launch ledger holds no launch of:
   messaging addresses tasks only, its D3); `limit` (the session has had `maxNudges`); `once_per_round` (it was
-  nudged in this round); and the delivery's own answers, `gone`, `untasked` and **`unsupported`**: no listener
-  connected within messaging's grace (`nolistener`, the exclave lacks the `inbox` mod, which `doctor` warns about),
-  or a daemon stopping. A held delivery (the listener not connected yet, inside the grace) is `outcome: "sent"`,
-  a placed one `delivered`, and the reply carries the session's `nudges` after it. No rate limit applies beside the
+  nudged in this round); `marked` also for two live `ours` panes under one task id (the counts hold one pid a task,
+  so they could not tell the panes apart); and the delivery's own answers, `gone`, `untasked`, **`no_listener`** (no
+  listener connected within messaging's grace, audited `nolistener`: the exclave lacks the `inbox` mod, which
+  `doctor` warns about, or its listener dropped and did not come back in time) and **`unsupported`** (a daemon
+  stopping, or one wiring no messaging; the frame-level `unsupported` of held rounds is the same word for a
+  different cause, and answers every verb). **The pane is read again after the count is written** (the write is a
+  durable file, a window): its pid and task must still be the ones counted, it must not have become marked, `needs-input`
+  or a dialog, and `deliverAsCustodian` is handed that pid and task and answers `gone` for a pane that carries other
+  ones now, so a nudge never lands on a different session than the one whose count was written. A held delivery
+  (the listener not connected yet, inside the grace) is `outcome: "sent"` and **stays counted**: the hold may still
+  deliver, and refunding it would let a later listener's delivery make `maxNudges` plus one; if no listener comes
+  its grace ends audited `nolistener` with the count spent (after a daemon restart the first grace is the daemon's
+  own, so a round in that window can spend a nudge on an exclave without the mod: accepted, `doctor` warns about
+  the mod). A placed delivery is `delivered`, and the reply carries the session's `nudges` after it. No rate limit applies beside the
   counts: the custodian is not a task, and the counts bound it tighter than `MESSAGE_RATE` would.
 - **`interrupt` (C27, custodian 8)** sends a single Escape, the constant key `["Escape"]` and never a frame field
   (`send-keys -t <pane> Escape`, the drain ask's `sendKeys`), for a session hung inside a command, where a message
@@ -11696,13 +11710,17 @@ frame can do, not what the round can.
   verified key). `interruptVerdict`, a pure function of the daemon's facts, allows it only for an `ours` pane that is
   not a round pane, the round's own or marked, classified `live`, whose last state is `busy` (`needs-input` is
   `waiting`: an Escape there would dismiss the owner's question or deny a permission; anything else, no state
-  included, is `not_busy`), not interrupted before (`limit`: once per session), and whose screen, **as sampled within
-  `SCREEN_FRESH_MS`** (three sampler intervals), has stood still for `interruptAfterMinutes` (`too_soon` otherwise,
-  and for a stalled sampler, whose frozen `screenSince` would read as a still screen). It works for an untasked
-  session too. **The count is written before the key**, so neither a failed key nor a restart after it makes a
+  included, is `not_busy`), not interrupted before (`limit`: once per session), and whose screen, **as sampled by a pass taken at the act** (after the count is written, through the tracker's own
+  `sample`, and only a reading that pass made counts; within `SCREEN_FRESH_MS`, three sampler intervals, when no pass
+  is wired), has stood still for `interruptAfterMinutes` (`too_soon` otherwise, and for a failed capture or a stalled
+  sampler, whose frozen `screenSince` would read as a still screen). **A typed draft, or an input box that cannot be
+  found or read, is `waiting`** (`inputBoxDraft`, as `close`'s rule): this build does not know that Escape on a busy
+  turn leaves a draft alone, so it refuses where it cannot show it does. It works for an untasked session too. **The count is written before the key**, so neither a failed key nor a restart after it makes a
   second; the pane and its classification are then **read again**, and the verdict taken once more from those and
-  the daemon's facts with nothing awaited between it and the key, so a session that answered, asked or ended while
-  the count was written gets no key (and its count back). A key tmux refused is `internal` and stays counted: at most
+  the daemon's facts with nothing awaited between it and the key, so a session that answered, asked, ended or was
+  re-tagged to another task (its pid and task must be the first read's, and it must still be `ours` and alive) while
+  the count was written gets no key (and its count back); two live panes under one task id are `marked`, as for `nudge`.
+  `limit` for an `interrupt` means "already interrupted" and says nothing of the nudges. A key tmux refused is `internal` and stays counted: at most
   once is the promise, and the key may have landed. The agent follows an interrupt with a nudge in the same round.
 - **The flags file (C30, `custodian-flags.ts`)** is `stateDir()/custodian/sessions.json`, 0600 under the 0700 dir,
   through `writeDurable`, **not** `state.json`. C30's text names `state.json`, but that file is the owner CLI's alone
@@ -11727,7 +11745,7 @@ frame can do, not what the round can.
   session ends**. `round` is the pane id of the round that last nudged it, so once-per-round holds across a restart
   that adopts the round. Counts are written ahead of the act and given back when nothing was delivered or sent.
   They are not sent to the leader: the card shows a flag, not a count; `MachineStatus.cu.n[1]` is the last round's
-  delivered nudges, from the round log.
+  accepted nudges (`nudge.ok`: delivered, or held for a listener that may never come), from the round log.
 - **When a flag lifts.** Never from a session event on the leader: the record's flag is removed only by the
   daemon's `unflag` or by a re-assignment (`advance` to `ready`, Scheduler). The daemon sends `unflag` when (a) a
   bound `busy` frame arrives for a pane whose retained state was `idle` (turn ended or not: a respawn's idle is
@@ -11901,7 +11919,7 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   for `everyMinutes` and counts nothing, so a busy afternoon never reads `failing`); `running` while a round's pane is recorded; else `idle`. The count is seeded at start from the log's
   trailing failures, so a restart does not forget a failing seat. A host whose checks failed (`seatFailed`) is
   `failing` too, with nothing to count. A launch failure writes no log entry, which is why the in-memory count exists.
-  `n[1]` is the last logged round's delivered nudges (`nudge.ok`, custodian 8; zero for an older line), and
+  `n[1]` is the last logged round's accepted nudges (`nudge.ok`: delivered or held; custodian 8; zero for an older line), and
   `n[2]` the last logged round's flagged count (the verb's new flags plus the daemon's own after a close), capped
   at 999; older log lines have no such count and read as zero.
 - **The `failing` push (C41, custodian 6).** The seat hands a `custodian-event` `failing` to the leader **once, on the

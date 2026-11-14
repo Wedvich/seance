@@ -1031,6 +1031,26 @@ describe("pause and the owner's round request (C45)", () => {
     r.seat.stop();
   });
 
+  test("a busy pane no verb could act on holds no round due: the verbs' own reach decides", async () => {
+    let reach = false;
+    const asked: number[] = [];
+    const r = rig({
+      activity: () => [pane({ state: "busy", screenSince: NOW - EVERY })],
+      busyReach: (_pane, stillMs) => {
+        asked.push(stillMs);
+        return Promise.resolve(reach);
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(asked).toEqual([EVERY]);
+    reach = true;
+    await r.seat.tick();
+    expect(r.launches).toEqual(["default"]);
+    r.seat.stop();
+  });
+
   test("a pause with no end holds, and an unreadable control file holds with one warning", async () => {
     const r = rig();
     r.control.read = { pause: { at: 0, until: null }, unreadable: true };

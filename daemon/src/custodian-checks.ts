@@ -104,11 +104,11 @@ export async function custodianChecks(o: {
       message: `${label}: the session-events mod is not installed or enabled — the custodian can never close its sessions (unobserved); run \`seanced mod install\``,
     });
   }
-  // `nudge` delivers through the mod's listener; without one it answers `unsupported` (C26).
+  // `nudge` delivers through the mod's listener; without one it answers `no_listener` (C26).
   for (const label of await deps.inboxMissing()) {
     checks.push({
       level: "warn",
-      message: `${label}: the inbox mod is not installed or enabled — the custodian can never nudge its sessions (unsupported); run \`seanced mod install\``,
+      message: `${label}: the inbox mod is not installed or enabled — the custodian can never nudge its sessions (no_listener); run \`seanced mod install\``,
     });
   }
   return checks;

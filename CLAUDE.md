@@ -192,7 +192,7 @@ green:
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
   `custodian` for the daemon's seat starting, closing or ending a custodian round and for a round's `close` and the worktree it decides, its `flag`, `nudge` and `interrupt`,
-  `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text),
+  `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text; a custodian nudge writes only its `dir=in` line, `from=custodian`),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
   `leader` for the scheduler loop dispatching to its own machine in
@@ -431,7 +431,10 @@ green:
   holds, and a sender counts as tasked only when the ledger holds its pane's task. Text is never
   logged and never in argv: `--append-system-prompt` carries only the constant `STANDING_INSTRUCTION`,
   on tasked spawns. The mod delivers only by `$.prompt.submit` or `$.session.append`, never `asUser`,
-  `$.prompt.fill` or tmux keys. A sending task may send 20 messages a minute and 200 an hour.
+  `$.prompt.fill` or tmux keys. A sending task may send 20 messages a minute and 200 an hour. The daemon has a second
+  way into a pane's inbox, `Messages.deliverAsCustodian` (a custodian `nudge`, DESIGN.md "Session messages"): it binds
+  no peer (the `custodian` frame was bound to the round's pane) and has no rate bucket (the verb's counts bound it),
+  but it addresses only a live pane carrying a task the ledger holds, and only the pid and task the verb counted under.
   Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
@@ -467,11 +470,13 @@ green:
   delivers one `request` message only through messaging's local delivery (`Messages.deliverAsCustodian`, the `inbox`
   mod's submit: never a key, `asUser`, `$.prompt.fill` or tmux), the daemon its sender in the fixed
   `custodianRequest` wrapper, only to an `ours` pane carrying a task this machine's launch ledger holds, never one
-  that is marked, the round's, or whose last state is `needs-input`, its text at most `MESSAGE_PUSH_MAX` bytes and
+  that is marked, the round's, sharing its task id with another live pane, or whose last state is `needs-input` or whose screen is
+  a dialog or exit prompt, the pane read again after its count is written and handed to the delivery with the pid and task
+  counted under (`gone` for any other), its text at most `MESSAGE_PUSH_MAX` bytes and
   never logged or audited, at most `maxNudges` per session and one per round. `interrupt` sends only the constant
   key Escape (`["Escape"]`, never a frame field), once per session, only to an `ours`, unmarked, `live` pane whose
-  last state is `busy` (never `needs-input`) and whose screen, sampled within `SCREEN_FRESH_MS`, has stood still for
-  `interruptAfterMinutes`, re-reading the pane and its facts after the count is written and before the key. Both
+  last state is `busy` (never `needs-input`) whose input box holds no draft and whose screen, as read by a sampling pass taken after the count is written, has stood
+  still for `interruptAfterMinutes`, re-reading the pane (pid, task, ownership) and its facts before the key. Both
   counts are the daemon's (C30): in `custodian/sessions.json` beside the flags, keyed by task id (or pane id when
   untasked) and bound to the session's pid, written before the act, dropped when the session ends, kept across a
   restart, never set by a frame and never sent to the leader. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's

@@ -475,6 +475,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
           roundPane: () => seat?.roundPane() ?? null,
           roundPanePids: listRoundPanePids,
           activity: paneActivity.activity,
+          sample: paneActivity.sample,
           retainedSince: () => retainedSince,
           untouchable,
           tasks: ctx.endedTasks,
@@ -482,8 +483,9 @@ const custodianSeat: DaemonCapability = (ctx) => {
           despawn,
           killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
           // Without messaging here (no session-events capability) a nudge has no delivery: `unsupported`.
-          deliver: (pane, text) =>
-            messagesOf.get(ctx)?.deliverAsCustodian(pane, text) ?? Promise.resolve({ ok: false, code: "unsupported" }),
+          deliver: (pane, text, expect) =>
+            messagesOf.get(ctx)?.deliverAsCustodian(pane, text, expect) ??
+            Promise.resolve({ ok: false, code: "unsupported" }),
           keys: sendKeys,
           settings,
           flags,
@@ -520,6 +522,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
       untouchable,
+      ...(verbs === null ? {} : { busyReach: verbs.reach }),
       appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
       readRounds: () => readRounds(custodianRoundsPath()),
       readControl: () => readControl(),

@@ -46,6 +46,8 @@ export const CUSTODIAN_REPLY_CODES = [
   "untasked",
   /** A `nudge` past `maxNudges` for the session, or a second `interrupt` of it. */
   "limit",
+  /** A `nudge` to a session with no inbox listener now or within the grace: the mod is missing, or its listener dropped. */
+  "no_listener",
   /** A second `nudge` of the session in one round. */
   "once_per_round",
   /** An `interrupt` of a pane whose last state is not `busy`, or that is not a live session. */

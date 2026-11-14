@@ -70,7 +70,17 @@ export interface MessagesDeps {
 /** What became of a custodian nudge (`deliverAsCustodian`). */
 export type CustodianDelivery =
   | { readonly ok: true; readonly taskId: string; readonly outcome: "delivered" | "sent" }
-  | { readonly ok: false; readonly code: "gone" | "untasked" | "unsupported" | "too_long" | "stopping" };
+  | {
+      readonly ok: false;
+      /** `no_listener`: no inbox listener now and none within the grace; `unsupported`: no messaging here at all. */
+      readonly code: "gone" | "untasked" | "unsupported" | "no_listener" | "too_long" | "stopping";
+    };
+
+/** The pane process and task the caller's counts were written under: a delivery to anything else is `gone`. */
+export interface CustodianTarget {
+  readonly pid: number;
+  readonly taskId: string;
+}
 
 export interface Messages {
   /** Writes the ack or a refusal itself; a refusal closes the sink. */
@@ -79,10 +89,11 @@ export interface Messages {
   /**
    * A custodian round's nudge (docs/custodian.md C26): one `request` to the task session in `pane`, the daemon as its
    * sender, by the same listener write or hold a `message` frame takes. No peer binding (the `custodian` frame was
-   * bound to the round's pane already) and no rate-limit bucket (the verb's own counts bound it). `unsupported` is a
-   * pane with no listener past the grace: its exclave lacks the `inbox` mod, so nothing would ever read it.
+   * bound to the round's pane already) and no rate-limit bucket (the verb's own counts bound it). `no_listener` is a
+   * pane with no listener past the grace: its exclave lacks the `inbox` mod, or its listener dropped and did not come
+   * back in time. `expect` is the pid and task the verb counted under: a pane carrying other ones now is `gone`.
    */
-  readonly deliverAsCustodian: (pane: string, text: string) => Promise<CustodianDelivery>;
+  readonly deliverAsCustodian: (pane: string, text: string, expect: CustodianTarget) => Promise<CustodianDelivery>;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
@@ -411,7 +422,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     return { ok: true, id, outcome: "sent" };
   };
 
-  const deliverAsCustodian: Messages["deliverAsCustodian"] = async (paneId, text) => {
+  const deliverAsCustodian: Messages["deliverAsCustodian"] = async (paneId, text, expect) => {
     if (stopped) return { ok: false, code: "stopping" };
     const bytes = Buffer.byteLength(text, "utf8");
     // Always pushed, never pulled: a nudge is a request.
@@ -424,6 +435,8 @@ export function createMessages(deps: MessagesDeps): Messages {
     const to = target.taskId;
     const launched = to === null ? undefined : deps.launchedAt(to);
     if (to === null || launched === undefined) return { ok: false, code: "untasked" };
+    // Counted under another process or task than the one here now: the count is not this session's.
+    if (target.pid !== expect.pid || to !== expect.taskId) return { ok: false, code: "gone" };
     const id = mintId();
     const item: Held = {
       id,
@@ -436,7 +449,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     const placed = place(target, to, launched, item);
     if (placed === "nolistener") {
       auditHeld(to, item, "nolistener");
-      return { ok: false, code: "unsupported" };
+      return { ok: false, code: "no_listener" };
     }
     if (placed === "delivered") auditHeld(to, item, "delivered");
     return { ok: true, taskId: to, outcome: placed };

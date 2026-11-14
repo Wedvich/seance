@@ -33,7 +33,7 @@ import {
   type InterruptRefusal,
   type KeptWhy,
 } from "./custodian-frame.ts";
-import type { CustodianDelivery } from "./messages.ts";
+import type { CustodianDelivery, CustodianTarget } from "./messages.ts";
 import type { WorktreeOutcome, WorktreeRule } from "./custodian-worktree.ts";
 import { mapLimit } from "./concurrency.ts";
 import { inputBoxDraft } from "./drain-ask.ts";
@@ -125,6 +125,8 @@ export interface InterruptVerdictInput {
   readonly interrupted: boolean;
   readonly now: number;
   readonly interruptAfterMs: number;
+  /** The screen must have been sampled at or after this: the act's own sampling pass began then (0 for no such pass). */
+  readonly sampledAfter: number;
 }
 
 /**
@@ -144,6 +146,7 @@ export function interruptVerdict(o: InterruptVerdictInput): "interrupt" | Interr
   if (o.interrupted) return "limit";
   const { screenSince, sampledAt } = activity;
   if (screenSince === null || sampledAt === null || o.now - sampledAt > SCREEN_FRESH_MS) return "too_soon";
+  if (sampledAt < o.sampledAfter) return "too_soon";
   if (o.now - screenSince < o.interruptAfterMs) return "too_soon";
   return "interrupt";
 }
@@ -210,6 +213,8 @@ export interface CustodianVerbDeps {
   readonly classifyPane?: (info: PaneInfo) => Promise<PaneState>;
   /** The pane's current screen with its attributes (`capture-pane -e`), null when tmux cannot say. */
   readonly capture?: (pane: string) => Promise<string | null>;
+  /** One screen sampling pass (`PaneActivityTracker.sample`), which `interrupt` takes at the act; absent, the sampler's last reading stands. */
+  readonly sample?: () => Promise<void>;
   readonly activity: (pane: string) => PaneActivity | null;
   /** When this process began retaining pane state; null while no seat holds the tracker. */
   readonly retainedSince: () => number | null;
@@ -224,7 +229,7 @@ export interface CustodianVerbDeps {
    * A nudge's delivery: messaging's local delivery (`Messages.deliverAsCustodian`), the inbox mod's `$.prompt.submit`,
    * never a key. `unsupported` when this daemon wires no messaging.
    */
-  readonly deliver: (pane: string, text: string) => Promise<CustodianDelivery>;
+  readonly deliver: (pane: string, text: string, expect: CustodianTarget) => Promise<CustodianDelivery>;
   /** One `send-keys -t <pane> ...args` (`drain-ask.ts`'s `sendKeys`); true when tmux took it. Only ever `["Escape"]`. */
   readonly keys: (pane: string, args: readonly string[]) => Promise<boolean>;
   readonly readRefusals?: () => Promise<unknown>;
@@ -246,6 +251,13 @@ export interface CustodianVerbDeps {
 export interface CustodianVerbs {
   /** `peer` is the connecting process's kernel-reported pid, null where the host cannot say. */
   readonly handle: (raw: unknown, peer: number | null) => Promise<CustodianReply>;
+  /**
+   * Whether a verb could act on this `busy` pane whose screen has stood still for `stillMs`: `nudge` on a session with
+   * a task this machine launched and nudges left, `interrupt` once the screen has stood still `interruptAfterMinutes`
+   * and the session was not interrupted. The seat's due check asks, so a round is not held for a pane no verb could
+   * touch (a hand-started session on a long build, a session whose nudges are spent).
+   */
+  readonly reach: (pane: string, stillMs: number) => Promise<boolean>;
 }
 
 const MINUTE_MS = 60_000;
@@ -611,6 +623,21 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     }
   };
 
+  /** More than one live `ours` pane under this pane's task id: the counts could not tell them apart. */
+  const sharesTask = (panes: readonly PaneInfo[], info: PaneInfo): boolean =>
+    info.taskId !== null &&
+    panes.some((p) => p.paneId !== info.paneId && p.ours && !p.dead && p.pid !== null && p.taskId === info.taskId);
+
+  /** What stands between a nudge and its delivery once the pane is read again; null when nothing does. */
+  const nudgeStillOk = async (again: PaneInfo, first: PaneInfo): Promise<CustodianReplyCode | null> => {
+    if (again.dead || again.pid !== first.pid || again.taskId !== first.taskId || !again.ours) return "gone";
+    if (again.custodian || again.paneId === deps.roundPane() || deps.untouchable(again.paneId)) return "marked";
+    if (deps.activity(again.paneId)?.state === "needs-input") return "waiting";
+    const state = await classify(again);
+    if (state === "background-prompt" || state === "exit-prompt") return "waiting";
+    return state === "live" ? null : "unobserved";
+  };
+
   /**
    * C26: one `request` to a task session, through messaging's delivery, so it can never answer a dialog or touch a
    * draft. Counted ahead of the delivery (at most `maxNudges` per session, one per round); a delivery that placed
@@ -636,16 +663,30 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       if (deps.untouchable(pane)) return await refuse("marked", taskId);
       // C7: a session waiting on the owner is the needs-input alert's.
       if (deps.activity(pane)?.state === "needs-input") return await refuse("waiting", taskId);
+      // The same screens `close` leaves to the owner: a request submitted in front of a dialog is not messaging's case.
+      const state = await classify(info);
+      if (state === "background-prompt" || state === "exit-prompt") return await refuse("waiting", taskId);
+      if (state !== "live") return await refuse("unobserved", taskId);
       // Messaging addresses only a task this machine launched (its D3).
       if (taskId === null || deps.tasks.launchedAt(taskId) === undefined) return await refuse("untasked", taskId);
-      await pruneCounts(await panesNow());
+      const all = await panesNow();
+      // The counts hold one pid a task id: two panes under it would read each other's entry as zero.
+      if (sharesTask(all, info)) return await refuse("marked", taskId);
+      await pruneCounts(all);
       const was = await deps.flags.counts(taskId, info.pid);
       if (was.nudges >= deps.settings.maxNudges) return await refuse("limit", taskId);
       const round = deps.roundPane();
       if (round !== null && was.round === round) return await refuse("once_per_round", taskId);
       const counted: SessionCounts = { ...was, nudges: was.nudges + 1, round };
       await deps.flags.setCounts(taskId, counted);
-      const delivery = await deps.deliver(pane, text);
+      // The write was a window (a durable file): what C7 excludes, the pane and the task are read again before the text goes.
+      const again = await infoOf(pane);
+      const last = again === null ? "gone" : await nudgeStillOk(again, info);
+      if (last !== null) {
+        await restoreCounts(taskId, was);
+        return await refuse(last, taskId);
+      }
+      const delivery = await deps.deliver(pane, text, { pid: info.pid, taskId });
       if (!delivery.ok) {
         await restoreCounts(taskId, was);
         // A daemon on its way down delivers nothing now: as good as no messaging here.
@@ -678,11 +719,14 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     let taskId: string | null = null;
     try {
       const info = await infoOf(pane);
-      if (info === null || info.pid === null) return await refuse("gone", null);
+      if (info === null || info.dead || info.pid === null) return await refuse("gone", null);
       taskId = info.taskId;
       const key = taskId ?? pane;
-      await pruneCounts(await panesNow());
+      const all = await panesNow();
+      if (sharesTask(all, info)) return await refuse("marked", taskId);
+      await pruneCounts(all);
       const was = await deps.flags.counts(key, info.pid);
+      let sampledAfter = 0;
       const judge = (read: PaneInfo, state: PaneState, interrupted: boolean): "interrupt" | InterruptRefusal =>
         interruptVerdict({
           info: read,
@@ -692,16 +736,39 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
           interrupted,
           now: deps.now(),
           interruptAfterMs,
+          sampledAfter,
         });
       const first = judge(info, await classify(info), was.interrupted);
       if (first !== "interrupt") return await refuse(first, taskId);
       await deps.flags.setCounts(key, { ...was, interrupted: true });
-      // Read again now: the write was a window in which the session may have answered, asked or ended.
+      // The sampler's reading may be minutes old, and a command that began printing again since would still read as
+      // still: take a pass now and trust only a reading it made.
+      // A pass already running is joined, and may have read this pane before the call: a second pass is a new one.
+      const pass = async (sampler: () => Promise<void>): Promise<boolean> => {
+        sampledAfter = deps.now();
+        await sampler();
+        return (deps.activity(pane)?.sampledAt ?? -1) >= sampledAfter;
+      };
+      if (deps.sample !== undefined && !(await pass(deps.sample))) await pass(deps.sample);
+      // Escape on a busy turn is not known to leave a typed draft alone: `close`'s rule, the same read.
+      const screen = await capture(pane);
+      if (screen === null || inputBoxDraft(screen) !== "") {
+        await restoreCounts(key, was);
+        return await refuse("waiting", taskId);
+      }
+      // Read again now: these were windows in which the session may have answered, asked or ended.
       const again = await infoOf(pane);
       const againState = again === null ? null : await classify(again);
       // Nothing is awaited from this verdict to the key.
       const last =
-        again === null || againState === null || again.pid !== info.pid ? "gone" : judge(again, againState, false);
+        again === null ||
+        againState === null ||
+        again.dead ||
+        again.pid !== info.pid ||
+        again.taskId !== info.taskId ||
+        !again.ours
+          ? "gone"
+          : judge(again, againState, false);
       if (last !== "interrupt") {
         await restoreCounts(key, was);
         return await refuse(last, taskId);
@@ -819,7 +886,24 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     return true;
   };
 
+  const reach: CustodianVerbs["reach"] = async (pane, stillMs) => {
+    try {
+      const info = await infoOf(pane);
+      if (info === null || !info.ours || info.dead || info.pid === null || info.custodian) return false;
+      const held = await deps.flags.counts(info.taskId ?? pane, info.pid);
+      const nudgeable =
+        info.taskId !== null &&
+        deps.tasks.launchedAt(info.taskId) !== undefined &&
+        held.nudges < deps.settings.maxNudges;
+      return nudgeable || (stillMs >= interruptAfterMs && !held.interrupted);
+    } catch {
+      // An unreadable fact must not hold a round due on every tick: the owner's request still starts one.
+      return false;
+    }
+  };
+
   return {
+    reach,
     handle: async (raw, peer) => {
       const frame = parseCustodianFrame(raw);
       if (frame === null) return { ok: false, code: "invalid" };

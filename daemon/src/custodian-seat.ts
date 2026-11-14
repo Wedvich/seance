@@ -80,7 +80,9 @@ export const CHECK_INTERVAL_MS = MINUTE_MS;
  * narrowing): C7's exclusions (a last state of `needs-input`, or a drain, hand-off or pass mark: `untouchable`), a
  * pane no frame has given a state (`close` answers `unobserved`), and an `idle` without `turnEnded` (`close` answers
  * that `unobserved` too, and a mod's `session.start` on a reload or respawn sends exactly that for a finished session).
- * A `busy` pane counts once its screen has stood still for `everyMs`: `nudge` can act on it then (C26).
+ * A `busy` pane counts once its screen has stood still for `everyMs` and the verbs' own `reach` says one could act on
+ * it: `nudge` (a task this machine launched, nudges left) or, from `interruptAfterMinutes`, `interrupt`. A still
+ * screen on a healthy long command still counts: the agent is the judge of that, and its `nudge` costs one of three.
  */
 export function roundDue(o: {
   readonly now: number;
@@ -102,7 +104,7 @@ export function roundDue(o: {
 
 /**
  * Whether a verb that exists could act on this pane once `everyMs` has passed: `close`, on a pane idle since its
- * turn ended; `nudge` (and, later, `interrupt`), on a `busy` pane whose screen has stood still. A due round keeps
+ * turn ended; `nudge` and `interrupt`, on a `busy` pane whose screen has stood still (`reach` narrows it). A due round keeps
  * meaning "something could be done", never "something is old".
  */
 function actionable(pane: TrackedActivity, now: number, everyMs: number): boolean {
@@ -244,6 +246,8 @@ export interface SeatDeps {
   readonly activity: () => readonly TrackedActivity[];
   /** A pane a hand-off, pass or drain ask marked: C7 keeps the custodian off it. */
   readonly untouchable: (pane: string) => boolean;
+  /** `CustodianVerbs.reach`: whether a verb could act on a `busy` pane still for `stillMs`. Absent, every one could. */
+  readonly busyReach?: (pane: string, stillMs: number) => Promise<boolean>;
   readonly draining: () => boolean;
   /** The capability was stopped: nothing is saved, and a late launch closes its own pane. */
   readonly stopped: () => boolean;
@@ -607,6 +611,19 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         d.warn("custodian: a round was requested too soon after the last one; dropped");
       }
     }
+    // Only a `busy` pane the due check would count is asked about, so an idle host costs no reads.
+    const reachable = async (panes: readonly TrackedActivity[], at: number): Promise<readonly TrackedActivity[]> => {
+      const reach = d.busyReach;
+      if (reach === undefined) return panes;
+      const kept = await Promise.all(
+        panes.map(async (pane) => {
+          if (pane.state !== "busy" || d.untouchable(pane.pane)) return true;
+          if (pane.screenSince === null || at - pane.screenSince < everyMs) return true;
+          return await reach(pane.pane, at - pane.screenSince);
+        }),
+      );
+      return panes.filter((_, i) => kept[i]);
+    };
     if (round === undefined) {
       const requested = request === "fresh";
       const due = roundDue({
@@ -617,7 +634,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         draining: d.draining(),
         paused: pausedAt(control, now),
         requested,
-        panes: d.activity(),
+        panes: await reachable(d.activity(), now),
         untouchable: d.untouchable,
       });
       if (!due || (!requested && now < pickAfter)) return;
