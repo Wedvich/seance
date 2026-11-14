@@ -167,17 +167,22 @@ describe("the custodian op's acts", () => {
       // oxlint-disable-next-line no-await-in-loop -- one case at a time over one dir
       expect(await act({ act: "round" })).toMatchObject({ ok: false, code });
     }
-    seat = { live: true, configured: true, view: null, record: {}, rounds: [] };
-    seat.rounds = [
-      {
-        start: NOW - 60_000,
-        end: NOW - 30_000,
-        exclave: "e",
-        outcome: "healthy",
-        reason: "done",
-        counts: emptyCounts(),
-      },
-    ];
+    seat = {
+      live: true,
+      configured: true,
+      view: null,
+      record: {},
+      rounds: [
+        {
+          start: NOW - 60_000,
+          end: NOW - 30_000,
+          exclave: "e",
+          outcome: "healthy",
+          reason: "done",
+          counts: emptyCounts(),
+        },
+      ],
+    };
     expect(await act({ act: "round" })).toEqual({
       ok: false,
       code: "too_soon",
