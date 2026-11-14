@@ -41,6 +41,12 @@ const SCREEN_CHECK_TRIES = 7;
 
 const NORMALIZE = /\s+/gu;
 const RULE = /^─{8,}$/u;
+/**
+ * What Claude Code puts in the box for a paste or an image, the owner's own content however it is styled: not measured
+ * here, so a match counts as typed whatever its colour (fails closed on wording; a release that rewords it only
+ * loses this guard, and the style rule still applies).
+ */
+const PLACEHOLDER = /\[(?:Pasted text|Image|\.\.\.Truncated text)[^\]]*#\d+/iu;
 
 /**
  * The text in the screen's input box (between the last two full-width `─` rules, as Claude Code draws it), after the
@@ -91,7 +97,9 @@ function styledRows(styled: string): Cell[][] {
       const code = parts[at] ?? "";
       if (code.startsWith("38:")) {
         grey = false;
-      } else if (code === "38" || code === "48") {
+      } else if (code === "38" || code === "48" || code === "58") {
+        // 58 (underline colour) is skipped like 48 so its parameters are not read as standalone codes: `58;5;2` would
+        // otherwise switch faint on, and every typed cell after it would pass as a suggestion.
         const kind = parts[at + 1];
         if (code === "38") {
           const [a = Number.NaN, b = Number.NaN, c = Number.NaN] = parts.slice(at + 2, at + 5).map(Number);
@@ -131,11 +139,11 @@ function styledRows(styled: string): Cell[][] {
 
 /**
  * Like `inputBoxText`, but over a `capture-pane -e` screen and without the cells Claude Code draws as a prompt
- * suggestion: faint or grey text in an otherwise empty box, its first cell often the cursor (inverse). What is left is
- * what was typed, `""` for an empty box or one showing only a suggestion, and null when there is no box. Fails closed:
- * any cell not recognisably faint or grey counts as typed, and the inverse first cell is a cursor only beside more
- * suggestion text, so a one-character draft with the cursor moved onto it is still a draft. Read in memory, never
- * returned to a wire, logged or audited.
+ * suggestion: faint or grey text, its first cell often the cursor (inverse). What is left is what was typed, `""` for
+ * an empty box or one whose every non-blank cell is faint or grey, and null when there is no box. Fails closed: any
+ * cell not recognisably faint or grey counts as typed; the inverse first cell is a cursor only beside more suggestion
+ * text, so a one-character draft with the cursor moved onto it is still a draft; and a paste or image placeholder is a
+ * draft however it is drawn. Read in memory, never returned to a wire, logged or audited.
  */
 export function inputBoxDraft(styled: string): string | null {
   const rows = styledRows(styled);
@@ -156,6 +164,12 @@ export function inputBoxDraft(styled: string): string | null {
   const rest = cells.slice(first + 1);
   const solid = rest.filter((cell) => cell.ch.trim() !== "");
   const cursor = solid[0]?.inverse === true && solid.slice(1).some((cell) => cell.ghost) ? solid[0] : undefined;
+  const all = rest
+    .map((cell) => cell.ch)
+    .join("")
+    .replace(NORMALIZE, " ")
+    .trim();
+  if (PLACEHOLDER.test(all)) return all;
   return rest
     .filter((cell) => !cell.ghost && cell !== cursor)
     .map((cell) => cell.ch)

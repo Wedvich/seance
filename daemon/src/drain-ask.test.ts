@@ -869,6 +869,20 @@ describe("inputBoxDraft", () => {
     expect(inputBoxDraft(screen(`❯ ${ESC}[34mrun the tests${RESET}`))).toBe("run the tests");
   });
 
+  test("an underline colour's parameters are not read as standalone codes: typed text stays a draft", () => {
+    // `58;5;2` and `58;2;2;…` would read `2` as faint on, and every typed cell after it as a suggestion.
+    expect(inputBoxDraft(screen(`❯ ${ESC}[4m${ESC}[58;5;2mhalf a reply${RESET}`))).toBe("half a reply");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[58;2;2;2;2mhalf a reply${RESET}`))).toBe("half a reply");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[58:5:2mhalf a reply${RESET}`))).toBe("half a reply");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[58;5;2m${FAINT}commit and push${RESET}`))).toBe("");
+  });
+
+  test("a paste or image placeholder is a draft even when it is drawn faint or grey", () => {
+    expect(inputBoxDraft(screen(`❯ ${FAINT}[Pasted text #1 +40 lines]${RESET}`))).toBe("[Pasted text #1 +40 lines]");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[90m[Image #1]${RESET}`))).toBe("[Image #1]");
+    expect(inputBoxDraft(screen(`❯ ${FAINT}commit and push [image] #1${RESET}`))).toBe("");
+  });
+
   test("a reset, or the faint attribute switched off, ends the suggestion", () => {
     expect(inputBoxDraft(screen(`❯ ${FAINT}ghost${ESC}[22m typed`))).toBe("typed");
     expect(inputBoxDraft(screen(`❯ ${ESC}[90mghost${ESC}[39m typed`))).toBe("typed");
