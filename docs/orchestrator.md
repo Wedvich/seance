@@ -28,7 +28,7 @@ From the memo, in order. These are wants, not decisions on mechanism.
    starts building.
 2. Amend has to grow for this. As work proceeds it creates follow-up issues and more work, which
    must adapt the graph already in the queue, and Séance should support that.
-3. Séance is not tied hard to Linear. As with the companion tool (huddle; docs/messaging.md §6),
+3. Séance is not tied hard to Linear. As with the adapter seam for other tools (docs/messaging.md §6),
    neither codebase knows the other: Séance offers an adapter interface, and a separate adapter
    mediates. Work tracking is the same shape, with a Linear adapter as the first one.
 4. A new role, after Steve Yegge's split: short-lived agents do the implementation and are gone;

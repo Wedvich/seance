@@ -1,7 +1,7 @@
 # Session messaging — spec
 
 **Status: PR 1 (local delivery) built 2026-11-13, PR 2 (cross-machine) and the reply by handle (D3, amended)
-built 2026-11-14; PR 3 (adapter seam) not built.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
+built 2026-11-14; PR 3 (adapter seam) not built; §6 revised 2026-11-14.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
 Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
 macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
 pre-PR 1 checks on Linux and on macOS (`origin/worktree-messaging-spike-2-macos`, `spike/REPORT-macos-2.md`). Like docs/drain.md,
@@ -24,10 +24,9 @@ relaying is often the only path between two sessions that sit on one box.
 
 Wanted: **any session Séance knows about can message any other**, across machines and accounts,
 through MCP tools. Across machines it goes over the relay sealed under the PSK, so the relay never
-reads it. Later, a **locally installed adapter** in a separate private repo will use the same
-local delivery primitive to bridge sessions to an external system (a huddle project, which pushes
-a `nudge` held while the session is idle unless the item has `wake`). Séance offers the seam and
-knows nothing about huddle.
+reads it. Later, **adapters**, each a locally installed program in a repository of its own, will bridge
+sessions and an external tool both ways through the same local delivery primitive (§6). Séance offers
+the seam and names no tool.
 
 **Out of scope: a shared bulletin board** (a list every session reads and posts to). Its natural
 home would be the relay store, and the store is the wrong place for it:
@@ -108,7 +107,7 @@ leader (DESIGN.md, "Cross-machine"). The audit gained `dir=receipt`.
 | Capability, a daemon that receives          | `CAPABILITIES.messages`                                                                                                        |
 | Capability, a leader that routes            | `CAPABILITIES.messageRoute`                                                                                                    |
 | Caps                                        | `MESSAGE_PUSH_MAX` (8 KiB), `MESSAGE_MAX` (64 KiB)                                                                             |
-| Audit origin                                | `message` (and `adapter` for the seam)                                                                                         |
+| Audit origin                                | `message` (and `adapter` for the seam, §6)                                                                                     |
 | Outcomes                                    | `delivered`, `held`, `offline`, `ended`, `unknown`, `unsupported`, `too_long`, `rate_limited`, `no_leader`, `routed`, `remote` |
 | Cross-machine size budget                   | `MESSAGE_ROUTE_MAX` (40 000 bytes of JSON-escaped text)                                                                        |
 | The gate on a `message` frame               | `route: "ask"` then `route: "send"`                                                                                            |
@@ -173,7 +172,7 @@ successor"). Built (PR 2) as `resolveMessageTarget` (`scheduler/src/message-rout
 | not in the queue, or a chain that breaks (a cycle, a successor the queue does not hold) | `unknown`                                                                                                                              |
 
 "Held" here is an answer, not storage. The sender reads "the target has not started yet" and
-decides whether to retry. The word is kept for the adapter seam's boundary delivery (§6).
+decides whether to retry. The adapter seam's `result` uses it in the same meaning (§6.1).
 
 **Who resolves.** The leader, whose queue holds the chain (§3). PR 1's local path, which needs no
 leader, is built (DESIGN.md, "Session messages", Resolution): the daemon resolves a task id against its
@@ -234,45 +233,236 @@ the daemons', with the outcomes of §3 added to the built set.
 
 ### 6. The adapter seam
 
-What a local adapter (huddle, later) needs, and nothing more:
+Revised 2026-11-14 from the owner's brief for PR 3 and the 2026-11-13 memo; nothing here is built. Three PRs,
+§7 item 3.
 
-- **Session state out**: per tasked pane on this machine, `{ taskId, state, turnEnded? }`. The
-  daemon already computes this for `session-event` before it forwards it.
-- **Delivery in**: "deliver this text to task X on this machine,
-  `{ when: "now" | "boundary", wake: boolean }`". This is the same primitive §1 uses:
-  - `now` with `wake` is `$.prompt.submit`.
-  - `now` without `wake` is `$.session.append` mid-turn, or held to the next turn when idle.
-  - `boundary` holds the text to the next `turnEnded` idle, then delivers by `wake`.
+**What the owner decided (the brief, 2026-11-14).**
 
-  The adapter's text reads with a fixed wrapper naming the adapter ("from the `<name>` adapter on
-  this machine"), never as a session or the user.
+- **Séance owns a generic, tool-agnostic interface; it never names a tool.** Not in code, specs, plans, names or
+  tests. An adapter for a tool lives in its own repository (`seance-<tool>`, private if the owner likes), and that
+  tool's code does not know Séance either. The adapter is the only thing that knows both.
+- **Two-way.** A tool delivers messages into Séance sessions, and Séance's state and events (sessions, tasks,
+  messages) flow out to the tool, so the two can stay in sync.
+- **The same pattern will serve work tracking** (memo, 2026-11-13): Séance should not be tied to one tracker
+  either. That is a different seam (docs/orchestrator.md §1, and open question 5 below), and this one is shaped so
+  as not to foreclose it.
 
-**How an adapter is registered.** Only in the machine's own `config.json`, as trait probes are
-(DESIGN.md, Daemon, "Trait probes"): `adapters: [{ name, argv }]`, an argv array, never a shell
-string. The daemon starts each one as a supervised child, under the environment a session gets
-less `CREDENTIALS_DIRECTORY`. It talks over an **inherited socketpair fd**, so no socket rendezvous
-exists for another process to claim the name on. The adapter is restarted with backoff and stopped
-with the daemon. Audited `origin=adapter` with the name and counts, never text, an argv word other
-than `argv[0]`'s basename, or its output.
+**The shape, in one paragraph.** An adapter is a program the machine's owner installs and names in that machine's
+`config.json`. The daemon starts it as a supervised child, and the two speak newline-delimited JSON over the
+child's stdin and stdout, so there is no rendezvous for another process to claim. The daemon sends a snapshot of
+this machine's sessions, then every change to them, the lifecycle of the tasks it launched, and the messages
+sessions address to the adapter. The adapter sends deliveries: text for a task's session on this machine, or a
+reply to a message a session sent it. Everything else about the tool (its server, its credentials, its ids, how it
+maps a task to its own objects) stays in the adapter. One adapter instance runs per machine, and a fleet-wide tool
+sees the fleet by running its adapter on every machine, each reporting its own sessions under its own `deviceId`.
 
-**What an adapter may not do:**
+#### 6.1 The protocol
 
-- spawn, despawn, enqueue, cancel or touch the queue;
-- send cross-machine, or reach the relay at all;
-- read any inbox, prompt, transcript or other message;
-- address an untasked pane, or a task by anything but its id on this machine;
+The schema of record will be `shared/src/adapter-protocol.ts` (types and parsers, as `shared/src/types.ts` is for
+the wire), with a JSON Schema generated from it and committed beside it, so an adapter in any language can vendor a
+copy at a protocol version. One frame per line, UTF-8, at most 256 KiB a line (a delivery carries at most
+`MESSAGE_MAX` of text, 64 KiB, which JSON escaping can grow).
+
+**Handshake.** The daemon writes `hello` first; the adapter answers with its own; nothing else flows before both.
+
+| Frame           | Fields                                                                                                                                                       |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| daemon `hello`  | `{ kind: "hello", protocol: [1], features: string[], machine: { deviceId, name }, daemon: { version } }`                                                     |
+| adapter `hello` | `{ kind: "hello", protocol: 1, name, version, wants: ("sessions" \| "tasks" \| "messages")[], features: string[] }`; `name` must equal its `config.json` key |
+
+**Daemon to adapter (state and events out)**, each sent only for what the adapter `wants`:
+
+| Frame          | When                                                                     | Fields                                                                                                                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot`     | after the handshake, and on `resync`                                     | `{ sessions: Session[] }`: every live Claude pane this daemon binds, tasked or not                                                                                                                                                          |
+| `session`      | a session's state, task or PR changed (the `session-event` ingest's own) | `{ session: Session }`, the whole record, never a patch                                                                                                                                                                                     |
+| `session-gone` | the pane ended or stopped being a Claude session                         | `{ key }`                                                                                                                                                                                                                                   |
+| `task`         | a task this machine launched moved                                       | `{ task, event: "launched" \| "done" \| "handoff" \| "pass" \| "ended", continues?, prUrl? }`, from the launch ledger and the session's own reports                                                                                         |
+| `message`      | a session sent this adapter a message (§6.2)                             | `{ id, messageKind, text, from: { key, task?, title? }, inReplyTo? }`                                                                                                                                                                       |
+| `result`       | answer to one `deliver`                                                  | `{ ref, id?, outcome, code? }`: `outcome` is the built set's (`delivered`, `sent`, `held`, `ended`, `unknown`, `too_long`, `rate_limited`, `unsupported`, `invalid`) plus `refused` (the adapter's config does not allow that kind or repo) |
+| `delivery`     | the fate of a delivery first answered `sent`                             | `{ id, outcome: "delivered" \| "dropped" \| "nolistener" \| "ended" }`                                                                                                                                                                      |
+
+`Session` is `{ key, task?: { id, title? }, exclave, repo?, branch?, state: "busy" | "idle" | "needs-input" |
+"unknown", turnEnded?, reason?, prUrl?, remoteSession?, since }`. `key` is stable for the life of one `claude`
+process (the `<pid>:<start time>` binding "Replies by handle" already reads), so a tool can tell a restarted
+session from the one before; a tasked session is better keyed by its task id, which survives restarts and
+continues through `continues` (a successor is a new task; a spawn does not name its predecessor today, so carrying `succeeds` is a spawn field PR 3a would add). `repo` is the task's repo name and `branch` the worktree's branch,
+for a tool that tracks who works where. `exclave` is the exclave's name, never an account id.
+
+**Adapter to daemon:**
+
+| Frame     | Fields                                                                                                                                                                                                                                       |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deliver` | `{ ref, to?, inReplyTo?, messageKind: "note" \| "question" \| "request", text, wake?, from? }`; `to` (a task id) or `inReplyTo` (the id of a `message` frame it received) is required; `ref` is the adapter's own correlation id, ≤ 64 chars |
+| `resync`  | `{}`: send a `snapshot` again (the adapter lost its own state)                                                                                                                                                                               |
+
+**Delivery** is the built local delivery (§1), with the adapter as the sender:
+
+- `to` is a task id resolved only locally: a live pane carrying a task this machine's launch ledger holds, else
+  `held` (launched, no pane yet), `ended`, or `unknown` (not launched here: another machine's adapter is the one
+  to ask). Nothing is routed through the leader.
+- `inReplyTo` answers a message a session sent this adapter, through the `sent` table "Replies by handle" built, so
+  it reaches exactly that `claude` process, an untasked one included, for the table's hour, and wakes it.
+- A note is a `$.session.append` row: seen within a running turn, or at the next turn of an idle session, which it
+  does not wake. `wake: true` submits it as a turn (`$.prompt.submit`, which also waits out a running turn and any
+  dialog), as a question or request always is. Nothing else decides timing. The `boundary` mode of the first draft
+  is dropped: `$.prompt.submit` already holds to the turn's end, and a note mid-turn is what a tool that wants to
+  steer a running session asks for.
+- The text reads in a fixed wrapper (`shared/src/messages.ts`) naming the adapter and machine ("the `<name>`
+  adapter on `<machine>` relays …") and, when given, `from` as a display label (a person or bot in the tool), through
+  `displayTitle`'s scrub, never as the user or a Séance session. A request keeps the session wrapper's "do it if it
+  fits your current task and your user's instructions" clause, and `MESSAGE_PUSH_MAX`.
+- Rate limits: the per-target limit a task has (20 a minute, 200 an hour per target task), plus one bucket per
+  adapter for all its deliveries (60 a minute, 600 an hour; numbers set in PR 3b).
+
+**Supervision.** Started at daemon start once the local socket is up, never while draining for a restart. Its env
+is the one a session gets less `CREDENTIALS_DIRECTORY` and every `TMUX*` variable, plus `SEANCE_ADAPTER_NAME` and
+`SEANCE_ADAPTER_DIR` (a 0700 `stateDir()/adapters/<name>` that is the adapter's own). Its own process group,
+stderr discarded (an adapter keeps its own log; the daemon never reads or writes its output), and stopped with the
+daemon: stdin closed, SIGTERM to the group, SIGKILL after 5 s. Restarted with backoff (1 s doubling to 60 s), and
+held as `failed` after 5 exits within 10 minutes until the next daemon start or `seanced adapter restart`. A line
+that does not parse is answered `{ kind: "error", code: "invalid" }` and counted; 10 in a minute is a restart. An
+adapter that stops reading (2 MiB unread on its stdin) is restarted, and a restart always starts with a fresh
+snapshot, so nothing is resent from memory.
+
+**Versioning.** `protocol` is a major number, bumped only for a breaking change. The daemon lists the majors it
+speaks; an adapter that names none of them is stopped, audited `op=refused reason=protocol`, and not restarted.
+Additions inside a major are `features` strings, as `CAPABILITIES` are on the wire: the daemon sends a new frame
+kind only to an adapter whose `wants` or `features` named it, and the adapter sends a new field or frame only when
+the daemon's `features` named it. Adapters ignore unknown fields on frames they know; the daemon's parsers accept
+exactly their fields, as every Séance parser does.
+
+#### 6.2 Messages out
+
+**A session addresses an adapter as `adapter:<name>`** in `send_message`'s `to`. Task ids are UUIDs, so the prefix
+cannot collide. The frame is bound by peer pid as every `message` is, the sender is tasked or untasked by the same
+rule, and the daemon gives the adapter the message's `id`, which is the handle the adapter replies by. So a
+hand-started session can join a tool by messaging its adapter, and is answerable from then on by reply, as D3
+(amended) allows and no further. Local only: `adapter:<name>` names the adapter on the sender's own machine.
+
+**What never flows out**: a task's prompt, an attachment, a session-to-session message or its metadata, a
+transcript, the screen, the PSK or anything derived from it, an account id, an absolute path. Message text flows
+only when a session addressed it to that adapter.
+
+#### 6.3 Trust: an adapter is third-party code
+
+**An adapter runs as the owner's uid, so Séance cannot contain it.** Such a process can read `state.json`, the
+keychain where it is unlocked and every worktree, and can drive tmux. Installing one trusts its code as much as an
+MCP server or a Claude Code plugin the owner installs, and the docs say so where `seanced adapter add` is described.
+What the seam's rules bound is what **Séance** grants and audits: the paths it owns stay true to its invariants (no
+text in a log, no queue write, no relay frame, no key or credential handed over), and a well-behaved adapter's reach
+is exactly the protocol. They are not a sandbox, and the threat model must not count them as one.
+
+What follows from that:
+
+- **The tool is a new source of prompt text for every session on the machine.** Anyone who can write into the tool
+  (a project member, a bot, a compromised server) can put a note or question in a session, and, if allowed, a
+  request. `kinds` in config bounds it, defaulting to `["note", "question"]`; `request` is the owner's explicit opt-in
+  per adapter. The optional `repos` list bounds which tasks the adapter sees and reaches.
+- **State out is a disclosure to the tool's server**: titles, repos, branches, PR URLs, states, and the text of
+  messages sessions address to it. The owner chooses that by installing the adapter; prompts are never part of it.
+- **The tool's credentials are the adapter's.** They live in the adapter's own config or keychain entry, are never
+  in Séance's `config.json`, and are never passed by the daemon. A daemon with a service-delivered key never hands
+  `CREDENTIALS_DIRECTORY` to an adapter, as it never does to a session or a probe.
+- **Integrity**: `seanced adapter add` records the adapter's git commit, when its directory is a git checkout, and
+  `doctor` warns when the checkout moved since, as a reminder that new code is running, not as a refusal.
+
+#### 6.4 What an adapter repository looks like
+
+```
+seance-<tool>/
+  README.md              setup: the tool's own login, then `seanced adapter add`
+  seance-adapter.json    { "name": "<tool>", "protocol": 1, "argv": ["bun", "src/main.ts"] }
+  src/main.ts            NDJSON on stdin and stdout, its own log under $SEANCE_ADAPTER_DIR
+  src/protocol.ts        the vendored schema, at protocol 1
+  test/                  against Séance's reference adapter's fixtures
+```
+
+Any language works: the contract is a process, stdin, stdout and the schema. Séance ships a minimal reference
+adapter (an echo that answers each message by reply) beside its tests. It is the PR 3 tests' stub, the
+template a new adapter starts from, and a conformance check an adapter repository can run against.
+
+#### 6.5 Installing one on a machine
+
+```
+git clone <adapter repo> ~/src/seance-<tool>        # anywhere the owner keeps code
+(cd ~/src/seance-<tool> && bun install)              # and the tool's own login or key setup
+seanced adapter add ~/src/seance-<tool>              # reads seance-adapter.json, writes config.json
+seanced restart
+seanced adapter status                               # running, protocol, counts, last exit
+```
+
+`add` writes `adapters.<name>` into this machine's `config.json` and never anything else:
+
+```json
+"adapters": {
+  "<name>": {
+    "argv": ["bun", "/Users/<owner>/src/seance-<tool>/src/main.ts"],
+    "kinds": ["note", "question"],
+    "repos": ["github.com/<owner>/<repo>"],
+    "commit": "<sha at add>"
+  }
+}
+```
+
+`argv` is an argv array resolved to absolute paths at `add`, never a shell string. The `bun` in it is a bare name
+resolved through PATH at exec, never a recorded `process.execPath`. `name` follows `^[a-z][a-z0-9-]{0,31}$`, and a
+machine may name at most four adapters. Hand-editing the key is equivalent; `remove`, `restart` and `status` are the
+other verbs. Self-update never pulls or rebuilds an adapter: an update restarts the daemon, which restarts the
+adapters on the code they have. Each machine is set up on its own, and nothing about adapters crosses the relay.
+
+#### 6.6 What an adapter may not do
+
+- spawn, despawn, enqueue, cancel, amend, pass or otherwise touch the queue (open question 5);
+- send cross-machine, or reach the relay or the leader at all;
+- read an inbox, a prompt, a transcript, a screen, or any message not addressed to it;
+- address an untasked session except by reply, or a task by anything but its id on this machine;
+- send a key, answer a dialog, or deliver as the user (the delivery is the `inbox` mod's, never tmux);
 - be declared from a frame, the PWA, MCP or another machine.
 
-Rejected:
+Audited under its own origin, `adapter`: `op=start|exit|restart|refused|failed|stop` with the name, an exit code and a
+reason, and per message `op=deliver dir=in` (adapter to session) and `op=message dir=out` (session to adapter),
+with task ids, kind, byte count and outcome. Never text, a `from` label, a message id, an argv word other than
+`argv[0]`'s basename, or anything the adapter printed.
 
-- **An adapter dialing the local socket and naming itself.** Any process of the same user could
-  claim the name. Peer-pid binding names a pane, not a program.
-- **An adapter as an MCP client of `seanced mcp`.** That is app-role and fleet-wide, the opposite
-  of local-only.
-- **The adapter installing its own Claude mod.** Two mods would deliver into one session, with no
-  shared rule for wake or boundary, and Séance would lose its say over what reaches a session.
+#### 6.7 Checked against three kinds of tool
 
-The adapter protocol (frame shapes on the fd) is set in PR 3, not here.
+| Need                                                            | A hosted workspace agents attach to | A team chat bridge  | A work tracker             |
+| --------------------------------------------------------------- | ----------------------------------- | ------------------- | -------------------------- |
+| Turn state of each session (busy, idle, needs input), lifecycle | `session`, `task`                   | `session`           | `task`                     |
+| A stable key per session                                        | task id, else `key`                 | task id, else `key` | task id                    |
+| Text into a session, held while idle or waking it               | `deliver`, note or `wake`           | `deliver`           | —                          |
+| Whether and when it landed                                      | `result`, `delivery`                | `result`            | —                          |
+| A session talking to the tool, and the tool answering           | `adapter:<name>`, reply             | same                | —                          |
+| PR URL and done                                                 | `session.prUrl`, `task` `done`      | —                   | `task`                     |
+| Start or resume a session for an item nobody holds              | **no** (open question 5)            | —                   | **no**                     |
+| Create, amend or settle tasks                                   | —                                   | —                   | **no**: orchestrator.md §1 |
+| Tasks queued but not yet placed on any machine                  | —                                   | —                   | **no** (open question 6)   |
+
+The first two fit the seam as it stands. The tracker's core needs (create and amend tasks, see the whole queue)
+are the queue's, which this seam is forbidden on purpose; it gets state out from here and writes through an
+orchestrator session (docs/orchestrator.md). A fourth, an output-only tool (a desktop notifier, a time log), is
+`wants: ["sessions"]` and nothing else, which the handshake allows.
+
+**Rejected:**
+
+- **An adapter dialing the local socket and naming itself.** Any process of the same user could claim the name.
+  Peer-pid binding names a pane, not a program.
+- **An inherited socketpair on fd 3** (the first draft). It removes the rendezvous, but so do stdin and stdout,
+  which every language and runtime has with no extra fd plumbing, as MCP's stdio transport does. The cost is
+  that an adapter that prints to stdout breaks its own stream; that is the adapter's bug, answered `invalid` and
+  restarted.
+- **An adapter loaded into the daemon (`import()`).** Third-party code inside the process that holds the PSK, a
+  service-delivered credential and every invariant above.
+- **An adapter as an MCP client of `seanced mcp`**, or as its own app-role relay client. Both are fleet-wide and
+  hold, or need, the PSK: the opposite of a local program trusted with this machine's sessions.
+- **The daemon calling the tool itself** (a webhook out, a tool URL in Séance's config). Séance would hold a tool's
+  address and credentials, which is the coupling the brief forbids.
+- **One adapter for the fleet, on the leader.** Leadership moves, delivery happens on the machine with the pane, and
+  the leader keeps nothing a message carries (D2).
+- **The adapter installing its own Claude mod.** Two mods would deliver into one session, with no shared rule for
+  wake, and Séance would lose its say over what reaches a session.
+- **A `boundary` delivery mode** (above). Kept out until a tool needs it.
 
 ### 7. Build order
 
@@ -297,10 +487,26 @@ Small PRs, each landing on its own:
      ended, offline, and a superseded predecessor whose chain breaks and is then completed. The held
      phase (a successor still waiting) is covered in `scheduler/` and the leader's unit tests only: a
      successor placed through `succeeds` dispatches at once and ignores `deps`, so the e2e cannot hold one.
-3. **Adapter seam.** `config.json` `adapters`, the supervised child and fd protocol, state out,
-   delivery in, and audit origin `adapter`.
-   - Tested by: daemon tests with a `scriptStub` adapter (`daemon/test/fixtures.ts`), covering
-     delivery by `when` and `wake`, refusals, restart, and stop with the daemon.
+3. **Adapter seam** (§6), in three PRs, each landing on its own:
+   - **3a. The child and state out.** `config.json` `adapters` and its parser, the supervisor (env,
+     process group, backoff, `failed`, stop with the daemon, the unread cap), the handshake and versioning,
+     `snapshot`, `session`, `session-gone` and `task`, `shared/src/adapter-protocol.ts` and its committed JSON
+     Schema, the reference adapter, and audit origin `adapter`'s lifecycle lines. Useful alone: an
+     output-only tool works after it.
+   - **3b. Delivery in and messages out.** `deliver`, `result` and `delivery`, `kinds` and `repos`, the
+     adapter wrapper in `shared/src/messages.ts`, the rate buckets, `adapter:<name>` in `send_message` and
+     the `message` frame out, replies both ways through the `sent` table, and the `op=deliver` and
+     `op=message` audit lines.
+   - **3c. Installing.** `seanced adapter add | remove | restart | status`, `seance-adapter.json`, the
+     recorded commit and `doctor`'s checks, and README's setup step with §6.3's trust statement.
+   - Tested by: daemon tests with the reference adapter as a committed stub, linked and exec'd once in
+     `beforeAll` (CLAUDE.md, Testing), covering the handshake and a protocol refusal, snapshot and
+     session events from real `session-event` frames, delivery by kind and `wake`, a reply round trip in
+     both directions (the adapter answering a session, and a session answering the adapter's question),
+     every refusal (`unknown`, `too_long`, `rate_limited`, `refused`), a malformed line, the unread cap,
+     restart with backoff and the `failed` hold, stop with the daemon by process group, and the env
+     without `CREDENTIALS_DIRECTORY`; a layering test that nothing in the adapter modules reads message
+     text into `log.ts` or `audit.ts`.
 
 **Replies by handle (D3, amended). Built 2026-11-14; the record is DESIGN.md, "Replies by handle".**
 `inReplyTo` with no `to`, the `sent` and `received` tables, the `claude`-process binding, `wake`,
@@ -330,6 +536,13 @@ model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will a
   `deliver-message` and `message-receipt` follow this.
 - **Every surface audits under its own origin, never reusing one.** `adapter` is the new origin PR 3
   adds, beside PR 1's `message`.
+- **An adapter is the owner's code at the owner's uid, not contained** (§6.3). The invariants PR 3 keeps
+  are Séance's own: an adapter is declared only in the machine's `config.json` and run only as that argv;
+  it is reached only over its own stdin and stdout, never a socket a process could dial; it gets no
+  prompt, attachment, session-to-session message, account id or key, and message text only when a session
+  addressed it; it delivers only by the `inbox` mod's local delivery, under its own wrapper, kinds and
+  rate buckets, to a task this machine's launch ledger holds or by reply; it writes nothing to the queue,
+  the store, the leader or the relay; and nothing it sends or prints is logged.
 - **A service-delivered credential never leaves the daemon process.** An adapter's env drops
   `CREDENTIALS_DIRECTORY`, as a session's and a trait probe's do.
 - **Traits are declared only in the machine's own `config.json`; probes run only that argv.**
@@ -353,3 +566,32 @@ model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will a
 3. **The MCP channel** (`--channels`): one push covers mid-turn and wake. Worth revisiting once
    `allowedChannelPlugins` can be set org-wide without a startup dialog.
 4. **A sender-side "who can I message" view** beyond `get_queue`. Wait for use.
+
+The adapter seam's (§6), each with a recommendation:
+
+5. **May an adapter start or resume work** (spawn, continue, enqueue, amend)? A workspace tool would like a
+   session resumed for an item whose session is gone, and a tracker needs to create and amend tasks.
+   _Recommend no, not in this seam._ Route it through an orchestrator session the adapter delivers to
+   (docs/orchestrator.md §1), so a person or an agent with a fence decides what runs. If that proves too
+   slow, a per-adapter `grants` key is its own threat-model change, later.
+6. **A fleet-wide queue view out** (tasks not yet placed on any machine)? _Recommend no for now._ Each
+   machine's adapter covers the sessions; unplaced tasks reach a tool through whoever queued them.
+7. **Addressing an untasked session beyond a reply** (D3)? _Recommend keeping D3._ A hand-started session
+   joins a tool by messaging `adapter:<name>`, and is answerable by reply for the `sent` table's hour; it
+   messages again to stay reachable. Revisit only if a tool needs longer.
+8. **Session-to-session message metadata out** (who messaged whom, when)? _Recommend no, not even counts._
+   It is the mailbox-shaped record D3 rejected keeping at the leader, handed to a third party instead.
+9. **`request` from an adapter by default?** _Recommend off_, opt-in per adapter in `kinds` (§6.3), since
+   whoever can write into the tool can write into the session.
+10. **Contain the adapter** (the custodian round's masks with a network allowlist for the tool's host)?
+    _Recommend not in PR 3._ State the same-uid trust plainly (§6.3); revisit before any adapter the owner did
+    not write is installed. Containment would have to be drilled as the custodian's was before it is claimed.
+11. **An external ref on a task in state out**, for a tool to map a task to its own object without keeping a
+    map? _Recommend yes once docs/orchestrator.md's display-only `ref` exists_; until then the adapter keeps
+    its own map from task id.
+12. **Adapters on the Machines row** (a `MachineStatus` field)? _Recommend later_; `seanced adapter status`
+    and `doctor` first.
+13. **State in beyond messages** (a tool setting a label, a flag or done on a task)? _Recommend none in PR 3._
+    Each touches the leader's record, which §6.6 keeps out of the seam.
+14. **The spec's `linear` field names a tool**, against the brief's rule. _Recommend folding it into
+    docs/orchestrator.md's general `ref`_ when that is decided; out of PR 3's scope.
