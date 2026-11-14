@@ -250,26 +250,44 @@ export async function readNotes(path: string = custodianNotesPath()): Promise<st
 const NO_BWRAP = "bwrap and socat must be on PATH (apt install bubblewrap socat)";
 const BWRAP_BLOCKED =
   "bwrap cannot create a sandbox on this host (e.g. AppArmor's apparmor_restrict_unprivileged_userns)";
+const BWRAP_NESTED_BLOCKED =
+  "bwrap cannot run inside another bwrap on this host (e.g. AppArmor's bwrap-userns-restrict, as on Ubuntu 24.04), and in bwrap's strict mode a round runs Claude Code's bwrap inside the vsock filter's";
 const BWRAP_PROBE_MS = 5_000;
 
 /**
  * Why this host cannot sandbox a round, null when it can. Linux needs `bubblewrap` and `socat` (without them
  * `failIfUnavailable` refuses to start), and a host that forbids unprivileged user namespaces fails every command: one
  * real probe through the daemon's exec path (argv array, bare env, output never read or logged) approximates Claude
- * Code's own bwrap call. macOS has its own sandbox; other platforms never get here.
+ * Code's own bwrap call. In strict mode the same probe runs again inside an outer bwrap, as the vsock filter's
+ * wraps Claude Code's: an AppArmor profile can allow `/usr/bin/bwrap` a user namespace only when it is not nested
+ * (Ubuntu 24.04's `bwrap-userns-restrict`), and such a host would fail every round's start rather than be refused.
+ * macOS has its own sandbox; other platforms never get here.
  */
-export async function sandboxProblem(platform: "darwin" | "linux"): Promise<string | null> {
+export async function sandboxProblem(
+  platform: "darwin" | "linux",
+  weakerNested: () => Promise<boolean> = weakerNestedNeeded,
+): Promise<string | null> {
   if (platform === "darwin") return null;
   const bwrap = Bun.which("bwrap");
   if (bwrap === null || Bun.which("socat") === null) return NO_BWRAP;
+  const inner = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-user", "--unshare-pid", "true"];
+  if (!(await bwrapProbe(inner))) return BWRAP_BLOCKED;
+  if (await weakerNested()) return null;
+  return (await bwrapProbe([bwrap, "--dev-bind", "/", "/", "--", ...inner])) ? null : BWRAP_NESTED_BLOCKED;
+}
+
+async function bwrapProbe(argv: readonly string[]): Promise<boolean> {
   try {
-    const probe = await exec(
-      [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-user", "--unshare-pid", "true"],
-      { timeoutMs: BWRAP_PROBE_MS, bareEnv: true, discardStdout: true, discardStderr: true, killGroup: true },
-    );
-    return probe.exitCode === 0 ? null : BWRAP_BLOCKED;
+    const probe = await exec(argv, {
+      timeoutMs: BWRAP_PROBE_MS,
+      bareEnv: true,
+      discardStdout: true,
+      discardStderr: true,
+      killGroup: true,
+    });
+    return probe.exitCode === 0;
   } catch {
-    return BWRAP_BLOCKED;
+    return false;
   }
 }
 
