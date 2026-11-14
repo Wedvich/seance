@@ -1500,7 +1500,12 @@ export type ArchiveMetricsRequest = Omit<MetricsRequest, "step"> & { readonly st
   );
 
 /** The finished states the archive keeps (A16), each an `outcome` filter. */
-export const ARCHIVE_TASK_OUTCOMES = ["done", "failed", "cancelled"] as const satisfies readonly TaskState[];
+export const ARCHIVE_TASK_OUTCOMES = [
+  "done",
+  "failed",
+  "cancelled",
+  "superseded",
+] as const satisfies readonly TaskState[];
 
 export type ArchiveTaskOutcome = (typeof ARCHIVE_TASK_OUTCOMES)[number];
 

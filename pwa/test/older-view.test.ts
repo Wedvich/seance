@@ -220,6 +220,23 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
     expect(card?.body).not.toBe("Created 3d ago.");
   });
 
+  test("a superseded card says it was passed on, and the Outcome sheet offers it", () => {
+    const row = archived(
+      "t-1",
+      {
+        state: "superseded",
+        successor: "t-2",
+        assignment: { deviceId: "dev-gone", exclave: "default", clone: "app" },
+      },
+      { machine: "old-box" },
+    );
+    const [card] = deriveOlder(state({ list: page([row]) }), NOW)?.rows ?? [];
+    expect(card?.headline).toBe("Passed to a successor on old-box");
+    expect(card?.dot).toBeNull();
+    const sheet = deriveOlder(state({ sheet: "outcome" }), NOW)?.sheet;
+    expect(sheet?.options.map((o) => o.label)).toEqual(["Any", "Done", "Failed", "Cancelled", "Passed on"]);
+  });
+
   test("an account shows by its name here when its store key is one this install knows", () => {
     const row = archived("t-1", {}, { account: "account:feedface00", alias: "Archived name" });
     const aliased = state(
