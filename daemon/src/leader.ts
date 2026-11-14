@@ -220,9 +220,11 @@ export interface Leader {
    * A `custodian-event` from this machine, in process (`run-capabilities.ts`), as `onSession` is; other
    * machines' arrive through the term's leg. `from` is the sealing daemon: a `flag` or `unflag` moves only a
    * task placed on it (`Scheduler.onFlag`), and a `failing` is pushed under its id. Dropped outside a
-   * running term, logged at info with the kind and never the note.
+   * running term, logged at info with the kind and never the note, and answered `false` then: the sender keeps what it
+   * meant to send (a `failing` held for its next tick, a flag entry kept). `true` is that a running term took it, not
+   * that it changed anything (a refused or repeated one is `true` too).
    */
-  readonly onCustodianEvent: (event: CustodianEvent, from: string) => void;
+  readonly onCustodianEvent: (event: CustodianEvent, from: string) => boolean;
   /**
    * The relay's nudge after an app-leg write to the store (`store-changed`;
    * `RelayClient`'s `onStoreChanged`): refreshes that one task, then ticks.
@@ -245,7 +247,7 @@ interface TermRun {
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   readonly onBranchState: (state: BranchState, from: string) => void;
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
-  readonly onCustodianEvent: (event: CustodianEvent, from: string) => void;
+  readonly onCustodianEvent: (event: CustodianEvent, from: string) => boolean;
   readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
 }
@@ -406,17 +408,36 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   };
   // The custodian's flag, unflag and failing: a flag's note is display-only and never logged here, nor pushed.
   // Declared before the leg that calls it; it reads `scheduler` and `sendPush` only once a term is running.
-  const onCustodianEvent = (event: CustodianEvent, from: string): void => {
+  /** A sealer that pushed a `failing` within this window pushes no second: the daemon raises one per run of failures. */
+  const FAILING_PUSH_GAP_MS = 30 * 60_000;
+  const failingPushedAt = new Map<string, number>();
+  const onCustodianEvent = (event: CustodianEvent, from: string): boolean => {
     if (!live || !running) {
       log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
-      return;
+      return false;
     }
     if (event.kind === "failing") {
+      // Only a machine runs a seat (the archivist holds the PSK and never does). A refused or repeated one is still
+      // taken: the sender must not hold it for a retry.
+      const state = relay.getState();
+      if (state.archivist?.deviceId === from || !state.machines.some((machine) => machine.deviceId === from)) {
+        log.warn(`scheduler: custodian-event kind=failing from=${quote(from)} dropped — not a registered machine`);
+        return true;
+      }
+      const last = failingPushedAt.get(from);
+      if (last !== undefined && now() - last < FAILING_PUSH_GAP_MS) {
+        log.info(
+          `scheduler: custodian-event kind=failing from=${quote(from)} dropped — one was pushed within 30 minutes`,
+        );
+        return true;
+      }
+      failingPushedAt.set(from, now());
       log.warn(`scheduler: custodian failing: device=${quote(from)}`);
       sendPush({ v: 1, kind: "custodian-failing", at: now(), deviceId: from });
-      return;
+      return true;
     }
     scheduler.onFlag(event, from).catch(fail);
+    return true;
   };
   // The session's own pass: the record is prompt text and is never logged, nor is the branch it names.
   const onSessionPass = (pass: SessionPass, from: string): boolean => {
@@ -910,11 +931,9 @@ export function createLeader(options: LeaderOpts): Leader {
     onBranchState: (state, from) => current?.onBranchState(state, from),
     onSessionPass: (pass, from) => current?.onSessionPass(pass, from) ?? false,
     onCustodianEvent: (event, from) => {
-      if (current !== null) {
-        current.onCustodianEvent(event, from);
-        return;
-      }
+      if (current !== null) return current.onCustodianEvent(event, from);
       log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
+      return false;
     },
     onStoreChanged: (key, version) => current?.onStoreChanged(key, version),
     term: () => current?.term ?? null,
