@@ -143,6 +143,13 @@ export interface ClaudeStub {
   readonly autonomy: () => Promise<string | null>;
   /** Polls for the record, then returns everything the launch was fed on stdin. */
   readonly stdin: () => Promise<string>;
+  /**
+   * Has the `ok`/`stuck` stub in `pane` run `command` under `sh -c` as its own child, on the pane's tty, so a
+   * test process sits where a session's tool would (the daemon binds it by its parent walk to that pane). Not
+   * `respawn-pane -k`: swapping a live pane's pty failed ENXIO now and then on GitHub's macOS runners under a
+   * full run's load (`fork failed: Device not configured`), and only that swap ever did; this allocates none.
+   */
+  readonly runInPane: (pane: string, command: string) => Promise<void>;
 }
 
 const WARM_FLAG = "--stub-warm";
@@ -205,12 +212,29 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   });
 
   const sleeper = join(dir, "sleeper.ts");
+  // `runInPane`'s drop box: one file per pane, named by the `TMUX_PANE` tmux gives every pane's process.
+  const runDir = join(dir, "run");
+  await mkdir(runDir, { recursive: true });
   await Bun.write(
     sleeper,
     [
+      'import { readFileSync, rmSync } from "node:fs";',
+      `const order = ${JSON.stringify(runDir)} + "/" + (process.env["TMUX_PANE"] ?? "none");`,
+      "const poll = setInterval(() => {",
+      "  let command;",
+      '  try { command = readFileSync(order, "utf8"); } catch { return; }',
+      "  rmSync(order, { force: true });",
+      "  clearInterval(poll);",
+      "  ran = true;",
+      // Untitled again, as respawn-pane used to leave the pane: what runs there now is no registered session.
+      '  process.stdout.write("\\x1b]2;\\x1b\\\\");',
+      '  Bun.spawn(["sh", "-c", command], { stdio: ["inherit", "inherit", "inherit"] });',
+      "}, 50);",
+      "poll.unref();",
+      "let ran = false;",
       'if (Bun.argv[2] === "titled") {',
       "  await Bun.sleep(300);",
-      '  process.stdout.write("\\x1b]2;\u2733 stub\\x1b\\\\");',
+      '  if (!ran) process.stdout.write("\\x1b]2;\u2733 stub\\x1b\\\\");',
       "}",
       "await Bun.sleep(120_000);",
       "",
@@ -309,7 +333,27 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     }, `claude stub stdin at ${stdinFile}`);
     return text;
   };
-  return { ok, stuck, failing, exitPrompt, repl, deaf, argvFile, stdinFile, argv, machineTag, autonomy, stdin };
+  const runInPane = async (pane: string, command: string): Promise<void> => {
+    // Renamed into place, so the stub never reads half a command.
+    const order = join(runDir, pane);
+    await Bun.write(`${order}.tmp`, command);
+    await rename(`${order}.tmp`, order);
+  };
+  return {
+    ok,
+    stuck,
+    failing,
+    exitPrompt,
+    repl,
+    deaf,
+    argvFile,
+    stdinFile,
+    argv,
+    machineTag,
+    autonomy,
+    stdin,
+    runInPane,
+  };
 }
 
 /** One test's view of the `gh` stub: its own files, so a call from another test's late child never lands in them. */
