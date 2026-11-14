@@ -11574,7 +11574,8 @@ does not change when they land.
 - **The round log (C42, `custodian-rounds.ts`)** is `stateDir()/custodian/rounds.jsonl`, 0600 under a 0700 dir, the
   last 20 rounds: start, end, exclave, outcome, reason, the daemon's own tally per verb (`ok` and `refused`) and of
   worktrees removed and kept, and the summary for a healthy round. A line is read only through `parseRoundEntry`
-  (exact keys and types) and one it cannot read is not carried forward. A write is an **upsert on `start`**: a later
+  (exact keys and types) and one it cannot read is not carried forward; a file that cannot be read at all (any error but
+  a missing file) rejects the write, so a transient fault never rewrites the history to one line (code review F8). A write is an **upsert on `start`**: a later
   `failed` end replaces an earlier `failed` one (a deadline after an exit), a `healthy` entry is never replaced, and
   writes run one at a time through a module-level chain. The summary may quote a pane, so it goes nowhere else: no
   log, no audit line, and not the wire (C42's reading side is custodian 5). The tally is in memory: a round a

@@ -113,9 +113,15 @@ export function parseRoundEntry(line: string): RoundEntry | null {
   };
 }
 
-/** Oldest first; a missing file is no rounds. */
+/**
+ * Oldest first; a missing file is no rounds. Any other read error rejects: `upsertRound` rewrites the file from what
+ * this returns, so reading an unreadable file as empty would drop the history it holds.
+ */
 export async function readRounds(path: string): Promise<readonly RoundEntry[]> {
-  const text = await readFile(path, "utf8").catch(() => "");
+  const text = await readFile(path, "utf8").catch((err: unknown) => {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") return "";
+    throw err;
+  });
   return text.split("\n").flatMap((line) => {
     const entry = line === "" ? null : parseRoundEntry(line);
     return entry === null ? [] : [entry];

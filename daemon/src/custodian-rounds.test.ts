@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -100,6 +100,14 @@ describe("upsertRound", () => {
     const path = join(dir, "d.jsonl");
     await Promise.all([1, 2, 3, 4, 5].map((start) => upsertRound(path, entry(start))));
     expect((await readRounds(path)).map((round) => round.start).toSorted((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test("a file it cannot read is an error, never no rounds: the history is not rewritten away", async () => {
+    const path = join(dir, "f.jsonl");
+    await mkdir(path);
+    await expect(readRounds(path)).rejects.toThrow();
+    await expect(upsertRound(path, entry(1))).rejects.toThrow();
+    expect((await stat(path)).isDirectory()).toBe(true);
   });
 
   test("a line it cannot read is not carried forward, and a missing file is no rounds", async () => {
