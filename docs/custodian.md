@@ -129,7 +129,7 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
   - a `live` pane whose last frame is a turn-ended `idle` (an `idle` carrying `turnEnded`) that
     has stood for `closeAfterMinutes`. A live pane the daemon has no events for is `unobserved`
     and is never closed: the screen alone does not prove a turn ended;
-  - a `dead` or `shell` pane among `ours` at once, with no wait.
+  - a `dead` pane among `ours` at once, with no wait (a `shell` pane is `unobserved`: it is never a session at rest, so `close` refuses it).
 
   It then runs the existing graceful despawn (`daemon/src/despawn.ts`), audited
   `origin=custodian`. A task session closed this way settles exactly as one the owner typed
