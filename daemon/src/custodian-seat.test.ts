@@ -235,12 +235,17 @@ describe("pickExclave", () => {
 
 describe("seatEnabled", () => {
   const config = { custodian: CUSTODIAN_DEFAULTS };
-  test("needs the key, the process option and a supported platform", () => {
-    expect(seatEnabled(config, {}, "linux")).toBe(true);
-    expect(seatEnabled(config, {}, "darwin")).toBe(true);
-    expect(seatEnabled(config, {}, "win32")).toBe(false);
-    expect(seatEnabled({}, {}, "linux")).toBe(false);
+  test("needs the key, the process option, live rounds and a supported platform", () => {
+    expect(seatEnabled(config, { live: true }, "linux")).toBe(true);
+    expect(seatEnabled(config, { live: true }, "darwin")).toBe(true);
+    expect(seatEnabled(config, { live: true }, "win32")).toBe(false);
+    expect(seatEnabled({}, { live: true }, "linux")).toBe(false);
     expect(seatEnabled(config, undefined, "linux")).toBe(false);
+  });
+
+  test("rounds are held in production: no test seam, no seat", () => {
+    expect(seatEnabled(config, {}, "linux")).toBe(false);
+    expect(seatEnabled(config, { live: false }, "linux")).toBe(false);
   });
 });
 

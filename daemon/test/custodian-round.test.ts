@@ -362,8 +362,12 @@ describe("the capability bit", () => {
   const PSK = toBase64(new Uint8Array(32).fill(9));
   const TOKEN = "test-bearer";
 
-  async function advertised(custodian: Config["custodian"]): Promise<readonly string[]> {
+  async function advertised(
+    custodian: Config["custodian"],
+    opts: { readonly live: boolean },
+  ): Promise<readonly string[]> {
     const booted = await boot(custodian, {
+      live: opts.live,
       // A seat that starts must find nothing to do and nothing to launch: the sandbox check fails it first.
       sandboxProblem: () => Promise.resolve("test: no sandbox"),
     });
@@ -378,7 +382,7 @@ describe("the capability bit", () => {
 
   async function boot(
     custodian: Config["custodian"],
-    opts: { readonly sandboxProblem: () => Promise<string | null> },
+    opts: { readonly live: boolean; readonly sandboxProblem: () => Promise<string | null> },
   ): Promise<{ readonly relay: ReturnType<typeof startTestRelay>; readonly stop: () => void }> {
     const home = await mkdtemp(join(base, "cap-home-"));
     await mkdir(join(home, ".claude"), { recursive: true });
@@ -406,6 +410,7 @@ describe("the capability bit", () => {
         baseBackoffMs: 20,
         telemetryIntervalMs: 100_000,
         custodian: {
+          live: opts.live,
           checkIntervalMs: 3_600_000,
           sandboxProblem: opts.sandboxProblem,
           weakerNested: () => Promise.resolve(false),
@@ -433,15 +438,16 @@ describe("the capability bit", () => {
     return pane;
   }
 
-  for (const [label, custodian, problem] of [
-    ["is off", undefined, null],
-    ["is declined by the host's checks", CUSTODIAN_DEFAULTS, "test: no sandbox"],
+  for (const [label, custodian, live, problem] of [
+    ["is off", undefined, true, null],
+    ["is held", CUSTODIAN_DEFAULTS, false, null],
+    ["is declined by the host's checks", CUSTODIAN_DEFAULTS, true, "test: no sandbox"],
   ] as const) {
     test(`a seat that ${label} closes a round the last process left, audited reason=off`, async () => {
       const stray = await strayRound();
       let booted: Awaited<ReturnType<typeof boot>> | undefined;
       const lines = await captureLog(async () => {
-        booted = await boot(custodian, { sandboxProblem: () => Promise.resolve(problem) });
+        booted = await boot(custodian, { live, sandboxProblem: () => Promise.resolve(problem) });
         await pollUntil(async () => (await paneInfo(stray)) === null, "the stray round pane to close");
         await Bun.sleep(50);
       });
@@ -452,33 +458,43 @@ describe("the capability bit", () => {
     });
   }
 
-  test("a host whose seat cannot start answers the verbs unsupported, not not_custodian", async () => {
-    const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve("test: no sandbox") });
-    try {
-      const sessions = { v: 1, kind: "custodian", verb: "sessions" };
-      const answer = async (): Promise<unknown> =>
-        exchange(sessions, {
-          path: socketPath(),
-          timeoutMs: 5_000,
-          timeoutText: "the daemon did not answer the custodian frame",
-          restartGraceMs: 0,
-        }).catch(() => null);
-      await pollUntil(async () => (await answer()) !== null, "the daemon's local socket to answer");
-      await pollUntil(
-        async () => JSON.stringify(await answer()) === JSON.stringify({ ok: false, code: "unsupported" }),
-        "the failed seat to answer unsupported",
-      );
-    } finally {
-      booted.stop();
-    }
-  });
+  // A held seat and a seat that failed its checks are the same to a caller: no round exists to bind to.
+  for (const [label, opts] of [
+    ["cannot start", { live: true, sandboxProblem: () => Promise.resolve("test: no sandbox") }],
+    ["is held (rounds are not live in production)", { live: false, sandboxProblem: () => Promise.resolve(null) }],
+  ] as const) {
+    test(`a host whose seat ${label} answers the verbs unsupported, not not_custodian`, async () => {
+      const booted = await boot(CUSTODIAN_DEFAULTS, opts);
+      try {
+        const sessions = { v: 1, kind: "custodian", verb: "sessions" };
+        const answer = async (): Promise<unknown> =>
+          exchange(sessions, {
+            path: socketPath(),
+            timeoutMs: 5_000,
+            timeoutText: "the daemon did not answer the custodian frame",
+            restartGraceMs: 0,
+          }).catch(() => null);
+        await pollUntil(async () => (await answer()) !== null, "the daemon's local socket to answer");
+        await pollUntil(
+          async () => JSON.stringify(await answer()) === JSON.stringify({ ok: false, code: "unsupported" }),
+          "the failed seat to answer unsupported",
+        );
+      } finally {
+        booted.stop();
+      }
+    });
+  }
 
-  test("a daemon with the key and a seat advertises custodian", async () => {
-    expect(await advertised(CUSTODIAN_DEFAULTS)).toContain(CAPABILITIES.custodian);
+  test("a daemon with the key and a live seat advertises custodian", async () => {
+    expect(await advertised(CUSTODIAN_DEFAULTS, { live: true })).toContain(CAPABILITIES.custodian);
   });
 
   test("without the key it does not", async () => {
-    expect(await advertised(undefined)).not.toContain(CAPABILITIES.custodian);
+    expect(await advertised(undefined, { live: true })).not.toContain(CAPABILITIES.custodian);
+  });
+
+  test("rounds are held in production: the key alone advertises nothing", async () => {
+    expect(await advertised(CUSTODIAN_DEFAULTS, { live: false })).not.toContain(CAPABILITIES.custodian);
   });
 });
 

@@ -31,6 +31,7 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
     config: { custodian: CUSTODIAN_DEFAULTS },
     home: HOME,
     platform,
+    live: true,
     deps: {
       scan: () => Promise.resolve(scan(["work"])),
       trusted: () => Promise.resolve(true),
@@ -44,6 +45,31 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
   });
 
 describe("custodianChecks", () => {
+  test("while rounds are held it is one ok line and probes nothing, so doctor cannot fail on the key", async () => {
+    const probed: string[] = [];
+    const checks = await custodianChecks({
+      config: { custodian: CUSTODIAN_DEFAULTS },
+      home: HOME,
+      platform: "linux",
+      deps: {
+        scan: () => {
+          probed.push("scan");
+          return Promise.resolve(scan());
+        },
+        sandboxProblem: () => {
+          probed.push("sandbox");
+          return Promise.resolve("bwrap and socat must be on PATH");
+        },
+        sessionEventsMissing: () => {
+          probed.push("session-events");
+          return Promise.resolve(["~/.claude-work"]);
+        },
+      },
+    });
+    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("held until the round is contained") }]);
+    expect(probed).toEqual([]);
+  });
+
   test("another platform fails at once", async () => {
     expect(await run({}, "win32")).toEqual([{ level: "fail", message: "the custodian runs only on macOS and Linux" }]);
   });

@@ -15,15 +15,26 @@ import type { SeatRecord } from "./seat-record.ts";
  */
 
 /**
- * `RunOpts.custodian`: the seat's seams. Production passes `{}` (`main.ts`), and the machine's own `custodian` config
- * key is what turns rounds on; a test that passes none never launches a real round.
+ * Rounds are held until the hardening (docs/custodian.md, build item 4b). The verbs bound only what goes through
+ * them: a live round's sandbox can still reach the tmux socket and the daemon's plain local ops, and read on-disk
+ * secrets with github.com reachable, so an injected round would not be bound by them. Owner decision, 2026-11-14;
+ * item 4b removes this constant.
  */
+export const ROUNDS_LIVE = false;
+
+/** `RunOpts.custodian`: the seat's seams. Production passes `{}`; the rest is for tests, which must never launch a real round. */
 export interface CustodianSeatOpts {
+  /** Tests only: `true` turns the seat on where `ROUNDS_LIVE` holds it. */
+  readonly live?: boolean;
   readonly checkIntervalMs?: number;
   /** The graceful exit's grace before a round is killed. */
   readonly graceMs?: number;
   readonly sandboxProblem?: () => Promise<string | null>;
   readonly weakerNested?: () => Promise<boolean>;
+}
+
+export function seatLive(opts: CustodianSeatOpts): boolean {
+  return opts.live ?? ROUNDS_LIVE;
 }
 
 export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux" | null {
@@ -32,15 +43,21 @@ export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux"
 
 /**
  * Whether this daemon holds a seat: the machine's own config carries the key, the process was started for one
- * (`RunOpts.custodian`) and the platform has a fence. One predicate for the capability bit and the seat, so they
- * cannot disagree.
+ * (`RunOpts.custodian`), rounds are live, and the platform has a fence. One predicate for the capability bit and the
+ * seat, so they cannot disagree.
  */
 export function seatEnabled(
   config: Pick<Config, "custodian">,
   opts: CustodianSeatOpts | null | undefined,
   platform: NodeJS.Platform,
 ): boolean {
-  return config.custodian !== undefined && opts !== null && opts !== undefined && custodianPlatform(platform) !== null;
+  return (
+    config.custodian !== undefined &&
+    opts !== null &&
+    opts !== undefined &&
+    seatLive(opts) &&
+    custodianPlatform(platform) !== null
+  );
 }
 
 const MINUTE_MS = 60_000;

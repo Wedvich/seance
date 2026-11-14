@@ -8,7 +8,7 @@ import {
   sandboxProblem,
   weakerNestedNeeded,
 } from "./custodian-launch.ts";
-import { custodianPlatform, hostProblem } from "./custodian-seat.ts";
+import { custodianPlatform, hostProblem, seatLive } from "./custodian-seat.ts";
 import { scanExclaves, type ExclaveScan } from "./exclaves.ts";
 import { tildify } from "./paths.ts";
 import { isDirTrusted } from "./trust.ts";
@@ -37,14 +37,26 @@ const REAL: CustodianCheckDeps = {
 /**
  * `seanced doctor`'s custodian section, for a machine whose config carries `custodian` (docs/custodian.md): why a
  * round would not start here, or could not close what it finds. Read-only — it never creates a round dir, which only a
- * round about to run does.
+ * round about to run does. While rounds are held (`ROUNDS_LIVE`) the key only moves reap's defaults, so nothing here
+ * can fail a machine: one informational line, and none of the probes run (the session-events warn included: it is for
+ * the day rounds go live). `live` is the test seam, as `CustodianSeatOpts.live`.
  */
 export async function custodianChecks(o: {
   readonly config: Pick<Config, "custodian">;
   readonly home: string;
   readonly platform: NodeJS.Platform;
+  readonly live?: boolean;
   readonly deps?: Partial<CustodianCheckDeps>;
 }): Promise<readonly Check[]> {
+  if (!seatLive({ live: o.live })) {
+    return [
+      {
+        level: "ok",
+        message:
+          "rounds are held until the round is contained (docs/custodian.md, item 4b): the key only sets reap's defaults here",
+      },
+    ];
+  }
   const deps = { ...REAL, ...o.deps };
   const platform = custodianPlatform(o.platform);
   if (platform === null) return [{ level: "fail", message: "the custodian runs only on macOS and Linux" }];
