@@ -139,10 +139,13 @@ async function logRounds(): Promise<void> {
     return;
   }
   const blocks = entries.toReversed().map((entry) => {
-    const { sessions, close, notes, done, worktrees } = entry.counts;
+    const { worktrees, flagged, ...verbs } = entry.counts;
+    const counts = Object.entries(verbs)
+      .map(([verb, count]) => `${verb} ${count.ok}/${count.refused}`)
+      .join(", ");
     const lines = [
       `${time(entry.start)} -> ${time(entry.end)}  exclave ${printable(entry.exclave)}  ${entry.outcome} (${printable(entry.reason)})`,
-      `  sessions ${sessions.ok}/${sessions.refused}, close ${close.ok}/${close.refused}, notes ${notes.ok}/${notes.refused}, done ${done.ok}/${done.refused}, worktrees removed ${worktrees.removed} kept ${worktrees.kept}`,
+      `  ${counts}, flagged ${flagged}, worktrees removed ${worktrees.removed} kept ${worktrees.kept}`,
     ];
     if (entry.summary !== undefined) {
       lines.push(
