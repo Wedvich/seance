@@ -175,6 +175,10 @@ export interface CustodianVerbs {
 }
 
 const MINUTE_MS = 60_000;
+/** Refusals of an unbound sender that are written (log and audit) per minute, whatever the senders. */
+const REFUSAL_LINES_PER_MIN = 20;
+/** Unbound senders remembered for the once-a-minute collapse. */
+const REFUSAL_PIDS_KEPT = 64;
 const SESSIONS_CONCURRENCY = 4;
 
 const minutesSince = (now: number, since: number | null): number | null =>
@@ -431,14 +435,36 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     return (await walk(peer, await deps.roundPanePids())) === round;
   };
 
+  /** Whether this unbound sender's refusal is written: once a minute per pid, and `REFUSAL_LINES_PER_MIN` overall. */
+  const refusals = { at: new Map<number | null, number>(), windowStart: 0, lines: 0 };
+  const worthWriting = (peer: number | null): boolean => {
+    const now = deps.now();
+    const last = refusals.at.get(peer);
+    if (last !== undefined && now - last < MINUTE_MS) return false;
+    if (now - refusals.windowStart >= MINUTE_MS) {
+      refusals.windowStart = now;
+      refusals.lines = 0;
+    }
+    if (refusals.lines >= REFUSAL_LINES_PER_MIN) return false;
+    refusals.lines += 1;
+    refusals.at.delete(peer);
+    refusals.at.set(peer, now);
+    const oldest = refusals.at.keys().next();
+    if (refusals.at.size > REFUSAL_PIDS_KEPT && !oldest.done) refusals.at.delete(oldest.value);
+    return true;
+  };
+
   return {
     handle: async (raw, peer) => {
       const frame = parseCustodianFrame(raw);
       if (frame === null) return { ok: false, code: "invalid" };
       if (!(await bound(peer))) {
-        // The verb is one of the parsed constants, so it is safe to name.
-        deps.warn(`custodian: refused a ${frame.verb} frame from pid ${peer ?? "-"} (not the round)`);
-        if (frame.verb === "close") await deps.audit.close(frame.pane, null, "not_custodian");
+        // Any same-uid process can send a frame, so a loop of them must not grow the log without bound (C48's audit
+        // stays, but is collapsed). The verb is one of the parsed constants, so it is safe to name.
+        if (worthWriting(peer)) {
+          deps.warn(`custodian: refused a ${frame.verb} frame from pid ${peer ?? "-"} (not the round)`);
+          if (frame.verb === "close") await deps.audit.close(frame.pane, null, "not_custodian");
+        }
         return { ok: false, code: "not_custodian" };
       }
       const reply = await dispatch(frame);

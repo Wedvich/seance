@@ -309,6 +309,23 @@ describe("who a custodian frame is acted on for", () => {
     expect(noPeer.lines).toEqual(["close %1 - not_custodian"]);
   });
 
+  test("a loop of frames from one process writes one refusal a minute, and a crowd of them a bounded number", async () => {
+    const clock = { now: NOW };
+    const r = rig({ now: () => clock.now, hostNamesPeers: () => false });
+    for (let at = 0; at < 50; at += 1) {
+      expect(await r.verbs.handle(close(), 4_000)).toEqual({ ok: false, code: "not_custodian" });
+    }
+    expect(r.lines).toEqual(["close %1 - not_custodian"]);
+    expect(r.warnings).toHaveLength(1);
+
+    clock.now += 61_000;
+    await r.verbs.handle(close(), 4_000);
+    expect(r.lines).toHaveLength(2);
+
+    for (let pid = 5_000; pid < 5_100; pid += 1) await r.verbs.handle(close(), pid);
+    expect(r.lines.length).toBeLessThanOrEqual(21);
+  });
+
   test("an unreadable tmux is an error for the socket to answer internal, never a pane's absence", async () => {
     const r = rig({ roundPanePids: () => Promise.reject(new Error("tmux down")) });
     await expect(r.verbs.handle(sessions, process.pid)).rejects.toThrow("tmux down");
