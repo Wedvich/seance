@@ -7,9 +7,12 @@ import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import {
   createCustodianSeat,
   createPick,
+  LaunchRefused,
   pickExclave,
   roundDue,
+  sandboxDrilled,
   seatEnabled,
+  START_FAILED_MS,
   type CloseOutcome,
   type SeatDeps,
   type SeatRecord,
@@ -245,17 +248,20 @@ describe("pickExclave", () => {
 
 describe("seatEnabled", () => {
   const config = { custodian: CUSTODIAN_DEFAULTS };
-  test("needs the key, the process option, live rounds and a supported platform", () => {
-    expect(seatEnabled(config, { live: true }, "linux")).toBe(true);
-    expect(seatEnabled(config, { live: true }, "darwin")).toBe(true);
-    expect(seatEnabled(config, { live: true }, "win32")).toBe(false);
-    expect(seatEnabled({}, { live: true }, "linux")).toBe(false);
+  test("needs the key, the process option and a supported platform", () => {
+    expect(seatEnabled(config, {}, "linux")).toBe(true);
+    expect(seatEnabled(config, {}, "darwin")).toBe(true);
+    expect(seatEnabled(config, {}, "win32")).toBe(false);
+    expect(seatEnabled({}, {}, "linux")).toBe(false);
     expect(seatEnabled(config, undefined, "linux")).toBe(false);
   });
+});
 
-  test("rounds are held in production: no test seam, no seat", () => {
-    expect(seatEnabled(config, {}, "linux")).toBe(false);
-    expect(seatEnabled(config, { live: false }, "linux")).toBe(false);
+describe("sandboxDrilled", () => {
+  test("macOS and a read-only /proc/sys (the weaker nested mode) were drilled; Linux's strict mode was not", () => {
+    expect(sandboxDrilled("darwin", false)).toBe(true);
+    expect(sandboxDrilled("linux", true)).toBe(true);
+    expect(sandboxDrilled("linux", false)).toBe(false);
   });
 });
 
@@ -334,7 +340,7 @@ describe("createPick", () => {
       planted: () => Promise.resolve(true),
       ensureDir: (dir) => Promise.resolve(dir),
     });
-    expect(await run()).toEqual({ none: "a: round dir holds settings or agents" });
+    expect(await run()).toEqual({ none: "a: round dir holds settings, agents or a link" });
   });
 
   test("a round dir that resolves to another exclave is skipped", async () => {
@@ -357,8 +363,9 @@ describe("createPick", () => {
   });
 });
 
-/** The verbs' audit lines, which the seat never writes. */
+/** The verbs' audit lines, and the refusal line `run-capabilities.ts` writes before a seat exists; the seat itself writes none. */
 const UNUSED_AUDIT = {
+  refused: (): Promise<void> => Promise.resolve(),
   close: (): Promise<void> => Promise.resolve(),
   removedWorktree: (): Promise<void> => Promise.resolve(),
   keptWorktree: (): Promise<void> => Promise.resolve(),
@@ -467,6 +474,10 @@ function rig(over: Partial<SeatDeps> = {}, record: SeatRecord = {}): Rig {
         return Promise.resolve();
       },
       ...UNUSED_AUDIT,
+      refused: (reason) => {
+        log.push(`refused ${reason}`);
+        return Promise.resolve();
+      },
     },
     readRounds: () => Promise.resolve([...rounds]),
     readControl: () => Promise.resolve(control.read),
@@ -559,7 +570,7 @@ describe("the seat's lifecycle", () => {
     r.seat.stop();
   });
 
-  test("a round whose pane is gone ends as exited, with no kill", async () => {
+  test("a round whose pane is gone within minutes of its start, with no verb called, ends as start_failed, with no kill", async () => {
     const r = rig();
     await r.seat.start();
     await r.seat.tick();
@@ -567,7 +578,62 @@ describe("the seat's lifecycle", () => {
     r.log.length = 0;
     r.clock.now = NOW + MIN;
     await r.seat.tick();
-    expect(r.log).toEqual([`rm ${TMP}`, "end %1 exited", `save ${JSON.stringify({ lastEndedAt: NOW + MIN })}`]);
+    expect(r.log).toEqual([`rm ${TMP}`, "end %1 start_failed", `save ${JSON.stringify({ lastEndedAt: NOW + MIN })}`]);
+    r.seat.stop();
+  });
+
+  test("a round that called a verb, or lasted past the start window, and then left ends as exited", async () => {
+    const used = rig();
+    await used.seat.start();
+    await used.seat.tick();
+    used.seat.count("sessions", true);
+    used.live.clear();
+    used.log.length = 0;
+    used.clock.now = NOW + MIN;
+    await used.seat.tick();
+    expect(used.log).toContain("end %1 exited");
+    used.seat.stop();
+
+    const late = rig();
+    await late.seat.start();
+    await late.seat.tick();
+    late.live.clear();
+    late.log.length = 0;
+    late.clock.now = NOW + START_FAILED_MS;
+    await late.seat.tick();
+    expect(late.log).toContain("end %1 exited");
+    late.seat.stop();
+  });
+
+  test("an adopted round that ends early with no verb counted is exited: its earlier verbs died with the old process", async () => {
+    const r = rig({}, { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default" } });
+    r.live.add("%1");
+    await r.seat.start();
+    r.live.clear();
+    r.log.length = 0;
+    r.clock.now = NOW + MIN;
+    await r.seat.tick();
+    expect(r.log).toContain("end %1 exited");
+    expect(r.log).not.toContain("end %1 start_failed");
+    r.seat.stop();
+  });
+
+  test("a launch the seat refuses is audited as the refusal, once, and no round is tried again", async () => {
+    const r = rig();
+    r.fail.launch = new LaunchRefused("toolchain", "bun or the checkout sits in /home/u");
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.log).toContain("refused toolchain");
+    expect(r.log.some((line) => line.includes("launch_failed"))).toBe(false);
+    expect(r.state.record).toEqual({ lastEndedAt: NOW });
+    expect(r.warnings.join("\n")).toContain("bun or the checkout sits in /home/u");
+    // Past every interval, with a launch that would now work: the seat holds, and audits nothing more.
+    r.fail.launch = null;
+    r.log.length = 0;
+    r.clock.now = NOW + 10 * EVERY;
+    await r.seat.tick();
+    expect(r.launches).toEqual([]);
+    expect(r.log).toEqual([]);
     r.seat.stop();
   });
 
@@ -825,7 +891,7 @@ describe("the seat's lifecycle", () => {
     ticked.log.length = 0;
     ticked.clock.now += MIN;
     await ticked.seat.tick();
-    expect(ticked.log.slice(0, 3)).toEqual(["kill %1 exited exited", `rm ${TMP}`, "end %1 exited"]);
+    expect(ticked.log.slice(0, 3)).toEqual(["kill %1 exited exited", `rm ${TMP}`, "end %1 start_failed"]);
     ticked.seat.stop();
   });
 });

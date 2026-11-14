@@ -4,7 +4,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { pausedAt, readControl, readSeatView, requestRound, type SeatView } from "./custodian-control.ts";
 import { freshView, ownerPause, ownerResume, ownerRound } from "./custodian-owner.ts";
 import { readRounds, type RoundEntry } from "./custodian-rounds.ts";
-import { FAILING_AFTER, ROUNDS_LIVE, trailingFailures } from "./custodian-seat.ts";
+import { FAILING_AFTER, trailingFailures } from "./custodian-seat.ts";
 import { custodianRoundsPath } from "./paths.ts";
 import { custodianSeatOf, pidAlive, readRuntime, readState } from "./state.ts";
 
@@ -89,7 +89,6 @@ async function status(): Promise<void> {
   console.log(
     `seat:        ${settings === undefined ? "not configured" : `configured (every ${printable(String(settings.everyMinutes))} min)`}`,
   );
-  console.log(`rounds:      ${ROUNDS_LIVE ? "live" : "held (docs/custodian.md, build item 4b)"}`);
   const view = await readSeatView();
   console.log(`daemon:      ${viewLine(view, now)}`);
   const control = await readControl();
@@ -140,10 +139,13 @@ async function logRounds(): Promise<void> {
     return;
   }
   const blocks = entries.toReversed().map((entry) => {
-    const { sessions, close, notes, done, worktrees } = entry.counts;
+    const { worktrees, flagged, ...verbs } = entry.counts;
+    const counts = Object.entries(verbs)
+      .map(([verb, count]) => `${verb} ${count.ok}/${count.refused}`)
+      .join(", ");
     const lines = [
       `${time(entry.start)} -> ${time(entry.end)}  exclave ${printable(entry.exclave)}  ${entry.outcome} (${printable(entry.reason)})`,
-      `  sessions ${sessions.ok}/${sessions.refused}, close ${close.ok}/${close.refused}, notes ${notes.ok}/${notes.refused}, done ${done.ok}/${done.refused}, worktrees removed ${worktrees.removed} kept ${worktrees.kept}`,
+      `  ${counts}, flagged ${flagged}, worktrees removed ${worktrees.removed} kept ${worktrees.kept}`,
     ];
     if (entry.summary !== undefined) {
       lines.push(
@@ -158,19 +160,16 @@ async function logRounds(): Promise<void> {
 }
 
 const ROUND_REFUSALS = {
-  held: "rounds are held until docs/custodian.md build item 4b",
   unconfigured: "no custodian configured in config.json",
   failed: "this host's checks failed, so no round can run",
   running: "a round is running",
   starting: "the seat is not running yet",
 } as const;
 
-/** `live` is a seam for tests: production passes none, and rounds are held while `ROUNDS_LIVE` is false. */
-export async function requestOwnerRound(live: boolean = ROUNDS_LIVE): Promise<void> {
+export async function requestOwnerRound(): Promise<void> {
   const decided = await ownerRound(
     {
       now: Date.now(),
-      live,
       configured: async () => (await configOf())?.custodian !== undefined,
       seatView: readSeatView,
       seatRecord: async () => {

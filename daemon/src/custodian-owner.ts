@@ -16,7 +16,7 @@ import type { SeatRecord } from "./seat-record.ts";
  * The owner's acts on the custodian, one implementation for both surfaces (docs/custodian.md C45; DESIGN.md, "The
  * custodian's status and the Machines row"): `seanced custodian round | pause | resume` at the shell
  * (`custodian-owner-cli.ts`) and the `custodian` app op (`handlers.ts`, wired in `run.ts`). The caller supplies what
- * differs: where the seat record comes from, whether rounds are live and configured, and the audit's origin. Log-free,
+ * differs: where the seat record comes from, whether a seat is configured, and the audit's origin. Log-free,
  * like `custodian-control.ts`: each caller says what it says in its own channel.
  */
 
@@ -29,8 +29,6 @@ export function freshView(view: SeatView | null, now: number): view is SeatView 
 
 export interface OwnerRoundInputs {
   readonly now: number;
-  /** `ROUNDS_LIVE`, or a test's seam: false refuses `held` before anything is read. */
-  readonly live: boolean;
   /** The machine's config.json carries a `custodian` key. */
   readonly configured: () => Promise<boolean>;
   readonly seatView: () => Promise<SeatView | null>;
@@ -48,7 +46,7 @@ export interface OwnerRoundInputs {
 
 export type OwnerRound =
   | { readonly outcome: "requested"; readonly view: SeatView | null }
-  | { readonly outcome: "held" | "unconfigured" | "failed" | "running" | "starting" }
+  | { readonly outcome: "unconfigured" | "failed" | "running" | "starting" }
   | { readonly outcome: "too_soon"; readonly latest: number; readonly after: number };
 
 /**
@@ -66,7 +64,6 @@ export async function ownerRound(inputs: OwnerRoundInputs, audit: CustodianOwner
 }
 
 async function decideRound(inputs: OwnerRoundInputs): Promise<OwnerRound> {
-  if (!inputs.live) return { outcome: "held" };
   if (!(await inputs.configured())) return { outcome: "unconfigured" };
   if (inputs.seatReady?.() === false) return { outcome: "starting" };
   const { now } = inputs;
@@ -104,7 +101,6 @@ export async function ownerResume(audit: CustodianOwnerAudit, path?: string): Pr
 }
 
 const ROUND_CODES = {
-  held: { code: "held", message: "rounds are held on this build" },
   unconfigured: { code: "unconfigured", message: "no custodian is configured on this machine" },
   failed: { code: "host_failed", message: "this host's checks failed, so no round can run" },
   running: { code: "running", message: "a round is running" },

@@ -7,10 +7,20 @@ import { PANE_ID } from "./pane-id.ts";
 
 export const CUSTODIAN_FRAME_VERSION = 1;
 
-/** The local socket's sixth frame kind: the custodian round's verbs, bound to the round's own pane. */
+/** The sixth frame kind, served only on the round's own socket (`custodian-socket.ts`): the round's verbs, bound to its pane. */
 export const CUSTODIAN_FRAME_KIND = "custodian";
 
-export const CUSTODIAN_VERBS = ["sessions", "close", "flag", "nudge", "interrupt", "notes", "done"] as const;
+export const CUSTODIAN_VERBS = [
+  "sessions",
+  "close",
+  "capture",
+  "pr",
+  "flag",
+  "nudge",
+  "interrupt",
+  "notes",
+  "done",
+] as const;
 export type CustodianVerb = (typeof CUSTODIAN_VERBS)[number];
 
 /** C40: the round's summary is at most this many bytes. */
@@ -42,8 +52,14 @@ export const CUSTODIAN_REPLY_CODES = [
   "too_late",
   /** A `close`, `flag`, `nudge`, `interrupt` or `notes` after the round's `done`. */
   "round_done",
-  /** A `nudge` to a pane carrying no task this machine's launch ledger holds a launch of: messaging addresses tasks only. */
+  /** A `pr` or `nudge` for a pane that carries no task (`nudge`: no task this machine's launch ledger holds a launch of; messaging addresses tasks only). */
   "untasked",
+  /** A `pr` for a task whose launch ledger holds no PR URL. */
+  "prless",
+  /** A `pr` the daemon could not read (no network, `gh` failing, a URL that is not GitHub's, a shape it does not know). */
+  "unreadable",
+  /** A `pr` whose PR is not in the GitHub repo the task's worktree's `origin` names. */
+  "foreign_pr",
   /** A `nudge` past `maxNudges` for the session, or a second `interrupt` of it. */
   "limit",
   /** A `nudge` to a session with no inbox listener now or within the grace: the mod is missing, or its listener dropped. */
@@ -86,6 +102,8 @@ export type KeptWhy =
 export type CustodianFrame =
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "sessions" }
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "close"; readonly pane: string }
+  | { readonly v: 1; readonly kind: "custodian"; readonly verb: "capture"; readonly pane: string }
+  | { readonly v: 1; readonly kind: "custodian"; readonly verb: "pr"; readonly pane: string }
   | {
       readonly v: 1;
       readonly kind: "custodian";
@@ -126,6 +144,24 @@ export interface CustodianPaneView {
   readonly close: "ok" | CloseRefusal;
 }
 
+/** One check of a PR's rollup: a check run's `status` and `conclusion`, or a commit status's state as the conclusion. */
+export interface PrCheckView {
+  readonly name: string;
+  readonly status: string | null;
+  readonly conclusion: string | null;
+}
+
+/** What `pr` reads of a PR (`custodian-pr.ts`): state and checks only, never a title, body or comment. */
+export interface PrView {
+  readonly state: string;
+  readonly isDraft: boolean;
+  readonly mergeable: string | null;
+  readonly reviewDecision: string | null;
+  readonly autoMerge: boolean;
+  readonly checks: { readonly state: string | null; readonly contexts: readonly PrCheckView[] };
+  readonly readAt: number;
+}
+
 export type CustodianReply =
   | {
       readonly ok: true;
@@ -145,6 +181,14 @@ export type CustodianReply =
       readonly outcome: "exited" | "killed" | "harvested";
       readonly worktree: { readonly removed: true; readonly how: string } | { readonly kept: KeptWhy } | null;
     }
+  | { readonly ok: true; readonly verb: "capture"; readonly pane: string; readonly text: string }
+  | ({
+      readonly ok: true;
+      readonly verb: "pr";
+      readonly pane: string;
+      readonly taskId: string;
+      readonly url: string;
+    } & PrView)
   | {
       readonly ok: true;
       readonly verb: "flag";
@@ -177,6 +221,8 @@ export function isCustodianFrameKind(raw: unknown): boolean {
 const KEYS: Record<CustodianVerb, readonly (readonly string[])[]> = {
   sessions: [["v", "kind", "verb"]],
   close: [["v", "kind", "verb", "pane"]],
+  capture: [["v", "kind", "verb", "pane"]],
+  pr: [["v", "kind", "verb", "pane"]],
   flag: [
     ["v", "kind", "verb", "pane", "reason"],
     ["v", "kind", "verb", "pane", "reason", "note"],
@@ -205,6 +251,8 @@ export function parseCustodianFrame(raw: unknown): CustodianFrame | null {
     case "sessions":
       return { ...base, verb };
     case "close":
+    case "capture":
+    case "pr":
     case "interrupt": {
       const pane = raw["pane"];
       return typeof pane === "string" && PANE_ID.test(pane) ? { ...base, verb, pane } : null;

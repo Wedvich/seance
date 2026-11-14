@@ -7,6 +7,8 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
+import { createPrReader } from "./custodian-pr.ts";
+import { custodianSocketPath, startCustodianSocket } from "./custodian-socket.ts";
 import {
   clearOnNewTurn,
   createCustodianFlags,
@@ -37,6 +39,7 @@ import {
   roundDirFor,
   roundDirPlanted,
   sandboxProblem,
+  toolchainRefusal,
   weakerNestedNeeded,
 } from "./custodian-launch.ts";
 import {
@@ -44,6 +47,8 @@ import {
   createPick,
   type CustodianSeat,
   custodianPlatform,
+  sandboxDrilled,
+  SANDBOX_UNDRILLED,
   lastRoundView,
   seatEnabled,
   type CloseOutcome,
@@ -133,7 +138,7 @@ export interface WiringCtx {
 }
 
 /** A local op socket surface a capability brings; the socket starts after every capability, with all of them. */
-export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages" | "custodian">;
+export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages">;
 
 export interface Started {
   readonly stop: () => void;
@@ -438,7 +443,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   const untouchable = (pane: string): boolean =>
     eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true;
 
-  /** The seat's checks failed or it could not start: no round will ever run here, so the verbs say `unsupported`. */
+  /** The seat's checks failed, it refused this host or it could not start: no round will ever run here. */
   let seatFailed = false;
   /** What the status shows for a failed seat: `failing`, with the log's last round (read once, when it failed). */
   let failedLast: Pick<CustodianStatus, "e" | "n"> = {};
@@ -489,6 +494,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
           retainedSince: () => retainedSince,
           untouchable,
           tasks: ctx.endedTasks,
+          readPr: createPrReader({ now: ctx.now }),
           worktree: createWorktreeRule({ tasks: ctx.endedTasks, repos: ctx.repos, listPanes }),
           despawn,
           killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
@@ -512,7 +518,22 @@ const custodianSeat: DaemonCapability = (ctx) => {
           audit,
           warn: (line) => log.warn(line),
         });
+  // The round's own socket (`custodian-socket.ts`): the seat owns its lifetime, and the verbs are served nowhere else.
+  let roundSocket: { readonly stop: () => void } | null = null;
+  const stopSocket = (): void => {
+    roundSocket?.stop();
+    roundSocket = null;
+  };
+  /** The machine's own roots, masked from a round and never to be covered by an allow entry. */
+  const rootMasks = (): string[] => [...ctx.config.repoRoots, ...ctx.exclaveScan().exclaves.map((each) => each.root)];
   const begin = async (): Promise<void> => {
+    if (verbs === null) {
+      // A round with no way to close anything can act on nothing.
+      log.warn("custodian: this backend cannot close a session — no rounds");
+      markFailed();
+      if (!cancelled) sweepLeftovers();
+      return;
+    }
     const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
     if (problem !== null) {
       log.warn(`custodian: no rounds on this host — ${problem}`);
@@ -522,9 +543,44 @@ const custodianSeat: DaemonCapability = (ctx) => {
       if (!cancelled) sweepLeftovers();
       return;
     }
+    // Refused, not launched: an unreadable `main.ts` makes bun exec it again and again, so a layout the round's
+    // sandbox could not read fails closed here, with a fixed audited reason.
+    const toolchain = await toolchainRefusal(platform, rootMasks());
+    if (toolchain !== null) {
+      log.warn(`custodian: no rounds on this host — ${toolchain}`);
+      if (cancelled) return;
+      await audit.refused("toolchain");
+      markFailed();
+      if (!cancelled) sweepLeftovers();
+      return;
+    }
+    const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
+    if (!(opts.sandboxDrilled ?? sandboxDrilled)(platform, await weakerNested())) {
+      log.warn(`custodian: ${SANDBOX_UNDRILLED}`);
+      if (cancelled) return;
+      await audit.refused("sandbox_undrilled");
+      markFailed();
+      if (!cancelled) sweepLeftovers();
+      return;
+    }
     const agents = await loadAgent();
     if (cancelled) return;
-    const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
+    const started = await startCustodianSocket({
+      path: custodianSocketPath(),
+      handle: verbs.handle,
+      warn: (line) => log.warn(line),
+    });
+    if ("problem" in started) {
+      log.warn(`custodian: no rounds — ${started.problem}`);
+      markFailed();
+      if (!cancelled) sweepLeftovers();
+      return;
+    }
+    if (cancelled) {
+      started.stop();
+      return;
+    }
+    roundSocket = started;
     releaseActivity = paneRetention.acquire();
     retainedSince = ctx.now();
     seat = createCustodianSeat({
@@ -533,7 +589,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
       untouchable,
-      ...(verbs === null ? {} : { busyReach: verbs.reach }),
+      busyReach: verbs.reach,
       appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
       readRounds: () => readRounds(custodianRoundsPath()),
       readControl: () => readControl(),
@@ -577,6 +633,8 @@ const custodianSeat: DaemonCapability = (ctx) => {
           ...(ctx.config.machineTag === undefined ? {} : { machineTag: ctx.config.machineTag }),
           weakerNested: await weakerNested(),
           platform,
+          custodianSocket: started.path,
+          rootMasks: rootMasks(),
           onTmp,
         }),
       listRounds: listRoundPanes,
@@ -594,6 +652,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   };
   void begin().catch((err: unknown) => {
     log.warn(`custodian: the seat did not start: ${String(err)}`);
+    stopSocket();
     markFailed();
     release();
     if (!cancelled) sweepLeftovers();
@@ -602,6 +661,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     stop: (): void => {
       cancelled = true;
       seat?.stop();
+      stopSocket();
       release();
     },
     custodianStatus: (now) =>
@@ -613,14 +673,6 @@ const custodianSeat: DaemonCapability = (ctx) => {
     // A failed seat has no tick to read the owner's act: re-read the pause for the row.
     custodianPoke: () => (seatFailed ? readFailedControl() : seat?.poke()),
     custodianHost: () => (seatFailed ? "failed" : seat?.ready() === true ? "ready" : "starting"),
-    ...(verbs === null
-      ? {}
-      : {
-          local: {
-            custodian: (raw, peer) =>
-              seatFailed ? Promise.resolve({ ok: false, code: "unsupported" }) : verbs.handle(raw, peer),
-          },
-        }),
   };
 };
 

@@ -58,6 +58,12 @@ export interface WorktreeIo {
   readonly remove: (repoPath: string, worktree: string) => Promise<boolean>;
 }
 
+/** The GitHub repo `origin` names in the clone at `repoPath`, null for any other host or none: reap's own resolution. */
+export async function githubOfClone(repoPath: string): Promise<ReturnType<typeof githubRepoOf>> {
+  const commonDir = await resolveCommonDir(repoPath);
+  return githubRepoOf(normalizeOrigin((commonDir === null ? null : await readOriginUrl(commonDir)) ?? ""));
+}
+
 const REAL_IO: WorktreeIo = {
   canonical,
   listWorktrees: async (repoPath) => {
@@ -71,10 +77,7 @@ const REAL_IO: WorktreeIo = {
   unlock: async (repoPath, path) => (await hardenedGit(repoPath, ["worktree", "unlock", path])).exitCode === 0,
   gitDirOf,
   lastTouched,
-  githubOf: async (repoPath) => {
-    const commonDir = await resolveCommonDir(repoPath);
-    return githubRepoOf(normalizeOrigin((commonDir === null ? null : await readOriginUrl(commonDir)) ?? ""));
-  },
+  githubOf: githubOfClone,
   nothingLost,
   stopMonitor: async (worktree) => {
     await platformFsmonitor()

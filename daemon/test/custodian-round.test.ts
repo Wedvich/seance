@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { APP_ID, CAPABILITIES, importPsk, open as openSealed, parseMachineInfo, seal, toBase64 } from "@seance/shared";
 import { custodianAudit } from "../src/audit.ts";
 import { createBackend } from "../src/backend-default.ts";
@@ -15,13 +15,15 @@ import {
   listRoundPanes,
   removeRoundTmp,
 } from "../src/custodian-launch.ts";
+import type { PrView } from "../src/custodian-frame.ts";
+import { custodianSocketPath, startCustodianSocket } from "../src/custodian-socket.ts";
 import { createCustodianFlags } from "../src/custodian-flags.ts";
 import { createCustodianVerbs } from "../src/custodian-verbs.ts";
 import { createWorktreeRule } from "../src/custodian-worktree.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { exchange } from "../src/local-client.ts";
-import { startLocalSocket } from "../src/local-socket.ts";
-import { custodianNotesPath, socketPath } from "../src/paths.ts";
+import { custodianNotesPath, socketPath, stateDir } from "../src/paths.ts";
+import { shq } from "../src/spawn.ts";
 import { scanRepos } from "../src/scan.ts";
 import { ROUND_SEED } from "../src/custodian-agent.ts";
 import type { RoundEntry } from "../src/custodian-rounds.ts";
@@ -39,7 +41,7 @@ import { startDaemon } from "../src/run.ts";
 import { ROUND_TMP } from "../src/seat-record.ts";
 import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { listClaudeSessions, listPanes, paneInfo } from "../src/sessions.ts";
-import { resolveTargetSession, tmux, tmuxOk } from "../src/tmux.ts";
+import { capturePane, resolveTargetSession, tmux, tmuxOk } from "../src/tmux.ts";
 import {
   captureLog,
   makeClaudeStub,
@@ -92,6 +94,21 @@ afterAll(async () => {
   else process.env["SEANCE_CLAUDE_BIN"] = savedClaudeBin;
   await rm(base, { recursive: true, force: true });
 });
+
+/** Round sockets a test started: closed after it, so a failed assertion cannot leave the path held for the next one. */
+const sockets: { readonly stop: () => void }[] = [];
+afterEach(() => {
+  for (const each of sockets.splice(0)) each.stop();
+});
+
+async function roundSocket(
+  handle: Parameters<typeof startCustodianSocket>[0]["handle"],
+): Promise<{ readonly stop: () => void }> {
+  const started = await startCustodianSocket({ path: custodianSocketPath(), handle, warn: () => {} });
+  if ("problem" in started) throw new Error(`round socket did not start: ${started.problem}`);
+  sockets.push(started);
+  return started;
+}
 
 interface Rig {
   readonly seat: CustodianSeat;
@@ -161,6 +178,8 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
         tmuxSession: "main",
         weakerNested: false,
         platform,
+        custodianSocket: custodianSocketPath(),
+        rootMasks: [],
         onTmp,
       }),
     listRounds: listRoundPanes,
@@ -210,6 +229,8 @@ describe("a round, with the stubs for claude", () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
     await rm(stub.argvFile, { force: true });
     await rm(stub.stdinFile, { force: true });
+    await mkdir(stateDir(), { recursive: true });
+    await roundSocket(() => Promise.resolve({ ok: false, code: "not_custodian" }));
     const r = seatOver();
     await r.seat.start();
     await r.seat.tick();
@@ -225,8 +246,37 @@ describe("a round, with the stubs for claude", () => {
     expect(argv.slice(at("--agent"), at("--agent") + 2)).toEqual(["--agent", "custodian"]);
     const fencePath = argv[at("--settings") + 1] ?? "";
     expect(fencePath.startsWith("/tmp/seance-cu-")).toBe(true);
-    const fence: { sandbox: { filesystem: { denyWrite: string[] } } } = JSON.parse(await readFile(fencePath, "utf8"));
+    const fence: {
+      permissions: { allow: string[]; deny: string[] };
+      sandbox: {
+        filesystem: { denyWrite: string[]; denyRead: string[]; allowRead: string[] };
+        network: { allowedDomains: string[]; allowUnixSockets?: string[]; allowAllUnixSockets?: boolean };
+      };
+    } = JSON.parse(await readFile(fencePath, "utf8"));
     expect(fence.sandbox.filesystem.denyWrite).toEqual([roundDir]);
+    const socketDir = await realpath(dirname(custodianSocketPath()));
+    expect(fence.sandbox.filesystem.allowRead).toEqual(
+      expect.arrayContaining([roundDir, await realpath(tmpDir), socketDir]),
+    );
+    // The state dir is masked, whether by its own entry or by a root that holds it (`/tmp`, `/Users`).
+    const state = await realpath(stateDir());
+    expect(fence.sandbox.filesystem.denyRead.some((path) => state === path || state.startsWith(`${path}/`))).toBe(true);
+    if (platform === "darwin") {
+      // The fence as written, not the paths computed for it: each mask and each re-allow is also there under the Data
+      // volume's mount point, which `realpath` would have folded back into its short form.
+      for (const mask of ["/Users", "/private/var/folders"]) {
+        expect(fence.sandbox.filesystem.denyRead).toEqual(
+          expect.arrayContaining([mask, `/System/Volumes/Data${mask}`]),
+        );
+      }
+      expect(fence.sandbox.filesystem.allowRead).toContain(`/System/Volumes/Data${roundDir}`);
+    }
+    // The window runs a script in the round's own tmp dir, not a command string for the owner's `default-shell` to parse.
+    expect((await stat(join(tmpDir, "run.sh"))).mode & 0o777).toBe(0o700);
+    expect(fence.sandbox.network.allowedDomains).toEqual([]);
+    if (platform === "darwin") expect(fence.sandbox.network.allowUnixSockets).toEqual([socketDir]);
+    else expect(fence.sandbox.network.allowAllUnixSockets).toBe(true);
+    expect(fence.permissions.allow).toEqual([`Read(/${roundDir}/**)`, "Bash(seanced custodian *)"]);
     for (const pair of [
       ["--setting-sources", "project"],
       ["--permission-mode", "dontAsk"],
@@ -324,7 +374,8 @@ describe("a round, with the stubs for claude", () => {
       expect(r.audit).toEqual([
         "audit custodian origin=custodian op=start exclave=default pane=%N outcome=started",
         "audit custodian origin=custodian op=kill pane=%N reason=exited outcome=killed",
-        "audit custodian origin=custodian op=end pane=%N outcome=failed reason=exited",
+        // Gone inside the start window with no verb called: the shape of a sandbox that failed to start.
+        "audit custodian origin=custodian op=end pane=%N outcome=failed reason=start_failed",
       ]);
       await noRounds();
       expect(await tmpExists(tmpDir)).toBe(false);
@@ -372,12 +423,8 @@ describe("the capability bit", () => {
   const PSK = toBase64(new Uint8Array(32).fill(9));
   const TOKEN = "test-bearer";
 
-  async function advertised(
-    custodian: Config["custodian"],
-    opts: { readonly live: boolean },
-  ): Promise<readonly string[]> {
+  async function advertised(custodian: Config["custodian"]): Promise<readonly string[]> {
     const booted = await boot(custodian, {
-      live: opts.live,
       // A seat that starts must find nothing to do and nothing to launch: the sandbox check fails it first.
       sandboxProblem: () => Promise.resolve("test: no sandbox"),
     });
@@ -392,7 +439,7 @@ describe("the capability bit", () => {
 
   async function boot(
     custodian: Config["custodian"],
-    opts: { readonly live: boolean; readonly sandboxProblem: () => Promise<string | null> },
+    opts: { readonly sandboxProblem: () => Promise<string | null>; readonly drilled?: boolean },
   ): Promise<{ readonly relay: ReturnType<typeof startTestRelay>; readonly stop: () => void }> {
     const home = await mkdtemp(join(base, "cap-home-"));
     await mkdir(join(home, ".claude"), { recursive: true });
@@ -421,10 +468,12 @@ describe("the capability bit", () => {
         telemetryIntervalMs: 100_000,
         statusFloorMs: 20,
         custodian: {
-          live: opts.live,
           checkIntervalMs: 3_600_000,
           sandboxProblem: opts.sandboxProblem,
           weakerNested: () => Promise.resolve(false),
+          // A CI runner's strict-mode Linux was never drilled, so the seat would refuse it: say it was, except where
+          // the test is about that refusal.
+          sandboxDrilled: () => opts.drilled ?? true,
         },
       });
       return {
@@ -449,16 +498,16 @@ describe("the capability bit", () => {
     return pane;
   }
 
-  for (const [label, custodian, live, problem] of [
-    ["is off", undefined, true, null],
-    ["is held", CUSTODIAN_DEFAULTS, false, null],
-    ["is declined by the host's checks", CUSTODIAN_DEFAULTS, true, "test: no sandbox"],
+  for (const [label, custodian, problem, drilled] of [
+    ["is off", undefined, null, true],
+    ["is declined by the host's checks", CUSTODIAN_DEFAULTS, "test: no sandbox", true],
+    ["is refused for a sandbox mode nobody drilled", CUSTODIAN_DEFAULTS, null, false],
   ] as const) {
     test(`a seat that ${label} closes a round the last process left, audited reason=off`, async () => {
       const stray = await strayRound();
       let booted: Awaited<ReturnType<typeof boot>> | undefined;
       const lines = await captureLog(async () => {
-        booted = await boot(custodian, { live, sandboxProblem: () => Promise.resolve(problem) });
+        booted = await boot(custodian, { sandboxProblem: () => Promise.resolve(problem), drilled });
         await pollUntil(async () => (await paneInfo(stray)) === null, "the stray round pane to close");
         await Bun.sleep(50);
       });
@@ -466,46 +515,68 @@ describe("the capability bit", () => {
       const audit = lines.filter((line) => line.includes("audit custodian"));
       expect(audit.some((line) => line.includes("op=kill") && line.includes("reason=off"))).toBe(true);
       expect(audit.some((line) => line.includes("op=end") && line.includes("reason=lost"))).toBe(true);
+      expect(audit.some((line) => line.includes("op=refused reason=sandbox_undrilled"))).toBe(!drilled);
     });
   }
 
-  // A held seat and a seat that failed its checks are the same to a caller: no round exists to bind to.
-  for (const [label, opts] of [
-    ["cannot start", { live: true, sandboxProblem: () => Promise.resolve("test: no sandbox") }],
-    ["is held (rounds are not live in production)", { live: false, sandboxProblem: () => Promise.resolve(null) }],
-  ] as const) {
-    test(`a host whose seat ${label} answers the verbs unsupported, not not_custodian`, async () => {
-      const booted = await boot(CUSTODIAN_DEFAULTS, opts);
-      try {
-        const sessions = { v: 1, kind: "custodian", verb: "sessions" };
-        const answer = async (): Promise<unknown> =>
-          exchange(sessions, {
-            path: socketPath(),
-            timeoutMs: 5_000,
-            timeoutText: "the daemon did not answer the custodian frame",
-            restartGraceMs: 0,
-          }).catch(() => null);
-        await pollUntil(async () => (await answer()) !== null, "the daemon's local socket to answer");
-        await pollUntil(
-          async () => JSON.stringify(await answer()) === JSON.stringify({ ok: false, code: "unsupported" }),
-          "the failed seat to answer unsupported",
-        );
-      } finally {
-        booted.stop();
-      }
-    });
-  }
+  const sessions = { v: 1, kind: "custodian", verb: "sessions" };
+  const askVerb = (path: string): Promise<unknown> =>
+    exchange(sessions, {
+      path,
+      timeoutMs: 5_000,
+      timeoutText: "the daemon did not answer the custodian frame",
+      restartGraceMs: 0,
+    }).catch(() => null);
+
+  test("a host whose seat cannot start has no round socket, and the main socket answers the verbs unsupported", async () => {
+    const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve("test: no sandbox") });
+    try {
+      await pollUntil(async () => (await askVerb(socketPath())) !== null, "the daemon's local socket to answer");
+      expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
+      // The seat's checks ran before the socket would have been bound: give a wrongly bound one time to appear.
+      await Bun.sleep(100);
+      expect(
+        await stat(custodianSocketPath()).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false);
+    } finally {
+      booted.stop();
+    }
+  });
+
+  test("a started seat listens on the round's own socket, which refuses a caller that is no round; stop removes it", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+    const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve(null) });
+    try {
+      await pollUntil(async () => (await askVerb(custodianSocketPath())) !== null, "the round's socket to answer");
+      // Only a process under the running round's pane is the custodian; this test process is not.
+      expect(await askVerb(custodianSocketPath())).toEqual({ ok: false, code: "not_custodian" });
+      expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
+    } finally {
+      booted.stop();
+    }
+    expect(
+      await stat(custodianSocketPath()).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
+    expect(
+      await stat(dirname(custodianSocketPath())).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
+  });
 
   test("a daemon with the key and a live seat advertises custodian", async () => {
-    expect(await advertised(CUSTODIAN_DEFAULTS, { live: true })).toContain(CAPABILITIES.custodian);
+    expect(await advertised(CUSTODIAN_DEFAULTS)).toContain(CAPABILITIES.custodian);
   });
 
   test("without the key it does not", async () => {
-    expect(await advertised(undefined, { live: true })).not.toContain(CAPABILITIES.custodian);
-  });
-
-  test("rounds are held in production: the key alone advertises nothing", async () => {
-    expect(await advertised(CUSTODIAN_DEFAULTS, { live: false })).not.toContain(CAPABILITIES.custodian);
+    expect(await advertised(undefined)).not.toContain(CAPABILITIES.custodian);
   });
 
   /** One app-sealed `custodian` request to a booted daemon, and what it answered. */
@@ -523,7 +594,7 @@ describe("the capability bit", () => {
 
   test("the op is answered only where a seat runs, and a round meets the daemon's own view of it", async () => {
     // No custodian key: no seat, so no control: unsupported, and nothing written for a seat to read.
-    const off = await boot(undefined, { live: true, sandboxProblem: () => Promise.resolve(null) });
+    const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
     try {
       const frame = await off.relay.registers.next(5_000);
       expect(await ask(off, frame.deviceId, { act: "resume" })).toMatchObject({ ok: false, code: "unsupported" });
@@ -532,7 +603,6 @@ describe("the capability bit", () => {
     }
     // A seat whose checks failed: host_failed from the daemon's memory, however long ago it failed (no seat.json read).
     const failed = await boot(CUSTODIAN_DEFAULTS, {
-      live: true,
       sandboxProblem: () => Promise.resolve("test: no sandbox"),
     });
     try {
@@ -562,29 +632,50 @@ describe("the capability bit", () => {
 
 const ROUND_IDLE_SCRIPT = "exec sleep 600";
 
-const ROUND_VERBS_SCRIPT = `
-out="$SEANCE_STATE_DIR/verbs"
+/**
+ * The round's pane runs under `env -i`, so the script knows nothing of the test's env: every path is absolute, and the
+ * panes it acts on arrive in `go`, one per line (A, B, then the round's own).
+ */
+const roundVerbsScript = (out: string): string => `
+out=${shq(out)}
 mkdir -p "$out"
 command -v seanced > "$out/which"
+env > "$out/env.txt"
 until [ -f "$out/go" ]; do sleep 0.1; done
-{ read -r a; read -r b; } < "$out/go"
+{ read -r a; read -r b; read -r self; } < "$out/go"
 run() { name=$1; shift; "$@" > "$out/$name.json" 2> "$out/$name.err"; echo $? > "$out/$name.rc"; }
 run sessions seanced custodian sessions
+run captureA seanced custodian capture "$a"
+run captureSelf seanced custodian capture "$self"
+run prA seanced custodian pr "$a"
+run prB seanced custodian pr "$b"
 run closeA seanced custodian close "$a"
 run closeB seanced custodian close "$b"
-run closeSelf seanced custodian close "$TMUX_PANE"
+run closeSelf seanced custodian close "$self"
+run flagSelf seanced custodian flag "$self" look
+run interruptSelf seanced custodian interrupt "$self"
+printf 'carry on' | run nudgeSelf seanced custodian nudge "$self"
 printf '## standing\\nkeep checking\\n## nonsense\\nnope\\n## other\\nnope\\n' | run notes seanced custodian notes
 printf 'closed one, kept one' | run done seanced custodian done
 echo finished > "$out/finished"
 exec sleep 600
 `;
 
-describe("the verbs, over the socket, from the round's own pane", () => {
-  let roundScript = "";
+const PR_URL = "https://github.com/o/r/pull/9";
+const PR_VIEW: PrView = {
+  state: "OPEN",
+  isDraft: false,
+  mergeable: "MERGEABLE",
+  reviewDecision: null,
+  autoMerge: false,
+  checks: { state: "SUCCESS", contexts: [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS" }] },
+  readAt: 1,
+};
+
+describe("the verbs, over the round's own socket, from the round's own pane", () => {
   let fx: GitFixture;
 
   beforeAll(async () => {
-    roundScript = await scriptStub(base, "round-verbs", ROUND_VERBS_SCRIPT);
     await mkdir(join(base, "verbs-fx"), { recursive: true });
     fx = await makeGitFixture(join(base, "verbs-fx"));
   });
@@ -611,28 +702,23 @@ describe("the verbs, over the socket, from the round's own pane", () => {
     return pane;
   }
 
-  test("a frame from the test process, a session pane or a second round pane is refused, and nothing is closed", async () => {
-    process.env["SEANCE_CLAUDE_BIN"] = await scriptStub(base, "round-idle", ROUND_IDLE_SCRIPT);
-    const ledger = LaunchLedger.memory();
-    await ledger.record("t-r");
-    await ledger.note("t-r", { repo: fx.repoPath, path: await fx.pushBranch("feat-refused") });
-    const ended = new EndedTasks(ledger);
-    const target = await sessionPane("sess-r", "t-r");
+  /** The verbs over the real ledger, panes and git, with only the GitHub side (`readPr`, the origin's repo) faked. */
+  async function verbsOver(r: Rig, ended: EndedTasks, panes: readonly string[], audit: string[]) {
     const turnEnded = Date.now();
     const closeAfter = CUSTODIAN_DEFAULTS.closeAfterMinutes * MIN;
-    const audit: string[] = [];
-    const r = seatOver();
     const repos = await scanRepos([fx.root]);
-    const verbs = createCustodianVerbs({
+    return createCustodianVerbs({
       roundPane: () => r.seat.roundPane(),
       roundPanePids: listRoundPanePids,
       activity: (pane) =>
-        pane === target
+        panes.includes(pane)
           ? { state: "idle", stateSince: turnEnded, turnEnded: true, screenSince: turnEnded, sampledAt: turnEnded }
           : null,
       retainedSince: () => turnEnded - closeAfter,
       untouchable: () => false,
       tasks: ended,
+      readPr: () => Promise.resolve(PR_VIEW),
+      originOf: () => Promise.resolve({ owner: "o", name: "r" }),
       worktree: createWorktreeRule({ tasks: ended, repos: () => repos, listPanes }),
       despawn: (id, request) => despawnSession(id, request),
       killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
@@ -659,8 +745,21 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       sendEvent: () => Promise.resolve(true),
       warn: () => {},
     });
-    const socket = await startLocalSocket({ handle: () => Promise.resolve(null), custodian: verbs.handle });
-    const out = join(process.env["SEANCE_STATE_DIR"] ?? "", "refused");
+  }
+
+  test("a frame from the test process, a session pane or a second round pane is refused, and nothing is closed", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = await scriptStub(base, "round-idle", ROUND_IDLE_SCRIPT);
+    const ledger = LaunchLedger.memory();
+    await ledger.record("t-r");
+    await ledger.note("t-r", { repo: fx.repoPath, path: await fx.pushBranch("feat-refused") });
+    const ended = new EndedTasks(ledger);
+    const target = await sessionPane("sess-r", "t-r");
+    const audit: string[] = [];
+    const r = seatOver();
+    const verbs = await verbsOver(r, ended, [target], audit);
+    await mkdir(stateDir(), { recursive: true });
+    await roundSocket(verbs.handle);
+    const out = join(stateDir(), "refused");
     try {
       await r.seat.start();
       await r.seat.tick();
@@ -671,7 +770,7 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       // From this process, which is no pane at all.
       const frame = { v: 1, kind: "custodian", verb: "close", pane: target };
       const fromHere = await exchange(frame, {
-        path: socketPath(),
+        path: custodianSocketPath(),
         timeoutMs: 5_000,
         timeoutText: "no answer",
         restartGraceMs: 0,
@@ -679,7 +778,7 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       expect(fromHere).toEqual({ ok: false, code: "not_custodian" });
 
       // From a window that looks like a session (`--remote-control`) and from a second pane tagged as a round that the
-      // seat record does not name: each runs the round's own shim and writes what it was told.
+      // seat record does not name: each runs the round's own shim, aimed at the round's socket as a round's env is.
       const asks = async (name: string, tagged: boolean): Promise<string> => {
         const pane = (
           await tmuxOk([
@@ -694,7 +793,7 @@ describe("the verbs, over the socket, from the round's own pane", () => {
             name,
             "-c",
             base,
-            `: --remote-control; ${shim} custodian close ${target} > ${out}/${name}.out 2> ${out}/${name}.err; echo $? > ${out}/${name}.rc; exec sleep 600`,
+            `: --remote-control; SEANCE_CUSTODIAN_SOCKET=${shq(custodianSocketPath())} ${shim} custodian close ${target} > ${out}/${name}.out 2> ${out}/${name}.err; echo $? > ${out}/${name}.rc; exec sleep 600`,
           ])
         ).trim();
         if (tagged) await tmuxOk(["set-option", "-p", "-t", pane, "@seance-custodian", "1"]);
@@ -724,13 +823,17 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       await r.seat.tick();
       await noRounds();
     } finally {
-      socket.stop();
       r.seat.stop();
     }
   }, 60_000);
 
-  test("a round's own seanced runs sessions, close, notes and done; the seat then ends it healthy", async () => {
-    process.env["SEANCE_CLAUDE_BIN"] = roundScript;
+  test("a round's own seanced runs sessions, capture, pr, close, notes and done; the seat then ends it healthy", async () => {
+    await mkdir(stateDir(), { recursive: true });
+    const out = join(stateDir(), "verbs");
+    process.env["SEANCE_CLAUDE_BIN"] = await scriptStub(base, "round-verbs", roundVerbsScript(out));
+    // What a tmux server's global environment can hold, and a round must never inherit.
+    await tmuxOk(["set-environment", "-g", "SSH_AUTH_SOCK", "/tmp/leak.sock"]);
+    await tmuxOk(["set-environment", "-g", "GH_TOKEN", "ghp_leak"]);
     const clean = await fx.pushBranch("feat-a");
     const dirty = await fx.pushBranch("feat-b");
     await writeFile(join(dirty, "unsaved.txt"), "only here\n");
@@ -743,70 +846,46 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       await ledger.note(taskId, { repo: fx.repoPath, path });
     }
     const ended = new EndedTasks(ledger);
+    await ended.notePr("t-a", PR_URL);
     const paneA = await sessionPane("sess-a", "t-a");
     const paneB = await sessionPane("sess-b", "t-b");
 
     // After every fixture write: the touched guard compares the worktree's newest signal with the turn's end.
-    const turnEnded = Date.now();
-    const closeAfter = CUSTODIAN_DEFAULTS.closeAfterMinutes * MIN;
     const audit: string[] = [];
     const r = seatOver();
-    const repos = await scanRepos([fx.root]);
-    const verbs = createCustodianVerbs({
-      roundPane: () => r.seat.roundPane(),
-      roundPanePids: listRoundPanePids,
-      activity: (pane) =>
-        pane === paneA || pane === paneB
-          ? { state: "idle", stateSince: turnEnded, turnEnded: true, screenSince: turnEnded, sampledAt: turnEnded }
-          : null,
-      retainedSince: () => turnEnded - closeAfter,
-      untouchable: () => false,
-      tasks: ended,
-      worktree: createWorktreeRule({ tasks: ended, repos: () => repos, listPanes }),
-      despawn: (id, request) => despawnSession(id, request),
-      killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
-      deliver: () => Promise.resolve({ ok: false, code: "unsupported" }),
-      keys: () => Promise.resolve(false),
-      settings: CUSTODIAN_DEFAULTS,
-      seat: {
-        count: (verb, ok) => r.seat.count(verb, ok),
-        countWorktree: (kind) => r.seat.countWorktree(kind),
-        countFlagged: () => r.seat.countFlagged(),
-        done: (summary) => r.seat.done(summary),
-        isDone: () => r.seat.isDone(),
-      },
-      now: () => turnEnded + 2 * closeAfter,
-      audit: custodianAudit((line) => {
-        audit.push(line.replaceAll(/ pane=%\d+/gu, " pane=%N"));
-        return Promise.resolve();
-      }),
-      flags: createCustodianFlags({
-        path: join(process.env["SEANCE_STATE_DIR"] ?? "", "custodian-flags.json"),
-        now: () => turnEnded + 2 * closeAfter,
-        warn: () => {},
-      }),
-      sendEvent: () => Promise.resolve(true),
-      warn: () => {},
-    });
-    const socket = await startLocalSocket({ handle: () => Promise.resolve(null), custodian: verbs.handle });
-    const out = join(process.env["SEANCE_STATE_DIR"] ?? "", "verbs");
+    const verbs = await verbsOver(r, ended, [paneA, paneB], audit);
+    await roundSocket(verbs.handle);
     try {
       await r.seat.start();
       await r.seat.tick();
       const roundPane = await onlyRound();
       const tmpDir = r.saved.record.round?.tmpDir ?? "";
       await pollUntil(() => tmpExists(join(out, "which")), "the round's script to start");
-      await writeFile(join(out, "go.tmp"), `${paneA}\n${paneB}\n`);
+      // Before the round closes pane A: what `capture` must hand back is this screen, not an empty or another pane's.
+      const screenA = await capturePane(paneA, { history: false });
+      await writeFile(join(out, "go.tmp"), `${paneA}\n${paneB}\n${roundPane}\n`);
       await rename(join(out, "go.tmp"), join(out, "go"));
       await pollUntil(() => tmpExists(join(out, "finished")), "the round's verbs to finish", 60_000);
 
       // F1: the round's own seanced is the one on PATH, whatever the tmux server's PATH holds.
       expect((await readFile(join(out, "which"), "utf8")).trim()).toBe(join(tmpDir, "bin", "seanced"));
+
+      // The environment is built, not inherited.
+      const env = await readFile(join(out, "env.txt"), "utf8");
+      expect(env).toContain(`SEANCE_CUSTODIAN_SOCKET=${custodianSocketPath()}\n`);
+      expect(env).toContain(`TMPDIR=${tmpDir}\n`);
+      expect(env).toContain(`CLAUDE_CODE_TMPDIR=${tmpDir}\n`);
+      for (const leaked of ["SSH_AUTH_SOCK", "GH_TOKEN", "SEANCE_STATE_DIR", "TMUX="]) {
+        expect(env).not.toContain(leaked);
+      }
+
       const read = (name: string): Promise<string> => readFile(join(out, name), "utf8");
       const codes = await Promise.all(
-        ["sessions", "closeA", "closeB", "closeSelf", "notes", "done"].map(async (v) => (await read(`${v}.rc`)).trim()),
+        ["sessions", "captureA", "captureSelf", "prA", "prB", "closeA", "closeB", "closeSelf", "notes", "done"].map(
+          async (v) => (await read(`${v}.rc`)).trim(),
+        ),
       );
-      expect(codes).toEqual(["0", "0", "0", "1", "0", "0"]);
+      expect(codes).toEqual(["0", "0", "1", "0", "1", "0", "0", "1", "0", "0"]);
 
       const listed: { panes: { pane: string }[] } = JSON.parse(await read("sessions.json"));
       const seen = new Map(listed.panes.map((p) => [p.pane, p]));
@@ -815,6 +894,22 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       for (const pane of [paneA, paneB]) {
         expect(seen.get(pane)).toMatchObject({ owner: "ours", classification: "live", close: "ok" });
       }
+
+      const captured: { text: string } = JSON.parse(await read("captureA.json"));
+      expect(captured).toMatchObject({ ok: true, verb: "capture", pane: paneA });
+      expect(captured.text.trim()).not.toBe("");
+      expect(screenA).not.toBeNull();
+      expect(captured.text.trim()).toBe(screenA?.trim() ?? "");
+      expect(await read("captureSelf.err")).toContain("refused marked");
+      expect(JSON.parse(await read("prA.json"))).toMatchObject({
+        ok: true,
+        verb: "pr",
+        pane: paneA,
+        taskId: "t-a",
+        url: PR_URL,
+        state: "OPEN",
+      });
+      expect(await read("prB.err")).toContain("refused prless");
 
       expect(JSON.parse(await read("closeA.json"))).toMatchObject({
         ok: true,
@@ -833,6 +928,14 @@ describe("the verbs, over the socket, from the round's own pane", () => {
       expect(await paneInfo(paneA)).toBeNull();
       expect(await paneInfo(paneB)).toBeNull();
       expect(await read("closeSelf.err")).toContain("refused marked");
+      // The acting verbs reach the round's own socket and its binding too: refused for the round's own pane by the
+      // verb's own check, never `not_custodian` or `unsupported`.
+      for (const verb of ["flagSelf", "interruptSelf", "nudgeSelf"]) {
+        // oxlint-disable-next-line no-await-in-loop -- three small reads
+        const [rc, err] = await Promise.all([read(`${verb}.rc`), read(`${verb}.err`)]);
+        expect(rc.trim()).toBe("1");
+        expect(err).toMatch(/refused (?!not_custodian|unsupported)/u);
+      }
       expect(JSON.parse(await read("notes.json"))).toMatchObject({ ok: true, kept: ["standing"], dropped: 2 });
       const notes = await readFile(custodianNotesPath(), "utf8");
       expect(notes).toContain("keep checking");
@@ -848,6 +951,8 @@ describe("the verbs, over the socket, from the round's own pane", () => {
         "audit custodian origin=custodian op=worktree pane=%N task=t-a outcome=removed how=origin",
         "audit custodian origin=custodian op=worktree pane=%N task=t-b outcome=kept why=dirty",
       ]);
+      // `capture` and `pr` read and act on nothing: no audit line, however they ended.
+      expect(audit.some((line) => line.includes("op=capture") || line.includes("op=pr"))).toBe(false);
 
       // `done` marked the round: the next tick closes it ahead of its deadline, healthy, with the tally.
       await r.seat.tick();
@@ -856,12 +961,18 @@ describe("the verbs, over the socket, from the round's own pane", () => {
         outcome: "healthy",
         reason: "done",
         summary: "closed one, kept one",
-        counts: { close: { ok: 2, refused: 1 }, worktrees: { removed: 1, kept: 1 } },
+        counts: {
+          close: { ok: 2, refused: 1 },
+          capture: { ok: 1, refused: 1 },
+          pr: { ok: 1, refused: 1 },
+          worktrees: { removed: 1, kept: 1 },
+        },
       });
       expect(await tmpExists(tmpDir)).toBe(false);
     } finally {
-      socket.stop();
       r.seat.stop();
+      await tmuxOk(["set-environment", "-g", "-u", "SSH_AUTH_SOCK"]).catch(() => "");
+      await tmuxOk(["set-environment", "-g", "-u", "GH_TOKEN"]).catch(() => "");
     }
   }, 90_000);
 });

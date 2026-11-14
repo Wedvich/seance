@@ -1166,7 +1166,7 @@ export interface MachineInfo {
  * (its `MachineStatus.cu` then says `failing`). The Machines card shows its Custodian row only for a machine that
  * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`). It also means the daemon
  * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
- * `ROUNDS_LIVE` has held every seat since the seat was built, so the one bit gates the Machines card's menu too.
+ * rounds were held (`ROUNDS_LIVE`) on every build before custodian 4b, so the one bit gates the Machines card's menu too.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1942,7 +1942,8 @@ export interface CustodianRequest {
 }
 
 /**
- * `held`: rounds are held on this build (`ROUNDS_LIVE`); `unconfigured`: no `custodian` key in its config.json;
+ * `held`: rounds are held on that daemon's build (`ROUNDS_LIVE`, before custodian 4b; no daemon that advertises
+ * `CAPABILITIES.custodian` answers it); `unconfigured`: no `custodian` key in its config.json;
  * `host_failed`: its host checks failed, so no round can run; `running`: a round runs now; `too_soon`: one started
  * or ended within the request spacing, `after` (ms) saying when one may be asked. Those five refuse `round` only.
  */

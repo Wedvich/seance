@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ExclaveInfo } from "@seance/shared";
 import { custodianChecks, type CustodianCheckDeps } from "./custodian-checks.ts";
+import { sandboxDrilled, SANDBOX_UNDRILLED } from "./custodian-seat.ts";
 import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import { roundDirFor } from "./custodian-launch.ts";
 import type { Exclave, ExclaveScan } from "./exclaves.ts";
@@ -28,10 +29,9 @@ const scan = (...entries: readonly [string, Partial<ExclaveInfo>?][]): ExclaveSc
 
 const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "linux") =>
   custodianChecks({
-    config: { custodian: CUSTODIAN_DEFAULTS },
+    config: { custodian: CUSTODIAN_DEFAULTS, repoRoots: [] },
     home: HOME,
     platform,
-    live: true,
     deps: {
       scan: () => Promise.resolve(scan(["work"])),
       trusted: () => Promise.resolve(true),
@@ -39,6 +39,8 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
       planted: () => Promise.resolve(false),
       sandboxProblem: () => Promise.resolve(null),
       weakerNested: () => Promise.resolve(false),
+      drilled: () => true,
+      toolchainProblem: () => Promise.resolve(null),
       sessionEventsMissing: () => Promise.resolve([]),
       inboxMissing: () => Promise.resolve([]),
       ...deps,
@@ -46,10 +48,10 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
   });
 
 describe("custodianChecks", () => {
-  test("while rounds are held it is one ok line and probes nothing, so doctor cannot fail on the key", async () => {
+  test("the probes run with no seam: a key alone is a real check of the host", async () => {
     const probed: string[] = [];
     const checks = await custodianChecks({
-      config: { custodian: CUSTODIAN_DEFAULTS },
+      config: { custodian: CUSTODIAN_DEFAULTS, repoRoots: [] },
       home: HOME,
       platform: "linux",
       deps: {
@@ -65,14 +67,16 @@ describe("custodianChecks", () => {
           probed.push("session-events");
           return Promise.resolve(["~/.claude-work"]);
         },
+        weakerNested: () => Promise.resolve(true),
+        toolchainProblem: () => Promise.resolve(null),
         inboxMissing: () => {
           probed.push("inbox");
           return Promise.resolve(["~/.claude-work"]);
         },
       },
     });
-    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("held until the round is contained") }]);
-    expect(probed).toEqual([]);
+    expect(probed).toEqual(["sandbox", "scan", "session-events", "inbox"]);
+    expect(checks.map((c) => c.level)).toEqual(["fail", "warn", "fail", "warn", "warn"]);
   });
 
   test("another platform fails at once", async () => {
@@ -88,7 +92,7 @@ describe("custodianChecks", () => {
   test("an exclave the seat would skip is never reported as able to host: no root, a planted dir", async () => {
     for (const [deps, reason] of [
       [{ rootExists: () => Promise.resolve(false) }, "root missing"],
-      [{ planted: () => Promise.resolve(true) }, "round dir holds settings or agents"],
+      [{ planted: () => Promise.resolve(true) }, "round dir holds settings, agents or a link"],
     ] as const) {
       const checks = await run(deps);
       expect(checks).toEqual([
@@ -137,6 +141,54 @@ describe("custodianChecks", () => {
     expect((await run({ weakerNested: () => Promise.resolve(true) }, "darwin")).some((c) => c.level === "warn")).toBe(
       false,
     );
+  });
+
+  test("Linux's strict mode fails with the seat's own words; macOS and a drilled mode do not", async () => {
+    const undrilled = { drilled: () => false };
+    const checks = await run(undrilled);
+    expect(checks[0]).toEqual({ level: "fail", message: SANDBOX_UNDRILLED });
+    expect((await run(undrilled, "darwin")).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(false);
+    expect((await run({})).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(false);
+  });
+
+  test("the real drilled test: strict Linux fails, a read-only /proc/sys passes", async () => {
+    const real = { drilled: sandboxDrilled };
+    expect((await run(real)).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(true);
+    expect(
+      (await run({ ...real, weakerNested: () => Promise.resolve(true) })).some((c) => c.message === SANDBOX_UNDRILLED),
+    ).toBe(false);
+  });
+
+  test("a toolchain the sandbox's masks would hide fails, saying the round will not start", async () => {
+    const checks = await run({ toolchainProblem: () => Promise.resolve("the daemon's checkout is not laid out") });
+    expect(checks[0]).toEqual({
+      level: "fail",
+      message: "the daemon's checkout is not laid out — rounds refuse to start",
+    });
+  });
+
+  test("the toolchain probe is given the repo roots and every exclave's root", async () => {
+    let given: readonly string[] = [];
+    await custodianChecks({
+      config: { custodian: CUSTODIAN_DEFAULTS, repoRoots: ["/home/u/code"] },
+      home: HOME,
+      platform: "linux",
+      deps: {
+        scan: () => Promise.resolve(scan(["work"])),
+        trusted: () => Promise.resolve(true),
+        rootExists: () => Promise.resolve(true),
+        planted: () => Promise.resolve(false),
+        sandboxProblem: () => Promise.resolve(null),
+        weakerNested: () => Promise.resolve(false),
+        drilled: () => true,
+        toolchainProblem: (_platform, roots) => {
+          given = roots;
+          return Promise.resolve(null);
+        },
+        sessionEventsMissing: () => Promise.resolve([]),
+      },
+    });
+    expect(given).toEqual(["/home/u/code", exclave("work").root]);
   });
 
   test("a signed-out exclave warns, an untrusted one says how to trust it, and none able to host fails", async () => {

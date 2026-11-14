@@ -198,6 +198,19 @@ describe("custodian audit lines", () => {
   });
 });
 
+describe("custodian refusal line", () => {
+  test("the seat declining to start rounds: one op, one enumerated reason, nothing else", async () => {
+    const out: string[] = [];
+    const audit = custodianAudit((line) => void out.push(line));
+    await audit.refused("sandbox_undrilled");
+    await audit.refused("toolchain");
+    expect(out).toEqual([
+      "audit custodian origin=custodian op=refused reason=sandbox_undrilled",
+      "audit custodian origin=custodian op=refused reason=toolchain",
+    ]);
+  });
+});
+
 describe("message audit lines", () => {
   test("one shape per sender: a task, an untasked session, and a sender no pane could be found for; never text", async () => {
     const out: string[] = [];
