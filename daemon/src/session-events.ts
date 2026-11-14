@@ -181,7 +181,7 @@ const PANE_PID_FORMAT = [
 /**
  * Pure parser over `list-panes -a` in `PANE_PID_FORMAT`; path last, taken as the remainder. A pane carrying
  * `@seance-custodian` is dropped (C10): the seat's round can bind no frame, take no message or drain key and is never
- * sampled. The `custodian` frame (custodian PR 4) needs its own reader that keeps these panes.
+ * sampled. The `custodian` frame binds against its own reader, `listRoundPanePids` (`custodian-launch.ts`), which keeps them.
  */
 export function parsePanePids(raw: string): readonly BoundPane[] {
   const seen = new Set<string>();

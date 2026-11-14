@@ -117,7 +117,7 @@ export interface RunOpts {
   readonly authHealth?: Partial<Omit<AuthHealthDeps, "scan" | "home">>;
   /**
    * Enables the custodian seat's side of this process (`custodian-seat.ts`): with a `custodian` key in the config it
-   * advertises the capability and starts rounds, and without one (or with rounds not live) it closes any round a
+   * advertises the capability and starts rounds, and without one it closes any round a
    * seat left. Off unless supplied, as `authHealth` is — a test daemon must never start a real round in a developer's
    * tmux; main.ts passes `{}`. The rest are test seams.
    */

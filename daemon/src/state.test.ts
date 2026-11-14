@@ -171,6 +171,13 @@ describe("custodianSeatOf", () => {
     expect((await seatOf({ round: { ...round, exclave: "default" } })).round?.exclave).toBe("default");
   });
 
+  test("a round's done mark is kept only as the boolean true", async () => {
+    expect(await seatOf({ round: { ...round, done: true } })).toEqual({ round: { ...round, done: true } });
+    for (const done of [false, "true", 1, null, {}]) {
+      expect(await seatOf({ round: { ...round, done } })).toEqual({ round });
+    }
+  });
+
   test("anything unreadable reads as none, field by field", async () => {
     expect(await seatOf(undefined)).toEqual({});
     expect(await seatOf("x")).toEqual({});
