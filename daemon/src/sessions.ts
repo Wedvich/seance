@@ -20,19 +20,23 @@ export const CLAUDE_COMMAND = /^(?:claude|\d+\.\d+\.\d+)$/u;
  * --remote-control` line) registers on the title alone — nothing else ever
  * runs in that pane, and what tmux calls the process there is a host detail
  * (`claude`, the versioned filename, `node`, or the `caffeinate` wrapper on
- * macOS). A pane séance did not start needs a claude-named process too, or a
- * shell that set a title would count.
+ * macOS). The seat's round (`custodian`) is the same: its launch script `exec`s
+ * claude, and on strict-mode Linux behind the vsock filter's `bwrap`, which
+ * Linux tmux names the pane's command (the foreground group's leader). A pane
+ * séance did not start needs a claude-named process too, or a shell that set a
+ * title would count.
  */
 export function isRegistered(pane: {
   readonly ours: boolean;
+  readonly custodian: boolean;
   readonly titled: boolean;
   readonly command: string;
 }): boolean {
   return pane.titled && runsClaude(pane);
 }
 
-function runsClaude(pane: { readonly ours: boolean; readonly command: string }): boolean {
-  return pane.ours || CLAUDE_COMMAND.test(pane.command);
+function runsClaude(pane: { readonly ours: boolean; readonly custodian: boolean; readonly command: string }): boolean {
+  return pane.ours || pane.custodian || CLAUDE_COMMAND.test(pane.command);
 }
 
 /**
@@ -116,7 +120,7 @@ function registeredPanes(raw: string): readonly Pane[] {
     if (custodian === "1") continue;
     // Grouped sessions repeat every window; splits repeat the window id too.
     if (seen.has(windowId)) continue;
-    if (!isRegistered({ ours: ours === "1", titled: titled === "1", command })) continue;
+    if (!isRegistered({ ours: ours === "1", custodian: false, titled: titled === "1", command })) continue;
     seen.add(windowId);
     // The registered pane's id, not the window's first: in a split it is claude's that `despawn` must reach.
     panes.push({ id: paneId, window: windowName, path: panePath, taskId: taskIdFrom(task) });

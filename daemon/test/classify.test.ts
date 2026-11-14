@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyPane, listPanes, listStuckWindows, type PaneInfo, type PaneState } from "../src/sessions.ts";
-import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
+import { CLAUDE_COMMAND, classifyPane, listPanes, listStuckWindows, paneInfo, type PaneInfo, type PaneState } from "../src/sessions.ts";
+import { CUSTODIAN_OPTION, resolveTargetSession, tmuxOk } from "../src/tmux.ts";
 import {
   makeClaudeStub,
   pollUntil,
@@ -106,6 +106,23 @@ describe("classifyPane (real tmux, stub claude)", () => {
     await settlesAs(paneId, "exit-prompt");
     await tmuxOk(["send-keys", "-t", paneId, "Escape"]);
     await settlesAs(paneId, "live");
+  });
+
+  test("the seat's round is live behind a wrapper tmux names it by; the same wrapper unmarked is a shell", async () => {
+    // Strict-mode Linux runs the round under the vsock filter's `bwrap`, the foreground group's leader, which Linux
+    // tmux names the pane's command; a non-exec'ing `sh` stands in for it.
+    const round = await open(`exec /bin/sh -c '${stub.ok}; exit 0'`, ["-n", "round"]);
+    await tmuxOk(["set-option", "-p", "-t", round, CUSTODIAN_OPTION, "1"]);
+    const plain = await open(`exec /bin/sh -c '${stub.ok}; exit 0'`, ["-n", "wrapped"]);
+    const roundState = async (): Promise<PaneState | "gone"> => {
+      const info = await paneInfo(round);
+      return info === null ? "gone" : classifyPane(info);
+    };
+    await pollUntil(async () => (await paneInfo(round))?.titled === true, "the round to title");
+    expect((await paneInfo(round))?.command).not.toMatch(CLAUDE_COMMAND);
+    expect(await roundState()).toBe("live");
+    await pollUntil(async () => (await pane(plain))?.titled === true, "the unmarked pane to title");
+    expect(await stateOf(plain)).toBe("shell");
   });
 
   test("a hand-started claude that exits back to its shell reads as shell, though its title stays", async () => {

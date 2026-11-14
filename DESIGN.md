@@ -8832,7 +8832,9 @@ decision is recorded here.
   `AF_VSOCK` with `EAFNOSUPPORT`, `io_uring_setup` with `EPERM` (`IORING_OP_SOCKET` makes a socket no syscall filter
   sees) and every syscall of another ABI with `ENOSYS` (x32, i386's `int 0x80` and its `socketcall`, arm64's compat
   arm), and allows the rest. The pane's process is that bwrap and claude its direct child, as under macOS's
-  `caffeinate`, so the `rc` read holds. **Not on the weaker mode:** Thad's drill ran without it and no drill has
+  `caffeinate`, so the `rc` read holds; Linux tmux names that bwrap the pane's command (the foreground group's
+  leader), so the round counts as running claude by its `@seance-custodian` mark (`isRegistered`), as a séance spawn
+  does by its start command, or the deadline's graceful close would read it unregistered and kill it. **Not on the weaker mode:** Thad's drill ran without it and no drill has
   probed vsock in an LXC container (one shares the host's kernel, so CID 2 is no host there, but the host's own VMs
   may listen); widening it there is a re-drill.
   Both go through `CustodianAudit.refused` and then the same leftover sweep a seat that is off runs, so a round the

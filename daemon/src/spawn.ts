@@ -427,7 +427,7 @@ async function awaitRegistration(windowId: string, waitMs: number, task: boolean
     dead = deadField === "1";
     // This window is ours by construction — the same call `sessions.ts` makes
     // for it, so what registers here is what the list will hold.
-    titled = isRegistered({ ours: true, titled: titledField === "1", command: "" });
+    titled = isRegistered({ ours: true, custodian: false, titled: titledField === "1", command: "" });
     if (dead || titled || Bun.nanoseconds() >= deadline) break;
     // oxlint-disable-next-line no-await-in-loop
     await Bun.sleep(100);
