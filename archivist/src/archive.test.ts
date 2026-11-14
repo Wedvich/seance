@@ -3,10 +3,11 @@ import { Database } from "bun:sqlite";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ARCHIVE_TASK_OUTCOMES, statesIn, type ArchiveTasksRequest, type Task } from "@seance/shared";
+import { ARCHIVE_TASK_OUTCOMES, parseTask, statesIn, type ArchiveTasksRequest, type Task } from "@seance/shared";
 import {
   Archive,
   ARCHIVE_SCHEMA_VERSION,
+  ARCHIVED_SUCCEEDS_ACCOUNT,
   archivedTask,
   taskRow,
   type Fleet,
@@ -109,9 +110,24 @@ describe("archive.sqlite", () => {
       INSERT INTO tasks VALUES ('t-bare', 1, 'failed', 'seance', NULL, 50, NULL, NULL, NULL,
         NULL, NULL, NULL, 'dispatch_unconfirmed', '{"id":"t-bare"}', 60, 60);
       INSERT INTO events (at, kind, device_id) VALUES (5, 'first_seen', 'dev-a');
+      INSERT INTO tasks VALUES ('t-hand', 1, 'cancelled', 'seance', NULL, 70, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, 'not json {', 80, 80);
       PRAGMA user_version = 1;
     `);
-    const all = (db: Database): unknown[] => db.query("SELECT * FROM tasks ORDER BY id").all();
+    // Schema 1 kept a successor's raw `succeeds.account`.
+    const succeeds = { task: "t-full", account: RAW_ACCOUNT, at: { deviceId: "dev-a", exclave: "x", clone: "c" } };
+    const successor = {
+      id: "t-succ",
+      spec: { repo: "seance", mode: "worktree", succeeds: { ...succeeds, trigger: "pass" } },
+    };
+    old
+      .query(
+        `INSERT INTO tasks VALUES ('t-succ', 2, 'done', 'seance', NULL, 90, 'dev-b', 'beta', 'account:def',
+          NULL, NULL, 'session', NULL, ?, 95, 99)`,
+      )
+      .run(JSON.stringify(successor));
+    type Row = Record<string, unknown> & { id: string; record: string };
+    const all = (db: Database): Row[] => db.query<Row, []>("SELECT * FROM tasks ORDER BY id").all();
     const before = all(old);
     old.close();
 
@@ -119,7 +135,19 @@ describe("archive.sqlite", () => {
     expect(rows<{ user_version: number }>("PRAGMA user_version")[0]?.user_version).toBe(ARCHIVE_SCHEMA_VERSION);
     const after = new Database(path, { readonly: true });
     try {
-      expect(all(after)).toEqual(before);
+      const upgraded = all(after);
+      // Every column of every row as it was, but the successor's raw account id, which is now the placeholder.
+      expect(upgraded.map(({ record: _r, ...rest }) => rest)).toEqual(before.map(({ record: _r, ...rest }) => rest));
+      const records = new Map(upgraded.map((row) => [row.id, row.record]));
+      for (const row of before) {
+        if (row.id !== "t-succ") expect(records.get(row.id)).toBe(row.record);
+      }
+      const record = records.get("t-succ") ?? "";
+      expect(record).not.toContain(RAW_ACCOUNT);
+      expect(JSON.parse(record)).toEqual({
+        ...successor,
+        spec: { ...successor.spec, succeeds: { ...successor.spec.succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } },
+      });
     } finally {
       after.close();
     }
@@ -131,7 +159,7 @@ describe("archive.sqlite", () => {
     const superseded = taskRow(task({ id: "t-passed", state: "superseded" }), 2, context);
     if (superseded === null) throw new Error("superseded refused");
     expect(archive.upsertTask(superseded, 400)).toBe(true);
-    expect(archive.counts().tasks.rows).toBe(3);
+    expect(archive.counts().tasks.rows).toBe(5);
   });
 
   test("refuses a file at a schema newer than this build", async () => {
@@ -179,6 +207,30 @@ describe("task rows", () => {
       undefined,
     );
     expect(row).toMatchObject({ repo: "seance", title: "Do the thing", deviceId: "dev-a", prState: "open" });
+  });
+
+  test("a successor keeps its lineage but not its predecessor's raw account id, and still parses as a task", () => {
+    const succeeds = {
+      task: "t-0",
+      account: RAW_ACCOUNT,
+      at: { deviceId: "dev-z", exclave: "default", clone: "seance" },
+      trigger: "quota" as const,
+      since: 500,
+    };
+    const successor = task({
+      id: "t-next",
+      state: "superseded",
+      successor: "t-after",
+      spec: { ...task().spec, pin: undefined, succeeds },
+    });
+    const row = taskRow(successor, 2, context);
+    if (row === null) throw new Error("superseded refused");
+    expect(row.record).not.toContain(RAW_ACCOUNT);
+    expect(archive.upsertTask(row, 10)).toBe(true);
+    const [stored] = archive.queryTasks({ outcome: "superseded" }, 10).rows;
+    const parsed = parseTask(JSON.parse(stored?.record ?? "null"));
+    expect(parsed?.spec.succeeds).toEqual({ ...succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT });
+    expect(parsed?.successor).toBe("t-after");
   });
 
   test("a record not in a finished state still loses its prompt and attachment manifest", () => {

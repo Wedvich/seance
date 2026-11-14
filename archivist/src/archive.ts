@@ -130,6 +130,14 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
       ALTER TABLE tasks_v2 RENAME TO tasks;
       CREATE INDEX tasks_created ON tasks (created_at);
     `);
+    // A successor's `succeeds.account` is a raw account id, which schema 1 kept (A15): rewritten to the placeholder
+    // `archivedTask` now writes, as a literal here so this entry stays frozen. A record that is not JSON (a hand edit)
+    // is left alone rather than failing the open: `CASE` keeps the JSON functions off it.
+    db.exec(`
+      UPDATE tasks SET record = json_set(record, '$.spec.succeeds.account', '-')
+      WHERE (CASE WHEN json_valid(record) THEN json_type(record, '$.spec.succeeds.account') END) IS NOT NULL
+        AND (CASE WHEN json_valid(record) THEN json_extract(record, '$.spec.succeeds.account') END) IS NOT '-';
+    `);
   },
 ];
 
@@ -163,15 +171,23 @@ export interface TaskContext {
 
 /**
  * A task as the archive may hold it: `forgetPrompt` (prompt and attachment
- * manifest gone, A14), and the two fields that carry a raw account id
- * (`spec.pin.account`, `spillAlert`) dropped, since the archive names an
- * account only by its store key (A15). Also gone is everything the daemon or
+ * manifest gone, A14), and the fields that carry a raw account id
+ * (`spec.pin.account`, `spillAlert`) dropped, and `spec.succeeds.account`
+ * replaced by `ARCHIVED_SUCCEEDS_ACCOUNT`, since the archive names an account
+ * only by its store key (A15). Also gone is everything the daemon or
  * the router derives from prompt text, which the store prunes and the archive
  * would keep for good: `assignment.window` and `branch` (a title-less task's
  * slug is the prompt's first words), `failure.message` (a daemon's text, which
  * may name the worktree) and `decision` (a `skill_absent` reason carries a
  * `/skill` read off the prompt). `failure.code` and the placement stay.
  */
+/**
+ * What an archived successor's `succeeds.account` reads instead of the predecessor's raw account id. Kept, not
+ * dropped, so the record still parses as a successor; never a real `org:account` id. Migration 2 writes the same
+ * text as a literal.
+ */
+export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
+
 export function archivedTask(task: Task): Task {
   const {
     spillAlert: _spill,
@@ -183,11 +199,15 @@ export function archivedTask(task: Task): Task {
     ...rest
   } = forgetPrompt(task);
   // Dropped again whatever the phase: `forgetPrompt` leaves an unfinished record's spec whole, and a stored row's JSON is not held to its `state` column.
-  const { pin, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
+  const { pin, succeeds, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
   const deviceId = pin?.deviceId;
   return {
     ...rest,
-    spec: { ...specRest, ...(deviceId === undefined ? {} : { pin: { deviceId } }) },
+    spec: {
+      ...specRest,
+      ...(deviceId === undefined ? {} : { pin: { deviceId } }),
+      ...(succeeds === undefined ? {} : { succeeds: { ...succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } }),
+    },
     ...(assignment === undefined ? {} : { assignment: withoutWindow(assignment) }),
     ...(failure === undefined ? {} : { failure: { ...failure, message: "" } }),
   };
