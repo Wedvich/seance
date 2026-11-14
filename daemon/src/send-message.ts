@@ -38,8 +38,11 @@ export interface SendMessageResult {
   readonly id?: string;
 }
 
-/** What the caller found out about routing: whether the verified leader can take a message for another machine. */
-export type RouteGate = () => Promise<{ readonly ok: true } | { readonly ok: false; readonly text: string }>;
+/**
+ * What the caller found out about routing: whether the verified leader can take a message for another machine (`route`)
+ * or a reply by handle for one (`reply`: a leader that predates it would drop the reply's `replyTo` unseen).
+ */
+export type RouteGate = (need: "route" | "reply") => Promise<{ readonly ok: true } | { readonly ok: false; readonly text: string }>;
 
 export interface SendMessageOpts {
   /** The local op socket; this machine's by default. */
@@ -52,6 +55,18 @@ export interface SendMessageOpts {
 }
 
 const GRACE_SECONDS = LISTENER_GRACE_MS / 1_000;
+
+/** The answers that read differently for a reply, which names a message, not a task. */
+const REFUSED_REPLY = {
+  unknown: (id) =>
+    `no message ${id} reached this session in the last hour, or the session that sent it is gone; reply by task id if it had one`,
+  ended: (id) => `the session that sent message ${id} is gone, so nothing was sent`,
+  invalid: () =>
+    "this machine's daemon could not read the reply; it may predate replies by message id (`seanced update`), and nothing was sent",
+  held: (id) => `the session that sent message ${id} is not reachable yet; nothing was kept — send again in a little while`,
+  remote: (id) =>
+    `the session that sent message ${id} is on another machine, and this caller cannot route through the scheduler; nothing was sent`,
+} as const satisfies Partial<Record<MessageReplyCode, (id: string) => string>>;
 
 const REFUSED = {
   unbound: () =>
@@ -74,16 +89,16 @@ const REFUSED = {
   no_leader: () => "this machine's daemon could not reach a scheduler leader, so nothing was sent",
 } as const satisfies Record<MessageReplyCode, (to: string) => string>;
 
-const NO_LISTENER = (to: string): string =>
-  `task ${to}'s session has no inbox listener: its Claude account lacks the inbox mod (\`seanced mod install\` on that machine) or the session started before it was installed`;
+const NO_LISTENER = (who: string): string =>
+  `${who}'s session has no inbox listener: its Claude account lacks the inbox mod (\`seanced mod install\` on that machine) or the session started before it was installed`;
 
 const TOO_LONG_ROUTE = `too long to send to another machine: at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped`;
 
-const SENT = (to: string, id: string): string =>
-  `held for task ${to} until its session's inbox listener connects (up to ${GRACE_SECONDS} s); if it never does — e.g. that Claude account lacks the inbox mod — the message is dropped unseen. Message id ${id}`;
+const SENT = (who: string, id: string): string =>
+  `held for ${who} until its session's inbox listener connects (up to ${GRACE_SECONDS} s); if it never does — e.g. that Claude account lacks the inbox mod — the message is dropped unseen. Message id ${id}`;
 
-const ROUTED = (to: string, id: string, receipt: boolean): string =>
-  `sent through the scheduler to task ${to} as message ${id}; ${
+const ROUTED = (who: string, id: string, receipt: boolean): string =>
+  `sent through the scheduler to ${who} as message ${id}; ${
     receipt
       ? "a receipt note saying whether it was delivered follows in your conversation; a receipt is a courtesy, so without one whether it landed is unknown, and a resend may duplicate it"
       : "no receipt follows: this session has no task, so you will not be told whether it was delivered"
@@ -111,18 +126,31 @@ type Exchanged = { readonly reply: MessageReply } | { readonly failed: SendMessa
 
 export async function sendMessage(
   message: {
-    readonly to: string;
+    /** The receiving task; left out to answer a message you received, by the `inReplyTo` handle alone. */
+    readonly to?: string;
     readonly kind: MessageKind;
     readonly text: string;
     readonly inReplyTo?: string;
   },
   opts: SendMessageOpts = {},
 ): Promise<SendMessageResult> {
-  const { to, kind, text, inReplyTo } = message;
-  if (!isTaskId(to)) return { ok: false, text: "`to` is not a task id (get_queue lists them)" };
+  const { kind, text, inReplyTo } = message;
   if (inReplyTo !== undefined && !isMessageId(inReplyTo)) {
     return { ok: false, text: "`inReplyTo` is not a message id: it is the id a message you received names" };
   }
+  // A message id given as `to` is the handle again: a model that fills the field with what it was told to answer.
+  const to = message.to === inReplyTo ? undefined : message.to;
+  if (to === undefined && inReplyTo === undefined) {
+    return { ok: false, text: "give `to` (a task id; get_queue lists them), or `inReplyTo` to answer a message you received" };
+  }
+  if (to !== undefined && !isTaskId(to)) return { ok: false, text: "`to` is not a task id (get_queue lists them)" };
+  const who = to === undefined ? `the session that sent message ${inReplyTo}` : `task ${to}`;
+  const replyWords: Partial<Record<MessageReplyCode, (id: string) => string>> = REFUSED_REPLY;
+  const refusal = (code: MessageReplyCode): string => {
+    if (to !== undefined) return REFUSED[code](to);
+    const id = inReplyTo ?? "";
+    return (replyWords[code] ?? REFUSED[code])(id);
+  };
   const bytes = Buffer.byteLength(text, "utf8");
   if (bytes > MESSAGE_MAX || (kind === "request" && bytes > MESSAGE_PUSH_MAX)) {
     return { ok: false, text: REFUSED.too_long() };
@@ -136,7 +164,7 @@ export async function sendMessage(
         {
           v: MESSAGE_FRAME_VERSION,
           kind: MESSAGE_FRAME_KIND,
-          to,
+          ...(to === undefined ? {} : { to }),
           messageKind: kind,
           text,
           ...(inReplyTo === undefined ? {} : { inReplyTo }),
@@ -169,8 +197,9 @@ export async function sendMessage(
   const { routeGate } = opts;
   let first = await exchangeFrame(routeGate === undefined ? undefined : "ask");
   let fellBack = false;
-  // A daemon that predates routing rejects the unknown `route` key and delivered nothing: ask once more without it.
-  if (routeGate !== undefined && "reply" in first && !first.reply.ok && first.reply.code === "invalid") {
+  // A daemon that predates routing rejects the unknown `route` key and delivered nothing: ask once more without it. A
+  // reply has no such daemon to fall back to: one that predates routing predates replies, and rejects the missing `to`.
+  if (to !== undefined && routeGate !== undefined && "reply" in first && !first.reply.ok && first.reply.code === "invalid") {
     first = await exchangeFrame(undefined);
     fellBack = true;
   }
@@ -178,10 +207,10 @@ export async function sendMessage(
   let { reply } = first;
 
   if (!reply.ok && reply.code === "remote") {
-    if (routeGate === undefined) return { ok: false, text: REFUSED.remote(to) };
+    if (routeGate === undefined) return { ok: false, text: refusal("remote") };
     let gate: Awaited<ReturnType<RouteGate>>;
     try {
-      gate = await routeGate();
+      gate = await routeGate(to === undefined ? "reply" : "route");
     } catch (err) {
       return { ok: false, text: err instanceof Error ? err.message : String(err) };
     }
@@ -192,16 +221,15 @@ export async function sendMessage(
   }
 
   if (!reply.ok) {
-    if (reply.reason === "nolistener") return { ok: false, text: NO_LISTENER(to) };
+    if (reply.reason === "nolistener") return { ok: false, text: NO_LISTENER(who) };
     if (reply.reason === "route" && reply.code === "too_long") return { ok: false, text: TOO_LONG_ROUTE };
     // That daemon cannot route, so a task it does not hold is not "unknown" or "ended" for want of a route asked.
-    if (fellBack && (reply.code === "unknown" || reply.code === "ended")) {
+    if (fellBack && to !== undefined && (reply.code === "unknown" || reply.code === "ended")) {
       return { ok: false, text: PREDATES_ROUTING(to) };
     }
-    return { ok: false, text: REFUSED[reply.code](to) };
+    return { ok: false, text: refusal(reply.code) };
   }
-  if (reply.outcome === "routed")
-    return { ok: true, id: reply.id, text: ROUTED(to, reply.id, reply.receipt !== false) };
-  const delivered = `delivered to task ${to} as message ${reply.id}`;
-  return { ok: true, id: reply.id, text: reply.outcome === "delivered" ? delivered : SENT(to, reply.id) };
+  if (reply.outcome === "routed") return { ok: true, id: reply.id, text: ROUTED(who, reply.id, reply.receipt !== false) };
+  const delivered = `delivered to ${who} as message ${reply.id}`;
+  return { ok: true, id: reply.id, text: reply.outcome === "delivered" ? delivered : SENT(who, reply.id) };
 }

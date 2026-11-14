@@ -54,6 +54,7 @@ import {
   type DeliverMessageResponse,
   type MessageReceiptRequest,
   type MessageReceiptResponse,
+  type ReplyHandle,
   type SessionMessage,
   PUSH_BRANCH_ERROR_CODES,
   PUSH_ENDPOINT_MAX_LENGTH,
@@ -2469,22 +2470,50 @@ function parseRoutedBody(value: Readonly<Record<string, unknown>>): {
   };
 }
 
-/** `session-message`, at the leader: a daemon's, so skew and bug hygiene plus the bounds the forward must fit. */
-export function parseSessionMessage(value: unknown): SessionMessage | null {
-  if (!isRecord(value) || !isTaskId(value["to"])) return null;
-  const body = parseRoutedBody(value);
-  return body === null ? null : { ...body, to: value["to"] };
+/** A reply handle's machine: a routing id, which is what the leader looks up in its registry. */
+function parseReplyHandle(value: unknown): ReplyHandle | null {
+  if (!isRecord(value)) return null;
+  const { id, deviceId } = value;
+  if (!isMessageId(id)) return null;
+  if (typeof deviceId !== "string" || deviceId === "" || deviceId.length > ROUTING_ID_MAX_LENGTH) return null;
+  return { id, deviceId };
 }
 
-/** `deliver-message`, at the daemon holding the resolved task. `settled` is kept only as `true`. */
-export function parseDeliverMessageRequest(value: unknown): DeliverMessageRequest | null {
+/**
+ * `session-message`, at the leader: a daemon's, so skew and bug hygiene plus the bounds the forward must fit. Exactly one
+ * of `to` (a task) and `replyTo` (a handle): both would name two addresses, neither none.
+ */
+export function parseSessionMessage(value: unknown): SessionMessage | null {
   if (!isRecord(value)) return null;
-  const { taskId, addressed, fromMachine, settled } = value;
-  if (!isTaskId(taskId) || !isTaskId(addressed)) return null;
-  if (typeof fromMachine !== "string" || fromMachine === "" || fromMachine.length > ROUTING_ID_MAX_LENGTH) return null;
+  const { to, replyTo } = value;
+  if ((to === undefined) === (replyTo === undefined)) return null;
   const body = parseRoutedBody(value);
   if (body === null) return null;
-  return { ...body, taskId, addressed, fromMachine, ...(settled === true ? { settled: true as const } : {}) };
+  if (to !== undefined) return isTaskId(to) ? { ...body, to } : null;
+  const handle = parseReplyHandle(replyTo);
+  return handle === null ? null : { ...body, replyTo: handle };
+}
+
+/**
+ * `deliver-message`, at the daemon holding the resolved task: `taskId` with `addressed`, or `replyTo`, never both.
+ * `settled` is kept only as `true` and only beside a task, `origin` only as a routing id.
+ */
+export function parseDeliverMessageRequest(value: unknown): DeliverMessageRequest | null {
+  if (!isRecord(value)) return null;
+  const { taskId, addressed, replyTo, fromMachine, settled, origin } = value;
+  if (typeof fromMachine !== "string" || fromMachine === "" || fromMachine.length > ROUTING_ID_MAX_LENGTH) return null;
+  if (origin !== undefined && (typeof origin !== "string" || origin === "" || origin.length > ROUTING_ID_MAX_LENGTH)) {
+    return null;
+  }
+  const body = parseRoutedBody(value);
+  if (body === null) return null;
+  const common = { ...body, fromMachine, ...(origin === undefined ? {} : { origin }) };
+  if (replyTo !== undefined) {
+    if (taskId !== undefined || addressed !== undefined || !isMessageId(replyTo)) return null;
+    return { ...common, replyTo };
+  }
+  if (!isTaskId(taskId) || !isTaskId(addressed)) return null;
+  return { ...common, taskId, addressed, ...(settled === true ? { settled: true as const } : {}) };
 }
 
 /** A `deliver-message` answer at the leader: an outcome it knows, or a failure it words as `unsupported`. */
@@ -2508,15 +2537,16 @@ export function parseMessageReceiptRequest(value: unknown): MessageReceiptReques
   const { id, to, taskId, kind: rawKind, outcome: rawOutcome, reason, fromTask } = value;
   const kind = MESSAGE_KINDS.find((k) => k === rawKind);
   const outcome = RECEIPT_OUTCOMES.find((o) => o === rawOutcome);
-  if (!isMessageId(id) || !isTaskId(to) || kind === undefined || outcome === undefined) return null;
+  if (!isMessageId(id) || kind === undefined || outcome === undefined) return null;
+  if (to !== undefined && !isTaskId(to)) return null;
   if (taskId !== undefined && !isTaskId(taskId)) return null;
   if (fromTask !== undefined && !isTaskId(fromTask)) return null;
   if (reason !== undefined && reason !== "nolistener") return null;
   return {
     id,
-    to,
     kind,
     outcome,
+    ...(to === undefined ? {} : { to }),
     ...(taskId === undefined ? {} : { taskId }),
     ...(reason === undefined ? {} : { reason }),
     ...(fromTask === undefined ? {} : { fromTask }),

@@ -1,14 +1,15 @@
 # Session messaging — spec
 
-**Status: PR 1 (local delivery) built 2026-11-13 and PR 2 (cross-machine) built 2026-11-14; PR 3
-(adapter seam) not built.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
+**Status: PR 1 (local delivery) built 2026-11-13, PR 2 (cross-machine) and the reply by handle (D3, amended)
+built 2026-11-14; PR 3 (adapter seam) not built.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
 Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
 macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
 pre-PR 1 checks on Linux and on macOS (`origin/worktree-messaging-spike-2-macos`, `spike/REPORT-macos-2.md`). Like docs/drain.md,
 this file is the working record until the code lands; each part folds into DESIGN.md as it is built,
 and its text here goes. PR 1's and PR 2's record is in DESIGN.md: Local op socket, "Session messages"
 (the frames, the daemon's inbox, the outcomes, the wrappers, the audit) and its "Cross-machine"
-subsection (the gate, the leader's resolve, forward and receipt, the size budget, the skew table),
+subsection (the gate, the leader's resolve, forward and receipt, the size budget, the skew table) and its
+"Replies by handle" subsection (the two tables, the `claude`-process binding, `wake`, `messageReply`),
 Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. What stays
 here is the evidence, PR 3, and the open questions.
 
@@ -125,9 +126,19 @@ leader (DESIGN.md, "Cross-machine"). The audit gained `dir=receipt`.
 - **D1. Cross-machine goes through the leader** (§3).
 - **D2. A target that is offline or asleep: drop, and answer `offline`.** Nothing is held anywhere
   (§3).
-- **D3. Sessions without a task are out of v1.** The task id is the only address (§2). Built.
+- **D3 (amended 2026-11-14). A session without a task is reached only as a reply, by the id of a message it
+  sent.** It was "Sessions without a task are out of v1; the task id is the only address (§2)". The owner's
+  2026-11-14 smoke test had a hand-started session ask a task a question, and the task had no way to answer. A
+  reply names the message it answers (`inReplyTo`, no `to`); the daemon that minted the id knows which session
+  asked, and answers only to the pane, pid, task and **`claude` process** that did, for an hour. A task id stays the
+  only address for anything that is not a reply. Built: DESIGN.md, "Session messages", "Replies by handle".
+  **Rejected**, each in §2's list: machine + pane id as a general address; a synthetic task id or queue entry for a
+  hand-started session; a leader-held reply table; the Claude session id; replies on one machine only.
 - **D4. Wake by kind.** A question or request wakes an idle session; a note does not (§1). Built: a note is a
   `$.session.append` row, added at once and read within a running turn too, which does not wake an idle session.
+  **Extended 2026-11-14 (`wake`):** a note that answers a question or request the receiving session itself sent
+  does wake it, since an idle asker would never read it otherwise. The daemon decides from its own `sent` table and
+  marks the inbox line; the mod then uses `$.prompt.submit`. Nothing else about a note changed.
 
 ## Decisions
 
@@ -141,7 +152,9 @@ The spike's three checks are in the Evidence table above.
 
 ### 2. Addressing: the task id, following its chain
 
-**The task id is the only address** (D3). It is the only handle stable across panes: tmux reuses
+**The task id is the only address for a message that is not a reply** (D3, amended 2026-11-14: a reply to a session
+with no task is addressed by the id of the message it answers, "Replies by handle" in DESIGN.md). It is the only
+handle stable across panes: tmux reuses
 pane ids, a session can be resumed in another pane, and a window name is display-only (DESIGN.md,
 "Claude Code mods": "nothing routes, binds or places on the window").
 
@@ -170,8 +183,17 @@ the leader is asked only for what the sender's own daemon cannot deliver. Anythi
 
 Rejected:
 
-- **Machine + pane id** (D3). A reused pane id delivers to a stranger. A hand-started session has
-  no task, nothing to resolve a chain through, and no placement the leader knows.
+- **Machine + pane id** (D3), as a general address. A reused pane id delivers to a stranger. A hand-started
+  session has no task, nothing to resolve a chain through, and no placement the leader knows. (A pane id is
+  still part of a reply's binding, beside the pid, the task and the `claude` process, and is never an address a
+  frame supplies.)
+- **A synthetic task id, or a queue entry, for a hand-started session** (D3). It would put a session Séance never
+  spawned into the leader's record and the Queue screen, with a lifecycle nothing ends, and hand it the chain
+  resolution, `continues` and the reaper, none of which apply.
+- **A leader-held reply table** (D3). The leader would keep a map of who talked to whom, a mailbox's worth of
+  metadata, to answer what the asker's own daemon already can: it minted the id.
+- **Replies on one machine only** (D3). The smoke test that raised this was cross-machine, and asking a task on
+  another machine is the common case.
 - **The Claude session id.** It is stable across `--resume`, but it is the daemon's own choice
   (`--session-id`), recorded only in the launch ledger of the machine that ran it. It is not in the
   queue, so a sender could learn it only by asking that machine, and it is the very id the
@@ -280,6 +302,16 @@ Small PRs, each landing on its own:
    - Tested by: daemon tests with a `scriptStub` adapter (`daemon/test/fixtures.ts`), covering
      delivery by `when` and `wake`, refusals, restart, and stop with the daemon.
 
+**Replies by handle (D3, amended). Built 2026-11-14; the record is DESIGN.md, "Replies by handle".**
+`inReplyTo` with no `to`, the `sent` and `received` tables, the `claude`-process binding, `wake`,
+`CAPABILITIES.messageReply`, `replyTo` and `origin` on the routed ops.
+
+- Tested by: `daemon/test/messages.test.ts` with real peers, including the restart that matters most (a second
+  `claude` stub under the same shell pid must not read the first's replies or answer its questions); leader tests
+  for forwarding by `replyTo` and the `messageReply` gate; the mod's test for `wake`; and an e2e test
+  (`e2e/messages.test.ts`) where a session with no task asks a task on the other machine and is answered by id, with
+  a wake, and answers back.
+
 ## Threat model
 
 PR 1's part is built and recorded in DESIGN.md (Threat model item 6; Local op socket, "Session
@@ -301,6 +333,10 @@ model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will a
 - **Traits are declared only in the machine's own `config.json`; probes run only that argv.**
   Adapters follow the same rule (§6).
 - **Nothing reachable from `seanced mcp` calls `log.ts`.** PR 2 adds no `seanced mcp` code that logs.
+- **A reply handle is a bearer, so it is bound.** A message id is `crypto.randomUUID`, unguessable and in no log or
+  audit line. The replier's daemon accepts it only from the pane, pid, task and `claude` process the message was placed
+  for, and the asker's daemon delivers only to the pane, pid, task and process that sent it while it runs; the leader
+  keeps no table. Built (DESIGN.md, Threat model item 6).
 
 ## Open questions
 

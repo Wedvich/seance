@@ -88,8 +88,6 @@ const settled = (h: Harness, receipts: number): Promise<void> =>
 const warned = (h: Harness, lines: number): Promise<void> =>
   pollUntil(() => h.warnings.length >= lines, `${lines} warn line(s)`);
 
-const forwarded = (h: Harness): Promise<void> => pollUntil(() => h.delivered.length > 0, "a forward");
-
 describe("createMessageRouter", () => {
   test("forwards to a connected machine advertising routing, then sends the receipt to the sealer", async () => {
     const h = harness({
@@ -111,6 +109,7 @@ describe("createMessageRouter", () => {
           kind: "note",
           text: SECRET,
           fromMachine: "MsgBox",
+          origin: SENDER,
           inReplyTo: ID,
           fromTask: FROM_TASK,
           fromTitle: SECRET_TITLE,
@@ -246,16 +245,17 @@ describe("createMessageRouter", () => {
     }
   });
 
-  test("an untasked sender is forwarded and gets no receipt", async () => {
+  test("an untasked sender is forwarded and gets a receipt naming no task: its own daemon's sent table finds the pane", async () => {
     const h = harness();
     const { fromTask: _task, fromTitle: _title, ...untasked } = message;
     expect(h.router.onSessionMessage(untasked, SENDER)).toBe(true);
-    await forwarded(h);
-    await idle();
+    await settled(h, 1);
     expect(h.delivered).toHaveLength(1);
     expect(h.delivered[0]?.request).not.toHaveProperty("fromTask");
     expect(h.delivered[0]?.request).not.toHaveProperty("fromTitle");
-    expect(h.receipts).toEqual([]);
+    expect(h.receipts).toEqual([
+      { deviceId: SENDER, request: { id: ID, to: TO, kind: "note", outcome: "delivered", taskId: RESOLVED } },
+    ]);
   });
 
   test("a fromTask placed on another machine is dropped: no deliver, no receipt, one line", async () => {
@@ -319,6 +319,104 @@ describe("createMessageRouter", () => {
     expect(thrown.router.onSessionMessage(message, SENDER)).toBe(true);
     await warned(thrown, 1);
     expect(thrown.warnings[0]).toContain("failed");
+  });
+
+  describe("a reply by handle", () => {
+    const HANDLE_ID = "0b9d7a54-3c1e-4f6a-8a21-7d5e9c4b1f02";
+    const { to: _to, ...base } = message;
+    const reply: SessionMessage = { ...base, replyTo: { id: HANDLE_ID, deviceId: TARGET } };
+    const REPLYING = [...ROUTING, CAPABILITIES.messageReply];
+    const machines = (target: readonly string[]): Machine[] => [
+      machine({ deviceId: SENDER, name: "MsgBox", capabilities: REPLYING }),
+      machine({ deviceId: TARGET, name: "Target", capabilities: target }),
+    ];
+
+    test("is forwarded to the machine the handle names, resolving nothing, carrying its origin and no task address", async () => {
+      let resolved = 0;
+      const h = harness({
+        machines: machines(REPLYING),
+        resolve: () => {
+          resolved += 1;
+          return { kind: "unknown" };
+        },
+      });
+      expect(h.router.onSessionMessage(reply, SENDER)).toBe(true);
+      await settled(h, 1);
+      expect(resolved).toBe(0);
+      expect(h.delivered).toEqual([
+        {
+          deviceId: TARGET,
+          request: {
+            id: ID,
+            kind: "note",
+            text: SECRET,
+            fromMachine: "MsgBox",
+            origin: SENDER,
+            fromTask: FROM_TASK,
+            fromTitle: SECRET_TITLE,
+            replyTo: HANDLE_ID,
+          },
+        },
+      ]);
+      // The receipt names the reply by its id and no task, and the sealer's own daemon finds the pane or the task.
+      expect(h.receipts).toEqual([
+        { deviceId: SENDER, request: { id: ID, kind: "note", outcome: "delivered", fromTask: FROM_TASK } },
+      ]);
+    });
+
+    test("a target that routes messages but predates replies is unsupported, never forwarded", async () => {
+      const h = harness({ machines: machines(ROUTING) });
+      h.router.onSessionMessage(reply, SENDER);
+      await settled(h, 1);
+      expect(h.delivered).toEqual([]);
+      expect(h.receipts[0]?.request.outcome).toBe("unsupported");
+    });
+
+    test("an offline or unregistered target is offline, and the target's own answer is passed on", async () => {
+      const off = harness({ machines: [machine({ deviceId: SENDER, name: "MsgBox", capabilities: REPLYING })] });
+      off.router.onSessionMessage(reply, SENDER);
+      await settled(off, 1);
+      expect(off.receipts[0]?.request.outcome).toBe("offline");
+      const ended = harness({
+        machines: machines(REPLYING),
+        deliver: () => Promise.resolve({ ok: true, outcome: "ended" }),
+      });
+      ended.router.onSessionMessage(reply, SENDER);
+      await settled(ended, 1);
+      expect(ended.receipts[0]?.request.outcome).toBe("ended");
+    });
+
+    test("an untasked sender is forwarded without a task and its receipt names none", async () => {
+      const h = harness({ machines: machines(REPLYING) });
+      const { fromTask: _task, fromTitle: _title, ...untasked } = reply;
+      h.router.onSessionMessage(untasked, SENDER);
+      await settled(h, 1);
+      expect(h.delivered[0]?.request).not.toHaveProperty("fromTask");
+      expect(h.receipts[0]?.request).toEqual({ id: ID, kind: "note", outcome: "delivered" });
+    });
+
+    test("a reply whose sending task is placed elsewhere is dropped like any message", async () => {
+      const h = harness({ machines: machines(REPLYING), sentFrom: () => "elsewhere" });
+      expect(h.router.onSessionMessage(reply, SENDER)).toBe(false);
+      expect(h.warnings).toHaveLength(1);
+      await idle();
+      expect(h.delivered).toEqual([]);
+      expect(h.receipts).toEqual([]);
+    });
+
+    test("a warn line for a refused reply carries neither the text, the handle nor the message id", async () => {
+      const h = harness({
+        machines: machines(REPLYING),
+        deliver: () => Promise.resolve({ ok: false, code: "unsupported", message: SECRET }),
+      });
+      h.router.onSessionMessage(reply, SENDER);
+      await warned(h, 1);
+      for (const line of h.warnings) {
+        expect(line).not.toContain(SECRET);
+        expect(line).not.toContain(HANDLE_ID);
+        expect(line).not.toContain(ID);
+      }
+    });
   });
 
   test("no warn line carries the text or the sender's title", async () => {

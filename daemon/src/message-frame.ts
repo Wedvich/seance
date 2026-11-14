@@ -60,7 +60,10 @@ export type MessageReply =
  */
 export const INBOX_REFUSAL_CODES = ["invalid", "unbound", "unsupported", "stopping", "untasked"] as const;
 
-/** The first line a listener reads. Only a pane carrying a task this machine launched is acked: nothing is addressed to any other. */
+/**
+ * The first line a listener reads. Every bound pane is acked, an untasked one included (it can be answered by handle);
+ * `untasked` stays in the codes for a daemon that predates replies and still refuses such a pane.
+ */
 export type InboxAck =
   | {
       readonly ok: true;
@@ -78,6 +81,11 @@ export interface InboxLine {
   readonly messageKind: MessageKind;
   readonly push: string;
   readonly body?: string;
+  /**
+   * Set only by the daemon, from its own `sent` table: this line answers a question or request the receiving session
+   * itself sent, so the mod submits it even when it is a note. Never a frame field, so no sender can ask for it.
+   */
+  readonly wake?: true;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as session events are. */
@@ -98,7 +106,8 @@ export const MESSAGE_ROUTES = ["ask", "send"] as const;
 export type MessageFrameRoute = (typeof MESSAGE_ROUTES)[number];
 
 export interface MessageFrame {
-  readonly to: string;
+  /** Absent for a reply by handle: `inReplyTo` names the message answered and the daemon's own table says where it goes. */
+  readonly to?: string;
   readonly messageKind: MessageKind;
   readonly text: string;
   readonly inReplyTo?: string;
@@ -113,7 +122,9 @@ export function parseMessageFrame(raw: unknown): MessageFrame | null {
   if (Object.keys(raw).some((key) => !MESSAGE_FIELDS.has(key))) return null;
   if (raw["v"] !== MESSAGE_FRAME_VERSION || raw["kind"] !== MESSAGE_FRAME_KIND) return null;
   const { to, messageKind, text, inReplyTo, route: rawRoute } = raw;
-  if (!isTaskId(to)) return null;
+  // A handle is an address in its own right, so `to` may be left out only where `inReplyTo` stands in for it.
+  const address = to === undefined ? undefined : isTaskId(to) ? to : null;
+  if (address === null || (address === undefined && inReplyTo === undefined)) return null;
   const kind = MESSAGE_KINDS.find((k) => k === messageKind);
   if (kind === undefined) return null;
   if (typeof text !== "string" || text === "") return null;
@@ -121,7 +132,7 @@ export function parseMessageFrame(raw: unknown): MessageFrame | null {
   const route = MESSAGE_ROUTES.find((r) => r === rawRoute);
   if (rawRoute !== undefined && route === undefined) return null;
   return {
-    to,
+    ...(address === undefined ? {} : { to: address }),
     messageKind: kind,
     text,
     ...(inReplyTo === undefined ? {} : { inReplyTo }),

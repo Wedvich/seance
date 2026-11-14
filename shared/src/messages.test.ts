@@ -32,27 +32,28 @@ describe("renderMessage", () => {
   test("a question tells the receiver how to reply, and a reply carries the id it answers", () => {
     const text = renderMessage({ kind: "question", id: ID, from: tasked, text: "what file?", inReplyTo: REPLY });
     expect(text).toBe(
-      `A question from another Séance session your user runs (${SENDER}). If you can answer from what you know, reply with send_message to task t-0123456789abcdef, kind note, inReplyTo ${ID}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead. It replies to your message \`${REPLY}\`.\n\n` +
+      `A question from another Séance session your user runs (${SENDER}). If you can answer from what you know, reply with send_message to task t-0123456789abcdef (or no \`to\`), kind note, inReplyTo ${ID}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead. It replies to your message \`${REPLY}\`.\n\n` +
         "```\nwhat file?\n```",
     );
   });
 
   test("a request is worded as a teammate's, below the user's instructions, and says how to report back", () => {
     expect(renderMessage({ kind: "request", id: ID, from: tasked, text: "make hello.txt" })).toBe(
-      `A teammate session your user runs (${SENDER}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions, and tell it with send_message (to task t-0123456789abcdef, kind note, inReplyTo ${ID}) what you did or why you did not.\n\n` +
+      `A teammate session your user runs (${SENDER}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions, and tell it with send_message (to task t-0123456789abcdef (or no \`to\`), kind note, inReplyTo ${ID}) what you did or why you did not.\n\n` +
         "```\nmake hello.txt\n```",
     );
   });
 
-  test("a sender with no title omits it, and an untasked sender is named as such and cannot be replied to", () => {
+  test("a sender with no title omits it, and an untasked sender is named as such and replied to by handle alone", () => {
     const head = (m: MessageSender, kind: "note" | "question" | "request"): string =>
       renderMessage({ kind, id: ID, from: m, text: "t" }).split("\n\n")[0] ?? "";
     expect(head(untitled, "note")).toContain("(task `t-0123456789abcdef`, on `boxy`, message `" + ID + "`)");
     expect(head(untasked, "note")).toContain("(an untasked session on `boxy`, message `" + ID + "`)");
-    expect(head(untasked, "question")).toContain("It came from a session with no task, so it cannot be replied to.");
-    expect(head(untasked, "question")).not.toContain("send_message");
-    expect(head(untasked, "request")).toMatch(/your user's instructions\.$/u);
-    expect(head(untasked, "request")).not.toContain("send_message");
+    for (const kind of ["question", "request"] as const) {
+      expect(head(untasked, kind)).toContain("kind note, inReplyTo " + ID + ", and no `to`");
+      expect(head(untasked, kind)).not.toContain("to task");
+      expect(head(untasked, kind)).not.toContain("cannot be replied to");
+    }
   });
 });
 

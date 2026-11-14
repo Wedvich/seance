@@ -147,11 +147,25 @@ const MAX_DEPTH = 32;
  * fixed-argv `ps` lists every parent at once. Nothing a peer sent reaches any.
  */
 export async function ancestorIn<T>(pid: number, targets: ReadonlyMap<number, T>): Promise<T | null> {
+  return (await ancestorBelow(pid, targets))?.hit ?? null;
+}
+
+/**
+ * `ancestorIn` plus the hop before the hit: the target's direct child on the peer's chain, null when the peer is the
+ * target itself. Messaging binds a reply handle to it, since a hand-started session's pane process is the shell, which
+ * outlives the `claude` that is its child.
+ */
+export async function ancestorBelow<T>(
+  pid: number,
+  targets: ReadonlyMap<number, T>,
+): Promise<{ readonly hit: T; readonly below: number | null } | null> {
   const parentOf = await parentLookup();
   let current: number | null = pid;
+  let below: number | null = null;
   for (let depth = 0; current !== null && current > 1 && depth < MAX_DEPTH; depth++) {
     const hit = targets.get(current);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) return { hit, below };
+    below = current;
     // oxlint-disable-next-line no-await-in-loop -- each hop needs the one before it
     current = await parentOf(current);
   }

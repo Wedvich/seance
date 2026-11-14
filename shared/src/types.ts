@@ -1157,6 +1157,10 @@ export interface MachineInfo {
  * `session-message`. Advertised by every daemon (any may lead; receiving a forward needs no peer binding of its own).
  * `send_message` checks the verified leader for it before sending a message off its machine, and the leader checks the
  * target for it (with `messages`) before forwarding.
+ * `messageReply`: as a daemon, acks untasked listeners, keeps the `sent` and `received` handle tables, delivers a reply by
+ * handle (`replyTo`) and sets `wake`; as a leader, routes a `session-message` carrying `replyTo`. Advertised beside
+ * `messages` (the daemon half needs peer binding). `send_message` checks the verified leader for it before routing a
+ * reply, and the leader checks the target for it before forwarding one.
  * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian`.
  * Configured, not checked: a host that fails the sandbox or agent checks runs no round and still advertises it
  * (its `MachineStatus.cu` then says `failing`). The Machines card shows its Custodian row only for a machine that
@@ -1189,6 +1193,7 @@ export const CAPABILITIES = {
   drainAsk: "drainAsk",
   messages: "messages",
   messageRoute: "messageRoute",
+  messageReply: "messageReply",
   custodian: "custodian",
 } as const;
 
@@ -2034,14 +2039,16 @@ export type PassCloseResponse =
   | { readonly ok: false; readonly code: PassCloseErrorCode; readonly message: string };
 
 /**
- * `op: "session-message"`, a daemon → the scheduler (an event, sealed `from` the sending daemon's own device id, or the
- * leader in process): a session's message to a task that is not deliverable on its machine (DESIGN.md, "Session
- * messages", "Cross-machine"). `fromTask` is the sending pane's task as its own daemon bound it by peer pid; the leader
- * honours it only for a task placed on the sealer. `text` is the message and is never logged anywhere.
+ * A reply by handle: the id of a message the replier received and the machine whose daemon holds the asker's table.
+ * The leader forwards it on the replier's word and keeps nothing; the asker's daemon decides.
  */
-export interface SessionMessage {
+export interface ReplyHandle {
   readonly id: string;
-  readonly to: string;
+  readonly deviceId: string;
+}
+
+interface SessionMessageBase {
+  readonly id: string;
   readonly kind: MessageKind;
   readonly text: string;
   readonly fromTask?: string;
@@ -2050,23 +2057,53 @@ export interface SessionMessage {
 }
 
 /**
- * `op: "deliver-message"`, scheduler → the daemon holding the resolved task, sealed `from: SCHEDULER_ID` (or the leader
- * in process). `taskId` is the task the leader resolved; `addressed` is the id the sender named, which differs after a
- * supersede or a continuation. `settled`: the leader's record of the task is finished, so the daemon's launch grace
- * (a spawn that has not yet shown its pane) does not apply: no pane is `ended`, never `held`.
+ * `op: "session-message"`, a daemon → the scheduler (an event, sealed `from` the sending daemon's own device id, or the
+ * leader in process): a session's message to a task that is not deliverable on its machine (DESIGN.md, "Session
+ * messages", "Cross-machine"), or, with `replyTo` and no `to`, a reply to a message the sender received (forwarded to
+ * the handle's machine, nothing resolved). `fromTask` is the sending pane's task as its own daemon bound it by peer
+ * pid; the leader honours it only for a task placed on the sealer. `text` is the message and is never logged anywhere.
  */
-export interface DeliverMessageRequest {
+export type SessionMessage =
+  | (SessionMessageBase & { readonly to: string; readonly replyTo?: undefined })
+  | (SessionMessageBase & { readonly to?: undefined; readonly replyTo: ReplyHandle });
+
+interface DeliverMessageBase {
   readonly id: string;
-  readonly taskId: string;
-  readonly addressed: string;
   readonly kind: MessageKind;
   readonly text: string;
   readonly inReplyTo?: string;
   readonly fromTask?: string;
   readonly fromTitle?: string;
   readonly fromMachine: string;
-  readonly settled?: true;
+  /**
+   * The sealing daemon's device id, from the leader's AAD-bound `from` of the original: what a reply to this message
+   * names as its handle's machine. Absent from a leader that predates replies, whose messages cannot be replied to by
+   * handle.
+   */
+  readonly origin?: string;
 }
+
+/**
+ * `op: "deliver-message"`, scheduler → the daemon holding the resolved task, sealed `from: SCHEDULER_ID` (or the leader
+ * in process). `taskId` is the task the leader resolved; `addressed` is the id the sender named, which differs after a
+ * supersede or a continuation. `settled`: the leader's record of the task is finished, so the daemon's launch grace
+ * (a spawn that has not yet shown its pane) does not apply: no pane is `ended`, never `held`. A reply by handle carries
+ * `replyTo`, the id of the message it answers (which the daemon's own `sent` table must hold), and none of `taskId`,
+ * `addressed` and `settled`.
+ */
+export type DeliverMessageRequest =
+  | (DeliverMessageBase & {
+      readonly taskId: string;
+      readonly addressed: string;
+      readonly settled?: true;
+      readonly replyTo?: undefined;
+    })
+  | (DeliverMessageBase & {
+      readonly replyTo: string;
+      readonly taskId?: undefined;
+      readonly addressed?: undefined;
+      readonly settled?: undefined;
+    });
 
 export const DELIVER_OUTCOMES = ["delivered", "sent", "held", "ended", "unknown"] as const;
 
@@ -2088,12 +2125,13 @@ export type ReceiptOutcome = (typeof RECEIPT_OUTCOMES)[number];
 
 /**
  * `op: "message-receipt"`, scheduler → the sealing daemon, sealed `from: SCHEDULER_ID` (or in process): ids, kind and
- * outcome, never text. `fromTask` is optional so a receipt for an untasked sender parses on a daemon that predates the
- * one that sends it, and is dropped there.
+ * outcome, never text. `id` is the message's own, which the sealing daemon's `sent` table is keyed by: with no `fromTask`
+ * (an untasked sender) the receipt goes to the pane that table names, else it is dropped, as a daemon that predates
+ * replies always does. `to` is absent for a reply, which names no task.
  */
 export interface MessageReceiptRequest {
   readonly id: string;
-  readonly to: string;
+  readonly to?: string;
   readonly taskId?: string;
   readonly kind: MessageKind;
   readonly outcome: ReceiptOutcome;

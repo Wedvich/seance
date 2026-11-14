@@ -179,6 +179,132 @@ describe("sendMessage", () => {
     }
   });
 
+  describe("a reply by handle", () => {
+    const reply = { kind: "note", text: "it is src/a.ts", inReplyTo: MESSAGE_ID } as const;
+
+    test("sends a frame with no `to`, words the delivery for the session that sent the message, and a `to` equal to the handle is the same reply", async () => {
+      const fake = daemon("reply.sock", JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "delivered" }));
+      try {
+        const result = await sendMessage(reply, { path: fake.path });
+        expect(result.text).toBe(`delivered to the session that sent message ${MESSAGE_ID} as message ${MESSAGE_ID}`);
+        const again = await sendMessage({ ...reply, to: MESSAGE_ID }, { path: fake.path });
+        expect(again.ok).toBe(true);
+        for (const frame of fake.frames) {
+          expect(frame).toEqual({
+            v: 1,
+            kind: "message",
+            messageKind: "note",
+            text: "it is src/a.ts",
+            inReplyTo: MESSAGE_ID,
+          });
+        }
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("with neither `to` nor `inReplyTo` it is refused locally and sends nothing", async () => {
+      const fake = daemon("neither.sock", JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "delivered" }));
+      try {
+        const result = await sendMessage({ kind: "note", text: "x" }, { path: fake.path });
+        expect(result.ok).toBe(false);
+        expect(result.text).toContain("`inReplyTo`");
+        expect(fake.frames).toEqual([]);
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("unknown, ended and held are worded for a message, not for a task's launch record", async () => {
+      for (const code of ["unknown", "ended", "held"] as const) {
+        const fake = daemon(`reply-${code}.sock`, JSON.stringify({ ok: false, code }));
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- one double per code
+          const result = await sendMessage(reply, { path: fake.path });
+          expect(result.ok).toBe(false);
+          expect(result.text).toContain(`message ${MESSAGE_ID}`);
+          expect(result.text).not.toContain("launch record");
+        } finally {
+          fake.stop();
+        }
+      }
+      const unlistened = daemon(
+        "reply-nolistener.sock",
+        JSON.stringify({ ok: false, code: "ended", reason: "nolistener" }),
+      );
+      try {
+        const result = await sendMessage(reply, { path: unlistened.path });
+        expect(result.text).toContain("the session that sent message");
+        expect(result.text).toContain("has no inbox listener");
+      } finally {
+        unlistened.stop();
+      }
+    });
+
+    test("an invalid answer says the daemon may predate replies, and is never resent without the route key", async () => {
+      const fake = scripted("reply-old.sock", [JSON.stringify({ ok: false, code: "invalid" })]);
+      try {
+        const result = await sendMessage(reply, {
+          path: fake.path,
+          routeGate: () => Promise.resolve({ ok: true }),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.text).toContain("predate replies");
+        expect(result.text).toContain("`seanced update`");
+        expect(fake.frames).toHaveLength(1);
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("a handle held elsewhere asks the gate for `reply`, then resends with route send", async () => {
+      const fake = scripted("reply-remote.sock", [
+        JSON.stringify({ ok: false, code: "remote" }),
+        JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "routed" }),
+      ]);
+      const needs: string[] = [];
+      try {
+        const result = await sendMessage(reply, {
+          path: fake.path,
+          routeGate: (need) => {
+            needs.push(need);
+            return Promise.resolve({ ok: true });
+          },
+        });
+        expect(result.ok).toBe(true);
+        expect(result.text).toContain("sent through the scheduler to the session that sent message");
+        expect(needs).toEqual(["reply"]);
+        expect(fake.frames).toEqual([
+          { v: 1, kind: "message", messageKind: "note", text: "it is src/a.ts", inReplyTo: MESSAGE_ID, route: "ask" },
+          { v: 1, kind: "message", messageKind: "note", text: "it is src/a.ts", inReplyTo: MESSAGE_ID, route: "send" },
+        ]);
+      } finally {
+        fake.stop();
+      }
+    });
+
+    test("a gate refusal for replies returns its text, and no gate says the caller cannot route", async () => {
+      const fake = scripted("reply-gate.sock", [JSON.stringify({ ok: false, code: "remote" })]);
+      try {
+        const result = await sendMessage(reply, {
+          path: fake.path,
+          routeGate: () => Promise.resolve({ ok: false, text: "the leader cannot route replies yet" }),
+        });
+        expect(result).toEqual({ ok: false, text: "the leader cannot route replies yet" });
+      } finally {
+        fake.stop();
+      }
+      const bare = scripted("reply-bare.sock", [JSON.stringify({ ok: false, code: "remote" })]);
+      try {
+        const result = await sendMessage(reply, { path: bare.path });
+        expect(result.ok).toBe(false);
+        expect(result.text).toContain("cannot route through the scheduler");
+      } finally {
+        bare.stop();
+      }
+    });
+  });
+
   describe("routing across machines", () => {
     const remote = JSON.stringify({ ok: false, code: "remote" });
     const routed = JSON.stringify({ ok: true, id: MESSAGE_ID, outcome: "routed" });

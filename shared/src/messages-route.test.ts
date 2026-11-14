@@ -76,6 +76,57 @@ describe("parseSessionMessage", () => {
   });
 });
 
+describe("parseSessionMessage, by reply handle", () => {
+  const { to: _to, ...base } = sessionMessage;
+  const reply = { ...base, replyTo: { id: REPLY, deviceId: "dev-1" } };
+
+  test("takes exactly one address: a task or a handle", () => {
+    expect(parseSessionMessage({ ...reply, extra: 1 })).toEqual(reply);
+    expect(parseSessionMessage({ ...reply, to: TO })).toBeNull();
+    expect(parseSessionMessage(base)).toBeNull();
+  });
+
+  test("refuses a handle that is not a message id and a machine that is not a routing id", () => {
+    for (const replyTo of [
+      "text",
+      null,
+      { id: "nope", deviceId: "dev-1" },
+      { id: REPLY, deviceId: "" },
+      { id: REPLY, deviceId: 3 },
+      { id: REPLY, deviceId: "d".repeat(257) },
+      { id: REPLY },
+    ]) {
+      expect(parseSessionMessage({ ...base, replyTo })).toBeNull();
+    }
+  });
+});
+
+describe("parseDeliverMessageRequest, by reply handle", () => {
+  const { taskId: _task, addressed: _addressed, ...base } = deliver;
+  const reply = { ...base, replyTo: REPLY };
+
+  test("takes a handle or a task and an address, never both, and keeps origin only as a routing id", () => {
+    expect(parseDeliverMessageRequest(reply)).toEqual(reply);
+    expect(parseDeliverMessageRequest({ ...reply, origin: "dev-1" })).toEqual({ ...reply, origin: "dev-1" });
+    expect(parseDeliverMessageRequest({ ...deliver, origin: "dev-1" })).toEqual({ ...deliver, origin: "dev-1" });
+    expect(parseDeliverMessageRequest({ ...reply, taskId: TO, addressed: TO })).toBeNull();
+    expect(parseDeliverMessageRequest({ ...reply, taskId: TO })).toBeNull();
+    expect(parseDeliverMessageRequest(base)).toBeNull();
+    for (const origin of ["", 3, "d".repeat(257)]) {
+      expect(parseDeliverMessageRequest({ ...reply, origin })).toBeNull();
+    }
+  });
+
+  test("drops settled beside a handle: it describes a task", () => {
+    expect(parseDeliverMessageRequest({ ...reply, settled: true })).toEqual(reply);
+  });
+
+  test("refuses a handle that is not a message id", () => {
+    expect(parseDeliverMessageRequest({ ...reply, replyTo: "nope" })).toBeNull();
+    expect(parseDeliverMessageRequest({ ...reply, replyTo: 3 })).toBeNull();
+  });
+});
+
 describe("parseDeliverMessageRequest", () => {
   test("keeps the carried fields, ignores unknown keys, and keeps settled only as true", () => {
     expect(parseDeliverMessageRequest({ ...deliver, extra: 1 })).toEqual(deliver);
@@ -165,6 +216,14 @@ describe("parseMessageReceiptRequest", () => {
   });
 });
 
+describe("parseMessageReceiptRequest, for a reply", () => {
+  test("takes a receipt with no `to`, which names no task, and still refuses a wrong-typed one", () => {
+    const receipt = { id: ID, kind: "note", outcome: "delivered" } as const;
+    expect(parseMessageReceiptRequest(receipt)).toEqual(receipt);
+    expect(parseMessageReceiptRequest({ ...receipt, to: 3 })).toBeNull();
+  });
+});
+
 describe("parseMessageReceiptResponse", () => {
   test("accepts the three outcomes and a coded failure, and nothing else", () => {
     for (const outcome of ["delivered", "sent", "dropped"] as const) {
@@ -199,5 +258,15 @@ describe("receiptNote", () => {
       expect(note).toContain(ID);
       expect(note).toContain(TO);
     }
+  });
+
+  test("for a reply names the reply's id and no task, and words an ended answer for a session, not a task", () => {
+    for (const outcome of ["delivered", "sent", "held", "ended", "unknown", "unsupported", "offline"] as const) {
+      const note = receiptNote({ id: ID, outcome });
+      expect(note).toContain(`your reply \`${ID}\``);
+      expect(note).not.toContain("to task");
+    }
+    expect(receiptNote({ id: ID, outcome: "ended" })).toContain("has ended");
+    expect(receiptNote({ id: ID, outcome: "ended" })).not.toContain("the task has no live session");
   });
 });

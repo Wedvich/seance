@@ -15,8 +15,15 @@ import {
 import { messageAudit, type MessageAudit } from "../src/audit.ts";
 import { exec } from "../src/exec.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
-import type { InboxLine } from "../src/message-frame.ts";
-import { createMessages, type ListenerSink, type Messages, type MessagesDeps } from "../src/messages.ts";
+import type { InboxLine, MessageReply } from "../src/message-frame.ts";
+import {
+  createMessages,
+  REPLY_HANDLE_MAX,
+  REPLY_HANDLE_TTL_MS,
+  type ListenerSink,
+  type Messages,
+  type MessagesDeps,
+} from "../src/messages.ts";
 import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { paneWindowName, tmuxOk } from "../src/tmux.ts";
@@ -265,7 +272,7 @@ const readLines = async (file: string): Promise<string[]> => {
 };
 
 describe("the real listener child and a real sender", () => {
-  test("a tasked listener is acked, an untasked one is refused (exit 4), and a note arrives as one line naming its sender", async () => {
+  test("tasked and untasked listeners are both acked, and a note arrives as one line naming its sender", async () => {
     const receiver = await launched("recv");
     const sender = await launched("send");
     const recvOut = join(base, "a-recv.out");
@@ -275,14 +282,12 @@ describe("the real listener child and a real sender", () => {
     await recv.go();
     await bare.go();
     await pollUntil(async () => (await readLines(recvOut)).length > 0, "the tasked listener's ack");
-    await pollUntil(() => Bun.file(`${bareOut}.exit`).exists(), "the untasked listener to be refused");
-    expect(JSON.parse((await readLines(recvOut))[0] ?? "")).toEqual({
-      ok: true,
-      keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
-    });
-    // The refusal is the CLI's exit code, never a line the mod would read.
-    expect(await readLines(bareOut)).toEqual([]);
-    expect((await readFile(`${bareOut}.exit`, "utf8")).trim()).toBe("4");
+    await pollUntil(async () => (await readLines(bareOut)).length > 0, "the untasked listener's ack");
+    const ack = { ok: true, keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES } };
+    expect(JSON.parse((await readLines(recvOut))[0] ?? "")).toEqual(ack);
+    // Acked and staying up: an untasked session is no longer refused (exit 4), since a reply can reach it.
+    expect(JSON.parse((await readLines(bareOut))[0] ?? "")).toEqual(ack);
+    expect(await Bun.file(`${bareOut}.exit`).exists()).toBe(false);
 
     const text = "schema v2 landed";
     const send = await senderCommand("a-send", [message(receiver, "note", text)]);
@@ -476,17 +481,28 @@ describe("refusing to bind", () => {
     expect(await messages.send(message(receiver, "note", "x"), target.pid)).toEqual({ ok: false, code: "unbound" });
   });
 
-  test("a pane with no task, or one tagged with an id this machine never launched, is refused untasked and acked nothing: no listener idles for a session nothing can reach", async () => {
+  test("a pane with no task, or one tagged with an id this machine never launched, is acked (a reply can reach it) but no task id does", async () => {
     const messages = setup();
     const bare = await pane("bare-pane");
     const forged = await pane("forged-pane", "task-never-launched-here");
+    const listeners = [];
     for (const target of [bare, forged]) {
       const listener = sinkDouble();
+      listeners.push(listener);
       // oxlint-disable-next-line no-await-in-loop -- one pane at a time
       await messages.listen(INBOX, target.pid, listener.sink);
-      expect(listener.lines.map((l) => JSON.parse(l))).toEqual([{ ok: false, code: "untasked" }]);
-      expect(listener.closed()).toBe(true);
+      expect(listener.lines.map((l) => JSON.parse(l))).toEqual([
+        { ok: true, keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES } },
+      ]);
+      expect(listener.closed()).toBe(false);
     }
+    // Neither is any task's address: the forged tag resolves to no launch, the bare pane to no tag.
+    const from = await pane("bare-from", await launched("bare-from"));
+    expect(await messages.send(message("task-never-launched-here", "note", "x"), from.pid)).toEqual({
+      ok: false,
+      code: "unknown",
+    });
+    for (const listener of listeners) expect(listener.lines).toHaveLength(1);
   });
 
   test("a frame that is not exactly {v:1, kind:inbox} is invalid, so a listener can never name a pane", async () => {
@@ -1117,7 +1133,7 @@ describe("routing a message for a task that is not on this machine", () => {
     });
   });
 
-  test("an untasked sender is routed with no fromTask and told no receipt follows", async () => {
+  test("an untasked sender is routed with no fromTask, and a receipt is promised as for any sender", async () => {
     const seen: SessionMessage[] = [];
     const messages = setup({
       route: (m) => {
@@ -1129,7 +1145,6 @@ describe("routing a message for a task that is not on this machine", () => {
     expect(await messages.send(routedFrame("task-elsewhere", "send", "hi"), from.pid)).toMatchObject({
       ok: true,
       outcome: "routed",
-      receipt: false,
     });
     expect(seen[0]).not.toHaveProperty("fromTask");
     expect(seen[0]).not.toHaveProperty("fromTitle");
@@ -1181,7 +1196,10 @@ describe("routing a message for a task that is not on this machine", () => {
 });
 
 describe("a message the leader routed here", () => {
-  const request = (taskId: string, extra: Partial<DeliverMessageRequest> = {}): DeliverMessageRequest => ({
+  const request = (
+    taskId: string,
+    extra: Partial<Extract<DeliverMessageRequest, { readonly taskId: string }>> = {},
+  ): DeliverMessageRequest => ({
     id: crypto.randomUUID(),
     taskId,
     addressed: taskId,
@@ -1395,5 +1413,523 @@ describe("every audit line of a routed message", () => {
         expect(line).not.toContain(text);
       }
     }
+  });
+});
+
+/** A reply by handle: no `to`, the id of the message answered as `inReplyTo`. */
+function replyFrame(
+  inReplyTo: string,
+  messageKind: "note" | "question" | "request",
+  text: string,
+  route?: "ask" | "send",
+): object {
+  texts.push(text);
+  return { v: 1, kind: "message", messageKind, text, inReplyTo, ...(route === undefined ? {} : { route }) };
+}
+
+const idOf = (reply: MessageReply): string => (reply.ok ? reply.id : "");
+
+/** Message ids are bearer handles: no audit line may carry one, nor any text a test sent. */
+function expectNoIdsOrText(...ids: readonly string[]): void {
+  for (const line of lines) {
+    for (const id of ids) expect(line).not.toContain(id);
+    // Short texts ("x", "hi") would match the line's own words.
+    for (const text of texts) if (text.length >= 8) expect(line).not.toContain(text);
+  }
+}
+
+/** A pid a script wrote to a file, once the write is whole. */
+async function pidFrom(file: string): Promise<number> {
+  await pollUntil(async () => (await readLines(file)).length > 0, `${file} to be written`);
+  return Number((await readLines(file))[0]);
+}
+
+describe("a reply by handle, on one machine", () => {
+  test("a task answers an untasked session's question by the id alone, the answer wakes the asker, and no line carries an id or text", async () => {
+    const messages = setup();
+    const taskId = await launched("rep-t");
+    const t = await pane("rep-t", taskId);
+    const u = await pane("rep-u");
+    const tListener = sinkDouble();
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    await messages.listen(INBOX, u.pid, uListener.sink);
+
+    const asked = await messages.send(message(taskId, "question", "which file?"), u.pid);
+    expect(asked).toMatchObject({ ok: true, outcome: "delivered" });
+    const q = idOf(asked);
+    // The wrapper tells the receiver how to answer a session that has no task.
+    expect(lineOf(tListener.lines[1]).push).toContain(`inReplyTo ${q}, and no \`to\``);
+
+    const answered = await messages.send(replyFrame(q, "note", "src/a.ts"), t.pid);
+    expect(answered).toMatchObject({ ok: true, outcome: "delivered" });
+    const r = idOf(answered);
+    const line = lineOf(uListener.lines[1]);
+    expect(line).toEqual({ v: 1, id: r, messageKind: "note", push: expect.any(String), wake: true });
+    expect(line.push).toContain("src/a.ts");
+    expect(line.push).toContain(taskId);
+    expect(line.push).toContain(`It replies to your message \`${q}\``);
+
+    // The answer can be answered in turn, and that answer to a note wakes nobody.
+    const again = await messages.send(replyFrame(r, "note", "thanks"), u.pid);
+    expect(again).toMatchObject({ ok: true, outcome: "delivered" });
+    expect(lineOf(tListener.lines[2])).not.toHaveProperty("wake");
+
+    expect(audits.filter((a) => a.to === "reply").map((a) => [a.dir, a.outcome])).toEqual([
+      ["out", "delivered"],
+      ["in", "delivered"],
+      ["out", "delivered"],
+      ["in", "delivered"],
+    ]);
+    expectNoIdsOrText(q, r, idOf(again));
+    for (const l of lines) {
+      expect(l).toMatch(
+        /^audit message origin=message dir=(out|in) from=("[^"]+"|untasked) to="[^"]+" kind=\w+ bytes=\d+ outcome=\w+$/u,
+      );
+    }
+  });
+
+  test("an answer wakes only for a question or request this pane's session sent: not for a note, and not for another pane's", async () => {
+    const messages = setup();
+    const taskId = await launched("wake-t");
+    const t = await pane("wake-t", taskId);
+    const u = await pane("wake-u");
+    const other = await pane("wake-other");
+    const tListener = sinkDouble();
+    const uListener = sinkDouble();
+    const otherListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    await messages.listen(INBOX, u.pid, uListener.sink);
+    await messages.listen(INBOX, other.pid, otherListener.sink);
+
+    const note = idOf(await messages.send(message(taskId, "note", "fyi"), u.pid));
+    await messages.send(replyFrame(note, "note", "ok"), t.pid);
+    expect(lineOf(uListener.lines[1])).not.toHaveProperty("wake");
+
+    const request = idOf(await messages.send(message(taskId, "request", "do it"), u.pid));
+    await messages.send(replyFrame(request, "note", "done"), t.pid);
+    expect(lineOf(uListener.lines[2]).wake).toBe(true);
+
+    // A message to `other` that names `u`'s question: `u` did not send it from `other`'s pane, so `other` is not woken.
+    const question = idOf(await messages.send(message(taskId, "question", "which?"), u.pid));
+    const named = await messages.send(replyFrame(question, "note", "that one"), t.pid);
+    expect(lineOf(uListener.lines[3]).wake).toBe(true);
+    expect(named).toMatchObject({ ok: true });
+    expect(otherListener.lines).toHaveLength(1);
+  });
+
+  test("a handle is held by the session the message reached: another pane, an unknown id and the asker itself get unknown", async () => {
+    const messages = setup();
+    const taskId = await launched("own-t");
+    const otherId = await launched("own-x");
+    const t = await pane("own-t", taskId);
+    const x = await pane("own-x", otherId);
+    const u = await pane("own-u");
+    for (const target of [t, x, u]) {
+      // oxlint-disable-next-line no-await-in-loop -- one listener at a time
+      await messages.listen(INBOX, target.pid, sinkDouble().sink);
+    }
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), u.pid));
+
+    expect(await messages.send(replyFrame(q, "note", "me too"), x.pid)).toEqual({ ok: false, code: "unknown" });
+    expect(await messages.send(replyFrame(crypto.randomUUID(), "note", "guess"), x.pid)).toEqual({
+      ok: false,
+      code: "unknown",
+    });
+    // The asker holds no handle for its own message: it was never placed in its pane.
+    expect(await messages.send(replyFrame(q, "note", "myself"), u.pid)).toEqual({ ok: false, code: "unknown" });
+    expect(audits.filter((a) => a.dir === "in" && a.to === "reply")).toEqual([]);
+    expect(audits.filter((a) => a.outcome === "unknown").map((a) => a.to)).toEqual(["reply", "reply", "reply"]);
+  });
+
+  test("a reply to an asker whose listener only dropped waits for that session, and one to an asker with no listener is ended", async () => {
+    const messages = setup();
+    const taskId = await launched("nl-t");
+    const t = await pane("nl-t", taskId);
+    const u = await pane("nl-u");
+    const tListener = sinkDouble();
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    await messages.listen(INBOX, u.pid, uListener.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), u.pid));
+
+    // Dropped, not gone: the reconnect grace holds the answer for that very session.
+    uListener.drop();
+    expect(await messages.send(replyFrame(q, "note", "held answer"), t.pid)).toMatchObject({
+      ok: true,
+      outcome: "sent",
+    });
+    const back = sinkDouble();
+    await messages.listen(INBOX, u.pid, back.sink);
+    expect(back.lines).toHaveLength(2);
+    expect(lineOf(back.lines[1]).wake).toBe(true);
+    expect(lineOf(back.lines[1]).push).toContain("held answer");
+
+    // Never listened: no launch or restart grace applies to a session nobody was waiting for.
+    const w = await pane("nl-w");
+    const asked = idOf(await messages.send(message(taskId, "question", "and you?"), w.pid));
+    expect(await messages.send(replyFrame(asked, "note", "nobody there"), t.pid)).toEqual({
+      ok: false,
+      code: "ended",
+      reason: "nolistener",
+    });
+    expect(inAudits("nolistener").filter((a) => a.to === "reply")).toHaveLength(1);
+  });
+
+  test("a handle lapses after an hour", async () => {
+    const messages = setup();
+    const taskId = await launched("ttl-t");
+    const t = await pane("ttl-t", taskId);
+    const u = await pane("ttl-u");
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    await messages.listen(INBOX, u.pid, sinkDouble().sink);
+    const first = idOf(await messages.send(message(taskId, "question", "first"), u.pid));
+    clock.now += REPLY_HANDLE_TTL_MS - 1;
+    const second = idOf(await messages.send(message(taskId, "question", "second"), u.pid));
+    expect(await messages.send(replyFrame(first, "note", "still good"), t.pid)).toMatchObject({ ok: true });
+    clock.now += 1;
+    expect(await messages.send(replyFrame(first, "note", "too late"), t.pid)).toEqual({ ok: false, code: "unknown" });
+    expect(await messages.send(replyFrame(second, "note", "in time"), t.pid)).toMatchObject({ ok: true });
+  });
+
+  test("a daemon keeps 256 handles: past that the oldest is forgotten and the newest still answers", async () => {
+    const taskId = await launched("hcap-t");
+    const t = await pane("hcap-t", taskId);
+    const senders = [await pane("hcap-u1"), await pane("hcap-u2")];
+    // One pane listing for all of them: 257 sends would otherwise cost 257 tmux round trips.
+    const snapshot = await listPanePids();
+    const messages = setup({ panes: () => Promise.resolve(snapshot) });
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    for (const sender of senders) {
+      // oxlint-disable-next-line no-await-in-loop -- one listener at a time
+      await messages.listen(INBOX, sender.pid, sinkDouble().sink);
+    }
+    const ids: string[] = [];
+    for (let i = 0; i < REPLY_HANDLE_MAX + 1; i++) {
+      // Two panes and 4 s apart keep each under the rate limits, and the 257 inside the hour.
+      clock.now += 4_000;
+      const from = senders[i % 2];
+      if (from === undefined) throw new Error("no sender");
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      ids.push(idOf(await messages.send(message(taskId, "question", `q${i}`), from.pid)));
+    }
+    expect(ids.filter((id) => id === "")).toEqual([]);
+    expect(await messages.send(replyFrame(ids[0] ?? "", "note", "evicted"), t.pid)).toEqual({
+      ok: false,
+      code: "unknown",
+    });
+    expect(await messages.send(replyFrame(ids[1] ?? "", "note", "kept"), t.pid)).toMatchObject({ ok: true });
+    expect(await messages.send(replyFrame(ids.at(-1) ?? "", "note", "newest"), t.pid)).toMatchObject({ ok: true });
+  }, 60_000);
+
+  test("in a pane séance spawned every child of the pane process is one session, so the listener and the sender need not be the same child", async () => {
+    const messages = setup();
+    const aFile = join(base, "ours-a.pid");
+    const bFile = join(base, "ours-b.pid");
+    const script = `sleep 600 & echo $! > ${shq(aFile)}; sleep 600 & echo $! > ${shq(bFile)}; wait`;
+    const paneId = (
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "msg:",
+        "-n",
+        "ours-pane",
+        "-c",
+        base,
+        "sh",
+        "-c",
+        script,
+        "claude",
+        "--remote-control",
+      ])
+    ).trim();
+    const [a, b] = [await pidFrom(aFile), await pidFrom(bFile)];
+    expect((await listPanePids()).find((p) => p.id === paneId)?.ours).toBe(true);
+
+    const taskId = await launched("ours-t");
+    const t = await pane("ours-t", taskId);
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, a, uListener.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), b));
+    expect(q).not.toBe("");
+    await messages.send(replyFrame(q, "note", "this one"), t.pid);
+    expect(lineOf(uListener.lines[1]).wake).toBe(true);
+  });
+});
+
+describe("a hand-started session that restarts under the same shell", () => {
+  const alive = async (pid: number): Promise<boolean> => {
+    const ps = await exec(["ps", "-o", "stat=", "-p", String(pid)]);
+    return ps.exitCode === 0 && !ps.stdout.trim().startsWith("Z");
+  };
+
+  test("the second claude holds none of the first's handles, and an answer to the first is ended: never held for it, delivered to it or woken into it", async () => {
+    const messages = setup();
+    const taskId = await launched("rs-t");
+    const t = await pane("rs-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+
+    // The pane's process is a shell; each `claude` is its child (an inner sh), and the peer a child of that, as a
+    // `seanced mcp` or `seanced inbox` is. The two run in sequence, so both sit under the same shell pid.
+    const file = (name: string): string => join(base, `rs-${name}`);
+    const claude = (name: string): string =>
+      `echo $$ > ${shq(file(`${name}.claude`))}; sleep 600 & echo $! > ${shq(file(`${name}.peer`))}; wait`;
+    const shell = await runner("rs-shell", `sh -c ${shq(claude("one"))}; sh -c ${shq(claude("two"))}`);
+    await shell.go();
+    const [claudeOne, peerOne] = [await pidFrom(file("one.claude")), await pidFrom(file("one.peer"))];
+    const shellBefore = (await listPanePids()).find((p) => p.id === shell.pane)?.pid;
+
+    // The first claude listens, asks, and is answered with a wake.
+    const first = sinkDouble();
+    await messages.listen(INBOX, peerOne, first.sink);
+    const asked = await messages.send(message(taskId, "question", "which file?"), peerOne);
+    expect(asked).toMatchObject({ ok: true, outcome: "delivered" });
+    const q = idOf(asked);
+    const answered = await messages.send(replyFrame(q, "note", "src/a.ts"), t.pid);
+    expect(answered).toMatchObject({ ok: true, outcome: "delivered" });
+    const r = idOf(answered);
+    expect(lineOf(first.lines[1]).wake).toBe(true);
+
+    // The claude goes; its shell stays, and nothing tells the daemon (no `ended` fires for an untasked pane).
+    first.drop();
+    process.kill(claudeOne, "SIGKILL");
+    process.kill(peerOne, "SIGKILL");
+    const [claudeTwo, peerTwo] = [await pidFrom(file("two.claude")), await pidFrom(file("two.peer"))];
+    expect(claudeTwo).not.toBe(claudeOne);
+    expect(await alive(claudeOne)).toBe(false);
+    expect((await listPanePids()).find((p) => p.id === shell.pane)?.pid).toBe(shellBefore);
+
+    // An answer to the first's question finds no session: ended, and nothing held for the next one.
+    expect(await messages.send(replyFrame(q, "note", "too late"), t.pid)).toEqual({ ok: false, code: "ended" });
+
+    // The second claude cannot answer what the first received, whether or not it has a listener yet.
+    expect(await messages.send(replyFrame(r, "note", "not mine"), peerTwo)).toEqual({ ok: false, code: "unknown" });
+    const second = sinkDouble();
+    await messages.listen(INBOX, peerTwo, second.sink);
+    expect(await messages.send(replyFrame(r, "note", "still not mine"), peerTwo)).toEqual({
+      ok: false,
+      code: "unknown",
+    });
+    expect(await messages.send(replyFrame(q, "note", "after it listened"), t.pid)).toEqual({
+      ok: false,
+      code: "ended",
+    });
+
+    // Nothing reached the second claude but the ack, and nothing it said reached the task.
+    expect(second.lines).toHaveLength(1);
+    expect(tListener.lines).toHaveLength(2);
+    expect(audits.filter((a) => a.dir === "in" && a.to === "reply" && a.outcome === "delivered")).toHaveLength(1);
+    expectNoIdsOrText(q, r);
+  });
+});
+
+describe("a reply or a message routed here from another machine, by handle", () => {
+  const ORIGIN = "d-remote";
+  const routedTo = (
+    taskId: string,
+    over: Partial<Extract<DeliverMessageRequest, { readonly taskId: string }>> = {},
+  ): DeliverMessageRequest => ({
+    id: crypto.randomUUID(),
+    taskId,
+    addressed: taskId,
+    kind: "question",
+    text: "remote question",
+    fromMachine: "MsgBox",
+    origin: ORIGIN,
+    ...over,
+  });
+
+  test("a reply for a question this machine's session sent is delivered with a wake, and an unknown, retired or note's handle is not", async () => {
+    const messages = setup();
+    const taskId = await launched("rr-t");
+    const t = await pane("rr-t", taskId);
+    const u = await pane("rr-u");
+    await messages.listen(INBOX, t.pid, sinkDouble().sink);
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, u.pid, uListener.sink);
+    const q = idOf(await messages.send(message(taskId, "question", "which?"), u.pid));
+    const note = idOf(await messages.send(message(taskId, "note", "fyi"), u.pid));
+
+    const reply = (replyTo: string, text: string): DeliverMessageRequest => {
+      texts.push(text);
+      return {
+        id: crypto.randomUUID(),
+        replyTo,
+        kind: "note",
+        text,
+        fromMachine: "MsgBox",
+        origin: ORIGIN,
+        fromTask: "t-remote",
+      };
+    };
+    expect(await messages.deliverRouted(reply(q, "remote answer"))).toEqual({ ok: true, outcome: "delivered" });
+    const line = lineOf(uListener.lines[1]);
+    expect(line.wake).toBe(true);
+    expect(line.push).toContain("MsgBox");
+    expect(line.push).toContain("remote answer");
+    expect(audits.at(-1)).toEqual({
+      dir: "in",
+      from: "t-remote",
+      to: "reply",
+      kind: "note",
+      bytes: "remote answer".length,
+      outcome: "delivered",
+    });
+
+    // A note's answer is delivered, without a wake; a handle nobody was sent is ended.
+    expect(await messages.deliverRouted(reply(note, "remote ok"))).toEqual({ ok: true, outcome: "delivered" });
+    expect(lineOf(uListener.lines[2])).not.toHaveProperty("wake");
+    expect(await messages.deliverRouted(reply(crypto.randomUUID(), "who?"))).toEqual({ ok: true, outcome: "ended" });
+    expect(audits.at(-1)).toMatchObject({ dir: "in", to: "reply", outcome: "ended" });
+    expect(uListener.lines).toHaveLength(3);
+    expectNoIdsOrText(q, note);
+  });
+
+  test("a message from another machine is answerable: the answer asks for a route, then is handed to the leader against its origin's handle", async () => {
+    const seen: SessionMessage[] = [];
+    const messages = setup({
+      route: (m) => {
+        seen.push(m);
+        return Promise.resolve(true);
+      },
+    });
+    const taskId = await launched("ro-t");
+    const t = await pane("ro-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    const incoming = routedTo(taskId);
+    expect(await messages.deliverRouted(incoming)).toEqual({ ok: true, outcome: "delivered" });
+    expect(lineOf(tListener.lines[1]).push).toContain("no `to`");
+
+    expect(await messages.send(replyFrame(incoming.id, "note", "answer", "ask"), t.pid)).toEqual({
+      ok: false,
+      code: "remote",
+    });
+    // A caller that never asked to route is answered as an unreachable local handle.
+    expect(await messages.send(replyFrame(incoming.id, "note", "answer"), t.pid)).toEqual({
+      ok: false,
+      code: "unknown",
+    });
+    expect(seen).toEqual([]);
+    const sent = await messages.send(replyFrame(incoming.id, "note", "answer", "send"), t.pid);
+    expect(sent).toMatchObject({ ok: true, outcome: "routed" });
+    expect(seen).toEqual([
+      {
+        id: idOf(sent),
+        kind: "note",
+        text: "answer",
+        fromTask: taskId,
+        fromTitle: "Sender",
+        inReplyTo: incoming.id,
+        replyTo: { id: incoming.id, deviceId: ORIGIN },
+      },
+    ]);
+    expect(audits.at(-1)).toEqual({
+      dir: "out",
+      from: taskId,
+      to: "reply",
+      kind: "note",
+      bytes: "answer".length,
+      outcome: "routed",
+    });
+    expectNoIdsOrText(incoming.id, idOf(sent));
+  });
+
+  test("a refused route leaves the handle usable, and a route-less daemon answers unsupported", async () => {
+    const taskId = await launched("rn-t");
+    const t = await pane("rn-t", taskId);
+    const refused = setup({ route: () => Promise.resolve(false) });
+    await refused.listen(INBOX, t.pid, sinkDouble().sink);
+    const incoming = routedTo(taskId);
+    await refused.deliverRouted(incoming);
+    expect(await refused.send(replyFrame(incoming.id, "note", "x", "send"), t.pid)).toEqual({
+      ok: false,
+      code: "no_leader",
+    });
+    expect(audits.at(-1)).toMatchObject({ dir: "out", to: "reply", outcome: "no_leader" });
+
+    const none = setup();
+    await none.listen(INBOX, t.pid, sinkDouble().sink);
+    await none.deliverRouted(routedTo(taskId, { id: incoming.id }));
+    expect(await none.send(replyFrame(incoming.id, "note", "x", "send"), t.pid)).toEqual({
+      ok: false,
+      code: "unsupported",
+    });
+  });
+
+  test("a receipt that names no task finds the pane that sent the message: an untasked sender's, and a reply's", async () => {
+    const messages = setup({ route: () => Promise.resolve(true) });
+    const u = await pane("rc-u");
+    const uListener = sinkDouble();
+    await messages.listen(INBOX, u.pid, uListener.sink);
+    const sent = await messages.send(routedFrame("task-elsewhere", "send", "hi"), u.pid);
+    const request: MessageReceiptRequest = {
+      id: idOf(sent),
+      to: "task-elsewhere",
+      kind: "note",
+      outcome: "offline",
+    };
+    expect(await messages.receipt(request)).toEqual({ ok: true, outcome: "delivered" });
+    expect(lineOf(uListener.lines[1]).push).toBe(receiptNote(request));
+    expect(audits.at(-1)).toEqual({
+      dir: "receipt",
+      from: null,
+      to: "task-elsewhere",
+      kind: "note",
+      outcome: "offline",
+    });
+    expect(lines.at(-1)).toContain("dir=receipt from=untasked");
+
+    // A reply's receipt names no `to` either, and is worded for a reply.
+    const taskId = await launched("rc-t");
+    const t = await pane("rc-t", taskId);
+    const tListener = sinkDouble();
+    await messages.listen(INBOX, t.pid, tListener.sink);
+    const incoming = routedTo(taskId);
+    await messages.deliverRouted(incoming);
+    const reply = await messages.send(replyFrame(incoming.id, "note", "answer", "send"), t.pid);
+    const receipt: MessageReceiptRequest = { id: idOf(reply), kind: "note", outcome: "delivered" };
+    expect(await messages.receipt(receipt)).toEqual({ ok: true, outcome: "delivered" });
+    expect(lineOf(tListener.lines[2]).push).toBe(receiptNote(receipt));
+    expect(lineOf(tListener.lines[2]).push).toContain("your reply");
+    expect(audits.at(-1)).toMatchObject({ dir: "receipt", from: taskId, to: "reply", outcome: "delivered" });
+
+    // Nothing remembered for an id and no task named: dropped, and nothing audited for it.
+    const before = audits.length;
+    expect(await messages.receipt({ id: crypto.randomUUID(), kind: "note", outcome: "delivered" })).toEqual({
+      ok: true,
+      outcome: "dropped",
+    });
+    expect(audits).toHaveLength(before);
+  });
+
+  test("a receipt for an untasked sender whose claude is gone is dropped, not held for the next one", async () => {
+    const messages = setup({ route: () => Promise.resolve(true) });
+    const file = join(base, "rcg.peer");
+    const claudeFile = join(base, "rcg.claude");
+    const inner = `echo $$ > ${shq(claudeFile)}; sleep 600 & echo $! > ${shq(file)}; wait`;
+    const shell = await runner("rcg-shell", `sh -c ${shq(inner)}; sleep 600`);
+    await shell.go();
+    const [claude, peer] = [await pidFrom(claudeFile), await pidFrom(file)];
+    const listener = sinkDouble();
+    await messages.listen(INBOX, peer, listener.sink);
+    const sent = await messages.send(routedFrame("task-elsewhere", "send", "hi"), peer);
+    process.kill(claude, "SIGKILL");
+    process.kill(peer, "SIGKILL");
+    await pollUntil(async () => {
+      const ps = await exec(["ps", "-o", "stat=", "-p", String(claude)]);
+      return ps.exitCode !== 0 || ps.stdout.trim().startsWith("Z");
+    }, "the claude to be gone");
+    listener.drop();
+    expect(await messages.receipt({ id: idOf(sent), to: "task-elsewhere", kind: "note", outcome: "delivered" })).toEqual({
+      ok: true,
+      outcome: "dropped",
+    });
   });
 });

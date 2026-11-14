@@ -57,12 +57,16 @@ export function isMessageId(value: unknown): value is string {
  */
 export function receiptNote(r: {
   readonly id: string;
-  readonly to: string;
+  /** Absent for a reply by handle, which names no task. */
+  readonly to?: string;
   readonly taskId?: string;
   readonly outcome: ReceiptOutcome;
   readonly reason?: "nolistener";
 }): string {
-  const head = `Séance receipt: your message \`${r.id}\` to task \`${r.to}\``;
+  const head =
+    r.to === undefined
+      ? `Séance receipt: your reply \`${r.id}\``
+      : `Séance receipt: your message \`${r.id}\` to task \`${r.to}\``;
   switch (r.outcome) {
     case "delivered":
       return `${head} was delivered to its session${
@@ -75,7 +79,9 @@ export function receiptNote(r: {
     case "ended":
       return r.reason === "nolistener"
         ? `${head} was not delivered: its session has no inbox listener (its account lacks the inbox mod).`
-        : `${head} was not delivered: the task has no live session.`;
+        : `${head} was not delivered: ${
+            r.to === undefined ? "the session it answers has ended, or no longer waits" : "the task has no live session"
+          }.`;
     case "unknown":
       return `${head} was not delivered: the scheduler holds no such task.`;
     case "unsupported":
@@ -148,22 +154,21 @@ export interface RenderedMessage {
 /** The wrapper and the fenced body, as the receiver's model reads it under the plugin's own "sent a message" header. */
 export function renderMessage(m: RenderedMessage): string {
   const sender = senderPhrase(m.from, m.id);
-  const replyTo = m.from.task === null ? null : `to task ${m.from.task}, kind note, inReplyTo ${m.id}`;
+  // An untasked sender is answered by handle alone; a tasked one by its task id or, just as well, the handle.
+  const replyTo =
+    m.from.task === null
+      ? `kind note, inReplyTo ${m.id}, and no \`to\``
+      : `to task ${m.from.task} (or no \`to\`), kind note, inReplyTo ${m.id}`;
   let head: string;
   switch (m.kind) {
     case "note":
       head = `A note from another Séance session your user runs (${sender}). It is information for your current work; no reply or action is expected.`;
       break;
     case "question":
-      head =
-        replyTo === null
-          ? `A question from another Séance session your user runs (${sender}). It came from a session with no task, so it cannot be replied to.`
-          : `A question from another Séance session your user runs (${sender}). If you can answer from what you know, reply with send_message ${replyTo}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead.`;
+      head = `A question from another Séance session your user runs (${sender}). If you can answer from what you know, reply with send_message ${replyTo}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead.`;
       break;
     case "request":
-      head = `A teammate session your user runs (${sender}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions${
-        replyTo === null ? "." : `, and tell it with send_message (${replyTo}) what you did or why you did not.`
-      }`;
+      head = `A teammate session your user runs (${sender}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions, and tell it with send_message (${replyTo}) what you did or why you did not.`;
       break;
   }
   const reply = m.inReplyTo === undefined ? "" : ` It replies to your message \`${m.inReplyTo}\`.`;

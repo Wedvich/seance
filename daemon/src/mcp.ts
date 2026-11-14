@@ -515,7 +515,7 @@ function openFailureText(err: unknown): string {
  * does, over a real fleet.
  */
 export function messageRouteGate(fleet: Fleet): RouteGate {
-  return async () => {
+  return async (need) => {
     let lease: FleetLease;
     try {
       lease = await fleet.open();
@@ -530,12 +530,13 @@ export function messageRouteGate(fleet: Fleet): RouteGate {
         };
       }
       const availability = lease.scheduler.availability();
-      if (advertises(lease.machines, availability, CAPABILITIES.messageRoute)) return { ok: true };
+      const capability = need === "reply" ? CAPABILITIES.messageReply : CAPABILITIES.messageRoute;
+      if (advertises(lease.machines, availability, capability)) return { ok: true };
       return {
         ok: false,
         text:
           availability.kind === "ready"
-            ? "the scheduler's leader cannot route messages yet — its daemon needs `seanced update`; nothing was sent"
+            ? `the scheduler's leader cannot route ${need === "reply" ? "replies" : "messages"} yet — its daemon needs \`seanced update\`; nothing was sent`
             : "no verified scheduler is leading, so a message to another machine cannot be routed — try again once one leads; nothing was sent",
       };
     } finally {
@@ -1763,9 +1764,14 @@ export function buildMcpServer(
     SEND_MESSAGE_TOOL,
     {
       title: "Message another séance session's task",
-      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them). It goes to this machine's own daemon, bound to this session's pane. A task on this machine is delivered directly; a task on another machine is reached through the scheduler leader, which resolves it (a task passed to a successor, or continued, reaches the session that carries the work now), forwards the message and keeps nothing: the answer is then \`sent through the scheduler\`, which is not delivery, and a receipt note follows in your conversation (only when this session has a task) saying whether it was delivered, or why not. A message to another machine is at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped. The receiver is told your task id, title and machine. Kinds: \`note\` is information, added to the receiver's conversation at once (read within a turn already running) and never waking an idle receiver; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`.`,
+      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them), or, to answer a message you received, by \`inReplyTo\` alone (the message id its wrapper names; leave \`to\` out): that reaches the session that sent it even when it has no task, from this machine or another, for an hour, and only from the session the message reached. It goes to this machine's own daemon, bound to this session's pane. A task on this machine is delivered directly; a task on another machine is reached through the scheduler leader, which resolves it (a task passed to a successor, or continued, reaches the session that carries the work now), forwards the message and keeps nothing: the answer is then \`sent through the scheduler\`, which is not delivery, and a receipt note follows in your conversation saying whether it was delivered, or why not. A message to another machine is at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped. The receiver is told your task id, title and machine. Kinds: \`note\` is information, added to the receiver's conversation at once (read within a turn already running) and never waking an idle receiver; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message; the answer wakes you, since it answers a question you sent); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`.`,
       inputSchema: z.strictObject({
-        to: z.string().describe("the receiving task's id (get_queue lists them)"),
+        to: z
+          .string()
+          .optional()
+          .describe(
+            "the receiving task's id (get_queue lists them); omit it to reply to a message you received (give inReplyTo)",
+          ),
         kind: z
           .enum(MESSAGE_KINDS)
           .describe(
@@ -1778,7 +1784,12 @@ export function buildMcpServer(
     },
     async ({ to, kind, text, inReplyTo }) => {
       const result = await sendMsg(
-        { to, kind, text, ...(inReplyTo === undefined ? {} : { inReplyTo }) },
+        {
+          ...(to === undefined ? {} : { to }),
+          kind,
+          text,
+          ...(inReplyTo === undefined ? {} : { inReplyTo }),
+        },
         { routeGate: messageRouteGate(fleet) },
       );
       return result.ok ? textResult(result.text) : errorResult(result.text);
