@@ -290,14 +290,6 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       return refuseClose(pane, info.taskId, verdict);
     }
     const activity = info.ours ? deps.activity(pane) : null;
-    if (verdict === "despawn" && state === "live") {
-      // `askToExit` clears the input box with Escape and Ctrl+C, and neither the screen hash nor a frame sees typing:
-      // an owner composing a reply there would lose it. Any typed text, or a box that cannot be found, fails closed; a
-      // prompt suggestion, which the styled read tells apart by its faint cells, is not a draft.
-      const screen = await capture(pane);
-      const draft = screen === null ? null : inputBoxDraft(screen);
-      if (draft !== "") return refuseClose(pane, info.taskId, "waiting");
-    }
     inFlight.add(pane);
     try {
       const turnEndedAt = state === "live" && activity?.turnEnded === true ? (activity.stateSince ?? null) : null;
@@ -305,9 +297,16 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       const touchedAt =
         info.taskId === null || turnEndedAt === null ? null : await deps.worktree.touchedAt(info.taskId);
       if (verdict === "despawn" && state === "live") {
-        // The awaits above (the capture, the stats) are a window in which the owner may have sent a prompt, from claude.ai
-        // say: the despawn's Escape would interrupt that turn and `/exit` end it. `inFlight` is left out of the
-        // re-read, since it holds this very pane.
+        // `askToExit` clears the input box with Escape and Ctrl+C, and neither the screen hash nor a frame sees typing:
+        // an owner composing a reply there would lose it. Read after the stats, the slow awaits, so the screen and the
+        // facts below are both the last thing read before the act. Any typed text, or a box that cannot be found, fails
+        // closed; a prompt suggestion, which the styled read tells apart by its faint cells, is not a draft.
+        const screen = await capture(pane);
+        const draft = screen === null ? null : inputBoxDraft(screen);
+        if (draft !== "") return await refuseClose(pane, info.taskId, "waiting");
+        // The awaits above are a window in which the owner may have sent a prompt, from claude.ai say: the despawn's
+        // Escape would interrupt that turn and `/exit` end it. `inFlight` is left out of the re-read, since it holds
+        // this very pane.
         const again = closeVerdict({
           info,
           state,
@@ -438,16 +437,29 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
   };
 
   /** Whether this unbound sender's refusal is written: once a minute per pid, and `REFUSAL_LINES_PER_MIN` overall. */
-  const refusals = { at: new Map<number | null, number>(), windowStart: 0, lines: 0 };
+  const refusals = { at: new Map<number | null, number>(), windowStart: 0, lines: 0, dropped: 0 };
   const worthWriting = (peer: number | null): boolean => {
     const now = deps.now();
+    // A flood leaves a trace: when a window that dropped refusals rolls over, one line says how many.
+    if (now - refusals.windowStart >= MINUTE_MS && refusals.dropped > 0) {
+      deps.warn(
+        `custodian: ${refusals.dropped} refused frames from unbound senders were not written in the last minute`,
+      );
+      refusals.dropped = 0;
+    }
     const last = refusals.at.get(peer);
-    if (last !== undefined && now - last < MINUTE_MS) return false;
+    if (last !== undefined && now - last < MINUTE_MS) {
+      refusals.dropped += 1;
+      return false;
+    }
     if (now - refusals.windowStart >= MINUTE_MS) {
       refusals.windowStart = now;
       refusals.lines = 0;
     }
-    if (refusals.lines >= REFUSAL_LINES_PER_MIN) return false;
+    if (refusals.lines >= REFUSAL_LINES_PER_MIN) {
+      refusals.dropped += 1;
+      return false;
+    }
     refusals.lines += 1;
     refusals.at.delete(peer);
     refusals.at.set(peer, now);

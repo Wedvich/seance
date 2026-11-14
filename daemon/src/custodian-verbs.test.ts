@@ -323,7 +323,24 @@ describe("who a custodian frame is acted on for", () => {
     expect(r.lines).toHaveLength(2);
 
     for (let pid = 5_000; pid < 5_100; pid += 1) await r.verbs.handle(close(), pid);
-    expect(r.lines.length).toBeLessThanOrEqual(21);
+    // 1 in the first window; in the second, pid 4000's and 19 more up to the 20 a minute. Nothing is written for
+    // the rest, and every written line has its warning, besides the one summary of the first window's 49 drops.
+    expect(r.lines).toHaveLength(21);
+    expect(r.warnings.filter((w) => w.includes("(not the round)"))).toHaveLength(21);
+    expect(r.warnings.filter((w) => w.includes("49 refused frames"))).toHaveLength(1);
+  });
+
+  test("a sender the host cannot name is one key, and a window that dropped refusals says how many once it rolls over", async () => {
+    const clock = { now: NOW };
+    const r = rig({ now: () => clock.now, hostNamesPeers: () => false });
+    for (let at = 0; at < 30; at += 1) await r.verbs.handle(close(), null);
+    expect(r.lines).toHaveLength(1);
+    expect(r.warnings).toHaveLength(1);
+
+    clock.now += 61_000;
+    await r.verbs.handle(close(), null);
+    expect(r.lines).toHaveLength(2);
+    expect(r.warnings.filter((w) => w.includes("29 refused frames"))).toHaveLength(1);
   });
 
   test("an unreadable tmux is an error for the socket to answer internal, never a pane's absence", async () => {
@@ -471,6 +488,25 @@ describe("close", () => {
     });
     r.state.panes = [info({ taskId: "t-1" })];
     expect(await r.verbs.handle(close(), process.pid)).toEqual({ ok: false, code: "busy" });
+    expect(r.calls).toEqual([]);
+  });
+
+  test("a draft typed while the close reads its worktree is seen: the screen is read last, before any key goes in", async () => {
+    const typing: { to: ((screen: string) => void) | null } = { to: null };
+    const r = rig({
+      worktree: {
+        touchedAt: () => {
+          typing.to?.(boxScreen("❯ also"));
+          return Promise.resolve(null);
+        },
+        decide: () => Promise.resolve(null),
+      },
+    });
+    typing.to = (screen) => {
+      r.state.screen = screen;
+    };
+    r.state.panes = [info({ taskId: "t-1" })];
+    expect(await r.verbs.handle(close(), process.pid)).toEqual({ ok: false, code: "waiting" });
     expect(r.calls).toEqual([]);
   });
 
