@@ -5428,8 +5428,31 @@ Where the build adds to or departs from the wording above:
   `shared/src/parse.ts` with the type pattern) become `_`, an empty name is `file`, and a
   name past 100 units is cut in the stem, keeping an extension of up to 16 units, never
   splitting a surrogate pair.
-- **Files are not persisted**: a `File` can't be, so a reload drops them, unlike the
-  prompt. They leave the form when a task carrying them is stored, matched by id.
+- **Stored files survive a reload** (since 2026-11-14; before, a reload dropped every file).
+  A `File` can't be persisted, but a stored one is already in R2, and its manifest entry is
+  all the create needs. So each `stored` file's entry (id, name, type, size, hash) and the
+  time its `201` came (`UploadState.at`) sit in localStorage under `seance:form-attachments`
+  (`writeFormAttachments`, `pwa/src/persist.ts`), written at once on every change to the
+  stored set, never debounced. On the same terms as the prompt: plaintext names on your own
+  device, the objects still sealed under the PSK. At boot `readFormAttachments` drops entries
+  stored over `STORED_MAX_AGE_MS` ago (a quarter of `ATTACHMENT_RETENTION_MS`, 7.5 days) or
+  stamped ahead, runs the rest through `parseAttachmentManifest` (anything refused restores
+  nothing), and puts them back as stored chips with no bytes (`PickedFile.file` null): no
+  preview, the glyph instead, never uploaded again. Any file dropped is counted in a notice
+  under the list (`notRestoredText`), since the prompt may still name it. The age bound
+  leaves the task three quarters of its objects' lifecycle to wait on deps or caps; past it
+  attaching again beats a spawn refused `attachment_unavailable`. A form left open is held to
+  it too: a Queue press (`UploadQueue.settle`) sends a stale stored file again under a fresh
+  id when its bytes are on the form, and fails one restored without them (`stale`), which a
+  later press never puts back in line. Setup's save of a new PSK or relay URL clears the key
+  (`dropFormAttachments`): objects stored under the old ones would not open or not be found.
+  Files still waiting or uploading are lost to a reload, and a share's reload counts only
+  those (`trackFormFiles`, `reloadCostText`). Files leave the form when a task carrying them
+  is stored, matched by id, and that write clears them from storage too. The prompt's write
+  stays debounced, so a kill inside that window can bring back a just-queued prompt without
+  its files (as it already brought back the prompt alone); and, like the form, the key is one
+  per origin, so the last tab to change its files wins. Rejected: reading an object back to
+  show a restored image's preview: "nothing uploaded is read back" (chip preview, below).
 - **A refused upload** marks its chip failed with a short reason ("Failed: limit
   reached"). A Queue press with a failed file shows the unqueued verdict without **Try
   again**: back on the form, Queue again re-uploads only the failed files.

@@ -1,15 +1,30 @@
 import {
   ATTACHMENT_LIMITS,
   ATTACHMENT_NAME_FORBIDDEN,
+  ATTACHMENT_RETENTION_MS,
   ATTACHMENT_TYPE_PATTERN,
   type AttachmentRefusal,
   type AttachmentRef,
 } from "@seance/shared";
 
 /**
+ * How long a stored file stays usable on the form, at boot and at the Queue press. Its object
+ * expires `ATTACHMENT_RETENTION_MS` after upload, and a task queued with it may wait on deps or
+ * caps before a daemon fetches it: a quarter (7.5 days today) leaves the rest for that. Past it,
+ * uploading again costs less than a spawn refused `attachment_unavailable`.
+ */
+export const STORED_MAX_AGE_MS = ATTACHMENT_RETENTION_MS / 4;
+
+/** Whether a file stored at `at` is past `STORED_MAX_AGE_MS`. */
+export function isStale(at: number, now: number): boolean {
+  return now - at > STORED_MAX_AGE_MS;
+}
+
+/**
  * Where a file's upload stands. `waiting` until its turn (or until attaching is
- * offered); `stored` is set by a `201` and kept for the compose session, so a retry
- * uploads only the rest; `failed` holds the chip's short reason and the verdict's
+ * offered); `stored` is set by a `201` and kept with the form, across a reload too, so a
+ * retry uploads only the rest, and `at` is when, since the object expires a fixed time after
+ * (`readFormAttachments`); `failed` holds the chip's short reason and the verdict's
  * sentence, and goes back to `waiting` at the next Queue press. Its `code` is the
  * refusal's, or `unread`/`threw` for a failure on this device: a reopened socket puts
  * an `unreachable` one back in line by it.
@@ -17,7 +32,7 @@ import {
 export type UploadState =
   | { readonly kind: "waiting" }
   | { readonly kind: "uploading"; readonly percent: number }
-  | { readonly kind: "stored"; readonly id: string; readonly hash: string }
+  | { readonly kind: "stored"; readonly id: string; readonly hash: string; readonly at: number }
   | { readonly kind: "failed"; readonly code: string; readonly short: string; readonly message: string };
 
 /**
@@ -28,7 +43,8 @@ export type UploadState =
 export interface PickedFile {
   /** Local only: the list's key and the remove handle; never sent. */
   readonly key: string;
-  readonly file: Blob;
+  /** Null for a file restored after a reload (`readFormAttachments`): stored, so never uploaded again, and shown without a preview. */
+  readonly file: Blob | null;
   readonly name: string;
   readonly type: string;
   readonly size: number;
@@ -144,6 +160,23 @@ export function manifestOf(files: readonly PickedFile[]): readonly AttachmentRef
     refs.push({ id: upload.id, name, type, size, hash: upload.hash });
   }
   return refs;
+}
+
+/** Why files the form held before a reload aren't back: the prompt may still name them. Null with none. */
+export function notRestoredText(dropped: number): string | null {
+  if (dropped === 0) return null;
+  const one = dropped === 1;
+  return `${one ? "1 file" : `${dropped} files`} from before the reload ${one ? "was" : "were"} uploaded too long ago or couldn't be read; attach ${one ? "it" : "them"} again.`;
+}
+
+/** A manifest entry back on the form after a reload, stored at `at`, its bytes gone. */
+export function restoredFile(
+  ref: AttachmentRef,
+  at: number,
+  mintKey: () => string = () => crypto.randomUUID(),
+): PickedFile {
+  const { id, name, type, size, hash } = ref;
+  return { key: mintKey(), file: null, name, type, size, upload: { kind: "stored", id, hash, at } };
 }
 
 /** The chip's label for a file's kind: its extension, upper-cased ("PNG"); null without one. */

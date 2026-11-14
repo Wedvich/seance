@@ -73,7 +73,8 @@ import {
 import { AccountStore } from "./account-store.ts";
 import { ARCHIVE_NO_ANSWER, ARCHIVE_UNDELIVERED, ARCHIVE_UNREADABLE, ArchiveStore } from "./archivist-store.ts";
 import { OlderStore } from "./older-store.ts";
-import { admitFiles, manifestOf, notAttachedText } from "./attachments.ts";
+import { admitFiles, manifestOf, notAttachedText, notRestoredText } from "./attachments.ts";
+import type { RestoredAttachments } from "./persist.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
@@ -179,6 +180,8 @@ const unqueued = (message: string): Verdict => ({ kind: "unqueued", message, may
 
 const LOCKED_NOTICE = "Files can't be added once Queue is pressed.";
 
+const NOTHING_RESTORED: RestoredAttachments = { files: [], dropped: 0 };
+
 export class Store {
   readonly #client: RelayClient;
   readonly #listeners = new Set<() => void>();
@@ -232,7 +235,12 @@ export class Store {
   readonly #older: OlderStore;
   readonly #uploads: UploadQueue;
 
-  constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, held: readonly HeldTask[] = []) {
+  constructor(
+    client: RelayClient,
+    form: PersistedForm = DEFAULT_FORM,
+    held: readonly HeldTask[] = [],
+    restored: RestoredAttachments = NOTHING_RESTORED,
+  ) {
     this.#client = client;
     this.#queue = new SchedulerStore(
       client,
@@ -287,8 +295,8 @@ export class Store {
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, renaming: null, notice: null },
       archiveStatus: null,
       older: CLOSED_OLDER,
-      attachments: [],
-      attachNotice: null,
+      attachments: restored.files,
+      attachNotice: notRestoredText(restored.dropped),
       heldDropped: [],
       awaitingUploads: false,
     };

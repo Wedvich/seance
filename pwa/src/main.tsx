@@ -10,8 +10,10 @@ import {
   dropLegacyHidden,
   dropLegacyPending,
   readForm,
+  readFormAttachments,
   readFormFiles,
   readHeld,
+  trackFormAttachments,
   trackFormFiles,
   trackHeld,
   writeForm,
@@ -79,7 +81,8 @@ if (key === null || token === null) {
     fleetQuotaRefreshMs: FLEET_QUOTA_INTERVAL_MS,
     ...(accountKey === null ? {} : { accountKey }),
   });
-  const store = new Store(client, readForm(), readHeld());
+  const store = new Store(client, readForm(), readHeld(), readFormAttachments());
+  trackFormAttachments(store);
 
   // Read before the first write below: it is the replaced document's, and only a share boot reports it.
   const before = readFormFiles();
