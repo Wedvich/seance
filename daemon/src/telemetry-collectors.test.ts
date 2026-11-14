@@ -324,7 +324,9 @@ describe("the collector registry", () => {
     }
     const all = fieldSets.flat();
 
-    expect(new Set(all)).toEqual(new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota", "tf", "tu", "cu"]));
+    expect(new Set(all)).toEqual(
+      new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota", "tf", "tu", "cu"]),
+    );
     // Each entry's keys are unique to it: no key appears in two entries' sets.
     expect(all).toHaveLength(new Set(all).size);
   });

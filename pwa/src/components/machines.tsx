@@ -717,9 +717,7 @@ const CUSTODIAN_STATE_WORDS = { idle: "Idle", running: "Running", paused: "Pause
 function CustodianLine({ row }: { readonly row: CustodianRow }): JSX.Element {
   return (
     <p className={`fleet-note custodian-row${row.warn ? " fleet-warn" : ""}`}>
-      <span>
-        Custodian · {row.state === null ? "no report yet" : CUSTODIAN_STATE_WORDS[row.state]}
-      </span>
+      <span>Custodian · {row.state === null ? "no report yet" : CUSTODIAN_STATE_WORDS[row.state]}</span>
       {row.ended !== null && <span>{row.ended}</span>}
       {row.counts !== null && <span>{row.counts}</span>}
       {row.link !== null && (

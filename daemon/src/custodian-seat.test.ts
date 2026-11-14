@@ -1001,8 +1001,7 @@ const entry = (over: Partial<RoundEntry> = {}): RoundEntry => ({
   counts: emptyCounts(),
   ...over,
 });
-const failed = (at: number): RoundEntry =>
-  entry({ start: at, end: at + 1000, outcome: "failed", reason: "deadline" });
+const failed = (at: number): RoundEntry => entry({ start: at, end: at + 1000, outcome: "failed", reason: "deadline" });
 
 describe("pause and the owner's round request (C45)", () => {
   test("a paused seat starts no round, even past everyMinutes; an expired pause lets it", async () => {
@@ -1182,9 +1181,7 @@ describe("the seat's view (C40, C41)", () => {
 
   test("e is the last log entry's end in seconds and n[0] its closed count, capped at 999", async () => {
     const r = rig();
-    r.rounds.push(
-      entry({ end: 1_763_000_123_456, counts: { ...emptyCounts(), close: { ok: 4_000, refused: 1 } } }),
-    );
+    r.rounds.push(entry({ end: 1_763_000_123_456, counts: { ...emptyCounts(), close: { ok: 4_000, refused: 1 } } }));
     await r.seat.start();
     expect(r.seat.view(NOW)).toEqual({ s: "idle", e: 1_763_000_123, n: [999, 0, 0] });
     r.seat.stop();

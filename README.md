@@ -197,7 +197,11 @@ Edit `~/.config/seance/config.json`:
   (`apt install bubblewrap socat`), and a round only sees a session at rest when the `session-events` mod is
   installed in that session's Claude (`seanced mod install`; `doctor` warns when it is not). The round keeps notes
   in `custodian/notes.md` in the daemon's state dir (`seanced custodian notes --clear` empties it) and its last 20
-  rounds in `custodian/rounds.jsonl` beside it.
+  rounds in `custodian/rounds.jsonl` beside it. At the shell, `seanced custodian status` says what the seat is doing,
+  `log` prints the last rounds (summaries included, which the Machines screen never sees), `pause [--for 1h]` and
+  `resume` hold and release it, and `round` asks for one now (honoured even while paused, spaced 15 minutes from
+  the last round, and dropped if not taken within 10). Once rounds go live the Machines card shows a Custodian row
+  for the machine.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
   account's cached quota may get before the daemon refreshes it with `claude -p /usage`.
   Values under 1 are refused: Claude Code debounces `/usage` for 60 s anyway.

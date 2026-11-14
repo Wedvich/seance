@@ -117,14 +117,14 @@ describe("seanced custodian, the owner's verbs", () => {
       join(custodian, "rounds.jsonl"),
       [
         entry(1_700_000_000_000, { summary: "older round" }),
-        entry(1_700_000_100_000, { summary: "\u001b[2Jclear‮evil\nsecond line", exclave: "x\u001b[31m" }),
+        entry(1_700_000_100_000, { summary: "\u001B[2Jclear‮evil\nsecond line", exclave: "x\u001B[31m" }),
       ]
         .map((line) => JSON.stringify(line))
         .join("\n") + "\n",
     );
     const { out, code } = await run("log");
     expect(code).toBe(0);
-    expect(out).not.toContain("\u001b");
+    expect(out).not.toContain("\u001B");
     expect(out).not.toContain("‮");
     expect(out).toContain("�[2J");
     expect(out).toContain("clear�evil");
@@ -135,7 +135,7 @@ describe("seanced custodian, the owner's verbs", () => {
 
 describe("printable and parseDuration", () => {
   test("printable replaces control, format and separator characters and truncates", () => {
-    expect(printable("a\u001bb\u009bc‮d e​f\ng")).toBe("a�b�c�d�e�f�g");
+    expect(printable("a\u001Bb\u009Bc‮d e​f\ng")).toBe("a�b�c�d�e�f�g");
     expect(printable("a\nb", 10, true)).toBe("a\nb");
     expect(printable("x".repeat(500), 10)).toBe(`${"x".repeat(10)}…`);
   });

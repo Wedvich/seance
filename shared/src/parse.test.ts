@@ -2307,7 +2307,8 @@ describe("M4 shapes", () => {
       "idle",
       null,
     ];
-    for (const cu of bad) expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, cu })).toEqual({ at: 1, scan: 2, cpu: 40 });
+    for (const cu of bad)
+      expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, cu })).toEqual({ at: 1, scan: 2, cpu: 40 });
     const extra = parseMachineStatus({ at: 1, scan: 2, cu: { s: "idle", extra: "x" } });
     expect(extra?.cu).toEqual({ s: "idle" });
   });

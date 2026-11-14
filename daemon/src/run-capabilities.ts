@@ -7,12 +7,7 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
-import {
-  dropRoundRequest,
-  peekRoundRequest,
-  readControl,
-  writeSeatView,
-} from "./custodian-control.ts";
+import { dropRoundRequest, peekRoundRequest, readControl, writeSeatView } from "./custodian-control.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
 import { createWorktreeRule } from "./custodian-worktree.ts";
@@ -388,6 +383,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     void readRounds(custodianRoundsPath())
       .then((entries) => {
         failedLast = lastRoundView(entries.at(-1));
+        return null;
       })
       .catch(() => {})
       .then(() => publish({ s: "failing", ...failedLast }, true))

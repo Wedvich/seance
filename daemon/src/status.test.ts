@@ -168,7 +168,12 @@ describe("fitStatus", () => {
   });
 
   test("the custodian's view is never trimmed, and the worst case beside every other kept field fits the budget", () => {
-    const cu = { s: "running" as const, e: 1_763_000_000, n: [999, 999, 999] as const, rc: `session_${"A".repeat(64)}` };
+    const cu = {
+      s: "running" as const,
+      e: 1_763_000_000,
+      n: [999, 999, 999] as const,
+      rc: `session_${"A".repeat(64)}`,
+    };
     const crowded = fitStatus({ ...status(3), cu, sess: Array.from({ length: 600 }, () => 9) });
     expect(crowded.sess).toBeUndefined();
     expect(crowded.cu).toEqual(cu);

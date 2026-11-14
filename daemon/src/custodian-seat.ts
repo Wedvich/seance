@@ -9,12 +9,7 @@ import {
 } from "@seance/shared";
 import type { Config, CustodianConfig } from "./config.ts";
 import type { CustodianVerb } from "./custodian-frame.ts";
-import {
-  pausedAt,
-  ROUND_REQUEST_MIN_GAP_MS,
-  type PauseRead,
-  type RoundRequest,
-} from "./custodian-control.ts";
+import { pausedAt, ROUND_REQUEST_MIN_GAP_MS, type PauseRead, type RoundRequest } from "./custodian-control.ts";
 import { countedVerb, emptyCounts, type RoundEntry } from "./custodian-rounds.ts";
 import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
 import type { TrackedActivity } from "./pane-activity.ts";
@@ -384,7 +379,9 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
       d.onView?.();
     }
     const { rc: _rc, ...published } = current;
-    await d.publishView(published).catch((err: unknown) => d.warn(`custodian: publishing the seat's view failed: ${String(err)}`));
+    await d
+      .publishView(published)
+      .catch((err: unknown) => d.warn(`custodian: publishing the seat's view failed: ${String(err)}`));
   };
 
   // A reload's second `startDaemon` writes `state` too: the outgoing instance saving over it would clobber it
@@ -629,12 +626,14 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         .then((entries) => {
           lastRound = entries.at(-1);
           failures = trailingFailures(entries);
+          return null;
         })
         .catch((err: unknown) => d.warn(`custodian: reading the round log failed: ${String(err)}`));
       return seeded
         .then(() => d.readControl())
         .then((read) => {
           control = read;
+          return null;
         })
         .then(() => serially(adopt))
         .catch((err: unknown) => d.warn(`custodian: adopting a round failed: ${String(err)}`))
