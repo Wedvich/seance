@@ -803,7 +803,14 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
  * origin like every command typed at this machine, and the `custodian` app op under `relay`. `status` and `log` are
  * reads and write nothing. No text from a file or a payload reaches a line: only the pause's end, and a fixed outcome.
  */
-export type CustodianOwnerOutcome = "requested" | "held" | "unconfigured" | "failed" | "running" | "too_soon";
+export type CustodianOwnerOutcome =
+  | "requested"
+  | "held"
+  | "unconfigured"
+  | "failed"
+  | "running"
+  | "starting"
+  | "too_soon";
 
 export interface CustodianOwnerAudit {
   readonly pause: (until: number | null) => Promise<void>;

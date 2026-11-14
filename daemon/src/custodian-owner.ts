@@ -34,16 +34,21 @@ export interface OwnerRoundInputs {
   /** The machine's config.json carries a `custodian` key. */
   readonly configured: () => Promise<boolean>;
   readonly seatView: () => Promise<SeatView | null>;
+  /**
+   * False while the daemon's seat does not exist yet (its checks still run): a request would sit unread. Absent for the
+   * shell, whose files cannot say; the daemon reads its own memory.
+   */
+  readonly seatReady?: () => boolean;
   /** The daemon's record of its running round and last end: the CLI's from `state.json`, the daemon's from memory. */
   readonly seatRecord: () => Promise<SeatRecord | undefined>;
   readonly rounds: () => Promise<readonly RoundEntry[]>;
-  /** Writes `round-request`; a seam for tests. */
-  readonly request?: (now: number) => Promise<void>;
+  /** Writes `round-request`; a seam for tests, and for the shell's warnings, which come before the write. */
+  readonly request?: (now: number, view: SeatView | null) => Promise<void>;
 }
 
 export type OwnerRound =
   | { readonly outcome: "requested"; readonly view: SeatView | null }
-  | { readonly outcome: "held" | "unconfigured" | "failed" | "running" }
+  | { readonly outcome: "held" | "unconfigured" | "failed" | "running" | "starting" }
   | { readonly outcome: "too_soon"; readonly latest: number; readonly after: number };
 
 /**
@@ -53,7 +58,9 @@ export type OwnerRound =
  */
 export async function ownerRound(inputs: OwnerRoundInputs, audit: CustodianOwnerAudit): Promise<OwnerRound> {
   const decided = await decideRound(inputs);
-  if (decided.outcome === "requested") await (inputs.request ?? requestRound)(inputs.now);
+  if (decided.outcome === "requested") {
+    await (inputs.request ?? ((now: number) => requestRound(now)))(inputs.now, decided.view);
+  }
   await audit.round(decided.outcome);
   return decided;
 }
@@ -61,6 +68,7 @@ export async function ownerRound(inputs: OwnerRoundInputs, audit: CustodianOwner
 async function decideRound(inputs: OwnerRoundInputs): Promise<OwnerRound> {
   if (!inputs.live) return { outcome: "held" };
   if (!(await inputs.configured())) return { outcome: "unconfigured" };
+  if (inputs.seatReady?.() === false) return { outcome: "starting" };
   const { now } = inputs;
   const read = await inputs.seatView().catch(() => null);
   const view = freshView(read, now) ? read : null;
@@ -100,6 +108,7 @@ const ROUND_CODES = {
   unconfigured: { code: "unconfigured", message: "no custodian is configured on this machine" },
   failed: { code: "host_failed", message: "this host's checks failed, so no round can run" },
   running: { code: "running", message: "a round is running" },
+  starting: { code: "unsupported", message: "this daemon's custodian seat is not running yet" },
 } as const;
 
 /**

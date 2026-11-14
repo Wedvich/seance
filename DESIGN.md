@@ -11838,7 +11838,7 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   precedent: a fault never starts a round the owner paused). `state.json` is deliberately not the daemon's `state.json`:
   the shell and the app op are its writers, and sharing the daemon's would race the daemon's own writes. **The later
   owner act wins:** the daemon runs the op's acts one at a time on one chain, and the shell's verbs, another process,
-  are not serialised with them. Each write is one whole-file atomic rename of a file that holds only the pause, so a
+  are not serialised with them. Each write is one whole-file atomic rename of the file (keeping any other key it holds), so a
   pause and a resume from the two in the same instant leave one of them, whole, and the row says which within the
   status floor. _Rejected:_ a lock file the shell and the daemon share (a stale lock after a crash holds the owner's
   pause hostage, for two writers one person drives) and routing the shell through the daemon's socket (a stopped
@@ -11859,7 +11859,16 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   to 30 days is `invalid_request`). `LOCAL_OPS`, `BROKER_OPS` and MCP do not carry it: the shell has its own verbs, and
   a keyless box has no app role. It runs the shell verbs' one implementation, `custodian-owner.ts`'s `ownerAct` over
   `ownerRound`, `ownerPause` and `ownerResume`, which `custodian-owner-cli.ts` calls too; the inputs differ only in
-  that the daemon reads the seat record from its memory. So while rounds are held a round is refused `held` and a
+  that the daemon reads the seat record and the seat's view from its memory (`custodianHost`: `starting` while the
+  seat's checks run, `failed` once they declined, else `ready`), never `seat.json`, which a failed seat stops writing and
+  so goes stale. **The op is wired only where this daemon runs a seat** (`seatEnabled`, the capability bit's predicate):
+  elsewhere it answers `unsupported` (no control), never an `ok` for a file nothing reads; a `round` while the seat is
+  still `starting` answers `unsupported` too, and `host_failed` once the checks failed, however long ago. A failed seat
+  still reports `p` in `cu` (it re-reads the pause when asked and at the failure), so the card offers Resume behind
+  `failing`. **No per-op rate limit beyond the round's spacing:** every act pokes the seat, but a poke is one tick, the
+  seat runs one pass at a time with at most one queued, and the due check's spacing bounds rounds, so an app-role holder
+  can only cost file reads and status refreshes (already floored by the relay), which the holder of the PSK could cost
+  through any op. So while rounds are held a round is refused `held` and a
   pause or resume still writes, and a round meets the same checks and refusals as the shell's (`unconfigured`,
   `host_failed`, `running`, `too_soon` with `after`, the time one can be asked for). A refusal before the act (not from
   an app, unparsable, no control) is audited `audit custodian origin=relay op=<act|-> outcome=refused|invalid_request|

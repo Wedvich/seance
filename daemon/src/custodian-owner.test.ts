@@ -146,6 +146,27 @@ describe("the custodian op's acts", () => {
     ]);
   });
 
+  test("round while the daemon's seat is still starting: unsupported, nothing requested; pause still writes", async () => {
+    const starting = (): Omit<OwnerRoundInputs, "now"> & { now: () => number; path: string } => ({
+      ...inputs(),
+      seatReady: () => false,
+    });
+    const op: CustodianControl = { act: (request, audit) => ownerAct(request, starting(), audit) };
+    expect((await handle({ custodian: op })(ask({ act: "round" }), APP_ID))?.payload).toMatchObject({
+      ok: false,
+      code: "unsupported",
+    });
+    expect(await exists(requestPath)).toBe(false);
+    expect((await handle({ custodian: op })(ask({ act: "pause" }), APP_ID))?.payload).toEqual({
+      ok: true,
+      pause: { until: null },
+    });
+    expect(trail()).toEqual([
+      "audit custodian origin=relay op=round outcome=starting",
+      "audit custodian origin=relay op=pause until=none",
+    ]);
+  });
+
   test("round writes the request and answers the pause that holds, which a round request overrides for one round", async () => {
     await act({ act: "pause" });
     expect(await act({ act: "round" })).toEqual({ ok: true, pause: { until: null } });

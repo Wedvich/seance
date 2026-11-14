@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CAPABILITIES, importPsk, open as openSealed, parseMachineInfo, toBase64 } from "@seance/shared";
+import { APP_ID, CAPABILITIES, importPsk, open as openSealed, parseMachineInfo, seal, toBase64 } from "@seance/shared";
 import { custodianAudit } from "../src/audit.ts";
 import { createBackend } from "../src/backend-default.ts";
 import { DespawnFailure } from "../src/backend.ts";
@@ -419,6 +419,7 @@ describe("the capability bit", () => {
         pongTimeoutMs: 1_000,
         baseBackoffMs: 20,
         telemetryIntervalMs: 100_000,
+        statusFloorMs: 20,
         custodian: {
           live: opts.live,
           checkIntervalMs: 3_600_000,
@@ -505,6 +506,57 @@ describe("the capability bit", () => {
 
   test("rounds are held in production: the key alone advertises nothing", async () => {
     expect(await advertised(CUSTODIAN_DEFAULTS, { live: false })).not.toContain(CAPABILITIES.custodian);
+  });
+
+  /** One app-sealed `custodian` request to a booted daemon, and what it answered. */
+  async function ask(booted: Awaited<ReturnType<typeof boot>>, deviceId: string, payload: unknown): Promise<unknown> {
+    const key = await importPsk(PSK);
+    booted.relay.sendToDaemon(
+      await seal(
+        key,
+        { to: deviceId, from: APP_ID },
+        { id: crypto.randomUUID(), ts: Date.now(), op: "custodian", payload },
+      ),
+    );
+    return (await openSealed(key, await booted.relay.messages.next(5_000))).payload;
+  }
+
+  test("the op is answered only where a seat runs, and a round meets the daemon's own view of it", async () => {
+    // No custodian key: no seat, so no control: unsupported, and nothing written for a seat to read.
+    const off = await boot(undefined, { live: true, sandboxProblem: () => Promise.resolve(null) });
+    try {
+      const frame = await off.relay.registers.next(5_000);
+      expect(await ask(off, frame.deviceId, { act: "resume" })).toMatchObject({ ok: false, code: "unsupported" });
+    } finally {
+      off.stop();
+    }
+    // A seat whose checks failed: host_failed from the daemon's memory, however long ago it failed (no seat.json read).
+    const failed = await boot(CUSTODIAN_DEFAULTS, {
+      live: true,
+      sandboxProblem: () => Promise.resolve("test: no sandbox"),
+    });
+    try {
+      const frame = await failed.relay.registers.next(5_000);
+      expect(await ask(failed, frame.deviceId, { act: "pause" })).toMatchObject({ ok: true });
+      let reply: unknown = null;
+      await pollUntil(async () => {
+        reply = await ask(failed, frame.deviceId, { act: "round" });
+        return (reply as { code?: string }).code === "host_failed";
+      }, "the failed seat to refuse a round as host_failed");
+      expect(reply).toMatchObject({ ok: false, code: "host_failed" });
+      // The pause shows behind `failing` (`p`), so the card can offer Resume: the status says so once the pause is read.
+      const key = await importPsk(PSK);
+      await pollUntil(async () => {
+        const status = (await openSealed(key, await failed.relay.statuses.next(5_000))).payload as {
+          cu?: { s?: string; p?: boolean };
+        };
+        return status.cu?.s === "failing" && status.cu.p === true;
+      }, "a failing status carrying the pause");
+      // The pause survives behind `failing`, so the card can offer Resume.
+      expect(await ask(failed, frame.deviceId, { act: "resume" })).toEqual({ ok: true, pause: null });
+    } finally {
+      failed.stop();
+    }
   });
 });
 

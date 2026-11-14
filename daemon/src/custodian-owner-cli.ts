@@ -1,7 +1,7 @@
 import { CUSTODIAN_PAUSE_MAX_MINUTES } from "@seance/shared";
 import { cliSink, custodianOwnerAudit } from "./audit.ts";
 import { loadConfig, type Config } from "./config.ts";
-import { pausedAt, readControl, readSeatView, type SeatView } from "./custodian-control.ts";
+import { pausedAt, readControl, readSeatView, requestRound, type SeatView } from "./custodian-control.ts";
 import { freshView, ownerPause, ownerResume, ownerRound } from "./custodian-owner.ts";
 import { readRounds, type RoundEntry } from "./custodian-rounds.ts";
 import { FAILING_AFTER, ROUNDS_LIVE, trailingFailures } from "./custodian-seat.ts";
@@ -162,6 +162,7 @@ const ROUND_REFUSALS = {
   unconfigured: "no custodian configured in config.json",
   failed: "this host's checks failed, so no round can run",
   running: "a round is running",
+  starting: "the seat is not running yet",
 } as const;
 
 /** `live` is a seam for tests: production passes none, and rounds are held while `ROUNDS_LIVE` is false. */
@@ -177,6 +178,18 @@ export async function requestOwnerRound(live: boolean = ROUNDS_LIVE): Promise<vo
         return state === null ? undefined : custodianSeatOf(state);
       },
       rounds: () => readRounds(custodianRoundsPath()),
+      // The warnings come before the write, so a write that throws is still preceded by them.
+      request: async (now, view) => {
+        const runtime = await readRuntime();
+        if (runtime === null || !pidAlive(runtime.pid)) {
+          console.error(
+            "seanced custodian: the daemon is not running; the request runs when it next ticks, if still fresh",
+          );
+        } else if (view === null) {
+          console.error("seanced custodian: the daemon has not reported a seat; it may not honour the request");
+        }
+        await requestRound(now);
+      },
     },
     custodianOwnerAudit("cli", cliSink),
   );
@@ -194,11 +207,6 @@ export async function requestOwnerRound(live: boolean = ROUNDS_LIVE): Promise<vo
   }
   const runtime = await readRuntime();
   const daemonUp = runtime !== null && pidAlive(runtime.pid);
-  if (!daemonUp) {
-    console.error("seanced custodian: the daemon is not running; the request runs when it next ticks, if still fresh");
-  } else if (decided.view === null) {
-    console.error("seanced custodian: the daemon has not reported a seat; it may not honour the request");
-  }
   console.log(
     daemonUp
       ? "round requested; the seat starts it at its next tick (within a minute) unless the launch fails or the daemon is stopping"
