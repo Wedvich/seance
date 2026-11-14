@@ -12,13 +12,15 @@ import { custodianNotesPath, socketPath } from "./paths.ts";
  * `session-event` (the round runs its verbs many times a turn): no import here may be heavy.
  *
  * The owner's verbs (`status`, `log`, `round`, `pause`, `resume`: `CUSTODIAN_OWNER_VERBS`) are not this module's: `main.ts`
- * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's five.
+ * sends them to `custodian-owner-cli.ts`, which this module never imports, and its USAGE stays the round's seven.
  *
  * Exit 0 for an `ok` reply, 1 for a refusal (its code on stderr), 2 for a command line the CLI refuses or a daemon it
  * cannot reach.
  */
 
-const USAGE = "usage: seanced custodian sessions | close <pane> | flag <pane> <reason> [note] | notes [--clear] | done";
+const USAGE =
+  "usage: seanced custodian sessions | close <pane> | flag <pane> <reason> [note] | nudge <pane> (text on stdin) | " +
+  "interrupt <pane> | notes [--clear] | done";
 
 /** `close` covers a graceful despawn, a fetch and a `gh` read; the rest answer from memory or one small write. */
 const CLOSE_TIMEOUT_MS = 180_000;
@@ -52,7 +54,11 @@ export function frameFor(rest: readonly string[], text: () => Promise<string>): 
   const base = { v: CUSTODIAN_FRAME_VERSION, kind: CUSTODIAN_FRAME_KIND } as const;
   const [verb, ...args] = rest;
   if (verb === "sessions" && args.length === 0) return Promise.resolve({ ...base, verb });
-  if (verb === "close" && args.length === 1) return Promise.resolve({ ...base, verb, pane: args[0] });
+  if ((verb === "close" || verb === "interrupt") && args.length === 1) {
+    return Promise.resolve({ ...base, verb, pane: args[0] });
+  }
+  if (verb === "nudge" && args.length === 1)
+    return text().then((body) => ({ ...base, verb, pane: args[0], text: body }));
   if (verb === "flag" && (args.length === 2 || args.length === 3)) {
     const [pane, reason, note] = args;
     return Promise.resolve({ ...base, verb, pane, reason, ...(note === undefined ? {} : { note }) });
@@ -81,7 +87,7 @@ export async function cmdCustodian(rest: readonly string[]): Promise<void> {
       path: socketPath(),
       timeoutMs: verb === "close" ? CLOSE_TIMEOUT_MS : VERB_TIMEOUT_MS,
       timeoutText: `the daemon did not answer ${verb ?? "the verb"} in time`,
-      // Only a read rides out a restart: a lost close or done may have run.
+      // Only a read rides out a restart: a lost close, nudge, interrupt or done may have run.
       ...(verb === "sessions" ? { restartGraceMs: RESTART_GRACE_MS } : {}),
     });
     console.log(JSON.stringify(reply));

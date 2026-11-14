@@ -886,3 +886,70 @@ describe("every audit line", () => {
     }
   });
 });
+
+describe("a custodian nudge", () => {
+  test("goes to the pane's listener as one request in the custodian's wrapper, audited from=custodian, never the text", async () => {
+    const messages = setup();
+    const receiver = await launched("nudge");
+    const target = await pane("nudge-target", receiver);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    texts.push("secret-nudge-text");
+    expect(await messages.deliverAsCustodian(target.id, "secret-nudge-text")).toEqual({
+      ok: true,
+      taskId: receiver,
+      outcome: "delivered",
+    });
+    const [, line] = listener.lines;
+    const delivered = lineOf(line);
+    expect(delivered.messageKind).toBe("request");
+    expect(delivered.push).toStartWith("The custodian on `testbox` (message `");
+    expect(delivered.push).toContain("```\nsecret-nudge-text\n```");
+    expect(delivered.push).not.toContain("send_message");
+    expect(delivered.body).toBeUndefined();
+    expect(audits).toEqual([
+      { dir: "in", from: { custodian: true }, to: receiver, kind: "request", bytes: 17, outcome: "delivered" },
+    ]);
+    expect(lines).toEqual([
+      `audit message origin=message dir=in from=custodian to="${receiver}" kind=request bytes=17 outcome=delivered`,
+    ]);
+  });
+
+  test("is held for a listener within the grace and refused unsupported past it, as an exclave without the inbox mod", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const receiver = await launched("nudgehold");
+    const target = await pane("nudgehold-target", receiver);
+    expect(await messages.deliverAsCustodian(target.id, "soon")).toEqual({
+      ok: true,
+      taskId: receiver,
+      outcome: "sent",
+    });
+    clock.now += 61_000;
+    expect(await messages.deliverAsCustodian(target.id, "late")).toEqual({ ok: false, code: "unsupported" });
+    expect(inAudits("nolistener").map((a) => a.from)).toEqual([{ custodian: true }]);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(listener.lines.slice(1).map((raw) => lineOf(raw).push.endsWith("```\nsoon\n```"))).toEqual([true]);
+  });
+
+  test("reaches only a live pane carrying a task this machine launched, under the push cap, and no sender's rate bucket", async () => {
+    const messages = setup({ graceMs: 1e9 });
+    const untagged = await pane("nudge-untasked");
+    const stranger = await pane("nudge-stranger", "task-never-launched-here");
+    expect(await messages.deliverAsCustodian(untagged.id, "x")).toEqual({ ok: false, code: "untasked" });
+    expect(await messages.deliverAsCustodian(stranger.id, "x")).toEqual({ ok: false, code: "untasked" });
+    expect(await messages.deliverAsCustodian("%99999", "x")).toEqual({ ok: false, code: "gone" });
+    const receiver = await launched("nudgecap");
+    const target = await pane("nudgecap-target", receiver);
+    expect(await messages.deliverAsCustodian(target.id, "é".repeat(MESSAGE_PUSH_MAX / 2 + 1))).toEqual({
+      ok: false,
+      code: "too_long",
+    });
+    for (let i = 0; i < 25; i++) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered sends
+      expect((await messages.deliverAsCustodian(target.id, `n${i}`)).ok).toBe(true);
+    }
+    messages.stop();
+    expect(await messages.deliverAsCustodian(target.id, "x")).toEqual({ ok: false, code: "stopping" });
+  });
+});

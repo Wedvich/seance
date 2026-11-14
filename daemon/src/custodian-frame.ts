@@ -10,7 +10,7 @@ export const CUSTODIAN_FRAME_VERSION = 1;
 /** The local socket's sixth frame kind: the custodian round's verbs, bound to the round's own pane. */
 export const CUSTODIAN_FRAME_KIND = "custodian";
 
-export const CUSTODIAN_VERBS = ["sessions", "close", "flag", "notes", "done"] as const;
+export const CUSTODIAN_VERBS = ["sessions", "close", "flag", "nudge", "interrupt", "notes", "done"] as const;
 export type CustodianVerb = (typeof CUSTODIAN_VERBS)[number];
 
 /** C40: the round's summary is at most this many bytes. */
@@ -34,14 +34,22 @@ export const CUSTODIAN_REPLY_CODES = [
   "busy",
   "too_soon",
   "unobserved",
-  /** A `notes` or `done` text, or a `flag` note, over its cap. */
+  /** A `notes`, `done` or `nudge` text, or a `flag` note, over its cap. */
   "too_long",
   /** A `flag` reason outside `FLAG_REASONS`. */
   "bad_reason",
   /** A `done` at or past the round's deadline. */
   "too_late",
-  /** A `close`, `flag` or `notes` after the round's `done`. */
+  /** A `close`, `flag`, `nudge`, `interrupt` or `notes` after the round's `done`. */
   "round_done",
+  /** A `nudge` to a pane carrying no task this machine's launch ledger holds a launch of: messaging addresses tasks only. */
+  "untasked",
+  /** A `nudge` past `maxNudges` for the session, or a second `interrupt` of it. */
+  "limit",
+  /** A second `nudge` of the session in one round. */
+  "once_per_round",
+  /** An `interrupt` of a pane whose last state is not `busy`, or that is not a live session. */
+  "not_busy",
 ] as const;
 
 export type CustodianReplyCode = (typeof CUSTODIAN_REPLY_CODES)[number];
@@ -50,6 +58,12 @@ export type CustodianReplyCode = (typeof CUSTODIAN_REPLY_CODES)[number];
 export type CloseRefusal = Extract<
   CustodianReplyCode,
   "foreign" | "marked" | "waiting" | "busy" | "too_soon" | "unobserved" | "gone" | "invalid"
+>;
+
+/** Why an `interrupt` sent no key (C27). */
+export type InterruptRefusal = Extract<
+  CustodianReplyCode,
+  "foreign" | "marked" | "waiting" | "not_busy" | "too_soon" | "limit" | "gone"
 >;
 
 /**
@@ -79,6 +93,8 @@ export type CustodianFrame =
       readonly reason: string;
       readonly note?: string;
     }
+  | { readonly v: 1; readonly kind: "custodian"; readonly verb: "nudge"; readonly pane: string; readonly text: string }
+  | { readonly v: 1; readonly kind: "custodian"; readonly verb: "interrupt"; readonly pane: string }
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "notes"; readonly text: string }
   | { readonly v: 1; readonly kind: "custodian"; readonly verb: "done"; readonly summary: string };
 
@@ -99,9 +115,9 @@ export interface CustodianPaneView {
   readonly prUrl: string | null;
   readonly worktree: string | null;
   readonly marked: boolean;
-  /** Placeholders until nudge exists (custodian 8). */
-  readonly nudges: 0;
-  readonly interrupted: false;
+  /** Nudges this session was sent and whether it was interrupted: the daemon's counts (C30), zero for a new session. */
+  readonly nudges: number;
+  readonly interrupted: boolean;
   /** The pane's open flag, its reason and when; never the note, which is model-written from pane text. */
   readonly flag: { readonly reason: FlagReason; readonly at: number } | null;
   /** `"ok"`, or the refusal `close` would answer. */
@@ -136,6 +152,17 @@ export type CustodianReply =
       /** Whether the event reached a leader or the relay: false for an untasked pane, or when not connected. */
       readonly sent: boolean;
     }
+  | {
+      readonly ok: true;
+      readonly verb: "nudge";
+      readonly pane: string;
+      readonly taskId: string;
+      /** `sent`: held for the pane's listener, which had not connected yet. */
+      readonly outcome: "delivered" | "sent";
+      /** This session's nudges, this one included. */
+      readonly nudges: number;
+    }
+  | { readonly ok: true; readonly verb: "interrupt"; readonly pane: string; readonly taskId: string | null }
   | { readonly ok: true; readonly verb: "notes"; readonly kept: readonly string[]; readonly dropped: number }
   | { readonly ok: true; readonly verb: "done" }
   | { readonly ok: false; readonly code: CustodianReplyCode };
@@ -152,6 +179,8 @@ const KEYS: Record<CustodianVerb, readonly (readonly string[])[]> = {
     ["v", "kind", "verb", "pane", "reason"],
     ["v", "kind", "verb", "pane", "reason", "note"],
   ],
+  nudge: [["v", "kind", "verb", "pane", "text"]],
+  interrupt: [["v", "kind", "verb", "pane"]],
   notes: [["v", "kind", "verb", "text"]],
   done: [["v", "kind", "verb", "summary"]],
 };
@@ -173,9 +202,16 @@ export function parseCustodianFrame(raw: unknown): CustodianFrame | null {
   switch (verb) {
     case "sessions":
       return { ...base, verb };
-    case "close": {
+    case "close":
+    case "interrupt": {
       const pane = raw["pane"];
       return typeof pane === "string" && PANE_ID.test(pane) ? { ...base, verb, pane } : null;
+    }
+    case "nudge": {
+      const { pane, text } = raw;
+      return typeof pane === "string" && PANE_ID.test(pane) && typeof text === "string"
+        ? { ...base, verb, pane, text }
+        : null;
     }
     case "flag": {
       const { pane, reason, note } = raw;

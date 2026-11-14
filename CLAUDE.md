@@ -55,22 +55,18 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — spec, seven parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
-  Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
-  and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat"; the verbs `sessions`, `close`, `notes`
-  and `done` and the round log, C23–C25, C31–C34, C37–C40 and C42, in DESIGN.md, "The custodian frame kind";
-  the `flag` verb, the flags file, `custodian-event`, `Task.flag`, the card's flag and the `stuck` and `failing` pushes,
-  C29, C33's flags, C41's push, C44 and C47's event, in DESIGN.md, "The custodian frame kind" (its leader's-side bullet); `MachineStatus.cu`, the Machines row and the owner's
-  shell verbs `status`, `log`, `round`, `pause` and `resume`, C40, C43, C45 and C47's status, in DESIGN.md, "The
-  custodian's status and the Machines row"; the `custodian` app op and the card's menu, C45 and C47's controls, in the
-  same section;
-  rounds are held behind `ROUNDS_LIVE` until build item 4b, which contains the round's sandbox — the verbs bound
-  only what goes through them; nudge and interrupt are not built): the
-  custodian, one seat per machine whose daemon
-  starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
-  when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
-  daemon checks, and flag the rest. Read it before touching despawn, reap's merged check, a pane's
-  tracked state, or anything that reads a live session's screen.
+- **docs/custodian.md** — what is left of the custodian spec: build item 4b (contain the round's sandbox, then
+  remove `ROUNDS_LIVE`), the open build-time details, and an
+  index of where each decision (C1–C49) is recorded in DESIGN.md. Everything else is built and recorded there: the
+  seat and the round ("The custodian's seat"), the round's verbs `sessions`, `close`, `flag`, `nudge`, `interrupt`,
+  `notes` and `done`, the flags and counts file and the round log ("The custodian frame kind"), and `MachineStatus.cu`,
+  the Machines row, the owner's shell verbs, the `custodian` app op and the card's menu ("The custodian's status and the
+  Machines row"). The custodian is one
+  seat per machine whose daemon starts a fresh, fenced Claude session per round to close finished sessions
+  (removing a worktree when nothing would be lost), nudge and interrupt stuck ones and flag the rest, through
+  `seanced custodian` verbs the daemon checks; rounds are held behind `ROUNDS_LIVE` until item 4b, since the verbs
+  bound only what goes through them. Read it, and those DESIGN.md sections, before touching despawn, reap's merged
+  check, a pane's tracked state, or anything that reads a live session's screen.
 - **docs/agents.md** — analysis, nothing decided: what spawning agents other than Claude Code
   (Codex first) would touch — the agent as a task field, launch, accounts, quota, session events,
   MCP, clients — the two risks (Codex's remote control, binding by peer pid) and a spike-first
@@ -195,7 +191,7 @@ green:
   the daemon's reap timer, `probe` for the daemon's trait probes, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
-  `custodian` for the daemon's seat starting, closing or ending a custodian round and for a round's `close` and the worktree it decides,
+  `custodian` for the daemon's seat starting, closing or ending a custodian round and for a round's `close` and the worktree it decides, its `flag`, `nudge` and `interrupt`,
   `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
@@ -440,7 +436,7 @@ green:
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
 - **The local socket's sixth frame kind is `custodian`** (`custodian-verbs.ts`, `custodian-frame.ts`; DESIGN.md,
-  "The custodian frame kind"): the round's five verbs `sessions`, `close <pane>`, `flag <pane>`, `notes` and `done`, and no other
+  "The custodian frame kind"): the round's seven verbs `sessions`, `close <pane>`, `flag <pane>`, `nudge <pane>`, `interrupt <pane>`, `notes` and `done`, and no other
   act, built but held with the seat (`ROUNDS_LIVE`: no round runs, so the frame answers `unsupported`). The verbs
   bound only what goes through them: a round's sandbox can still reach the tmux socket and the daemon's plain ops
   until docs/custodian.md item 4b. It is bound only by the kernel-reported peer pid, to a process of the one live pane carrying
@@ -467,10 +463,21 @@ green:
   a re-assignment, never by a new turn or the session's end otherwise: each only after the leader's `unflag` was taken, or the entry
   stays for the next try; the flags file is denied to the round's `Read` and sandbox (a mistake guard until item
   4b); the note is
-  display-only and never logged, audited, pushed, archived, put in `get_queue` or returned by `sessions`. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
+  display-only and never logged, audited, pushed, archived, put in `get_queue` or returned by `sessions`. `nudge`
+  delivers one `request` message only through messaging's local delivery (`Messages.deliverAsCustodian`, the `inbox`
+  mod's submit: never a key, `asUser`, `$.prompt.fill` or tmux), the daemon its sender in the fixed
+  `custodianRequest` wrapper, only to an `ours` pane carrying a task this machine's launch ledger holds, never one
+  that is marked, the round's, or whose last state is `needs-input`, its text at most `MESSAGE_PUSH_MAX` bytes and
+  never logged or audited, at most `maxNudges` per session and one per round. `interrupt` sends only the constant
+  key Escape (`["Escape"]`, never a frame field), once per session, only to an `ours`, unmarked, `live` pane whose
+  last state is `busy` (never `needs-input`) and whose screen, sampled within `SCREEN_FRESH_MS`, has stood still for
+  `interruptAfterMinutes`, re-reading the pane and its facts after the count is written and before the key. Both
+  counts are the daemon's (C30): in `custodian/sessions.json` beside the flags, keyed by task id (or pane id when
+  untasked) and bound to the session's pid, written before the act, dropped when the session ends, kept across a
+  restart, never set by a frame and never sent to the leader. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
   `seanced` is its own `<tmp>/bin/seanced`, first on its `PATH`. Nothing a pane, the notes or the summary held is
-  logged or audited (the `custodian` origin's lines are `op=close`, `op=worktree` and `op=flag` with ids, outcomes and
-  reasons, never a note), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
+  logged or audited (the `custodian` origin's lines are `op=close`, `op=worktree`, `op=flag`, `op=nudge` and
+  `op=interrupt` with ids, outcomes and reasons, never a note or a nudge's text), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
   (`daemon/test/message-layering.test.ts`). A new verb, or any other act, is a threat-model change.
 - **The custodian's owner verbs are the shell's acts, never a frame** (`custodian-owner-cli.ts`; DESIGN.md, "The
   custodian's status and the Machines row"): `seanced custodian status | log | round | pause | resume` are dispatched

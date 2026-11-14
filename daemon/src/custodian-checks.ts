@@ -22,6 +22,8 @@ export interface CustodianCheckDeps {
   readonly weakerNested: () => Promise<boolean>;
   /** The exclaves whose Claude Code lacks the `session-events` mod: its frames are how the custodian's `close` sees a session. */
   readonly sessionEventsMissing: () => Promise<readonly string[]>;
+  /** The exclaves whose Claude Code lacks the `inbox` mod: messaging is how the custodian's `nudge` reaches a session. */
+  readonly inboxMissing: () => Promise<readonly string[]>;
 }
 
 const REAL: CustodianCheckDeps = {
@@ -32,13 +34,14 @@ const REAL: CustodianCheckDeps = {
   sandboxProblem,
   weakerNested: weakerNestedNeeded,
   sessionEventsMissing: () => modMissing("session-events"),
+  inboxMissing: () => modMissing("inbox"),
 };
 
 /**
  * `seanced doctor`'s custodian section, for a machine whose config carries `custodian` (docs/custodian.md): why a
  * round would not start here, or could not close what it finds. Read-only — it never creates a round dir, which only a
  * round about to run does. While rounds are held (`ROUNDS_LIVE`) the key only moves reap's defaults, so nothing here
- * can fail a machine: one informational line, and none of the probes run (the session-events warn included: it is for
+ * can fail a machine: one informational line, and none of the probes run (the session-events and inbox warns included: they are for
  * the day rounds go live). `live` is the test seam, as `CustodianSeatOpts.live`.
  */
 export async function custodianChecks(o: {
@@ -99,6 +102,13 @@ export async function custodianChecks(o: {
     checks.push({
       level: "warn",
       message: `${label}: the session-events mod is not installed or enabled — the custodian can never close its sessions (unobserved); run \`seanced mod install\``,
+    });
+  }
+  // `nudge` delivers through the mod's listener; without one it answers `unsupported` (C26).
+  for (const label of await deps.inboxMissing()) {
+    checks.push({
+      level: "warn",
+      message: `${label}: the inbox mod is not installed or enabled — the custodian can never nudge its sessions (unsupported); run \`seanced mod install\``,
     });
   }
   return checks;

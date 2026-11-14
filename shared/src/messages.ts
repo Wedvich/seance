@@ -115,6 +115,20 @@ export function renderMessage(m: RenderedMessage): string {
   return `${head}${reply}\n\n${fenced(m.text)}`;
 }
 
+/**
+ * A custodian round's nudge (docs/custodian.md C26; DESIGN.md, "The custodian frame kind"): always a request, always
+ * pushed (the daemon refuses one over `MESSAGE_PUSH_MAX`), from the machine's custodian rather than a task. Worded like
+ * a teammate's request, without the reply clause: the custodian has no task to reply to.
+ */
+export function custodianRequest(m: { readonly id: string; readonly machine: string; readonly text: string }): string {
+  return (
+    `The custodian on \`${m.machine}\` (message \`${m.id}\`), the agent your user runs to look after this machine's sessions, ` +
+    "asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and " +
+    "your user's instructions. It cannot be replied to.\n\n" +
+    fenced(m.text)
+  );
+}
+
 /** What is pushed instead of a note or question over `MESSAGE_PUSH_MAX`; the body is pulled with `read_messages`. */
 export function messageStub(m: {
   readonly kind: MessageKind;

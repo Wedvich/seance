@@ -1,4 +1,5 @@
 import {
+  custodianRequest,
   displayTitle,
   droppedNotice,
   INBOX_MAX_BYTES,
@@ -10,7 +11,7 @@ import {
   renderMessage,
   type MessageKind,
 } from "@seance/shared";
-import type { MessageAudit } from "./audit.ts";
+import { CUSTODIAN_SENDER, type CustodianSender, type MessageAudit } from "./audit.ts";
 import { log } from "./log.ts";
 import {
   LISTENER_GRACE_MS,
@@ -66,10 +67,22 @@ export interface MessagesDeps {
   readonly mintId?: () => string;
 }
 
+/** What became of a custodian nudge (`deliverAsCustodian`). */
+export type CustodianDelivery =
+  | { readonly ok: true; readonly taskId: string; readonly outcome: "delivered" | "sent" }
+  | { readonly ok: false; readonly code: "gone" | "untasked" | "unsupported" | "too_long" | "stopping" };
+
 export interface Messages {
   /** Writes the ack or a refusal itself; a refusal closes the sink. */
   readonly listen: (raw: unknown, peer: number | null, sink: ListenerSink) => Promise<void>;
   readonly send: (raw: unknown, peer: number | null) => Promise<MessageReply>;
+  /**
+   * A custodian round's nudge (docs/custodian.md C26): one `request` to the task session in `pane`, the daemon as its
+   * sender, by the same listener write or hold a `message` frame takes. No peer binding (the `custodian` frame was
+   * bound to the round's pane already) and no rate-limit bucket (the verb's own counts bound it). `unsupported` is a
+   * pane with no listener past the grace: its exclave lacks the `inbox` mod, so nothing would ever read it.
+   */
+  readonly deliverAsCustodian: (pane: string, text: string) => Promise<CustodianDelivery>;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
@@ -86,8 +99,8 @@ interface Held {
   readonly messageKind: MessageKind;
   readonly push: string;
   readonly body?: string;
-  /** The sender's task, null when untasked: for the audit line only. */
-  readonly from: string | null;
+  /** The sender's task, null when untasked, or the custodian: for the audit line only. */
+  readonly from: string | null | CustodianSender;
   readonly bytes: number;
   /** Its own grace, from the moment it was held: one timer per inbox would age a later message by an earlier one's clock. */
   timer: ReturnType<typeof setTimeout> | null;
@@ -236,6 +249,35 @@ export function createMessages(deps: MessagesDeps): Messages {
     return true;
   };
 
+  /**
+   * Writes the message to the target pane's listener, or holds it for one within the grace: from the launch, from the
+   * listener's disconnect, or from this daemon's own start. `nolistener` past all three, with nothing kept. The caller
+   * writes the audit lines.
+   */
+  const place = (target: BoundPane, to: string, launched: number, item: Held): "delivered" | "sent" | "nolistener" => {
+    // The listener was bound for a task and a pane process: a pane re-tagged or respawned since is closed, not served.
+    const listener = listeners.get(target.id);
+    if (listener !== undefined) {
+      if (listener.taskId === to && listener.panePid === target.pid && listener.sink.write(lineOf(item, 0))) {
+        return "delivered";
+      }
+      if (listeners.get(target.id) === listener) {
+        listeners.delete(target.id);
+        listener.sink.close();
+      }
+    }
+    const t = now();
+    const reconnecting = disconnects.get(target.id);
+    const holds =
+      t - launched <= graceMs ||
+      (reconnecting !== undefined && reconnecting.taskId === to && t - reconnecting.at <= graceMs) ||
+      // A restart closed every listener and forgot every disconnect: each live pane is treated as just dropped.
+      t - startedAt <= graceMs;
+    if (!holds) return "nolistener";
+    hold(target.id, to, item);
+    return "sent";
+  };
+
   const listen: Messages["listen"] = async (raw, peer, sink) => {
     const refuse = (code: Extract<InboxAck, { ok: false }>["code"]): void => {
       sink.write(JSON.stringify({ ok: false, code } satisfies InboxAck));
@@ -356,40 +398,54 @@ export function createMessages(deps: MessagesDeps): Messages {
       timer: null,
     };
 
-    // The listener was bound for a task and a pane process: a pane re-tagged or respawned since is closed, not served.
-    const listener = listeners.get(target.id);
-    if (listener !== undefined) {
-      if (listener.taskId === to && listener.panePid === target.pid && listener.sink.write(lineOf(item, 0))) {
-        out("delivered");
-        auditHeld(to, item, "delivered");
-        return { ok: true, id, outcome: "delivered" };
-      }
-      if (listeners.get(target.id) === listener) {
-        listeners.delete(target.id);
-        listener.sink.close();
-      }
+    const placed = place(target, to, launched, item);
+    out(placed);
+    if (placed === "delivered") {
+      auditHeld(to, item, "delivered");
+      return { ok: true, id, outcome: "delivered" };
     }
-
-    const t = now();
-    const reconnecting = disconnects.get(target.id);
-    const holds =
-      t - launched <= graceMs ||
-      (reconnecting !== undefined && reconnecting.taskId === to && t - reconnecting.at <= graceMs) ||
-      // A restart closed every listener and forgot every disconnect: each live pane is treated as just dropped.
-      t - startedAt <= graceMs;
-    if (!holds) {
-      out("nolistener");
+    if (placed === "nolistener") {
       auditHeld(to, item, "nolistener");
       return { ok: false, code: "ended", reason: "nolistener" };
     }
-    hold(target.id, to, item);
-    out("sent");
     return { ok: true, id, outcome: "sent" };
+  };
+
+  const deliverAsCustodian: Messages["deliverAsCustodian"] = async (paneId, text) => {
+    if (stopped) return { ok: false, code: "stopping" };
+    const bytes = Buffer.byteLength(text, "utf8");
+    // Always pushed, never pulled: a nudge is a request.
+    if (bytes > MESSAGE_PUSH_MAX) return { ok: false, code: "too_long" };
+    const panes = await deps.panes();
+    sweep(panes);
+    const target = panes.find((pane) => pane.id === paneId && !pane.dead);
+    if (target === undefined) return { ok: false, code: "gone" };
+    // Addressed only as messaging addresses: a pane carrying a task this machine's launch ledger holds.
+    const to = target.taskId;
+    const launched = to === null ? undefined : deps.launchedAt(to);
+    if (to === null || launched === undefined) return { ok: false, code: "untasked" };
+    const id = mintId();
+    const item: Held = {
+      id,
+      messageKind: "request",
+      push: custodianRequest({ id, machine: deps.machine, text }),
+      from: CUSTODIAN_SENDER,
+      bytes,
+      timer: null,
+    };
+    const placed = place(target, to, launched, item);
+    if (placed === "nolistener") {
+      auditHeld(to, item, "nolistener");
+      return { ok: false, code: "unsupported" };
+    }
+    if (placed === "delivered") auditHeld(to, item, "delivered");
+    return { ok: true, taskId: to, outcome: placed };
   };
 
   return {
     listen,
     send,
+    deliverAsCustodian,
     onEnded: (pane, taskId) => {
       if (inboxes.get(pane)?.taskId === taskId) dropInbox(pane, "ended");
       disconnects.delete(pane);

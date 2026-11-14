@@ -54,12 +54,35 @@ describe("parseCustodianFrame", () => {
     expect(parseCustodianFrame({ ...base, verb: "flag", pane: "%1", reason: "look", taskId: "t-1" })).toBeNull();
   });
 
+  test("a nudge is exactly a pane and a text, an interrupt exactly a pane: no key, task id or session id", () => {
+    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "%3", text: "check CI" })).toEqual({
+      ...base,
+      verb: "nudge",
+      pane: "%3",
+      text: "check CI",
+    });
+    expect(parseCustodianFrame({ ...base, verb: "interrupt", pane: "%3" })).toEqual({
+      ...base,
+      verb: "interrupt",
+      pane: "%3",
+    });
+    // The cap is the handler's (`too_long`).
+    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "%3", text: "x".repeat(100_000) })).not.toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "%1" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "%1", text: 5 })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "1", text: "x" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "%1", text: "x", taskId: "t-1" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "interrupt", pane: "%1", key: "Enter" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "interrupt", pane: "%x" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "interrupt" })).toBeNull();
+  });
+
   test("an extra key, a missing key, another version or verb, a bad pane, a non-string text", () => {
     expect(parseCustodianFrame({ ...base, verb: "sessions", pane: "%1" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: "%1", text: "x" })).toBeNull();
     expect(parseCustodianFrame({ ...base, v: 2, verb: "sessions" })).toBeNull();
-    expect(parseCustodianFrame({ ...base, verb: "nudge", pane: "%1" })).toBeNull();
+    expect(parseCustodianFrame({ ...base, verb: "capture", pane: "%1" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: "12" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: "%x" })).toBeNull();
     expect(parseCustodianFrame({ ...base, verb: "close", pane: 12 })).toBeNull();

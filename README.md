@@ -188,14 +188,17 @@ Edit `~/.config/seance/config.json`:
   "closeAfterMinutes": 15, "roundTimeoutMinutes": 10, "maxNudges": 3, "interruptAfterMinutes": 30 }`
   (the defaults; every field optional, whole minutes 1 to 1440) turns on this machine's custodian seat
   (docs/custodian.md): a fresh, fenced Claude session per round that closes finished sessions and removes their
-  worktrees when nothing would be lost (a worktree with unpushed or uncommitted work is kept). **Rounds do not
+  worktrees when nothing would be lost (a worktree with unpushed or uncommitted work is kept), nudges a stuck task
+  session with a message (at most `maxNudges` per session, one per round), sends one Escape to a session hung in a
+  command for `interruptAfterMinutes`, and flags for you what it cannot settle. **Rounds do not
   start yet.** The verbs a round acts through are built, but a round's sandbox can still reach the tmux socket and
   the daemon's plain ops and read on-disk secrets, so rounds are held until the round is contained (docs/custodian.md,
   item 4b). For now the key only moves `reap`'s defaults (above), and nothing is launched, kept or advertised. When
   rounds go live, each exclave that hosts one needs its round directory trusted once (`seanced doctor` names it:
   `mkdir -p <dir> && cd <dir> && claude`, accept the dialog), Linux needs `bubblewrap` and `socat`
   (`apt install bubblewrap socat`), and a round only sees a session at rest when the `session-events` mod is
-  installed in that session's Claude (`seanced mod install`; `doctor` warns when it is not). The round keeps notes
+  installed in that session's Claude, and can nudge one only through its `inbox` mod (`seanced mod install`;
+  `doctor` warns when either is not). The round keeps notes
   in `custodian/notes.md` in the daemon's state dir (`seanced custodian notes --clear` empties it) and its last 20
   rounds in `custodian/rounds.jsonl` beside it. At the shell, `seanced custodian status` says what the seat is doing,
   `log` prints the last rounds (summaries included, which the Machines screen never sees), `pause [--for 1h]` and

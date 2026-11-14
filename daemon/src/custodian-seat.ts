@@ -80,6 +80,7 @@ export const CHECK_INTERVAL_MS = MINUTE_MS;
  * narrowing): C7's exclusions (a last state of `needs-input`, or a drain, hand-off or pass mark: `untouchable`), a
  * pane no frame has given a state (`close` answers `unobserved`), and an `idle` without `turnEnded` (`close` answers
  * that `unobserved` too, and a mod's `session.start` on a reload or respawn sends exactly that for a finished session).
+ * A `busy` pane counts once its screen has stood still for `everyMs`: `nudge` can act on it then (C26).
  */
 export function roundDue(o: {
   readonly now: number;
@@ -101,10 +102,11 @@ export function roundDue(o: {
 
 /**
  * Whether a verb that exists could act on this pane once `everyMs` has passed: `close`, on a pane idle since its
- * turn ended. Custodian 8's `interrupt` adds its own term here (a `busy` pane whose screen has stood still,
- * `screenSince`), so a due round keeps meaning "something could be done", never "something is old".
+ * turn ended; `nudge` (and, later, `interrupt`), on a `busy` pane whose screen has stood still. A due round keeps
+ * meaning "something could be done", never "something is old".
  */
 function actionable(pane: TrackedActivity, now: number, everyMs: number): boolean {
+  if (pane.state === "busy") return pane.screenSince !== null && now - pane.screenSince >= everyMs;
   return pane.state === "idle" && pane.turnEnded && pane.stateSince !== null && now - pane.stateSince >= everyMs;
 }
 
@@ -291,7 +293,11 @@ export function lastRoundView(last: RoundEntry | undefined): Pick<CustodianStatu
   if (last === undefined) return {};
   return {
     e: Math.floor(last.end / 1000),
-    n: [Math.min(last.counts.close.ok, COUNT_CAP), 0, Math.min(last.counts.flagged, COUNT_CAP)],
+    n: [
+      Math.min(last.counts.close.ok, COUNT_CAP),
+      Math.min(last.counts.nudge.ok, COUNT_CAP),
+      Math.min(last.counts.flagged, COUNT_CAP),
+    ],
   };
 }
 

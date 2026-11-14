@@ -83,7 +83,7 @@ usage: seanced [command]
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
   session-event  read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)
   inbox       hold this session's inbox listener open on the local daemon and print each message as a JSON line (the inbox mod's child; silent)
-  custodian   the custodian: the round's verbs sessions | close <pane> | flag <pane> <reason> [note] | notes [--clear] | done, and the owner's status | log | round | pause [--for 1h] | resume (docs/custodian.md; the owner's are this shell's only)
+  custodian   the custodian: the round's verbs sessions | close <pane> | flag <pane> <reason> [note] | nudge <pane> | interrupt <pane> | notes [--clear] | done, and the owner's status | log | round | pause [--for 1h] | resume (docs/custodian.md; the owner's are this shell's only)
   raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
   help        this text
 `;

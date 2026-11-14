@@ -60,7 +60,7 @@ import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
-import { createMessages } from "./messages.ts";
+import { createMessages, type Messages } from "./messages.ts";
 import { custodianRoundsPath, custodianSessionsPath, pruneLogPath, reapRefusalsPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
@@ -210,6 +210,8 @@ const flagStoreFor = (path: string, now: () => number): CustodianFlags => {
   return store;
 };
 const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
+/** The session-events capability's messaging, which the custodian's `nudge` delivers through (C26), read at each nudge. */
+const messagesOf = new WeakMap<WiringCtx, Messages>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -322,6 +324,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   });
   late.events = events;
   eventsOf.set(ctx, events);
+  messagesOf.set(ctx, messages);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
   return {
@@ -478,6 +481,10 @@ const custodianSeat: DaemonCapability = (ctx) => {
           worktree: createWorktreeRule({ tasks: ctx.endedTasks, repos: ctx.repos, listPanes }),
           despawn,
           killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+          // Without messaging here (no session-events capability) a nudge has no delivery: `unsupported`.
+          deliver: (pane, text) =>
+            messagesOf.get(ctx)?.deliverAsCustodian(pane, text) ?? Promise.resolve({ ok: false, code: "unsupported" }),
+          keys: sendKeys,
           settings,
           flags,
           sendEvent,

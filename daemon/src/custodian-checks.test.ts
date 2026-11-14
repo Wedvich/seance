@@ -40,6 +40,7 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
       sandboxProblem: () => Promise.resolve(null),
       weakerNested: () => Promise.resolve(false),
       sessionEventsMissing: () => Promise.resolve([]),
+      inboxMissing: () => Promise.resolve([]),
       ...deps,
     },
   });
@@ -62,6 +63,10 @@ describe("custodianChecks", () => {
         },
         sessionEventsMissing: () => {
           probed.push("session-events");
+          return Promise.resolve(["~/.claude-work"]);
+        },
+        inboxMissing: () => {
+          probed.push("inbox");
           return Promise.resolve(["~/.claude-work"]);
         },
       },
@@ -102,6 +107,19 @@ describe("custodianChecks", () => {
         message: expect.stringContaining("~/.claude-work: the session-events mod is not installed or enabled"),
       },
     ]);
+    expect(checks[1]?.message).toContain("seanced mod install");
+  });
+
+  test("an exclave without the inbox mod warns that nudge can never reach a session", async () => {
+    const checks = await run({ inboxMissing: () => Promise.resolve(["~/.claude-work"]) });
+    expect(checks).toEqual([
+      { level: "ok", message: "exclave work: round dir ~/work/.seance-custodian trusted" },
+      {
+        level: "warn",
+        message: expect.stringContaining("~/.claude-work: the inbox mod is not installed or enabled"),
+      },
+    ]);
+    expect(checks[1]?.message).toContain("nudge");
     expect(checks[1]?.message).toContain("seanced mod install");
   });
 
