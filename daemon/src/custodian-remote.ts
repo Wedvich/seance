@@ -48,7 +48,7 @@ export async function roundRemoteId(
 
 /**
  * The file is the round's Claude Code's to write, and any same-uid process's (4b masks the config dir from the round's
- * Bash, drill pending), so it is opened as untrusted: no symlink followed, no blocking
+ * Bash, drilled), so it is opened as untrusted: no symlink followed, no blocking
  * on a FIFO, and only a regular file read, at most `MAX_FILE_BYTES` of it — all checked on the opened descriptor.
  */
 async function idOf(path: string, pid: number, roundStartedAt: number): Promise<string | null> {

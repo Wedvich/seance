@@ -190,7 +190,7 @@ Edit `~/.config/seance/config.json`:
   (docs/custodian.md): a fresh, fenced Claude session per round that closes finished sessions and removes their
   worktrees when nothing would be lost (a worktree with unpushed or uncommitted work is kept), nudges a stuck task
   session with a message (at most `maxNudges` per session, one per round), sends one Escape to a session hung in a
-  command for `interruptAfterMinutes`, and flags for you what it cannot settle. The round runs in a sandbox that has no network and masks the machine's own directories (home, state, config, repo and exclave roots, and the other acting sockets) from it, but the sandbox's drill is still pending, so treat it as built, not proven (docs/custodian.md, item 4b, which lists what is still unverified); each
+  command for `interruptAfterMinutes`, and flags for you what it cannot settle. The round runs in a sandbox that has no network and masks the machine's own directories (home, state, config, repo and exclave roots, and the other acting sockets) from it, and its containment was drilled on macOS and on Linux's weaker nested mode (docs/custodian.md, item 4b, which lists what is still unverified); each
   exclave that hosts one needs its round directory trusted once (`seanced doctor` names it:
   `mkdir -p <dir> && cd <dir> && claude`, accept the dialog), Linux needs `bubblewrap` and `socat`
   (`apt install bubblewrap socat`; Linux that is not a container runs the sandbox in its strict mode, which has not

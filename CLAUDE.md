@@ -57,9 +57,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   in DESIGN.md (Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections; Claude
   Code mods; MCP server; Threat model item 6). What is left in the file is the adapter seam (PR 3), the open questions
   and the spike evidence. Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — what is left of the custodian spec: what only build item 4b's drill can settle (the round's
-  containment — its own socket, the masks, the built environment, no network — is built and rounds are live, but the
-  drill has not run, so the docs say _built_, not _contained_), the open build-time details, and an
+- **docs/custodian.md** — what is left of the custodian spec: what 4b's drills left unsettled (the round's
+  containment — its own socket, the masks, the built environment, no network — is built, rounds are live, and it was
+  drilled 2026-11-14 on macOS and on Linux's weaker nested mode; strict-mode Linux is undrilled and refused), the open build-time details, and an
   index of where each decision (C1–C49) is recorded in DESIGN.md. Everything else is built and recorded there: the
   seat, the round and its containment ("The custodian's seat"), the round's verbs `sessions`, `close`, `capture`, `pr`,
   `flag`, `nudge`, `interrupt`, `notes` and `done`, the flags and counts file and the round log ("The custodian frame
@@ -549,7 +549,7 @@ green:
   from `main.ts` by `import()`, outside `custodian-cli.ts`'s import closure (this module logs, audits `origin=cli`,
   and that closure must never reach `log.ts`), work from files and never the socket, and are denied to a round by
   generated fence entries (a mistake guard, not a boundary: the round's sandbox masks the `custodian/` dir and the tmux
-  socket, drill pending). Their files live in the 0700
+  socket; drilled). Their files live in the 0700
   `custodian/` dir, each 0600 and written durably: `state.json` (the pause; one the daemon cannot read loads as
   paused indefinitely), `round-request` (honoured only within `ROUND_REQUEST_TTL_MS`, spaced by
   `ROUND_REQUEST_MIN_GAP_MS`, dropped before launch) and `seat.json` (the seat's view, no `rc`). Everything read from
@@ -566,7 +566,7 @@ green:
   Its fence (`custodian-fence.ts`) is generated: the deny list comes from constants and the one `COMMANDS`
   table, so a new `seanced` command is denied to a round by default, and it is for a cheap model's mistakes,
   never a boundary. What bounds an injected round is its sandbox plus the daemon's verbs behind the one socket it
-  reaches (docs/custodian.md item 4b, built; the drill is pending, so say "built", not "contained"): `denyRead` masks
+  reaches (docs/custodian.md item 4b: drilled 2026-11-14 on macOS (Seatbelt) and on Linux's weaker nested mode (LXC), no hole found, so "contained" is claimed for those two modes only; strict-mode Linux is undrilled and refused, and any change to the masks, the fence, the built environment or the round socket needs a re-drill before "contained" is said again): `denyRead` masks
   every path socket and every secret (Linux inverts the tree, macOS lists `allowUnixSockets` as the round socket's
   directory alone), `allowRead` gives back only the round dir, its tmp dir, its socket's directory and the read-only
   toolchain (never the checkout whole), the Read tool is held to the round dir by `Read(//…)` rules and secret denies,
