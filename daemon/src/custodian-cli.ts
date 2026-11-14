@@ -20,7 +20,7 @@ import { custodianNotesPath } from "./paths.ts";
 
 const USAGE =
   "usage: seanced custodian sessions | close <pane> | capture <pane> | pr <pane> | flag <pane> <reason> [note] | " +
-  "nudge <pane> (text on stdin) | interrupt <pane> | notes [--clear] | done";
+  "nudge <pane> (text on stdin) | interrupt <pane> | notes [--clear] (text on stdin) | done (text on stdin)";
 
 /** `close` covers a graceful despawn, a fetch and a `gh` read; the rest answer from memory, one read or one small write. */
 const CLOSE_TIMEOUT_MS = 180_000;
