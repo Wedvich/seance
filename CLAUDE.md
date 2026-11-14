@@ -336,8 +336,10 @@ green:
   row"): the daemon answers `custodian` (round now, pause, resume) only when sealed `from: "app"` on the relay leg,
   parsed by `parseCustodianRequest`, audited without a payload, and neither `LOCAL_OPS`, `BROKER_OPS` nor MCP carries
   it. It acts only through the shell verbs' one implementation (`daemon/src/custodian-owner.ts`: never a second), which
-  writes the pause or a round request in `custodian/` and nothing else; a round is refused `held` while rounds are
-  held and meets the shell's spacing and refusals; the daemon runs the op's acts on one chain, and against the shell
+  writes the pause or a round request in `custodian/` and nothing else; a daemon running no seat (rounds held
+  included) or one still starting answers `unsupported`, one whose host checks failed refuses a round `host_failed`,
+  reading the seat's own state, never `seat.json`; a round is refused `held` while rounds are held and meets the
+  shell's spacing and refusals; the daemon runs the op's acts on one chain, and against the shell
   the later owner act wins (each write one atomic rename of a file holding only the pause). The PWA offers the
   controls only for a connected machine advertising `CAPABILITIES.custodian` and shows a refusal as fixed text by its
   code; thresholds, the model and on/off stay in `config.json` (C46), never the op's.
