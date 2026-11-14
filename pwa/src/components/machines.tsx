@@ -461,7 +461,7 @@ function CustodianItems(props: {
       />
       {paused ? (
         <MenuItem
-          label="Resume custodian"
+          label="Resume"
           icon={<ResumeIcon />}
           disabled={sending}
           onClick={() => onCustodian({ act: "resume" })}
