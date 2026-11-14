@@ -9422,7 +9422,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   a 44px tap target without the old hit-area overlay, and the split makes plain
   that the dot reports and the cog acts. The three states differ by shape as well
   as hue — solid green with a glow, steady amber behind a sonar ring, hollow red
-  ring — so the failed state is not carried by colour alone. The sonar swells
+  ring — so the failed state is not carried by colour alone. While it is the hollow ring, every
+  presence dot on the spawn form (the Machine and Account tiles, every row of their sheets, Auto
+  included) wears the same ring (`Dot`'s `unreachable`): the registry is then the last one heard,
+  and a green dot beside a red relay would claim a presence nobody can see. A settling re-dial
+  leaves them as they were, so a brief reconnect doesn't flash the form red. The sonar swells
   three times and then rests as a still halo, as the queued verdict's stage ring
   does: a ring that never stops keeps the compositor producing frames for as
   long as its state lasts, and a task can wait for hours behind the caps. The ring
@@ -9683,8 +9687,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **Auto is each picker's first row, and the scheduler is asked only through it** (scheduler M2
   item 6; both pickers since M4 PR 2). The row sits above the machines (or accounts), laid out like
   them, with a blue dot where a machine has its green one (on the tile too, once picked). Queuing
-  is greyed with its reason, the dot grey like an offline machine's — on the tile as on the row —
-  only when the relay socket is not open ("Not connected to the relay"). With a socket open it is available whatever the leader's state
+  is greyed with its reason only when the relay socket is not open ("Not connected to the relay"),
+  the dot grey like an offline machine's while the socket re-dials and the relay's own hollow red
+  ring once it is unreachable — on the tile as on the row. With a socket open it is available whatever the leader's state
   (owner's call, M3 item 6): the queue is the relay's, so an enqueue needs no leader. Where
   `RelayState.scheduler` is not `ready` the row carries a note instead of a reason — `none`
   reads "No scheduler is leading right now — it waits in the queue until one does", `unverified`

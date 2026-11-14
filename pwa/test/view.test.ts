@@ -374,6 +374,31 @@ describe("banner and button", () => {
     expect(view.formStatus).toBe("MacBook Pro is offline — the task waits for it");
   });
 
+  // The registry is the last one heard while the relay is down, so its green would be a stale claim.
+  test("an unreachable relay rings every presence dot as the relay's own, but a settling re-dial does not", () => {
+    const signedIn = machine({ exclaves: [exclave("default", "acct-1")] });
+    const pinned = { machine: "dev-1", account: "acct-1" };
+    const down = deriveView(state({ relay: relay({ status: "retrying", machines: [signedIn] }) }, pinned), NOW);
+    expect(down.relayState).toBe("offline");
+    expect(down.machineTile.dot).toBe("unreachable");
+    expect(down.accountTile.dot).toBe("unreachable");
+    expect(down.machineChoices.map((c) => c.dot)).toEqual(["unreachable"]);
+    expect(down.accountChoices.map((c) => c.dot)).toEqual(["unreachable"]);
+    expect(deriveView(state({ relay: relay({ status: "retrying" }) }), NOW).machineTile.dot).toBe("unreachable");
+
+    const settling = deriveView(
+      state({ relay: relay({ status: "retrying", settling: true, machines: [signedIn] }) }, pinned),
+      NOW,
+    );
+    expect(settling.machineTile.dot).toBe("ok");
+    expect(settling.accountTile.dot).toBe("ok");
+    expect(settling.machineChoices.map((c) => c.dot)).toEqual(["ok"]);
+
+    const open = deriveView(state({ relay: relay({ machines: [signedIn] }) }, pinned), NOW);
+    expect(open.machineTile.dot).toBe("ok");
+    expect(open.accountChoices.map((c) => c.dot)).toEqual(["ok"]);
+  });
+
   test("queuing outranks the other labels", () => {
     const view = deriveView(state({ spawning: true }, { prompt: "hi" }), NOW);
     expect(view.button).toEqual({ label: "Queuing…", enabled: false, busy: true });
@@ -575,7 +600,8 @@ describe("the pickers", () => {
   test("greyed with the reason only while the relay socket is not open", () => {
     const down = deriveView(state({ relay: { ...leader([mac]), status: "retrying" } }), NOW);
     expect(down.autoAvailability).toEqual({ available: false, reason: "Not connected to the relay", note: null });
-    expect(down.machineTile).toMatchObject({ dot: "off" });
+    expect(down.machineTile).toMatchObject({ dot: "unreachable" });
+    expect(down.autoDot).toBe("unreachable");
     expect(down.formStatus).toBe("Not connected — a task you queue waits on this phone");
   });
 

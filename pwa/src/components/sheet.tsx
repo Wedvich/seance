@@ -295,7 +295,7 @@ function TrashIcon(): JSX.Element {
 }
 
 export function dotClass(dot: Dot): string {
-  return dot === "ok" ? "dot dot-ok" : dot === "auto" ? "dot dot-auto" : "dot";
+  return dot === "off" ? "dot" : `dot dot-${dot}`;
 }
 
 /**
