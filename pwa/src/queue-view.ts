@@ -11,6 +11,7 @@ import {
   taskPrBlock,
   waitingContinuation,
   type DepAfter,
+  type FlagReason,
   type KnownAccount,
   type Machine,
   type PauseHold,
@@ -170,7 +171,20 @@ export interface QueueRow {
   readonly answer: string | null;
   /** Its autonomy level for the meta line's chip; null at `checkpoint`, the default, as `describeTask` leaves it out. */
   readonly autonomy: string | null;
+  /**
+   * The custodian's flag on the task: a fixed label for its reason, and the note it wrote. Display-only: the note is
+   * model-written from pane text, shown as text and never used to act, sort or section. Null when it has none.
+   */
+  readonly flag: { readonly label: string; readonly note: string | null } | null;
 }
+
+/** What each flag reason says on the card: fixed per reason, the note beside it is the custodian's own words. */
+const FLAG_LABELS: Record<FlagReason, string> = {
+  stuck: "Custodian: looks stuck",
+  look: "Custodian: take a look",
+  dirty: "Custodian: kept its worktree (uncommitted changes)",
+  unpushed: "Custodian: kept its worktree (unpushed commits)",
+};
 
 export interface QueueSection {
   readonly title: string;
@@ -490,6 +504,7 @@ function rowOf(
     // `needs-input` only: a `lost` task keeps `needsInputSince` too, but its machine is not there to take an answer.
     answer: task.state === "needs-input" ? session : null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
+    flag: task.flag === undefined ? null : { label: FLAG_LABELS[task.flag.reason], note: task.flag.note ?? null },
   };
 }
 

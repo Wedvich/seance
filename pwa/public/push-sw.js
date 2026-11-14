@@ -6,8 +6,9 @@
  * "updated in the background" one otherwise, and WebKit revokes a subscription after a few
  * silent pushes. The text is fixed per kind, a spill's or a quota-exhausted's window label shown only as one of
  * the known `5h`/`7d`, a quota-exhausted's reason and a login alert's state only as one of a few fixed texts, and the
- * archivist's silence as one fixed text with nothing of its payload; the payload carries ids and state, never a title or a prompt, and this worker holds no
- * PSK to open anything more.
+ * archivist's silence as one fixed text with nothing of its payload, a custodian flag's reason only as one of four fixed
+ * texts (its note is not in the payload) and a failing custodian as one fixed text; the payload carries ids and state,
+ * never a title or a prompt, and this worker holds no PSK to open anything more.
  */
 
 // A function scope, so nothing here lands in the global scope the generated worker shares.
@@ -33,6 +34,16 @@
       conflict: "A task's pull request has merge conflicts.",
       behind: "A task's pull request is behind its base branch.",
       unarmed: "A task's pull request is ready, but nothing will merge it.",
+    }),
+  );
+
+  /** What a custodian flag says per reason: fixed, null-prototype for the same reason. The note never reaches a push. */
+  const FLAG_TEXT = Object.freeze(
+    Object.assign(Object.create(null), {
+      stuck: "A task's session looks stuck. The custodian flagged it.",
+      look: "The custodian flagged a task for you to look at.",
+      dirty: "A closed task's worktree holds uncommitted changes.",
+      unpushed: "A closed task's worktree holds unpushed commits.",
     }),
   );
 
@@ -80,6 +91,14 @@
     if (alert.kind === "archivist") {
       return { body: "The archivist has been offline for 24 hours.", tag: "archivist", url: MACHINES_URL };
     }
+    if (alert.kind === "custodian-failing") {
+      if (typeof alert.deviceId !== "string" || !TASK_ID.test(alert.deviceId)) return null;
+      return {
+        body: "A machine's custodian has failed three rounds in a row.",
+        tag: `custodian:${alert.deviceId}`,
+        url: MACHINES_URL,
+      };
+    }
     if (typeof alert.taskId !== "string" || !TASK_ID.test(alert.taskId)) return null;
     const url = `/?task=${encodeURIComponent(alert.taskId)}`;
     if (alert.kind === "needs-input" && alert.question === true && alert.escalated !== true) {
@@ -118,6 +137,9 @@
         (alert.reason === undefined ? undefined : QUOTA_REASON_TEXT[alert.reason]) ??
         `A task's usage window is full${window === "" ? "" : ` (${window})`}. Tap to pass it on.`;
       return { body, tag: `quota-exhausted:${alert.taskId}`, url };
+    }
+    if (alert.kind === "flag") {
+      return { body: FLAG_TEXT[alert.reason] ?? "The custodian flagged a task.", tag: `flag:${alert.taskId}`, url };
     }
     if (alert.kind === "pass-refused") {
       return {

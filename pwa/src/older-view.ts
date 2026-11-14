@@ -225,6 +225,8 @@ function archivedRow(
     session: null,
     answer: null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
+    // The session the flag was about is gone with the record: an archived card does not carry one.
+    flag: null,
   };
 }
 

@@ -458,6 +458,28 @@ describe("deriveQueue", () => {
     expect(chipOf({ autonomy: "auto" })).toBe("Auto");
   });
 
+  test("a custodian flag shows a fixed label per reason and the note as written, and no flag shows none", () => {
+    const flagOf = (flag: Task["flag"]) =>
+      deriveQueue(state(ok([task("a", flag === undefined ? {} : { flag })])), NOW).sections[0]?.rows[0]?.flag;
+    expect(flagOf(undefined)).toBeNull();
+    expect(flagOf({ reason: "stuck", note: "same error four times", at: 1 })).toEqual({
+      label: "Custodian: looks stuck",
+      note: "same error four times",
+    });
+    expect(flagOf({ reason: "look", at: 1 })).toEqual({ label: "Custodian: take a look", note: null });
+    expect(flagOf({ reason: "dirty", at: 1 })?.label).toBe("Custodian: kept its worktree (uncommitted changes)");
+    expect(flagOf({ reason: "unpushed", at: 1 })?.label).toBe("Custodian: kept its worktree (unpushed commits)");
+  });
+
+  test("a flag moves neither the section nor the actions of its task", () => {
+    const rowFor = (fields: Partial<Task>) =>
+      deriveQueue(state(ok([task("a", { state: "running", ...fields })])), NOW).sections.map((section) => [
+        section.title,
+        section.rows.map((row) => [row.canCancel, row.canMarkDone, row.canFollowUp, row.dot]),
+      ]);
+    expect(rowFor({ flag: { reason: "stuck", at: 1 } })).toEqual(rowFor({}));
+  });
+
   describe("the leader's forge reading of the PR", () => {
     const URL = "https://github.com/acme/app/pull/123";
     const chip = (pr: PrStatus | undefined, now = NOW, skew = 0) =>
