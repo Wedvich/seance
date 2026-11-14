@@ -28,7 +28,11 @@ export interface TestRelay {
   /** HTTP-level probe; the only way to observe upgrade rejections as status codes. */
   readonly probe: (path: string, init?: ProbeInit) => Promise<Response>;
   readonly dispose: () => Promise<void>;
-  /** The worker's console lines so far — only with `captureLogs`, which keeps them off the test output. */
+  /**
+   * The worker's console lines so far — only with `captureLogs`, which keeps them off the test output.
+   * Lines reach it off workerd's stdout, after the response that caused them: poll a line you
+   * expect (`pollUntil`), never read once right after the request.
+   */
   readonly logs: () => readonly string[];
 }
 
@@ -105,6 +109,16 @@ export interface RelayOptions {
     readonly hourBytes?: number;
     readonly hourUploads?: number;
   };
+}
+
+/** Polls a positive assertion's subject rather than sleeping: a relay suite has no business importing the daemon's fixtures. */
+export async function pollUntil(ready: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
+    // oxlint-disable-next-line no-await-in-loop -- polling is sequential by nature
+    await Bun.sleep(20);
+  }
 }
 
 export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
