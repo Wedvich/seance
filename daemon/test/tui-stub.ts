@@ -38,7 +38,7 @@ let atPrompt = mode === "exit-prompt";
 let draft = "";
 
 function drawBox(): void {
-  draw(["⏺ Ready.", "─".repeat(40), `> ${draft}`, "─".repeat(40), "  ? for shortcuts"]);
+  draw(["⏺ Ready.", "─".repeat(40), `❯ ${draft}`, "─".repeat(40), "  ? for shortcuts"]);
 }
 
 function redraw(): void {

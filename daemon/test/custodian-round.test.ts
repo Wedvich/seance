@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CAPABILITIES, importPsk, open as openSealed, parseMachineInfo, toBase64 } from "@seance/shared";
@@ -8,7 +8,19 @@ import { createBackend } from "../src/backend-default.ts";
 import { DespawnFailure } from "../src/backend.ts";
 import { CUSTODIAN_DEFAULTS, type Config } from "../src/config.ts";
 import { loadAgent } from "../src/custodian-agent.ts";
-import { ensureRoundDir, launchRound, listRoundPanes, removeRoundTmp } from "../src/custodian-launch.ts";
+import {
+  ensureRoundDir,
+  launchRound,
+  listRoundPanePids,
+  listRoundPanes,
+  removeRoundTmp,
+} from "../src/custodian-launch.ts";
+import { createCustodianVerbs } from "../src/custodian-verbs.ts";
+import { createWorktreeRule } from "../src/custodian-worktree.ts";
+import { LaunchLedger } from "../src/launch-ledger.ts";
+import { startLocalSocket } from "../src/local-socket.ts";
+import { custodianNotesPath } from "../src/paths.ts";
+import { scanRepos } from "../src/scan.ts";
 import { ROUND_SEED } from "../src/custodian-agent.ts";
 import type { RoundEntry } from "../src/custodian-rounds.ts";
 import {
@@ -23,15 +35,18 @@ import type { Exclave } from "../src/exclaves.ts";
 import type { TrackedActivity } from "../src/pane-activity.ts";
 import { startDaemon } from "../src/run.ts";
 import { ROUND_TMP } from "../src/seat-record.ts";
-import { listPanePids } from "../src/session-events.ts";
+import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { listClaudeSessions, listPanes, paneInfo } from "../src/sessions.ts";
-import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
+import { resolveTargetSession, tmux, tmuxOk } from "../src/tmux.ts";
 import {
   captureLog,
   makeClaudeStub,
+  makeGitFixture,
   pollUntil,
+  scriptStub,
   usePrivateTmux,
   type ClaudeStub,
+  type GitFixture,
   type PrivateTmux,
 } from "./fixtures.ts";
 import { startTestRelay } from "./harness.ts";
@@ -443,4 +458,182 @@ describe("the capability bit", () => {
   test("without the key it does not", async () => {
     expect(await advertised(undefined)).not.toContain(CAPABILITIES.custodian);
   });
+});
+
+const ROUND_VERBS_SCRIPT = `
+out="$SEANCE_STATE_DIR/verbs"
+mkdir -p "$out"
+command -v seanced > "$out/which"
+until [ -f "$out/go" ]; do sleep 0.1; done
+{ read -r a; read -r b; } < "$out/go"
+run() { name=$1; shift; "$@" > "$out/$name.json" 2> "$out/$name.err"; echo $? > "$out/$name.rc"; }
+run sessions seanced custodian sessions
+run closeA seanced custodian close "$a"
+run closeB seanced custodian close "$b"
+run closeSelf seanced custodian close "$TMUX_PANE"
+printf '## standing\\nkeep checking\\n## nonsense\\nnope\\n## other\\nnope\\n' | run notes seanced custodian notes
+printf 'closed one, kept one' | run done seanced custodian done
+echo finished > "$out/finished"
+exec sleep 600
+`;
+
+describe("the verbs, over the socket, from the round's own pane", () => {
+  let roundScript = "";
+  let fx: GitFixture;
+
+  beforeAll(async () => {
+    roundScript = await scriptStub(base, "round-verbs", ROUND_VERBS_SCRIPT);
+    await mkdir(join(base, "verbs-fx"), { recursive: true });
+    fx = await makeGitFixture(join(base, "verbs-fx"));
+  });
+
+  async function sessionPane(name: string, taskId: string): Promise<string> {
+    const pane = (
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        `${session}:`,
+        "-n",
+        name,
+        "-c",
+        base,
+        `exec ${stub.repl} --remote-control`,
+      ])
+    ).trim();
+    await tmuxOk(["set-option", "-p", "-t", pane, "@seance-task", taskId]);
+    await pollUntil(async () => (await paneInfo(pane))?.titled === true, `${name} to be titled`);
+    return pane;
+  }
+
+  test("a round's own seanced runs sessions, close, notes and done; the seat then ends it healthy", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = roundScript;
+    const clean = await fx.pushBranch("feat-a");
+    const dirty = await fx.pushBranch("feat-b");
+    await writeFile(join(dirty, "unsaved.txt"), "only here\n");
+    const ledger = LaunchLedger.memory();
+    for (const [taskId, path] of [
+      ["t-a", clean],
+      ["t-b", dirty],
+    ] as const) {
+      await ledger.record(taskId);
+      await ledger.note(taskId, { repo: fx.repoPath, path });
+    }
+    const ended = new EndedTasks(ledger);
+    const paneA = await sessionPane("sess-a", "t-a");
+    const paneB = await sessionPane("sess-b", "t-b");
+
+    // After every fixture write: the touched guard compares the worktree's newest signal with the turn's end.
+    const turnEnded = Date.now();
+    const closeAfter = CUSTODIAN_DEFAULTS.closeAfterMinutes * MIN;
+    const audit: string[] = [];
+    const r = seatOver();
+    const repos = await scanRepos([fx.root]);
+    const verbs = createCustodianVerbs({
+      roundPane: () => r.seat.roundPane(),
+      roundPanePids: listRoundPanePids,
+      activity: (pane) =>
+        pane === paneA || pane === paneB
+          ? { state: "idle", stateSince: turnEnded, turnEnded: true, screenSince: turnEnded, sampledAt: turnEnded }
+          : null,
+      retainedSince: () => turnEnded - closeAfter,
+      untouchable: () => false,
+      tasks: ended,
+      worktree: createWorktreeRule({ tasks: ended, repos: () => repos, listPanes }),
+      despawn: (id, request) => despawnSession(id, request),
+      killPane: async (pane) => (await tmux(["kill-pane", "-t", pane])).exitCode === 0,
+      settings: CUSTODIAN_DEFAULTS,
+      seat: {
+        count: (verb, ok) => r.seat.count(verb, ok),
+        countWorktree: (kind) => r.seat.countWorktree(kind),
+        done: (summary) => r.seat.done(summary),
+        isDone: () => r.seat.isDone(),
+      },
+      now: () => turnEnded + 2 * closeAfter,
+      audit: custodianAudit((line) => {
+        audit.push(line.replaceAll(/ pane=%\d+/gu, " pane=%N"));
+        return Promise.resolve();
+      }),
+      onKept: (): void => {},
+      warn: () => {},
+    });
+    const socket = await startLocalSocket({ handle: () => Promise.resolve(null), custodian: verbs.handle });
+    const out = join(process.env["SEANCE_STATE_DIR"] ?? "", "verbs");
+    try {
+      await r.seat.start();
+      await r.seat.tick();
+      const roundPane = await onlyRound();
+      const tmpDir = r.saved.record.round?.tmpDir ?? "";
+      await pollUntil(() => tmpExists(join(out, "which")), "the round's script to start");
+      await writeFile(join(out, "go.tmp"), `${paneA}\n${paneB}\n`);
+      await rename(join(out, "go.tmp"), join(out, "go"));
+      await pollUntil(() => tmpExists(join(out, "finished")), "the round's verbs to finish", 60_000);
+
+      // F1: the round's own seanced is the one on PATH, whatever the tmux server's PATH holds.
+      expect((await readFile(join(out, "which"), "utf8")).trim()).toBe(join(tmpDir, "bin", "seanced"));
+      const read = (name: string): Promise<string> => readFile(join(out, name), "utf8");
+      const codes = await Promise.all(
+        ["sessions", "closeA", "closeB", "closeSelf", "notes", "done"].map(async (v) => (await read(`${v}.rc`)).trim()),
+      );
+      expect(codes).toEqual(["0", "0", "0", "1", "0", "0"]);
+
+      const listed: { panes: { pane: string }[] } = JSON.parse(await read("sessions.json"));
+      const seen = new Map(listed.panes.map((p) => [p.pane, p]));
+      // The round never sees its own pane; the private server's first window is listed as a foreign shell.
+      expect(seen.has(roundPane)).toBe(false);
+      for (const pane of [paneA, paneB]) {
+        expect(seen.get(pane)).toMatchObject({ owner: "ours", classification: "live", close: "ok" });
+      }
+
+      expect(JSON.parse(await read("closeA.json"))).toMatchObject({
+        ok: true,
+        verb: "close",
+        taskId: "t-a",
+        outcome: "exited",
+        worktree: { removed: true, how: "origin" },
+      });
+      expect(await tmpExists(clean)).toBe(false);
+      expect(JSON.parse(await read("closeB.json"))).toMatchObject({
+        ok: true,
+        taskId: "t-b",
+        worktree: { kept: "dirty" },
+      });
+      expect(await tmpExists(dirty)).toBe(true);
+      expect(await paneInfo(paneA)).toBeNull();
+      expect(await paneInfo(paneB)).toBeNull();
+      expect(await read("closeSelf.err")).toContain("refused marked");
+      expect(JSON.parse(await read("notes.json"))).toMatchObject({ ok: true, kept: ["standing"], dropped: 2 });
+      const notes = await readFile(custodianNotesPath(), "utf8");
+      expect(notes).toContain("keep checking");
+      expect(notes).not.toContain("nope");
+      expect(JSON.parse(await read("done.json"))).toEqual({ ok: true, verb: "done" });
+
+      expect(audit.filter((line) => line.includes("op=close"))).toEqual([
+        "audit custodian origin=custodian op=close pane=%N task=t-a outcome=exited",
+        "audit custodian origin=custodian op=close pane=%N task=t-b outcome=exited",
+        "audit custodian origin=custodian op=close pane=%N task=- outcome=marked",
+      ]);
+      expect(audit.filter((line) => line.includes("op=worktree"))).toEqual([
+        "audit custodian origin=custodian op=worktree pane=%N task=t-a outcome=removed how=origin",
+        "audit custodian origin=custodian op=worktree pane=%N task=t-b outcome=kept why=dirty",
+      ]);
+
+      // `done` marked the round: the next tick closes it ahead of its deadline, healthy, with the tally.
+      await r.seat.tick();
+      await noRounds();
+      expect(r.rounds.at(-1)).toMatchObject({
+        outcome: "healthy",
+        reason: "done",
+        summary: "closed one, kept one",
+        counts: { close: { ok: 2, refused: 1 }, worktrees: { removed: 1, kept: 1 } },
+      });
+      expect(await tmpExists(tmpDir)).toBe(false);
+    } finally {
+      socket.stop();
+      r.seat.stop();
+    }
+  }, 90_000);
 });
