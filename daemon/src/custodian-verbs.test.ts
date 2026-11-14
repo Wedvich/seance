@@ -765,6 +765,8 @@ describe("flag", () => {
     down.state.sendOk = false;
     expect(await down.verbs.handle(flag("look"), process.pid)).toMatchObject({ ok: true, sent: false });
     expect(await down.flags.get("t-1")).not.toBeNull();
+    // Nothing took it, and the audit says so: `ok` is for a flag the leader's side took.
+    expect(down.lines).toEqual(["flag %1 t-1 look unsent round"]);
 
     const throws = rig({ sendEvent: () => Promise.reject(new Error("SECRET-NOTE")) });
     expect(await throws.verbs.handle(flag("look"), process.pid)).toMatchObject({ ok: true, sent: false });
@@ -874,6 +876,26 @@ describe("a flag's life beside the verbs", () => {
     await removed.verbs.handle(close(), process.pid);
     expect(await removed.flags.get("t-1")).toBeNull();
     expect(removed.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+  });
+
+  test("a close with no worktree to decide on lifts every flag, a worktree reason included; the record's flag goes too", async () => {
+    const r = rig();
+    r.state.worktree = null;
+    await r.flags.set("t-1", "dirty", "edits in the shared checkout");
+    expect(await r.verbs.handle(close(), process.pid)).toMatchObject({ ok: true, worktree: null });
+    expect(await r.flags.get("t-1")).toBeNull();
+    expect(r.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+  });
+
+  test("a close with no entry still tells the leader: the record may hold the daemon's own flag from an earlier close", async () => {
+    const r = rig();
+    await r.verbs.handle(close(), process.pid);
+    expect(r.events).toEqual([{ kind: "unflag", taskId: "t-1", at: NOW }]);
+
+    const kept = rig();
+    kept.state.worktree = { kept: "touched" };
+    await kept.verbs.handle(close(), process.pid);
+    expect(kept.events).toEqual([]);
   });
 
   test("a close that keeps a dirty worktree leaves the daemon's flag on the record: the entry goes without an unflag", async () => {

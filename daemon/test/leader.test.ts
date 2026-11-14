@@ -1963,7 +1963,7 @@ describe("leader push", () => {
     const lines = await captureLog(async () => {
       try {
         // No term yet: dropped, said so, and answered false so the sender keeps what it meant to send.
-        expect(leader.onCustodianEvent(flag, "a")).toBe(false);
+        expect(await leader.onCustodianEvent(flag, "a")).toBe(false);
         leader.lead(1);
         await leader.settled();
         // The registry reaches the term's leg after takeover; the `failing` below reads it.
@@ -1972,28 +1972,30 @@ describe("leader push", () => {
           "a running term",
         );
         // Another machine's flag moves nothing.
-        leader.onCustodianEvent(flag, "b");
-        leader.onCustodianEvent(flag, "a");
+        expect(await leader.onCustodianEvent(flag, "b")).toBe(true);
+        // Taken once the write landed: the record holds it when the answer comes.
+        expect(await leader.onCustodianEvent(flag, "a")).toBe(true);
+        expect((await store.get("t-1"))?.body?.flag?.reason).toBe("stuck");
         await pollUntil(async () => (await store.get("t-1"))?.body?.flag?.reason === "stuck", "the flag on the record");
         await push.waitForRequests(1);
         // The same flag again, as the daemon resends it: nothing new written, nothing pushed.
-        leader.onCustodianEvent(flag, "a");
+        expect(await leader.onCustodianEvent(flag, "a")).toBe(true);
         await Bun.sleep(150);
         expect(push.requests()).toHaveLength(1);
         // A sealer that is no registered machine, and the archivist seat, are taken and pushed for nothing.
-        expect(leader.onCustodianEvent({ kind: "failing", at: 2 }, "stranger")).toBe(true);
-        expect(leader.onCustodianEvent({ kind: "failing", at: 2 }, "arch")).toBe(true);
-        expect(leader.onCustodianEvent({ kind: "failing", at: 2 }, "a")).toBe(true);
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 2 }, "stranger")).toBe(true);
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 2 }, "arch")).toBe(true);
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 2 }, "a")).toBe(true);
         await push.waitForRequests(2);
         // A second within the gap is a replay or a bug: taken, not pushed. Past it, the next run's is pushed.
-        expect(leader.onCustodianEvent({ kind: "failing", at: 3 }, "a")).toBe(true);
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 3 }, "a")).toBe(true);
         await Bun.sleep(150);
         expect(push.requests()).toHaveLength(2);
         clock += 31 * 60_000;
-        expect(leader.onCustodianEvent({ kind: "failing", at: 4 }, "a")).toBe(true);
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 4 }, "a")).toBe(true);
         await push.waitForRequests(3);
-        leader.onCustodianEvent({ kind: "unflag", taskId: "t-1", at: 3 }, "a");
-        await pollUntil(async () => (await store.get("t-1"))?.body?.flag === undefined, "the flag cleared");
+        expect(await leader.onCustodianEvent({ kind: "unflag", taskId: "t-1", at: 3 }, "a")).toBe(true);
+        expect((await store.get("t-1"))?.body?.flag).toBeUndefined();
       } finally {
         leader.stop();
         relay.stop();
@@ -2007,6 +2009,76 @@ describe("leader push", () => {
     expect(lines.filter((line) => line.includes("unflag: task="))).toHaveLength(1);
     expect(lines.some((line) => line.includes('custodian failing: device="a"'))).toBe(true);
     expect(lines.join("\n")).not.toContain("NOTE-SENTINEL");
+  });
+
+  test("a failing before the registry's first push is held for the sender and logged; with no push channel it is taken and logged as not pushed", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { leader } = leaderOver(relay);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await pollUntil(
+          () => leader.onCustodianEvent({ kind: "unflag", taskId: "none", at: 0 }, "a"),
+          "a running term",
+        );
+        // Nothing is known yet, which is not "not a registered machine": the sender tries again.
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 1 }, "a")).toBe(false);
+        relay.setRegistry([await routableEntry("a")]);
+        // No settings, so no push sender: nothing to hold the event for, and no stamp to suppress a later one.
+        await pollUntil(async () => await leader.onCustodianEvent({ kind: "failing", at: 2 }, "a"), "the registry");
+        expect(await leader.onCustodianEvent({ kind: "failing", at: 3 }, "a")).toBe(true);
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.some((line) => line.includes("kind=failing") && line.includes("held — no registry yet"))).toBe(true);
+    expect(lines.some((line) => line.includes("kind=failing") && line.includes("not pushed"))).toBe(true);
+    expect(lines.some((line) => line.includes("one was pushed within 30 minutes"))).toBe(false);
+  });
+
+  test("a flag is taken once its write resolved: a store fault answers false, and the record is as it was", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    await store.put(
+      "t-1",
+      0,
+      task("t-1", {
+        state: "done",
+        assignment: { deviceId: "a", ...target, pane: "%1" },
+        flag: { reason: "stuck", at: 1 },
+      }),
+    );
+    let down = false;
+    const faulty: QueueStore = {
+      list: () => store.list(),
+      get: (id) => store.get(id),
+      put: (id, version, body) => (down ? Promise.reject(new Error("store down")) : store.put(id, version, body)),
+      delete: (id, version) => store.delete(id, version),
+      getPause: () => store.getPause(),
+      putPause: (version, holds) => store.putPause(version, holds),
+    };
+    const { leader } = leaderOver(relay, faulty);
+    await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await pollUntil(
+          () => leader.onCustodianEvent({ kind: "unflag", taskId: "none", at: 0 }, "a"),
+          "a running term",
+        );
+        down = true;
+        expect(await leader.onCustodianEvent({ kind: "unflag", taskId: "t-1", at: 2 }, "a")).toBe(false);
+        expect((await store.get("t-1"))?.body?.flag?.reason).toBe("stuck");
+        down = false;
+        expect(await leader.onCustodianEvent({ kind: "unflag", taskId: "t-1", at: 3 }, "a")).toBe(true);
+        expect((await store.get("t-1"))?.body?.flag).toBeUndefined();
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
   });
 });
 

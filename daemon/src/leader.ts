@@ -221,10 +221,11 @@ export interface Leader {
    * machines' arrive through the term's leg. `from` is the sealing daemon: a `flag` or `unflag` moves only a
    * task placed on it (`Scheduler.onFlag`), and a `failing` is pushed under its id. Dropped outside a
    * running term, logged at info with the kind and never the note, and answered `false` then: the sender keeps what it
-   * meant to send (a `failing` held for its next tick, a flag entry kept). `true` is that a running term took it, not
-   * that it changed anything (a refused or repeated one is `true` too).
+   * meant to send (a `failing` held for its next tick, a flag entry kept). A flag or unflag is answered once its write
+   * resolved, `false` when it threw. `true` is that a running term took it, not that it changed anything (a refused or
+   * repeated one is `true` too).
    */
-  readonly onCustodianEvent: (event: CustodianEvent, from: string) => boolean;
+  readonly onCustodianEvent: (event: CustodianEvent, from: string) => Promise<boolean>;
   /**
    * The relay's nudge after an app-leg write to the store (`store-changed`;
    * `RelayClient`'s `onStoreChanged`): refreshes that one task, then ticks.
@@ -247,7 +248,7 @@ interface TermRun {
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   readonly onBranchState: (state: BranchState, from: string) => void;
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
-  readonly onCustodianEvent: (event: CustodianEvent, from: string) => boolean;
+  readonly onCustodianEvent: (event: CustodianEvent, from: string) => Promise<boolean>;
   readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
 }
@@ -411,7 +412,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   /** A sealer that pushed a `failing` within this window pushes no second: the daemon raises one per run of failures. */
   const FAILING_PUSH_GAP_MS = 30 * 60_000;
   const failingPushedAt = new Map<string, number>();
-  const onCustodianEvent = (event: CustodianEvent, from: string): boolean => {
+  const onCustodianEvent = async (event: CustodianEvent, from: string): Promise<boolean> => {
     if (!live || !running) {
       log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
       return false;
@@ -421,7 +422,10 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       // taken: the sender must not hold it for a retry.
       const state = relay.getState();
       // Before the first registry push nothing is known yet, not unregistered: leave it with the sender to retry.
-      if (state.registrySize === 0) return false;
+      if (state.registrySize === 0) {
+        log.info(`scheduler: custodian-event kind=failing from=${quote(from)} held — no registry yet`);
+        return false;
+      }
       if (state.archivist?.deviceId === from || !state.machines.some((machine) => machine.deviceId === from)) {
         log.warn(`scheduler: custodian-event kind=failing from=${quote(from)} dropped — not a registered machine`);
         return true;
@@ -433,13 +437,24 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         );
         return true;
       }
-      failingPushedAt.set(from, now());
       log.warn(`scheduler: custodian failing: device=${quote(from)}`);
-      sendPush({ v: 1, kind: "custodian-failing", at: now(), deviceId: from });
+      // The stamp only for a push that went out or was parked: one a full parked list dropped is for the sender to try
+      // again, and with no push channel at all there is nothing to hold it for.
+      if (!sendPush({ v: 1, kind: "custodian-failing", at: now(), deviceId: from })) {
+        log.info(`scheduler: custodian-event kind=failing from=${quote(from)} not pushed — no push channel or no room`);
+        return pushSender === null;
+      }
+      failingPushedAt.set(from, now());
       return true;
     }
-    scheduler.onFlag(event, from).catch(fail);
-    return true;
+    // Taken once the write resolved, so a sender that clears its entry on `true` never loses an unflag to a store fault.
+    try {
+      await scheduler.onFlag(event, from);
+      return true;
+    } catch (err) {
+      fail(err);
+      return false;
+    }
   };
   // The session's own pass: the record is prompt text and is never logged, nor is the branch it names.
   const onSessionPass = (pass: SessionPass, from: string): boolean => {
@@ -575,7 +590,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a custodian event`);
         return;
       }
-      onCustodianEvent(custodianEvent, from);
+      void onCustodianEvent(custodianEvent, from);
       return;
     }
     const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
@@ -668,10 +683,16 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
           onError: fail,
         });
   // A pass's alerts and the custodian's `failing` share one path: parked while the settings load is pending.
-  const sendPush = (push: PushAlert): void => {
-    if (pushSender === null) return;
-    if (settingsState !== "pending") pushSender.send(push);
-    else if (parked.length < PARKED_ALERTS_MAX) parked.push(push);
+  // True when it was sent or parked, false when there was nowhere to put it.
+  const sendPush = (push: PushAlert): boolean => {
+    if (pushSender === null) return false;
+    if (settingsState !== "pending") {
+      pushSender.send(push);
+      return true;
+    }
+    if (parked.length >= PARKED_ALERTS_MAX) return false;
+    parked.push(push);
+    return true;
   };
   // Disk, login and archivist alerts ride the registry, not the scheduler: the record's `diskAlerts`, `authAlerts`
   // and `archivistSilence` are what keep a new term from repeating one, and an alert is raised only once that
@@ -935,7 +956,7 @@ export function createLeader(options: LeaderOpts): Leader {
     onCustodianEvent: (event, from) => {
       if (current !== null) return current.onCustodianEvent(event, from);
       log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
-      return false;
+      return Promise.resolve(false);
     },
     onStoreChanged: (key, version) => current?.onStoreChanged(key, version),
     term: () => current?.term ?? null,

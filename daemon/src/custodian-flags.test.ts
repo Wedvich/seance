@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clearOnNewTurn,
   createCustodianFlags,
   deliverEvent,
   isNewTurn,
@@ -161,6 +162,99 @@ describe("liftEntry", () => {
   });
 });
 
+describe("liftEntry against a repeat flag", () => {
+  test("an entry a round flagged again while the unflag was out stays, though the repeat changed nothing", async () => {
+    const s = store();
+    await s.flags.set("t-1", "stuck", "same");
+    const entry = await s.flags.get("t-1");
+    if (entry === null) throw new Error("no entry");
+    const deps = {
+      flags: s.flags,
+      now: () => 7,
+      // The round's identical flag lands while the unflag is out: the entry is byte for byte what it was.
+      send: async (): Promise<boolean> => {
+        expect(await s.flags.set("t-1", "stuck", "same")).toBe("same");
+        return true;
+      },
+    };
+    expect(await liftEntry(deps, "t-1", entry)).toBe(true);
+    expect(await s.flags.get("t-1")).toEqual(entry);
+  });
+});
+
+describe("clearOnNewTurn", () => {
+  function rig(over: { send?: ((event: unknown) => Promise<boolean>) | null; taken?: boolean } = {}) {
+    const s = store();
+    const sent: unknown[] = [];
+    const warnings: string[] = [];
+    const taken = over.taken ?? true;
+    const send =
+      over.send === null
+        ? undefined
+        : (over.send ??
+          ((event: unknown): Promise<boolean> => {
+            sent.push(event);
+            return Promise.resolve(taken);
+          }));
+    const run = (key: string, taskId: string | null) =>
+      clearOnNewTurn({ flags: s.flags, send, now: () => 9, warn: (line) => warnings.push(line) }, key, taskId);
+    return { s, sent, warnings, run };
+  }
+
+  test("a stuck or look flag is unflagged and its entry goes", async () => {
+    for (const reason of ["stuck", "look"] as const) {
+      const r = rig();
+      await r.s.flags.set("t-1", reason, "n");
+      await r.run("t-1", "t-1");
+      expect(r.sent).toEqual([{ kind: "unflag", taskId: "t-1", at: 9 }]);
+      expect(await r.s.flags.get("t-1")).toBeNull();
+    }
+  });
+
+  test("dirty and unpushed are about the worktree: a new turn sends nothing and keeps them", async () => {
+    for (const reason of ["dirty", "unpushed"] as const) {
+      const r = rig();
+      await r.s.flags.set("t-1", reason, undefined);
+      await r.run("t-1", "t-1");
+      expect(r.sent).toEqual([]);
+      expect(await r.s.flags.get("t-1")).toMatchObject({ reason });
+    }
+  });
+
+  test("an untasked pane's entry is cleared with nothing sent: it has no record", async () => {
+    const r = rig();
+    await r.s.flags.set("%3", "look", undefined);
+    await r.run("%3", null);
+    expect(r.sent).toEqual([]);
+    expect(await r.s.flags.get("%3")).toBeNull();
+  });
+
+  test("no entry sends nothing, and no seat to send through changes nothing", async () => {
+    const none = rig();
+    await none.run("t-1", "t-1");
+    expect(none.sent).toEqual([]);
+
+    const noSeat = rig({ send: null });
+    await noSeat.s.flags.set("t-1", "stuck", undefined);
+    await noSeat.run("t-1", "t-1");
+    expect(await noSeat.s.flags.get("t-1")).not.toBeNull();
+  });
+
+  test("an unflag nothing took keeps the entry and warns; one that throws only warns, without its text", async () => {
+    const down = rig({ taken: false });
+    await down.s.flags.set("t-1", "stuck", undefined);
+    await down.run("t-1", "t-1");
+    expect(await down.s.flags.get("t-1")).not.toBeNull();
+    expect(down.warnings.join("\n")).toContain("was not taken");
+
+    const throws = rig({ send: () => Promise.reject(new Error("SECRET-NOTE")) });
+    await throws.s.flags.set("t-1", "stuck", undefined);
+    await throws.run("t-1", "t-1");
+    expect(await throws.s.flags.get("t-1")).not.toBeNull();
+    expect(throws.warnings.join("\n")).not.toContain("SECRET-NOTE");
+  });
+});
+
 describe("isTurnFlag", () => {
   test("stuck and look are about the turn; dirty and unpushed are about the worktree", () => {
     expect(isTurnFlag({ reason: "stuck", at: 1 })).toBe(true);
@@ -203,9 +297,9 @@ describe("isNewTurn", () => {
     expect(isNewTurn({ state: "idle" }, "busy")).toBe(true);
   });
 
-  test("a busy with no state retained is one: a restart forgot it, and a flag outlives it", () => {
-    expect(isNewTurn(null, "busy")).toBe(true);
-    expect(isNewTurn({ state: null }, "busy")).toBe(true);
+  test("a busy with no state retained is not one: a restart, a reload or a failed seat leaves none, and a stuck session sends busy after every permission", () => {
+    expect(isNewTurn(null, "busy")).toBe(false);
+    expect(isNewTurn({ state: null }, "busy")).toBe(false);
   });
 
   test("busy to busy and needs-input to busy are the same turn", () => {
@@ -247,10 +341,14 @@ describe("retainFrame", () => {
     same.retain(pane(true), "busy", false);
     expect(same.calls).toEqual(["read", "observe"]);
 
-    // An unobserved pane counts as a new turn, which a foreign pane must not borrow.
-    const foreign = rig(null);
+    const foreign = rig({ state: "idle" });
     foreign.retain(pane(false), "busy", false);
     expect(foreign.calls).toEqual(["observe"]);
+
+    // A pane this process has no state for is unobserved, never a new turn.
+    const unobserved = rig(null);
+    unobserved.retain(pane(true), "busy", false);
+    expect(unobserved.calls).toEqual(["read", "observe"]);
   });
 
   test("frames are still retained while no seat holds the flag store", () => {
@@ -266,8 +364,10 @@ describe("deliverEvent", () => {
 
   test("a leading machine answers with what its running term said, and never touches the relay", async () => {
     const relay = (): Promise<boolean> => Promise.reject(new Error("must not go to the relay"));
-    expect(await deliverEvent({ leads: () => true, inProcess: () => false, relay }, event)).toBe(false);
-    expect(await deliverEvent({ leads: () => true, inProcess: () => true, relay }, event)).toBe(true);
+    expect(await deliverEvent({ leads: () => true, inProcess: () => Promise.resolve(false), relay }, event)).toBe(
+      false,
+    );
+    expect(await deliverEvent({ leads: () => true, inProcess: () => Promise.resolve(true), relay }, event)).toBe(true);
   });
 
   test("a following machine seals it to the scheduler", async () => {

@@ -8,10 +8,9 @@ import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import { loadAgent } from "./custodian-agent.ts";
 import {
+  clearOnNewTurn,
   createCustodianFlags,
   deliverEvent,
-  isTurnFlag,
-  liftEntry,
   retainFrame,
   type CustodianFlags,
 } from "./custodian-flags.ts";
@@ -199,33 +198,6 @@ const flagStoreFor = (path: string, now: () => number): CustodianFlags => {
 };
 const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
 
-/**
- * The session started a new turn: a flag about the last one is stale, so the record's flag goes and then the entry, once
- * the `unflag` was taken (a send nothing took leaves the entry, and the next new turn, prune or close tries again).
- * `dirty` and `unpushed` are about the worktree, not the turn, and stay. A failure is a warning.
- */
-const clearOnNewTurn = async (
-  ctx: WiringCtx,
-  flags: CustodianFlags,
-  key: string,
-  taskId: string | null,
-): Promise<void> => {
-  try {
-    const entry = await flags.get(key);
-    const send = sendEventOf.get(ctx);
-    if (entry === null || !isTurnFlag(entry) || send === undefined) return;
-    if (taskId === null) {
-      await flags.clear(key, entry);
-      return;
-    }
-    if (!(await liftEntry({ flags, send, now: ctx.now }, key, entry))) {
-      log.warn("custodian: an unflag on a new turn was not taken; the entry stays for the next call");
-    }
-  } catch (err) {
-    log.warn(`custodian: clearing a flag on a new turn failed (${err instanceof Error ? err.name : "error"})`);
-  }
-};
-
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
   // claim — said once, since it changes what an event can be trusted to mean.
@@ -330,7 +302,8 @@ const sessionEvents: DaemonCapability = (ctx) => {
       onNewTurn: () => {
         const flags = flagsOf.get(ctx);
         if (flags === undefined) return undefined;
-        return (pane) => void clearOnNewTurn(ctx, flags, pane.taskId ?? pane.id, pane.taskId);
+        const deps = { flags, send: sendEventOf.get(ctx), now: ctx.now, warn: (line: string): void => log.warn(line) };
+        return (pane) => void clearOnNewTurn(deps, pane.taskId ?? pane.id, pane.taskId);
       },
     }),
   });

@@ -32,8 +32,13 @@ export interface CustodianFlags {
   /**
    * True when there was an entry. Writes nothing for a missing key. With `only`, an entry that has changed since the
    * caller read it (another reason, note or time) is left: a send took a while, and what a round set meanwhile stands.
+   * With `revision` too, so is an entry `set` was called for since, whether or not that changed anything: a round
+   * flagging the same reason and note again leaves the entry as it was, yet its event may reach the leader after the
+   * caller's `unflag` and put the flag back on the record.
    */
-  readonly clear: (key: string, only?: TaskFlag) => Promise<boolean>;
+  readonly clear: (key: string, only?: TaskFlag, revision?: number) => Promise<boolean>;
+  /** How many times `set` was called for the key in this process, as it was called: an in-memory stamp for `clear`. */
+  readonly revision: (key: string) => number;
   /**
    * Every entry whose key is no live task id and no live pane id: the sessions are gone. Deletes nothing: an entry is
    * the daemon's record of what the leader's task record holds, so the caller clears it (`clear`, with `only`) once
@@ -49,15 +54,17 @@ export interface CustodianFlags {
 export const isTurnFlag = (flag: TaskFlag): boolean => flag.reason === "stuck" || flag.reason === "look";
 
 /**
- * A bound `busy` frame after an `idle`, or with no state retained before it: the session was given work, so a flag about
- * what it was doing is stale. An `idle` that did not end a turn counts (a respawn's, whose next prompt is a turn), and so
- * does an unobserved pane (a daemon restart forgets the retained state, a flag outlives it, and a frame at all says the
- * session is not stuck). Not `needs-input` to `busy` (a permission answered) and not `busy` to `busy`: the same turn.
- * A turn the mod's pending report folded into one `busy` after another `busy` is not seen; the next round's prune or
- * the re-assignment lifts that flag.
+ * A bound `busy` frame after an `idle` this process saw: the session was given work, so a flag about what it was doing
+ * is stale. An `idle` that did not end a turn counts (a respawn's, whose next prompt is a turn): any state the process
+ * observed tells it apart from a pane it has not. A pane with no state retained is not a new turn: a restart, a config
+ * reload or a seat that never started leaves none, a stuck session sends `busy` after every permission it is asked, and
+ * lifting on the first one would let the next round flag it again and push twice. Not `needs-input` to `busy` (a
+ * permission answered) and not `busy` to `busy`: the same turn. A turn the mod's pending report folded into one `busy`
+ * after another `busy` is not seen either; the flag lifts at the next new turn, a close that kept nothing or the
+ * re-assignment.
  */
 export function isNewTurn(before: Pick<PaneActivity, "state"> | null, state: TrackedState): boolean {
-  return state === "busy" && (before === null || before.state === null || before.state === "idle");
+  return state === "busy" && before !== null && before.state === "idle";
 }
 
 /**
@@ -69,7 +76,7 @@ let chain: Promise<unknown> = Promise.resolve();
 export const isPaneKey = (key: string): boolean => key.startsWith("%");
 
 export interface LiftDeps {
-  readonly flags: Pick<CustodianFlags, "clear">;
+  readonly flags: Pick<CustodianFlags, "clear" | "revision">;
   /** True when something took the event: a leader's running term in process, or the socket on the relay leg. */
   readonly send: (event: CustodianEvent) => Promise<boolean>;
   readonly now: () => number;
@@ -85,14 +92,45 @@ export async function liftEntry(deps: LiftDeps, key: string, flag: TaskFlag): Pr
     await deps.flags.clear(key, flag);
     return true;
   }
+  const revision = deps.flags.revision(key);
   if (!(await deps.send({ kind: "unflag", taskId: key, at: deps.now() }))) return false;
-  // `only`: a round may have set a new flag while the send was out.
-  await deps.flags.clear(key, flag);
+  // `only` and `revision`: a round may have set a flag while the send was out, a repeat of this one included.
+  await deps.flags.clear(key, flag, revision);
   return true;
+}
+
+export interface NewTurnDeps {
+  readonly flags: Pick<CustodianFlags, "get" | "clear" | "revision">;
+  /** Undefined while no seat holds the flag store. */
+  readonly send: ((event: CustodianEvent) => Promise<boolean>) | undefined;
+  readonly now: () => number;
+  readonly warn: (line: string) => void;
+}
+
+/**
+ * The session started a new turn: a flag about the last one is stale, so the record's flag goes and then the entry, once
+ * the `unflag` was taken (a send nothing took leaves the entry, and the next new turn, prune or close tries again).
+ * `dirty` and `unpushed` are about the worktree, not the turn, and stay. A failure is a warning.
+ */
+export async function clearOnNewTurn(deps: NewTurnDeps, key: string, taskId: string | null): Promise<void> {
+  try {
+    const entry = await deps.flags.get(key);
+    if (entry === null || !isTurnFlag(entry) || deps.send === undefined) return;
+    if (taskId === null) {
+      await deps.flags.clear(key, entry);
+      return;
+    }
+    if (!(await liftEntry({ flags: deps.flags, send: deps.send, now: deps.now }, key, entry))) {
+      deps.warn("custodian: an unflag on a new turn was not taken; the entry stays for the next call");
+    }
+  } catch (err) {
+    deps.warn(`custodian: clearing a flag on a new turn failed (${err instanceof Error ? err.name : "error"})`);
+  }
 }
 
 export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
   let entries: Map<string, TaskFlag> | null = null;
+  const revisions = new Map<string, number>();
   const turn = <T>(act: () => Promise<T>): Promise<T> => {
     const next = chain.then(act);
     chain = next.catch(() => {});
@@ -153,8 +191,10 @@ export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
 
   return {
     get: (key) => turn(async () => (await load()).get(key) ?? null),
-    set: (key, reason, note) =>
-      turn(async () => {
+    revision: (key) => revisions.get(key) ?? 0,
+    set: (key, reason, note) => {
+      revisions.set(key, (revisions.get(key) ?? 0) + 1);
+      return turn(async () => {
         const result = await changing<FlagSet>((held) => {
           const was = held.get(key);
           if (was?.reason === reason && was.note === note) return null;
@@ -166,12 +206,14 @@ export function createCustodianFlags(deps: CustodianFlagsDeps): CustodianFlags {
           return was?.reason === reason ? "note" : "new";
         });
         return result ?? "same";
-      }),
-    clear: (key, only) =>
+      });
+    },
+    clear: (key, only, revision) =>
       turn(async () => {
         const result = await changing<true>((held) => {
           const was = held.get(key);
           if (was === undefined) return null;
+          if (revision !== undefined && (revisions.get(key) ?? 0) !== revision) return null;
           if (only !== undefined && !(was.reason === only.reason && was.note === only.note && was.at === only.at)) {
             return null;
           }
@@ -195,7 +237,7 @@ export interface RetainedPane {
 /**
  * Session-events ingest's `retain` hook: the retained state is read before `observe` replaces it, since a new turn is a
  * `busy` after what the pane showed last, which only the prior state says. Only a pane séance started is read: an
- * unobserved pane is a new turn (`isNewTurn`), and a foreign pane has no flag to lift.
+ * foreign pane has no flag to lift.
  */
 export function retainFrame<P extends RetainedPane>(deps: {
   /** The pane's retained state so far (`PaneActivityTracker.activity`). */
@@ -221,11 +263,11 @@ export function retainFrame<P extends RetainedPane>(deps: {
 export function deliverEvent(
   deps: {
     readonly leads: () => boolean;
-    readonly inProcess: (event: CustodianEvent) => boolean;
+    readonly inProcess: (event: CustodianEvent) => Promise<boolean>;
     readonly relay: (event: CustodianEvent) => Promise<boolean>;
   },
   event: CustodianEvent,
 ): Promise<boolean> {
-  if (deps.leads()) return Promise.resolve(deps.inProcess(event));
+  if (deps.leads()) return deps.inProcess(event);
   return deps.relay(event);
 }

@@ -513,7 +513,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
               at: deps.now(),
             });
       if (changed === "new") deps.seat.countFlagged();
-      await deps.audit.flag(pane, info.taskId, reason, "ok", "round");
+      // An untasked pane has no record to tell, so nothing went unsent.
+      await deps.audit.flag(pane, info.taskId, reason, info.taskId === null || sent ? "ok" : "unsent", "round");
       return { ok: true, verb: "flag", pane, taskId: info.taskId, reason, sent };
     } catch (err) {
       deps.warn(`custodian: flagging ${pane} failed (${err instanceof Error ? err.name : "error"})`);
