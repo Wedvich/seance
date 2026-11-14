@@ -12349,7 +12349,7 @@ prompt text or any act on the fleet.
   PWA's own tokens and markup; nothing adds a component or style but `.exclave-sessions-wide`. The
   card sits last in the machine list, before Accounts, with no gauges, exclave rows, ⋯ menu or
   Scheduler badge (A36a); its rows are Tasks, Samples, Events and Database with their oldest dates,
-  under one line "Keeps task, chart and fleet history. Never runs sessions." (A36b); offline it shows
+  titled "Archivist" with no description line online (A36b); offline it shows
   a grey dot, `offline · last seen <age>` and what is hidden until it is back, and a fleet whose
   registry never held an archivist shows no card (A36c); one range control `6h · 24h · 30d · 90d · 1y`,
   the last two only while it is online (A36d); no source marking but a failure's wording (A36e); an

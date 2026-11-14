@@ -825,10 +825,10 @@ describe("deriveArchivist", () => {
   test("online with a reply: last ingest, the build line, four rows and the history note", () => {
     const card = deriveArchivist(entry, held, NOW);
     expect(card).toMatchObject({
-      name: "archive",
+      name: "Archivist",
       online: true,
       meta: "linux · last ingest just now",
-      note: "Keeps task, chart and fleet history. Never runs sessions.",
+      note: null,
     });
     expect(card?.build).toBe(`${"a".repeat(12)} · committed 2h ago · main`);
     expect(card?.rows).toEqual([
