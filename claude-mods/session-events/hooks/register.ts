@@ -42,6 +42,10 @@ import type { EngineInterface, Register } from "claude-code";
  * allow or deny is a brief needs-input with no dialog. No hook can see either.
  * Not covered: an MCP server's elicitation, which has no engine event.
  *
+ * A tool call also reads the Remote Control bridge's session id and reports the
+ * unchanged state once when the id is new (`noteBridge`), so the PWA's claude.ai
+ * link need not wait for the first turn's end.
+ *
  * Fire-and-forget throughout: no hook waits on the daemon, and a missing
  * `bun`, a stopped daemon or a slow one costs the session nothing.
  */
@@ -155,6 +159,10 @@ interface Tracker {
   lastWait: string;
   lastPrUrl: string | undefined;
   anonymous: number;
+  /** The bridge's session id as a tool call last read it (`noteBridge`); unset until one did. */
+  bridge: string | undefined;
+  /** `bridge` when the last report went out: one that changed since is news even in an unchanged state. */
+  lastBridge: string | undefined;
 }
 
 function newTracker(): Tracker {
@@ -171,6 +179,8 @@ function newTracker(): Tracker {
     lastWait: "",
     lastPrUrl: undefined,
     anonymous: 0,
+    bridge: undefined,
+    lastBridge: undefined,
   };
 }
 
@@ -233,18 +243,44 @@ function sendCurrent($: EngineInterface, t: Tracker, prUrl?: string): void {
   // Part of the state too: a question opening beside a permission ask, or a different prompt being the only one left, is a change.
   const wait = state === "needs-input" ? waitOf(t) : {};
   const waitKey = `${wait.reason ?? ""}${wait.tool === undefined ? "" : `:${wait.tool}`}`;
-  if (state === t.lastState && turnEnded === t.lastTurnEnded && waitKey === t.lastWait && prUrl === undefined) {
-    return;
-  }
+  const same = state === t.lastState && turnEnded === t.lastTurnEnded && waitKey === t.lastWait;
+  if (same && t.bridge === t.lastBridge && prUrl === undefined) return;
   t.lastState = state;
   t.lastTurnEnded = turnEnded;
   t.lastWait = waitKey;
+  t.lastBridge = t.bridge;
   send($, t, {
     state,
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(turnEnded ? { turnEnded } : {}),
     ...wait,
   });
+}
+
+/**
+ * Reads the Remote Control bridge's session id, for `sendCurrent` to report a change in it. The CLI
+ * already adds it to every report from the env it inherits, but the bridge connects a second or so
+ * after the first turn starts, and a busy turn changes no state until it ends: without this, the
+ * PWA's claude.ai link waits for that end. A session started under another's env (a tmux server
+ * booted from inside a session) inherits that one's id until its own bridge replaces it, and this
+ * corrects that too. Read live: the engine sets the variable on its own process.
+ */
+async function noteBridge($: EngineInterface, t: Tracker): Promise<void> {
+  try {
+    const id = await $.env.get("CLAUDE_CODE_BRIDGE_SESSION_ID");
+    t.bridge = id === "" ? undefined : id;
+  } catch {
+    // Unreadable: the next state change carries whatever the env holds then.
+  }
+}
+
+/**
+ * A bridge id that is new since the last report, outside idle. An idle report is a turn's end to the
+ * daemon (a hand-off's or a pass's close, the drain ask's prompt) when it carries `turnEnded`, so it
+ * is never repeated for an id alone: the main loop's next `turn.start` carries the id instead.
+ */
+function shouldSendBridge(t: Tracker): boolean {
+  return t.bridge !== t.lastBridge && current(t) !== "idle";
 }
 
 function dropMain(t: Tracker): void {
@@ -314,6 +350,14 @@ export const register: Register = (on) => {
       t.questions.add(id);
       sendCurrent($, t);
     }
+    // Unawaited, like every report: the tool never waits on the read.
+    noteBridge($, t)
+      .then(() => {
+        if (shouldSendBridge(t)) sendCurrent($, t);
+      })
+      .catch(() => {
+        // noteBridge already swallows; this only keeps a bug here from going unhandled.
+      });
     /** Closes `id`; a dialog closing or a PR found reports the state the session is in now. */
     const finish = (prUrl?: string): void => {
       const wasOpen = id !== undefined && t.outstanding.delete(id);

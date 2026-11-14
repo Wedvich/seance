@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "claude-code/testing";
+import { describe, expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On, SessionEndReason, ToolCheckDecision } from "claude-code";
 import { daemonMain, prUrlFrom } from "./register.ts";
@@ -7,7 +7,8 @@ type Sent = { readonly argv: readonly string[]; readonly report: unknown }[];
 
 /**
  * Records every `session-event` run the mod makes, answering as the CLI does: silently.
- * `env` is the session's: in a tmux pane unless a test says otherwise.
+ * `env` is the session's: in a tmux pane unless a test says otherwise. Read at each `$.env.get`,
+ * not once, since the engine sets the bridge's id on its own process mid-session.
  */
 function record(
   on: On,
@@ -23,7 +24,7 @@ function record(
   } = {},
 ): Sent {
   const sent: Sent = [];
-  mock.env(on, env);
+  on("env.get", (_$, e) => ({ value: env[e.name] }));
   // The engine's own step beneath each lifecycle event; the mod only observes, so its echo does.
   on("session.start", (_$, e) => ({ cwd: e.cwd }));
   on("session.end", (_$, e) => ({ sessionId: e.sessionId }));
@@ -200,6 +201,53 @@ describe("reports", () => {
     // A non-event cannot be polled for: wait as long as a send takes to land above.
     await settled(sent, 1);
     expect(sent).toEqual([]);
+  });
+
+  test("a bridge id a tool call sees first goes out in an unchanged state, once per id", async ($, on) => {
+    // Mutable: the engine sets the variable on its own process once the bridge connects.
+    const env: Record<string, string> = { TMUX_PANE: "%7" };
+    const sent = record(on, { env });
+    tools($, on, { verdict: "allow" });
+    await $.turn.start({ ...turn, text: "hi" });
+    await settled(sent, 1);
+    await $.tool.call({ tool: "Bash", command: "ls" });
+    env["CLAUDE_CODE_BRIDGE_SESSION_ID"] = "session_01First";
+    await $.tool.call({ tool: "Bash", command: "ls" });
+    await settled(sent, 2);
+    await $.tool.call({ tool: "Bash", command: "ls" });
+    // Inherited from the env a tmux server was booted under, then replaced by the session's own.
+    env["CLAUDE_CODE_BRIDGE_SESSION_ID"] = "session_01Own";
+    await $.tool.call({ tool: "Bash", command: "ls" });
+    await settled(sent, 3);
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 4);
+    // The CLI adds the id itself, from the env it inherits; the mod only decides that a report goes.
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "busy" }, { state: "busy" }]);
+  });
+
+  test("a bridge id first seen at idle waits for the next turn: a repeated turn end would close a session", async ($, on) => {
+    const env: Record<string, string> = { TMUX_PANE: "%7" };
+    const sent = record(on, { env });
+    tools($, on, { verdict: "allow" });
+    await $.turn.start({ ...turn, text: "hi" });
+    await $.turn.complete(answered);
+    await settled(sent, 2);
+    env["CLAUDE_CODE_BRIDGE_SESSION_ID"] = "session_01Own";
+    // A background subagent's call, after the main loop's turn ended.
+    await $.tool.call({ tool: "Bash", command: "ls", agentId: "a1" });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 3);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "idle", turnEnded: true }]);
+  });
+
+  test("an empty bridge id is no id", async ($, on) => {
+    const sent = record(on, { env: { TMUX_PANE: "%7", CLAUDE_CODE_BRIDGE_SESSION_ID: "" } });
+    tools($, on, { verdict: "allow" });
+    await $.turn.start({ ...turn, text: "hi" });
+    await $.tool.call({ tool: "Bash", command: "ls" });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }]);
   });
 
   test("a question to the person needs input, as a question, until it is answered", async ($, on) => {
