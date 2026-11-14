@@ -9204,7 +9204,10 @@ decision is recorded here.
   upgrade, and the older daemon removed its own hash-named directory at its stop. An older daemon after a newer one
   ignores `socketDir` and serves the hash path, so a round the newer one left runs unreachable until its deadline
   closes it, and its whole-record writes drop the field, so the next upgrade makes a fresh directory and the old empty
-  one stays until `/tmp` is cleaned; accepted. A line over
+  one stays until `/tmp` is cleaned; accepted. **Not re-drilled (2026-11-14, the owner's call):** the random name
+  changed only the directory's name and lifetime; the round still reaches one 0700 directory, named in its allow list
+  and environment as before, through the same masks, fence and built environment, so the 4b drill's "contained" stands.
+  A change to what the round can reach still needs one. A line over
   64 KiB drops the connection. Any other frame kind (`Plain`, `session-event`, `message`, `inbox`, `broker`) is answered
   `unsupported`, with one warn a minute, and never reaches a handler. The binding is unchanged: the verbs bind by the
   kernel-reported peer pid alone. The daemon's **main** socket now answers the `custodian` kind `unsupported`, and its
