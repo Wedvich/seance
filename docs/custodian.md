@@ -273,7 +273,11 @@ fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat 
   (`bash -c "tmux new-window '…'"`, `tmux run-shell`, which the deny list does not stop), `send-keys` into
   any pane (approving a restricted session's permission prompt, which C22 rejected for nudges), send a raw
   `Plain` `despawn` frame with `force: true` that skips every `close` check, and read on-disk secrets
-  (`state.json`'s identity seed, `~/.ssh`, the `gh` credential) and send them to GitHub. Item 4b closes each.
+  (`state.json`'s identity seed, `~/.ssh`, the `gh` credential) and send them to GitHub, through the Bash
+  tool and through the `Read` tool the fence allows. The same sandbox on Linux reaches every other socket the
+  user can (the user systemd bus, Docker's socket, an ssh-agent), and on macOS may reach launchd over Mach, each
+  another way to run code outside it, and `kill` reaches every same-uid process. Item 4b closes each, or
+  records it as accepted.
 - **A wrong close is the worst accepted outcome.** It costs a continuation of the task, never work:
   C32 keeps anything that exists only locally.
 - **Nudge text is a new path from one session's output into another's input**, through a model.
@@ -283,7 +287,8 @@ fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat 
 - **Peer binding.** Only the round's own pane may call the verbs. A same-user process that can
   make itself a descendant of that pane can call them; that process could already type into any
   pane. This is not the converse: nothing yet stops the round's own pane from calling the other
-  frame kinds (item 4b (c)).
+  frame kinds. Item 4b (a) does not do that with a negative check (see Rejected alternatives) but by
+  giving the round a socket that serves only the verbs and taking the main socket out of its sight.
 
 ## Rejected alternatives
 
@@ -311,13 +316,22 @@ fenced shell, its pane option and the seat record are folded (DESIGN.md, Threat 
 - **A registry role with a relay secret, as the archivist has.** The archivist is one seat per
   fleet that the relay must refuse a second of. The custodian is per machine and local; the relay
   has nothing to enforce.
-- **Going live before item 4b (a)–(d).** Rejected by the owner on 2026-11-14. The verbs are the
+- **Going live before item 4b.** Rejected by the owner on 2026-11-14. The verbs are the
   intended bound, but a round's sandbox reaches the tmux socket and the daemon's plain ops and reads
   on-disk secrets with github.com reachable, so an injection into any session's screen text could run
   code outside the sandbox, approve a restricted session's prompts, force-despawn any pane or exfiltrate
   the identity seed or the `gh` token. Shipping verbs that look like a bound while the round has a
   wider reach is worse than shipping none: the doctor, the docs and the threat model would all say the
   round is contained when it is not.
+- **Refusing the round's descendants on the daemon's main socket** (4b's first draft: refuse every non-`custodian`
+  frame from a peer whose ancestors include a `@seance-custodian` pane). Inverts the safe direction: the verbs
+  grant access only to a descendant, so escaping ancestry only loses access, while this refuses only descendants,
+  so escaping gains it. A round's `bash -c "nohup … &"`, `setsid -f` or a double fork re-parents the sender to
+  init (Linux without a pid namespace) or launchd (macOS has none), its ancestor walk no longer reaches the pane,
+  and a `Plain` `despawn` with `force: true` is accepted. "Refused where the host names no peer" also read as
+  refusing every frame on such a host, rounds or not. 4b (a) gives the round a socket of its own and takes the main
+  one out of its sight instead; an ancestry refusal on the main socket may stay as defence in depth, never as
+  the bound.
 - **Names.** `janitor` (not the theme), `reaper` (`seanced reap` is a different mechanism, and it
   names only the closing half), `sentinel` and `warden` (the watch without the cleanup), `cerberus`
   (one entity, not a job held per machine), `familiar`, `sexton`, `acolyte`, `nightwatch`. A run is
@@ -341,32 +355,88 @@ delivery); nothing else here does.
    (C23–C25, C37–C39, C42).~~ Built 2026-11-14 (`daemon/src/custodian-verbs.ts`); rounds stay held
    (`ROUNDS_LIVE`) until 4b.
    4b. **Contain the round**, then remove `ROUNDS_LIVE`. Decided with the owner on 2026-11-14 after the
-   code review of item 4 showed the reach in the threat model above. Four changes, one PR (they are
-   one claim, that the round can reach only the verbs):
-   - **(a) Take the tmux socket from the round's sandbox.** macOS: drop tmux's socket dir from
-     `allowUnixSockets` (keep the daemon's run dir, which the verbs need). Linux has no per-path
-     socket filter (`allowAllUnixSockets` is all-or-nothing), so mask the tmux socket's dir with
-     `denyRead`. This needs a spike on a real round first, to prove bwrap's mask stops `connect()` and
-     not only `stat`; if it does not, the fallback is a second tmux server the round alone can reach,
-     never a wider fence.
-   - **(b) A `seanced custodian capture <pane>` verb.** The round can no longer run `capture-pane`, so
+   code review of item 4 showed the reach in the threat model above. The claim, and what the PR's drill
+   must prove: **from inside the sandbox the round reaches one socket that acts, the round's own, which
+   serves the `custodian` verbs and nothing else; and reads nothing but its own directory.** Everything
+   below follows from that sentence, so a route not on the list still counts as a hole. Five changes, one
+   PR. A route is **masked** (the path is hidden from the sandbox; a mask that stops only `stat` and not
+   `connect()` is no mask, so each is spiked), never merely denied by the fence's command list, which
+   `bash -c` gets past (C21).
+   - **(a) A socket only the round can reach, and the daemon's main socket out of its sight.** The seat
+     opens a second listener (a new module beside `local-socket.ts`; it reuses `custodianVerbs` and the
+     frame parser) in its own 0700 directory **outside `stateDir()` and outside every path the sandbox may
+     write** (a per-seat dir under the literal `/tmp/seance-cu-` prefix, as the tmp dir is, but not the
+     round's scratch dir, so the round cannot replace the socket). It answers the `custodian` kind only:
+     any other kind is refused `unsupported`, with one warn line a minute at most. The peer-pid binding stays as it is, a **positive** check (only a descendant of the
+     seat's running round pane is served), so a process that re-parents away loses access, never gains it.
+     The round's `seanced custodian` finds it through an env var the daemon sets in the round's launch
+     env (a path, not a credential; the binding is the kernel's, never the path's). Then the daemon's main
+     socket (`runDir()/seanced.sock`, so `stateDir()/run`) is out of sight: macOS drops `runDir()` from
+     `network.allowUnixSockets` and lists only the round socket's dir and nothing for tmux; Linux masks
+     `runDir()`. This is also what makes (d) possible: the verbs no longer live under `stateDir()`, so
+     masking `stateDir()` does not take the round's own verbs with it.
+   - **(b) Every other socket that acts as the user, one by one.** Linux's `allowAllUnixSockets` is
+     all-or-nothing (seccomp cannot filter by path), so on Linux each socket the user can reach is either
+     masked by path or, if the spike shows it can be done, the filter is **inverted**: the round's mount
+     namespace hides `/run`, `/var/run`, `/tmp` and `$HOME` except the paths it needs (the round socket's
+     dir, its scratch dir, its toolchain), which also answers abstract-namespace sockets only to the extent
+     the sandbox's network namespace does (spike: whether Claude Code's `bwrap` unshares the network
+     namespace, so a host's abstract sockets are unreachable; if not, `bwrap --unshare-net` or a path-free
+     route is part of this PR). Each reach and how 4b treats it:
+
+     | Reach                | How the round gets there                                                                                                                                           | 4b                                                                                                                                                                                                                                                                                                                                                                             |
+     | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+     | tmux server socket   | `capture-pane`, and `new-window`/`run-shell`/`send-keys`                                                                                                           | masked (Linux `/tmp/tmux-<uid>` or `#{socket_path}`'s dir) / dropped from `allowUnixSockets` (macOS); `capture` verb (c) replaces the one thing the round needs it for. Spike: the mask stops `connect()`                                                                                                                                                                      |
+     | Daemon main socket   | raw `Plain` `despawn` with `force: true`, broker, `message`, `inbox`                                                                                               | (a)                                                                                                                                                                                                                                                                                                                                                                            |
+     | User systemd manager | `/run/user/<uid>/bus`, `…/systemd/private`: `systemd-run --user sh -c '…'` runs outside the sandbox (the deny list's `systemctl` does not catch it, nor `bash -c`) | Linux: mask `/run/user/<uid>` (and `/run/dbus`, the system bus); spike: `systemd-run --user` and `busctl --user` are refused. Mind `/etc/resolv.conf` linking into `/run/systemd/resolve`: the spike checks name resolution still works                                                                                                                                        |
+     | Docker / Podman      | `/var/run/docker.sock`, `/run/docker.sock`, `$XDG_RUNTIME_DIR/podman/podman.sock`: root for a user in the group                                                    | Linux: masked with `/run`, `/var/run`                                                                                                                                                                                                                                                                                                                                          |
+     | ssh-agent, gpg-agent | `$SSH_AUTH_SOCK` signs as the owner (a `git push` over SSH works with `~/.ssh` masked), `~/.gnupg`, `/run/user/<uid>/gnupg`                                        | `SSH_AUTH_SOCK` and `GPG_*` are not in the round's launch env (the env is built, not inherited); the socket's dir is masked; `ssh` stays on the deny list as a mistake guard only                                                                                                                                                                                              |
+     | macOS Mach services  | `launchctl submit`/`bootstrap`/`load`, `osascript`, `open`, `defaults` reach launchd and LaunchServices over Mach; a job runs outside Seatbelt                     | **Open, spike first**: whether Claude Code's Seatbelt profile refuses the Mach lookups (DESIGN.md records it as untested). If it does not, a macOS round cannot be contained by that profile, and the fallback is below                                                                                                                                                        |
+     | `kill`               | `kill`/`pkill` reach every same-uid process: other sessions' `claude`, the daemon, **the tmux server (every session on the machine)**                              | **Open, owner decides.** Recommended: contain on Linux by a pid namespace (spike: whether the sandbox can run `--unshare-pid`; it also lets the peer-pid walk stay honest), accept on macOS and record it as the one accepted reach; a lost turn is cheap, a killed tmux server costs every session's live context (the worktrees and transcripts survive, `continue` resumes) |
+
+     If a spike shows a reach cannot be masked on a platform, the fallback is **the round as a different
+     OS user** (or a container) with no access to the owner's sockets, signals or files, and the daemon's
+     verbs reached over the round socket only; never a wider fence and never ancestry or env checks in the
+     daemon standing in for isolation.
+
+   - **(c) A `seanced custodian capture <pane>` verb.** The round can no longer run `capture-pane`, so
      the daemon does: it already captures the screen to hash it. The verb returns the text to the
      round only, for `ours` panes and never the round's own, is never logged or audited with text, and
      replaces `tmux capture-pane` in the agent's checklist (`daemon/custodian/agent.md`) and the
      fence's allowances.
-   - **(c) The local socket refuses every non-`custodian` frame kind** (Plain ops, broker,
-     `session-event`, `message`, `inbox`) from a peer whose ancestors include a `@seance-custodian`
-     pane, by the same kernel peer pid the verbs bind by. Refused where the host names no peer, as
-     the verbs are.
-   - **(d) `denyRead` for `stateDir()`** (identity seed, `state.json`; the round's own verbs and
-     notes are the daemon's, reached over the socket), **`~/.ssh`, `~/.config/gh` and Claude's
-     credential stores.** The round's `gh` token for reads and its writes must come some other way
-     than a file it can read; check where macOS keeps `gh`'s credential (keychain storage is not a
-     path to deny, and may need the round's `gh` run through a daemon-side verb or a scoped token).
-     Then remove `ROUNDS_LIVE`, `CustodianSeatOpts.live` and `seatLive`, and fold the held-branch tests
-     into ones that run rounds. The dev check is a real round on Linux and macOS: the `--agents` tools
-     shape, the peer pid under bwrap and Seatbelt, and Bun running the round's own `seanced` inside the
-     sandbox, plus an injected-round drill that tries each of the reaches above and is refused.
+   - **(d) Reads.** Two different mechanisms cover two different tools, and 4b needs both. The sandbox's
+     `denyRead` confines the Bash tool's subprocesses; the fence allows the `Read` tool outright
+     (`allow: ["Read", …]`), and whether `denyRead` also stops Claude Code's in-process `Read`, `Grep` and
+     `Glob` is **not established**: spike it, and until it is shown, assume not. So: `denyRead` **and**
+     `Read(<path>)` deny rules for each secret below, or better, narrow the `Read` allow to the round's own
+     directory so a path nobody listed is refused too. The secrets: `stateDir()` (identity seed,
+     `state.json`: safe to mask whole once (a) moves the round's socket out of it), `~/.ssh`, `~/.gnupg`,
+     `~/.config/gh`, each exclave's Claude credential store (`.credentials.json`, the keychain on macOS),
+     and the other credential files a user keeps (`~/.aws`, `~/.config/gcloud`, `~/.netrc`, `~/.npmrc`,
+     `~/.docker/config.json`): a deny list of home is never complete, so prefer the inverted form, `$HOME`
+     denied with the round dir, its toolchain and `seanced`'s own install re-allowed, if the pinned Claude
+     Code release's sandbox settings can express it (spike). github.com stays reachable, so anything
+     readable is something the round can send; the claim is about what is readable. The round's `gh` token
+     for reads must come some other way than a file it can read; check where macOS keeps `gh`'s credential
+     (keychain storage is not a path to deny, and may need the round's `gh` run through a daemon-side verb
+     or a scoped read-only token).
+   - **(e) The drill and the removal.** Then remove `ROUNDS_LIVE`, `CustodianSeatOpts.live` and `seatLive`,
+     and fold the held-branch tests into ones that run rounds. The dev check is a real round on Linux
+     (a VM or bare metal, and an LXC container) and macOS: the `--agents` tools shape, the peer pid under
+     bwrap and Seatbelt, and Bun running the round's own `seanced` inside the sandbox, plus an
+     **injected-round drill that tries every row of the table above and every read in (d) and is refused**,
+     each by the route a hostile model would take and not only the plain one: `tmux new-window` and
+     `send-keys`; a `Plain` `despawn` frame written straight to the main socket, **and from a process the
+     round re-parented away (`setsid -f`, `nohup … &`, a double fork) so its parent is init or launchd**;
+     `bash -c 'systemd-run --user …'`, `docker ps`, an `ssh-add -l` against the owner's agent, `launchctl
+     submit`; a `kill` of another pane's `claude` under whatever the owner decided; and `state.json`,
+     `~/.ssh/id_*` and `~/.config/gh/hosts.yml` read through `cat`, through `bash -c`, and through the `Read`
+     tool, then sent through `curl` to github.com. The drill passing is the only evidence for the claim; the
+     doctor, the docs and the threat model say "contained" only after it has.
+   - **Open, decided by a spike before any of it is built:** each "spike" in the table and in (d); whether a
+     second listener or a different process (a daemon-spawned broker the round alone reaches) is the simpler
+     home for (a); whether the round can keep `allowAllUnixSockets` at all once `/run`, `/var/run` and the
+     agent dirs are masked, or Linux gets the inverted mount form or the other-user fallback.
 5. `MachineStatus.cu` and the Machines row; `seanced custodian status | log | round | pause |
    resume` at the shell (C40, C43, C45).
 

@@ -8651,9 +8651,10 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
   outside the sandbox (`bash -c "tmux new-window '…'"`, `tmux run-shell`), `send-keys` into any pane (approving a
   restricted session's permission prompt), send a raw `Plain` `despawn` with `force: true` that skips every
   `close` check, and read the identity seed, `~/.ssh` and the `gh` credential and send them to GitHub. **The owner
-  decided on 2026-11-14 to hold rounds and contain the round next** (docs/custodian.md, build item 4b: take the
-  tmux socket away, a `capture` verb, the socket refusing other frame kinds from a round's process, `denyRead` for
-  the secrets), rejecting going live first. In production the seat is therefore off: no capability bit, no seat, no
+  decided on 2026-11-14 to hold rounds and contain the round next** (docs/custodian.md, build item 4b: a socket only
+  the round can reach, serving the verbs alone, with the daemon's main socket out of its sight; the tmux socket and
+  every other socket that acts as the user masked or accounted for; a `capture` verb; reads confined for the `Read`
+  tool as well as Bash), rejecting going live first. In production the seat is therefore off: no capability bit, no seat, no
   sampler, no retention (they run only with a seat, so a held daemon keeps no pane facts), `doctor` quiet (one
   `ok` line, none of its probes, the `session-events` warn included), the `custodian` frame answered
   `unsupported`, and the key moves reap's defaults only (`CUSTODIAN_REAP_DEFAULTS`, unchanged). The verbs, the
@@ -8816,8 +8817,11 @@ of the spec (nudge, interrupt, flags, health, the Machines row). Decisions are c
     `seanced` command, which act through a signal, a socket or the network. **The fence is for a cheap model's
     mistakes, never a boundary.** The intended bound under injection is C19: every change to a session or a worktree
     is a verb the daemon checks ("The custodian frame kind"), and it holds only once the round cannot reach the tmux
-    socket or the daemon's plain ops (docs/custodian.md item 4b; rounds are held until then). On macOS `launchctl` talks to launchd over Mach, which the profile may
-    allow (not tested).
+    socket or the daemon's plain ops (docs/custodian.md item 4b; rounds are held until then). 4b also has to account for
+    the sockets and signals this paragraph and "Platform keys" below list as reachable: the user systemd bus
+    (`systemd-run --user` runs outside the sandbox and the deny list does not catch it), Docker's socket, an
+    ssh-agent, and `kill` of any same-uid process, the tmux server among them. On macOS `launchctl` talks to launchd
+    over Mach, which the profile may allow (not tested; 4b's spike decides).
   - **Platform keys.** macOS runs under `caffeinate -is` (the machine must not sleep mid-round) and lists the
     tmux socket's directory (`#{socket_path}`) and `runDir()` in `network.allowUnixSockets`; without it
     `tmux capture-pane` and the daemon's local socket fail with `Operation not permitted` (a directory works as an
@@ -11628,13 +11632,19 @@ frame can do, not what the round can.
   key rules, the per-key pruning, never being logged, never leaving the machine, and the owner's `--clear`. The
   same-uid process that makes itself a descendant of the round's pane can call the verbs; it could already type into
   any pane. A frame's `close` cannot reach a foreign pane, a marked one, the round's own, a pane whose last state
-  is `needs-input` or `busy`, or one with a draft. What no frame check can bound, and item 4b (a)–(d) is to: the
+  is `needs-input` or `busy`, or one with a draft. What no frame check can bound, and item 4b is to: the
   round's `bash -c` reaching the tmux socket (`send-keys`, `run-shell`, `new-window`), the daemon's other frame
-  kinds from the round's process (a `Plain` `despawn` with `force: true` skips `close`'s checks), and the
-  round's reads of `state.json`'s identity seed, `~/.ssh` and the `gh` credential with github.com reachable.
+  kinds from the round's process (a `Plain` `despawn` with `force: true` skips `close`'s checks), the other
+  sockets and signals that act as the user (the systemd user bus, Docker, an ssh-agent, launchd, `kill`), and the
+  round's reads, through Bash and through the `Read` tool the fence allows, of `state.json`'s identity seed,
+  `~/.ssh` and the `gh` credential with github.com reachable. 4b's bound is positive, not an ancestry refusal on
+  the main socket (a re-parented process escapes that): the round reaches one socket of its own that serves the
+  verbs only.
 - **Rejected, and why:** going live before item 4b (owner, 2026-11-14: verbs that look like a bound while the
   round has a wider reach would make `doctor`, the docs and this threat model say the round is contained when it is
-  not); binding by `$TMUX_PANE` or any field of the frame (an env var and a claim, both the
+  not); refusing the round's descendants on the main socket as 4b's bound (it inverts the verbs' safe direction: a
+  `setsid -f` or double fork re-parents the sender away and gains access, docs/custodian.md, Rejected alternatives);
+  binding by `$TMUX_PANE` or any field of the frame (an env var and a claim, both the
   sender's own); a `close` that takes a task id (a task's pane is not unique across a continuation, and the pane id
   is what the daemon re-reads); `rm`/`git worktree remove` left to the agent, which C19 forbids and the fence
   only advises; `--force` on the removal, or removing a dirty worktree after a warning; clearing the notes through
