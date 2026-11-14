@@ -209,6 +209,34 @@ describe("collector", () => {
     }
   });
 
+  test("a row SQLite refuses is skipped and counted; the rest of the listing is archived and the store noted", async () => {
+    const fake = script();
+    const warnings: string[] = [];
+    const clock = createIngestClock();
+    // A STRICT INTEGER column refuses a fractional `created_at`: one row refused, the rest writable.
+    const listing = [
+      { task: finished("t-a"), version: 1 },
+      { task: { ...finished("t-b"), createdAt: 1.5 }, version: 1 },
+      { task: finished("t-c"), version: 1 },
+    ];
+    const source: ArchiveSource = {
+      ...fake.source,
+      listTasks: () => Promise.resolve({ ok: true, tasks: listing, unreadable: [] }),
+    };
+    const collector = await start(source, warnings, clock);
+    try {
+      await pollUntil(() => archive.taskVersion("t-c") === 1, "the task after the refused one archived");
+      expect(archive.taskVersion("t-a")).toBe(1);
+      expect(archive.taskVersion("t-b")).toBeNull();
+      expect(warnings.filter((line) => line.startsWith("tasks: "))).toEqual([
+        "tasks: 1 not archived: cannot store REAL value in INTEGER column tasks.created_at",
+      ]);
+      expect(clock.snapshot().store).not.toBeNull();
+    } finally {
+      collector.stop();
+    }
+  });
+
   test("the ingest clock notes the store when a listing lands and the registry when a fleet is written", async () => {
     const fake = script();
     const clock = createIngestClock();

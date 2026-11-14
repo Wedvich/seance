@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, SQLiteError } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
 import {
   forgetPrompt,
@@ -142,6 +142,14 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
 ];
 
 export const ARCHIVE_SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * SQLite refused this one row (a constraint, a datatype, a size): the next row may still land. Anything else — busy,
+ * I/O, a full disk, a closed database — fails every write after it too, and `busy_timeout` blocks the thread on each.
+ */
+export function isRowRefusal(err: unknown): err is SQLiteError {
+  return err instanceof SQLiteError && /^SQLITE_(?:CONSTRAINT|MISMATCH|TOOBIG)/u.test(err.code ?? "");
+}
 
 /** One task as the archive keeps it. `record` is `archivedTask`'s JSON. */
 export interface TaskRow {
