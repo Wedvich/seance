@@ -420,6 +420,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       // Only a machine runs a seat (the archivist holds the PSK and never does). A refused or repeated one is still
       // taken: the sender must not hold it for a retry.
       const state = relay.getState();
+      // Before the first registry push nothing is known yet, not unregistered: leave it with the sender to retry.
+      if (state.registrySize === 0) return false;
       if (state.archivist?.deviceId === from || !state.machines.some((machine) => machine.deviceId === from)) {
         log.warn(`scheduler: custodian-event kind=failing from=${quote(from)} dropped — not a registered machine`);
         return true;
