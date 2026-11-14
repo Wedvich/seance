@@ -2,7 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLAUDE_COMMAND, classifyPane, listPanes, listStuckWindows, paneInfo, type PaneInfo, type PaneState } from "../src/sessions.ts";
+import {
+  CLAUDE_COMMAND,
+  classifyPane,
+  listPanes,
+  listStuckWindows,
+  paneInfo,
+  type PaneInfo,
+  type PaneState,
+} from "../src/sessions.ts";
 import { CUSTODIAN_OPTION, resolveTargetSession, tmuxOk } from "../src/tmux.ts";
 import {
   makeClaudeStub,
