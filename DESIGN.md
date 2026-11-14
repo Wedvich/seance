@@ -11522,12 +11522,17 @@ does not change when they land.
   that is gone is `gone`. A close holds its pane while it runs, so a second for it is `marked`.
 - **A draft is never typed over (plan review F5).** The graceful despawn clears the input box with Escape and
   Ctrl+C, and neither the screen hash nor a session event sees typing: an owner composing a reply in a finished
-  session would lose it. Before a `live` pane is despawned, `close` reads the screen and `inputBoxText`
-  (`drain-ask.ts`, which `inputBoxShows` now also builds on) returns the text between the last two full-width rules
-  after the `❯`: **any text, or a box that cannot be found (a dialog, a menu), is `waiting`**. The cost, accepted:
-  Claude Code's prompt suggestion draws grey text in an empty box that a screen read cannot tell from a draft, so a
-  session showing one is refused `waiting` until it is gone. Failing closed there costs a later round; failing open
-  would cost an owner's draft. Not checked for `exit-prompt` panes (no box) or `dead` ones.
+  session would lose it. Before a `live` pane is despawned, `close` reads the screen with its attributes
+  (`capture-pane -e`, `capturePane`'s `styled`) and `inputBoxDraft` (`drain-ask.ts`; `inputBoxText` is the plain-capture
+  twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules after the `❯`,
+  **leaving out the cells Claude Code draws as a prompt suggestion** (code review F2): faint (SGR 2) or a grey
+  foreground (`90`, `38;5;8` and the mid greys of the 256 ramp, equal-channel `38;2` between 80 and 170), and the
+  cursor's inverse first cell when more suggestion text follows. **Any other text, or a box that cannot be found (a
+  dialog, a menu), is `waiting`**: a cell whose attribute is not recognised counts as typed, so a Claude Code release
+  that restyles the suggestion costs a later round (the session is refused `waiting`), never an owner's draft. The
+  styled capture is read in memory for this check only and is never hashed, logged or audited. The grey values are
+  what Claude Code's themes use as far as is known, not measured on a release here: `daemon/test/capture-styled.test.ts`
+  proves what tmux emits for them, not what Claude Code draws. Not checked for `exit-prompt` panes (no box) or `dead` ones.
 - **The worktree (C31–C34, `custodian-worktree.ts`)** is decided after a successful close, for a task whose launch
   this machine's ledger holds a worktree of (`EndedTasks.worktree`, the one authority on a path: a frame never names
   one), and nothing is decided for a here-mode task or a worktree already gone. In order, the worktree is kept as:

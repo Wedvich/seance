@@ -5,6 +5,7 @@ import {
   createDrainAsk,
   createLateDrainAsk,
   DRAIN_PROMPT,
+  inputBoxDraft,
   inputBoxShows,
   inputBoxText,
   type DrainAsk,
@@ -819,5 +820,57 @@ describe("inputBoxText", () => {
   test("no box, or a dialog in its place, is null", () => {
     expect(inputBoxText("just a transcript")).toBeNull();
     expect(inputBoxText([RULE, " Bash command", " Do you want to proceed?", RULE].join("\n"))).toBeNull();
+  });
+});
+
+describe("inputBoxDraft", () => {
+  const RULE = "─".repeat(60);
+  const ESC = "\u001B";
+  const FAINT = `${ESC}[2m`;
+  const INVERSE = `${ESC}[7m`;
+  const RESET = `${ESC}[0m`;
+  const screen = (...box: string[]): string => ["transcript", RULE, ...box, RULE, "  ? for shortcuts"].join("\n");
+
+  test("a plain screen reads as inputBoxText does: typed text is a draft, an empty box is not", () => {
+    expect(inputBoxDraft(screen("❯ "))).toBe("");
+    expect(inputBoxDraft(screen("❯ half a   reply", "  that wraps"))).toBe("half a reply that wraps");
+    expect(inputBoxDraft("just a transcript")).toBeNull();
+    expect(inputBoxDraft([RULE, " Bash command", " Do you want to proceed?", RULE].join("\n"))).toBeNull();
+  });
+
+  test("a suggestion drawn faint is no draft, with or without the cursor on its first cell", () => {
+    expect(inputBoxDraft(screen(`❯ ${FAINT}commit and push the changes${RESET}`))).toBe("");
+    expect(inputBoxDraft(screen(`❯ ${INVERSE}c${RESET}${FAINT}ommit and push${RESET}`))).toBe("");
+  });
+
+  test("a suggestion drawn in a grey foreground is no draft", () => {
+    for (const grey of ["90", "38;5;8", "38;5;244", "38;2;153;153;153"]) {
+      expect(inputBoxDraft(screen(`❯ ${ESC}[${grey}mrun the tests${RESET}`))).toBe("");
+    }
+  });
+
+  test("a suggestion wrapped over two lines is no draft", () => {
+    expect(inputBoxDraft(screen(`❯ ${FAINT}commit and push${RESET}`, `  ${FAINT}the changes${RESET}`))).toBe("");
+  });
+
+  test("any typed cell makes it a draft, however much suggestion text is beside it", () => {
+    expect(inputBoxDraft(screen(`❯ half a reply${FAINT} and a suggestion${RESET}`))).toBe("half a reply");
+    expect(inputBoxDraft(screen(`❯ ${FAINT}run the${RESET} tests`))).toBe("tests");
+    expect(inputBoxDraft(screen(`❯ ${INVERSE}ab${RESET}`))).toBe("ab");
+  });
+
+  test("a one-character draft with the cursor on it is still a draft", () => {
+    expect(inputBoxDraft(screen(`❯ ${INVERSE}x${RESET}`))).toBe("x");
+  });
+
+  test("an attribute it does not recognise counts as typed, so a surprise fails closed", () => {
+    expect(inputBoxDraft(screen(`❯ ${ESC}[38:2::153:153:153mrun the tests${RESET}`))).toBe("run the tests");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[38;2;255;255;255mrun the tests${RESET}`))).toBe("run the tests");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[34mrun the tests${RESET}`))).toBe("run the tests");
+  });
+
+  test("a reset, or the faint attribute switched off, ends the suggestion", () => {
+    expect(inputBoxDraft(screen(`❯ ${FAINT}ghost${ESC}[22m typed`))).toBe("typed");
+    expect(inputBoxDraft(screen(`❯ ${ESC}[90mghost${ESC}[39m typed`))).toBe("typed");
   });
 });

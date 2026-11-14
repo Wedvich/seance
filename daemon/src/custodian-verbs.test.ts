@@ -163,7 +163,8 @@ afterAll(async () => {
 
 const RULE = "─".repeat(60);
 /** Claude Code's screen: the transcript, then the input box between two full-width rules. */
-const boxScreen = (box: string, after = ""): string => `earlier output\n${RULE}\n${box}\n${RULE}\n  ? for shortcuts${after}`;
+const boxScreen = (box: string, after = ""): string =>
+  `earlier output\n${RULE}\n${box}\n${RULE}\n  ? for shortcuts${after}`;
 const EMPTY_BOX = boxScreen("❯ ");
 
 /** Every fact a verb reads is a seam, so each test says only what it differs in. */
@@ -426,6 +427,17 @@ describe("close", () => {
       expect(await r.verbs.handle(close(), process.pid)).toEqual({ ok: false, code: "waiting" });
       expect(r.calls).toEqual([]);
     }
+  });
+
+  test("a prompt suggestion, drawn faint, is not a draft: the session is closed, a typed draft beside it is not", async () => {
+    const ghost = rig();
+    ghost.state.screen = boxScreen("❯ \u001B[7mc\u001B[0m\u001B[2mommit and push the changes\u001B[0m");
+    expect(await ghost.verbs.handle(close(), process.pid)).toMatchObject({ ok: true, outcome: "exited" });
+
+    const typed = rig();
+    typed.state.screen = boxScreen("❯ half a reply\u001B[2m and a suggestion\u001B[0m");
+    expect(await typed.verbs.handle(close(), process.pid)).toEqual({ ok: false, code: "waiting" });
+    expect(typed.calls).toEqual([]);
   });
 
   test("a box that cannot be found, or a screen that cannot be read, fails closed the same way", async () => {

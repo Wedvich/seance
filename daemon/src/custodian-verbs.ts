@@ -17,7 +17,7 @@ import {
 } from "./custodian-frame.ts";
 import type { WorktreeOutcome, WorktreeRule } from "./custodian-worktree.ts";
 import { mapLimit } from "./concurrency.ts";
-import { inputBoxText } from "./drain-ask.ts";
+import { inputBoxDraft } from "./drain-ask.ts";
 import { writeDurable } from "./durable-write.ts";
 import { harvestable } from "./exit-status.ts";
 import { custodianNotesPath, reapRefusalsPath } from "./paths.ts";
@@ -146,7 +146,7 @@ export interface CustodianVerbDeps {
   readonly listPanes?: () => Promise<readonly PaneInfo[]>;
   readonly paneInfo?: (pane: string) => Promise<PaneInfo | null>;
   readonly classifyPane?: (info: PaneInfo) => Promise<PaneState>;
-  /** The pane's current screen, null when tmux cannot say. */
+  /** The pane's current screen with its attributes (`capture-pane -e`), null when tmux cannot say. */
   readonly capture?: (pane: string) => Promise<string | null>;
   readonly activity: (pane: string) => PaneActivity | null;
   /** When this process began retaining pane state; null while no seat holds the tracker. */
@@ -189,7 +189,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
   const panesNow = deps.listPanes ?? listPanes;
   const infoOf = deps.paneInfo ?? paneInfo;
   const classify = deps.classifyPane ?? classifyPane;
-  const capture = deps.capture ?? ((pane: string) => capturePane(pane, { history: false }));
+  const capture = deps.capture ?? ((pane: string) => capturePane(pane, { history: false, styled: true }));
   const readRefusals = deps.readRefusals ?? (() => readReapRefusals(reapRefusalsPath()));
   const notesPath = deps.notesPath ?? custodianNotesPath();
   const closeAfterMs = deps.settings.closeAfterMinutes * MINUTE_MS;
@@ -286,9 +286,10 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     const activity = info.ours ? deps.activity(pane) : null;
     if (verdict === "despawn" && state === "live") {
       // `askToExit` clears the input box with Escape and Ctrl+C, and neither the screen hash nor a frame sees typing:
-      // an owner composing a reply there would lose it. Any text, or a box that cannot be found, fails closed.
+      // an owner composing a reply there would lose it. Any typed text, or a box that cannot be found, fails closed; a
+      // prompt suggestion, which the styled read tells apart by its faint cells, is not a draft.
       const screen = await capture(pane);
-      const draft = screen === null ? null : inputBoxText(screen);
+      const draft = screen === null ? null : inputBoxDraft(screen);
       if (draft !== "") return refuseClose(pane, info.taskId, "waiting");
     }
     inFlight.add(pane);

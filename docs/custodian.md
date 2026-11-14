@@ -135,8 +135,8 @@ refusal codes there add `gone` and `invalid` to `close`, `round_done` to `close`
   `origin=custodian`. A task session closed this way settles exactly as one the owner typed
   `/exit` into: nothing about task state is the custodian's. _Built, with two additions:_ a `live` pane whose
   input box holds any text, or whose box cannot be found, is `waiting` (the despawn clears the box with
-  Escape and Ctrl+C, and nothing else sees a draft: a grey prompt suggestion reads as one, so such a session is
-  refused until it is gone), and a dead task pane is harvested (its exit status noted, then closed) rather than
+  Escape and Ctrl+C, and nothing else sees a draft: the screen is read with its attributes, so a prompt suggestion,
+  which Claude Code draws faint or grey, is not one, and any other text is), and a dead task pane is harvested (its exit status noted, then closed) rather than
   killed.
 
 - **C25. What "finished" means** is the agent's judgement, from the screen and the session's last
@@ -341,9 +341,10 @@ delivery); nothing else here does.
   closed (C24); `seanced doctor` now warns about it (built). The retained state is per process, so a
   session already at rest when the daemon restarts is `unobserved` too until its next frame; `sessions` says
   when retention began (`retainedSince`), which is how the round can tell, though not why per pane.
-- **Prompt suggestions.** A grey suggestion in an otherwise empty input box reads as a draft, so `close` refuses
-  such a session `waiting` (DESIGN.md, "The custodian frame kind"). Measure how often a finished session shows
-  one, and whether the box's styling (not in a plain `capture-pane`) could tell them apart.
+- **Prompt suggestions.** `close` reads the box through `capture-pane -e` and ignores faint and grey cells
+  (DESIGN.md, "The custodian frame kind"). Measure the attributes a real Claude Code release draws the suggestion
+  with: a style the daemon does not list reads as a draft and the session is refused `waiting`, which is safe and
+  silent.
 - **What "unchanged on screen" cannot see.** The change hash drops Claude's input box and footer and masks
   elapsed timers and the spinner glyph (DESIGN.md, "Per-pane retention"), matched on wording from Claude
   Code 2.1.x. A release that rewords them, or a repaint nobody has listed (a rotating tip, a clock in the

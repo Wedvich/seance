@@ -138,10 +138,15 @@ export async function resolveTargetSession(group: string): Promise<string> {
  * What a pane is showing, or null when tmux can't say (the pane is gone).
  * `history` pulls the scrollback in too; a live claude is on the alternate
  * screen, which has none, so the screen alone is what it is showing now.
+ * `styled` keeps each cell's attributes as SGR escapes (`-e`), which the plain read drops: the only way to tell
+ * Claude Code's faint prompt suggestion from typed text (`inputBoxDraft`). Never hashed or compared as plain text.
  */
-export async function capturePane(target: string, opts: { readonly history: boolean }): Promise<string | null> {
+export async function capturePane(
+  target: string,
+  opts: { readonly history: boolean; readonly styled?: boolean },
+): Promise<string | null> {
   const range = opts.history ? ["-S", "-", "-E", "-"] : [];
-  const result = await tmux(["capture-pane", "-p", ...range, "-t", target]);
+  const result = await tmux(["capture-pane", "-p", ...(opts.styled === true ? ["-e"] : []), ...range, "-t", target]);
   return result.exitCode === 0 ? result.stdout : null;
 }
 
