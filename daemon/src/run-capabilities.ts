@@ -352,6 +352,8 @@ const custodianSeat: DaemonCapability = (ctx) => {
   const untouchable = (pane: string): boolean =>
     eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true;
 
+  /** The seat's checks failed or it could not start: no round will ever run here, so the verbs say `unsupported`. */
+  let seatFailed = false;
   // The verbs exist before the seat does (its checks are async) and answer `not_custodian` until it names a round.
   const { despawn } = ctx.backend;
   const verbs: CustodianVerbs | null =
@@ -384,6 +386,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
     const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
     if (problem !== null) {
       log.warn(`custodian: no rounds on this host — ${problem}`);
+      seatFailed = true;
       // A host that cannot run a round is as off as a seat that is not configured: a round the last process left
       // would otherwise run on with no deadline. Not after a `stop`, whose incoming instance adopts it.
       if (!cancelled) sweepLeftovers();
@@ -445,6 +448,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   };
   void begin().catch((err: unknown) => {
     log.warn(`custodian: the seat did not start: ${String(err)}`);
+    seatFailed = true;
     release();
     if (!cancelled) sweepLeftovers();
   });
@@ -454,7 +458,14 @@ const custodianSeat: DaemonCapability = (ctx) => {
       seat?.stop();
       release();
     },
-    ...(verbs === null ? {} : { local: { custodian: verbs.handle } }),
+    ...(verbs === null
+      ? {}
+      : {
+          local: {
+            custodian: (raw, peer) =>
+              seatFailed ? Promise.resolve({ ok: false, code: "unsupported" }) : verbs.handle(raw, peer),
+          },
+        }),
   };
 };
 

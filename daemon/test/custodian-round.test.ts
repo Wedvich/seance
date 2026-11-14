@@ -18,8 +18,9 @@ import {
 import { createCustodianVerbs } from "../src/custodian-verbs.ts";
 import { createWorktreeRule } from "../src/custodian-worktree.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
+import { exchange } from "../src/local-client.ts";
 import { startLocalSocket } from "../src/local-socket.ts";
-import { custodianNotesPath } from "../src/paths.ts";
+import { custodianNotesPath, socketPath } from "../src/paths.ts";
 import { scanRepos } from "../src/scan.ts";
 import { ROUND_SEED } from "../src/custodian-agent.ts";
 import type { RoundEntry } from "../src/custodian-rounds.ts";
@@ -450,6 +451,27 @@ describe("the capability bit", () => {
       expect(audit.some((line) => line.includes("op=end") && line.includes("reason=lost"))).toBe(true);
     });
   }
+
+  test("a host whose seat cannot start answers the verbs unsupported, not not_custodian", async () => {
+    const booted = await boot(CUSTODIAN_DEFAULTS, { sandboxProblem: () => Promise.resolve("test: no sandbox") });
+    try {
+      const sessions = { v: 1, kind: "custodian", verb: "sessions" };
+      const answer = async (): Promise<unknown> =>
+        exchange(sessions, {
+          path: socketPath(),
+          timeoutMs: 5_000,
+          timeoutText: "the daemon did not answer the custodian frame",
+          restartGraceMs: 0,
+        }).catch(() => null);
+      await pollUntil(async () => (await answer()) !== null, "the daemon's local socket to answer");
+      await pollUntil(
+        async () => JSON.stringify(await answer()) === JSON.stringify({ ok: false, code: "unsupported" }),
+        "the failed seat to answer unsupported",
+      );
+    } finally {
+      booted.stop();
+    }
+  });
 
   test("a daemon with the key and a seat advertises custodian", async () => {
     expect(await advertised(CUSTODIAN_DEFAULTS)).toContain(CAPABILITIES.custodian);

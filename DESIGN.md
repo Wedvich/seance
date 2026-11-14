@@ -11490,9 +11490,12 @@ does not change when they land.
   frame acts. A round pane that is not the recorded round (a stray, a round the seat has not yet recorded) is
   therefore refused too. An unreadable tmux list throws rather than answering "no round pane", and the socket
   answers `internal`. A refusal is a warning naming the verb and a pid, and, for a `close`, an audit line with the
-  pane id the frame named (a `%n` that passed `PANE_ID`, so safe), `outcome=not_custodian`. The daemon answers
-  `unsupported` when it holds no seat or its backend has no `despawn`: the verbs exist before the seat's async
-  checks finish, and answer `not_custodian` until a round is recorded.
+  pane id the frame named (a `%n` that passed `PANE_ID`, so safe), `outcome=not_custodian`. Any same-uid process can
+  send a frame, so those lines are collapsed (code review F9): one per pid per minute, and at most 20 a minute
+  whatever the senders; the reply is the same. The daemon answers `unsupported` when it holds no seat, its backend has
+  no `despawn`, or the seat's checks failed (no sandbox tools, a sandbox probe failure, an unreadable agent file:
+  code review F10, since no round will ever run to be named); the verbs exist before the seat's async checks
+  finish, and answer `not_custodian` until a round is recorded.
 - **The round's own `seanced` (plan review F1).** The fence allows `Bash(seanced custodian *)` by name and nothing
   guarantees the tmux server's `PATH` holds a `seanced` of this checkout (linking is opt-in; nothing re-points it on a
   pull), so `launchRound` writes `<tmp>/bin/seanced`, a two-line `sh` wrapper running this process's own `bun`
