@@ -237,6 +237,52 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
     expect(sheet?.options.map((o) => o.label)).toEqual(["Any", "Done", "Failed", "Cancelled", "Passed on"]);
   });
 
+  test("archived cards show the successor chain, linking only to a card on screen", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const old = archived("t-old", { state: "superseded", successor: "t-new" });
+    const next = archived("t-new", {
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        title: "New work",
+        succeeds: { task: "t-old", account: "-", at, trigger: "quota", since: 5 },
+      },
+    });
+    const rows = deriveOlder(state({ list: page([old, next]) }), NOW)?.rows ?? [];
+    expect(rows[0]?.passedTo).toEqual({ text: "Passed to New work", reveal: "t-new" });
+    expect(rows[1]?.carriesOn).toEqual({ text: "Carries on Task t-old after its usage ran out", reveal: "t-old" });
+    expect(rows[0]?.carriesOn).toBeNull();
+
+    // The other end not loaded: the short id, as text.
+    const [alone] = deriveOlder(state({ list: page([old]) }), NOW)?.rows ?? [];
+    expect(alone?.passedTo).toEqual({ text: "Passed to task t-new", reveal: null });
+
+    // The successor live: its title, linked; on a sleeping machine (collapsed Asleep), text only.
+    const queue = live([]);
+    const running: Task = {
+      id: "t-new",
+      spec: { repo: ORIGIN, mode: "worktree", title: "Live work" },
+      state: "running",
+      createdAt: NOW,
+      assignment: { deviceId: "dev-b", exclave: "default", clone: "app" },
+    };
+    const liveQueue = { ...queue, tasks: [running] };
+    const awake = deriveOlder(
+      state({ list: page([old]) }, { queueView: liveQueue }, { machines: [machine(), machine({ deviceId: "dev-b" })] }),
+      NOW,
+    )?.rows[0];
+    expect(awake?.passedTo).toEqual({ text: "Passed to Live work", reveal: "t-new" });
+    const asleep = deriveOlder(
+      state(
+        { list: page([old]) },
+        { queueView: liveQueue },
+        { machines: [machine(), machine({ deviceId: "dev-b", connected: false })] },
+      ),
+      NOW,
+    )?.rows[0];
+    expect(asleep?.passedTo).toEqual({ text: "Passed to Live work", reveal: null });
+  });
+
   test("an account shows by its name here when its store key is one this install knows", () => {
     const row = archived("t-1", {}, { account: "account:feedface00", alias: "Archived name" });
     const aliased = state(

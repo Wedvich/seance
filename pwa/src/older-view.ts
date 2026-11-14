@@ -16,7 +16,8 @@ import {
   type Task,
 } from "@seance/shared";
 import { accountDisplayName } from "./machines-view.ts";
-import { prNames, type QueueRow } from "./queue-view.ts";
+import { machineAsleep } from "./asleep.ts";
+import { carriesOnLine, passedToLine, prNames, type QueueRow } from "./queue-view.ts";
 import {
   AUTONOMY_LABELS,
   NO_OLDER_FILTERS,
@@ -186,6 +187,7 @@ function archivedRow(
   now: number,
   known: readonly KnownAccount[],
   ids: ReadonlyMap<string, string>,
+  chain: Chain,
 ): QueueRow {
   const { task } = row;
   const machine = machineName(row, state);
@@ -214,8 +216,8 @@ function archivedRow(
     deps: null,
     continues: null,
     continuing: null,
-    carriesOn: null,
-    passedTo: null,
+    carriesOn: carriesOnLine(task, chain.titles, chain.revealable),
+    passedTo: passedToLine(task, chain.titles, chain.revealable),
     placement: [originLabel(task.spec.repo), ...(account === null ? [] : [account])].join(" · "),
     batch: null,
     busy: false,
@@ -225,6 +227,21 @@ function archivedRow(
     answer: null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
   };
+}
+
+/** What a successor-chain line can name and link: the live queue's tasks and the Older rows shown. */
+interface Chain {
+  readonly titles: ReadonlyMap<string, string>;
+  readonly revealable: ReadonlySet<string>;
+}
+
+function chainOf(state: AppState, shown: readonly ArchivedTask[]): Chain {
+  const view = state.queueView;
+  const live = view?.kind === "ok" ? view.tasks : [];
+  const titles = new Map([...live, ...shown.map((row) => row.task)].map((task) => [task.id, taskTitle(task)]));
+  // A card in the collapsed Asleep section is not rendered, so tapping would reveal nothing.
+  const onScreen = live.filter((task) => !machineAsleep(task, state.relay.machines));
+  return { titles, revealable: new Set([...onScreen, ...shown.map((row) => row.task)].map((task) => task.id)) };
 }
 
 function accountIds(state: AppState): ReadonlyMap<string, string> {
@@ -419,7 +436,8 @@ export function deriveOlder(state: AppState, now: number): OlderView | null {
   const shown = read.filter((row) => !live.has(row.task.id));
   const known = knownAccounts(state.relay.machines);
   const ids = accountIds(state);
-  const rows = shown.map((row) => archivedRow(row, state, now, known, ids));
+  const chain = chainOf(state, shown);
+  const rows = shown.map((row) => archivedRow(row, state, now, known, ids, chain));
 
   let status: string | null = null;
   let clearable = false;

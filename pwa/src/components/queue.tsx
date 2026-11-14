@@ -6,6 +6,7 @@ import {
   armTap,
   disarmRow,
   type ArmOp,
+  type LineageLine,
   type QueueRow,
   type QueueScreenView,
 } from "../queue-view.ts";
@@ -531,8 +532,8 @@ function QueueCard(props: {
       </div>
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
-      {row.carriesOn !== null && <p className="fleet-card-body">{row.carriesOn}</p>}
-      {row.passedTo !== null && <p className="fleet-card-body">{row.passedTo}</p>}
+      {row.carriesOn !== null && <Lineage line={row.carriesOn} onReveal={props.onReveal} />}
+      {row.passedTo !== null && <Lineage line={row.passedTo} onReveal={props.onReveal} />}
       {continuing !== null && (
         <p className="fleet-card-body">
           <button
@@ -583,6 +584,23 @@ function QueueCard(props: {
         </div>
       )}
     </section>
+  );
+}
+
+function Lineage(props: { line: LineageLine; onReveal: (taskId: string) => void }): JSX.Element {
+  const { text, reveal } = props.line;
+  if (reveal === null) return <p className="fleet-card-body">{text}</p>;
+  return (
+    <p className="fleet-card-body">
+      <button
+        type="button"
+        className="queue-reveal"
+        aria-label={`${text}, show in queue`}
+        onClick={() => props.onReveal(reveal)}
+      >
+        {text}
+      </button>
+    </p>
   );
 }
 

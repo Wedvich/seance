@@ -12162,7 +12162,13 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   of such rows reads on by itself rather than showing an empty page, at most six pages in a
   row and never past a page that added nothing; "Load older" is offered whenever a cursor
   remains, even with nothing shown. An archived card is a Queue card with every action off: no ⋯ menu, no Continue,
-  the PR chip in its last archived state with no checks icon. Its machine is the registry's
+  the PR chip in its last archived state with no checks icon. A passed-on card says "Passed to …"
+  (its `successor`) and a successor "Carries on …" with the live card's trigger suffix (its
+  `succeeds.task` and `trigger`; the archived `succeeds.account` placeholder is never read), the
+  other task titled from the live queue or the Older rows read, else its short id. The line
+  reveals the other card on tap only while that card is rendered (an Older row shown, or a live
+  task outside the collapsed Asleep section); live cards keep these lines as plain text, since
+  their view cannot see either. Its machine is the registry's
   current name, else the archive's last-known one. Its account is the live account's display
   name, matched by the `account:` store key this install derives, else the archived alias, else
   a short key, never the raw id. The Machine sheet lists the registry's machines, then every
