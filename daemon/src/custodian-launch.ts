@@ -782,10 +782,12 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
     ]);
     // The fence allows `Bash(seanced custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
     // `seanced` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
-    // on PATH, running this process's main. Like the fence, it is not writable from the round's sandbox.
+    // on PATH, running this process's main. Like the fence, it is not writable from the round's sandbox. Bun by its
+    // resolved path: bwrap binds an allow entry at its realpath, so a symlinked dir on the way (mise's
+    // `installs/bun/latest`) does not exist inside, and the shim dies with the round (no keg to outlive).
     const binDir = join(tmpDir, "bin");
     await mkdir(binDir, { mode: 0o700 });
-    await writeFile(join(binDir, "seanced"), seancedShim(toolchain.bun, toolchain.main), { mode: 0o700 });
+    await writeFile(join(binDir, "seanced"), seancedShim(toolchain.bunReal, toolchain.main), { mode: 0o700 });
     const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
     // A file, not a string for the owner's `default-shell` to parse: the agents JSON holds apostrophes, and any quoting
     // of it that survives two shells differs between them. Like the fence, it is not writable from the round's sandbox.
