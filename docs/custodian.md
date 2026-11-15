@@ -1,7 +1,8 @@
 # The custodian — what is left
 
 **Status: built and folded into DESIGN.md; item 4b's containment drilled 2026-11-14 on macOS and on Linux's weaker nested
-mode, and on strict-mode Linux (WSL2) under the vsock filter that drill made necessary.** The custodian is a cheap agent, one seat per
+mode, and on strict-mode Linux (WSL2) under the vsock filter that drill made necessary; the weaker mode re-drilled under
+that filter 2026-11-15, which every Linux round now runs under.** The custodian is a cheap agent, one seat per
 machine, that walks the machine's sessions on a timer, closes the finished ones, nudges the stuck ones and
 flags what it cannot settle. Every decision (C1–C49), its rejected alternatives and its threat model are
 recorded in DESIGN.md (index below). Rounds are live since item 4b (2026-11-14), which built the round's containment
@@ -32,16 +33,16 @@ The round's containment is built (2026-11-14) and was drilled the same day by an
 on Linux in the weaker nested mode (Proxmox LXC, bwrap): no hole on either, results in DESIGN.md's "The custodian's
 seat", "Contained". The claim is **from inside the sandbox the round reaches one socket that acts, the round's own,
 which serves the `custodian` verbs and nothing else; and reads nothing but its own directories and the read-only
-toolchain**, and it holds **only for the modes drilled**: macOS, weaker-mode Linux, and strict-mode Linux under the
-vsock filter (WSL2, 2026-11-14; DESIGN.md, "Contained": without the filter a round reached the Windows host over
-`AF_VSOCK`), and a change to the masks, the fence, the built environment or the round socket needs a re-drill
+toolchain**, and it holds **only for the modes drilled**: macOS, and Linux in both bwrap modes under the vsock filter
+(strict on WSL2, 2026-11-14: without the filter a round reached the Windows host over `AF_VSOCK`; weaker nested on an
+LXC container, 2026-11-15, where a fresh network namespace reached the host kernel's vsock loopback; DESIGN.md,
+"Contained"), and a change to the masks, the fence, the built environment or the round socket needs a re-drill
 before the docs say _contained_ again. The drills settled the E2 walk's Data-volume aliases (nothing readable in a masked
 root), that the macOS masks added after the spike do not break a round's start, that Seatbelt's `denyRead` with an
 `allowRead` beneath it holds, and that the Read tool refuses every baked secret path and every planted link (one
 refused Read per path, none read).
 
-- **Not settled.** (1) strict-mode Linux on bare metal (only WSL2 was drilled), and `AF_VSOCK` in weaker mode (the filter is
-  strict-mode only, and no drill probed vsock in an LXC container, whose host's VMs may listen); (2) a
+- **Not settled.** (1) strict-mode Linux on bare metal (only WSL2 was drilled); (2) a
   version-manager shim bun that is a copy, not a script or a differently named file, which `toolchainProblem` cannot
   see (a mise `latest` symlink dir was found instead, and is fixed: the round's `seanced` wrapper execs bun's
   realpath); (3) a `default-shell` of fish under tmux (the window runs `exec /bin/sh '<script>'`, which holds nothing fish

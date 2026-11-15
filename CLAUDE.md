@@ -59,7 +59,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/custodian.md** — what is left of the custodian spec: what 4b's drills left unsettled (the round's
   containment — its own socket, the masks, the built environment, no network — is built, rounds are live, and it was
-  drilled 2026-11-14 on macOS, on Linux's weaker nested mode and on strict-mode Linux (WSL2) under its vsock filter), the open build-time details, and an
+  drilled on macOS and on Linux in both bwrap modes under its vsock filter: strict on WSL2, weaker nested on LXC), the open build-time details, and an
   index of where each decision (C1–C49) is recorded in DESIGN.md. Everything else is built and recorded there: the
   seat, the round and its containment ("The custodian's seat"), the round's verbs `sessions`, `close`, `capture`, `pr`,
   `flag`, `nudge`, `interrupt`, `notes` and `done`, the flags and counts file and the round log ("The custodian frame
@@ -567,7 +567,7 @@ green:
   Its fence (`custodian-fence.ts`) is generated: the deny list comes from constants and the one `COMMANDS`
   table, so a new `seanced` command is denied to a round by default, and it is for a cheap model's mistakes,
   never a boundary. What bounds an injected round is its sandbox plus the daemon's verbs behind the one socket it
-  reaches (docs/custodian.md item 4b: drilled 2026-11-14 on macOS (Seatbelt), on Linux's weaker nested mode (LXC) and on strict-mode Linux (WSL2) under the vsock filter (`custodian-seccomp.ts`: an outer `bwrap --seccomp` refusing `AF_VSOCK`, `io_uring_setup` and other ABIs, without which a round reached the Windows host), no hole found, so "contained" is claimed for those modes only; strict-mode Linux on a CPU the filter has no table for is refused, and any change to the masks, the fence, the built environment or the round socket needs a re-drill before "contained" is said again): `denyRead` masks
+  reaches (docs/custodian.md item 4b: drilled on macOS (Seatbelt, 2026-11-14) and on Linux in both bwrap modes under the vsock filter (`custodian-seccomp.ts`: an outer `bwrap --seccomp` around every Linux round, refusing `AF_VSOCK`, `io_uring_setup` and other ABIs, without which a round reached the Windows host from WSL2 and the host kernel's vsock loopback from an LXC container; strict mode on WSL2 2026-11-14, the weaker nested mode on LXC 2026-11-15), no hole found, so "contained" is claimed for those modes only; Linux on a CPU the filter has no table for is refused, and any change to the masks, the fence, the built environment or the round socket needs a re-drill before "contained" is said again): `denyRead` masks
   every path socket and every secret (Linux inverts the tree, macOS lists `allowUnixSockets` as the round socket's
   directory alone), `allowRead` gives back only the round dir, its tmp dir, its socket's directory and the read-only
   toolchain (never the checkout whole), the Read tool is held to the round dir by `Read(//…)` rules and secret denies,
@@ -575,7 +575,7 @@ green:
   the round starts under `env -i` with a built environment (never inherited; `CLAUDE_CONFIG_DIR` set for a named
   exclave, proxy variables and their CA bundle passed through only when set and a proxy URL with userinfo not at all, no
   credential or provider variable ever; the pane runs `exec /bin/sh '<tmp>/run.sh'`, the launch script in the round's tmp
-  dir, so the owner's tmux `default-shell` parses no quoting of it). A host that cannot show this — strict-mode Linux with no
+  dir, so the owner's tmux `default-shell` parses no quoting of it). A host that cannot show this — Linux with no
   vsock filter for its CPU, a shim bun, or an `allowRead` entry covering any masked path (`sandboxMasks`) or leaving the checkout out — is refused (audited
   `op=refused`, `reason=sandbox_undrilled|toolchain`, a launch-time toolchain refusal included) and runs no round; a round
   this process launched that exits within two minutes of its start with no verb is audited `start_failed` (when it ended, not why:

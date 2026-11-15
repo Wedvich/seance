@@ -518,7 +518,7 @@ describe("roundCommand", () => {
     expect(script.startsWith("#!/bin/sh\n")).toBe(true);
   });
 
-  test("strict-mode Linux runs the command under bwrap --seccomp with the filter file on fd 3", () => {
+  test("Linux, in either bwrap mode, runs the command under bwrap --seccomp with the filter file on fd 3", () => {
     const script = roundScript({
       claude: "claude",
       caffeinate: false,

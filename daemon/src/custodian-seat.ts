@@ -30,28 +30,24 @@ export interface CustodianSeatOpts {
   readonly graceMs?: number;
   readonly sandboxProblem?: () => Promise<string | null>;
   readonly weakerNested?: () => Promise<boolean>;
-  /** Tests: whether the sandbox mode was drilled (`sandboxDrilled`); a CI runner's strict mode never was. */
-  readonly sandboxDrilled?: (platform: "darwin" | "linux", weakerNested: boolean) => boolean;
+  /** Tests: whether this host's sandbox was drilled (`sandboxDrilled`). */
+  readonly sandboxDrilled?: (platform: "darwin" | "linux") => boolean;
 }
 
 /**
- * Whether the round's sandbox has been drilled in this host's mode (docs/custodian.md item 4b; DESIGN.md, "The
- * custodian's seat"): macOS, Linux where `/proc/sys` is read-only and bwrap runs in its weaker nested mode (an LXC
- * container), and Linux's strict mode (`--proc /proc`, `--disable-userns`: bare metal or a VM, drilled on WSL2) only
- * under the outer seccomp filter (`vsockFilter`), which this host's arch must have: without it the WSL drill reached the
- * Windows host over vsock. Lifting any other case is a change to this one function.
+ * Whether the round's sandbox has been drilled on this host (docs/custodian.md item 4b; DESIGN.md, "The custodian's
+ * seat"): macOS, and Linux in both of bwrap's modes — strict (bare metal or a VM, drilled on WSL2) and weaker nested
+ * (`/proc/sys` read-only: an LXC container) — only under the outer seccomp filter (`vsockFilter`), which this host's
+ * arch must have: without it the WSL drill reached the Windows host over vsock, and an LXC container reaches its host
+ * kernel's vsock loopback through a fresh network namespace. Lifting any other case is a change to this one function.
  */
-export function sandboxDrilled(
-  platform: "darwin" | "linux",
-  weakerNested: boolean,
-  arch: string = process.arch,
-): boolean {
-  return platform === "darwin" || weakerNested || vsockFilter(arch) !== null;
+export function sandboxDrilled(platform: "darwin" | "linux", arch: string = process.arch): boolean {
+  return platform === "darwin" || vsockFilter(arch) !== null;
 }
 
 /** The one text the seat's warning and `seanced doctor` give for a host in an undrilled sandbox mode. */
 export const SANDBOX_UNDRILLED =
-  "bwrap would run in its strict mode here (/proc/sys is writable: bare metal or a VM) on a CPU the round's vsock filter has no table for (x64 and arm64 only) — no rounds on this host";
+  "every Linux round runs under a vsock filter, which has no table for this CPU (x64 and arm64 only) — no rounds on this host";
 
 export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux" | null {
   return platform === "darwin" || platform === "linux" ? platform : null;
