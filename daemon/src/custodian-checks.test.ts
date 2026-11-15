@@ -4,6 +4,7 @@ import { custodianChecks, type CustodianCheckDeps } from "./custodian-checks.ts"
 import { sandboxDrilled, SANDBOX_UNDRILLED } from "./custodian-seat.ts";
 import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import { roundDirFor } from "./custodian-launch.ts";
+import type { Check } from "./check.ts";
 import type { Exclave, ExclaveScan } from "./exclaves.ts";
 
 const HOME = "/home/m";
@@ -143,7 +144,7 @@ describe("custodianChecks", () => {
     );
   });
 
-  test("Linux's strict mode fails with the seat's own words; macOS and a drilled mode do not", async () => {
+  test("an undrilled Linux host fails with the seat's own words; macOS and a drilled host do not", async () => {
     const undrilled = { drilled: () => false };
     const checks = await run(undrilled);
     expect(checks[0]).toEqual({ level: "fail", message: SANDBOX_UNDRILLED });
@@ -151,21 +152,16 @@ describe("custodianChecks", () => {
     expect((await run({})).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(false);
   });
 
-  test("the real drilled test: strict Linux on an arch with no vsock filter fails, a read-only /proc/sys passes", async () => {
-    const real = {
-      drilled: (platform: "darwin" | "linux", nested: boolean) => sandboxDrilled(platform, nested, "riscv64"),
-    };
-    expect((await run(real)).some((c) => c.message === SANDBOX_UNDRILLED)).toBe(true);
-    expect(
-      (
-        await run({
-          drilled: (platform: "darwin" | "linux", nested: boolean) => sandboxDrilled(platform, nested, "x64"),
-        })
-      ).some((c) => c.message === SANDBOX_UNDRILLED),
-    ).toBe(false);
-    expect(
-      (await run({ ...real, weakerNested: () => Promise.resolve(true) })).some((c) => c.message === SANDBOX_UNDRILLED),
-    ).toBe(false);
+  test("the real drilled test: Linux on an arch with no vsock filter fails in either bwrap mode, x64 passes", async () => {
+    const on = (arch: string) => ({ drilled: (platform: "darwin" | "linux") => sandboxDrilled(platform, arch) });
+    const undrilled = (checks: readonly Check[]): boolean => checks.some((c) => c.message === SANDBOX_UNDRILLED);
+    expect(undrilled(await run(on("riscv64")))).toBe(true);
+    const nested = await run({ ...on("riscv64"), weakerNested: () => Promise.resolve(true) });
+    expect(undrilled(nested)).toBe(true);
+    // Refused outright: no warning about a mode that never runs.
+    expect(nested.some((c) => c.message.includes("enableWeakerNestedSandbox"))).toBe(false);
+    expect(undrilled(await run(on("x64")))).toBe(false);
+    expect(undrilled(await run({ ...on("x64"), weakerNested: () => Promise.resolve(true) }))).toBe(false);
   });
 
   test("a toolchain the sandbox's masks would hide fails, saying the round will not start", async () => {

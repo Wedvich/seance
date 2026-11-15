@@ -258,12 +258,11 @@ describe("seatEnabled", () => {
 });
 
 describe("sandboxDrilled", () => {
-  test("macOS and the weaker nested mode were drilled; Linux's strict mode only on an arch the vsock filter covers", () => {
-    expect(sandboxDrilled("darwin", false, "riscv64")).toBe(true);
-    expect(sandboxDrilled("linux", true, "riscv64")).toBe(true);
-    expect(sandboxDrilled("linux", false, "x64")).toBe(true);
-    expect(sandboxDrilled("linux", false, "arm64")).toBe(true);
-    expect(sandboxDrilled("linux", false, "riscv64")).toBe(false);
+  test("macOS was drilled; Linux, in either bwrap mode, only on an arch the vsock filter covers", () => {
+    expect(sandboxDrilled("darwin", "riscv64")).toBe(true);
+    expect(sandboxDrilled("linux", "x64")).toBe(true);
+    expect(sandboxDrilled("linux", "arm64")).toBe(true);
+    expect(sandboxDrilled("linux", "riscv64")).toBe(false);
   });
 });
 

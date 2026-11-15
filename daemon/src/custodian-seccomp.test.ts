@@ -71,15 +71,14 @@ describe("vsockFilter", () => {
             .join("");
         expect(strip(await run(["python3", "-c", PROBE]))).toBe(expected);
         // Ubuntu 24.04's AppArmor (`bwrap-userns-restrict`, on GitHub's runners) lets bwrap make a user namespace only
-        // when not nested: the seat's strict-mode check must refuse such a host, and there is no nested run to probe.
+        // when not nested: the seat must refuse such a host in either bwrap mode, and there is no nested run to probe.
         const nestProbe = Bun.spawn(
           ["bwrap", "--dev-bind", "/", "/", "--", "bwrap", "--ro-bind", "/", "/", "--unshare-user", "--", "true"],
           { stdout: "ignore", stderr: "ignore" },
         );
         const nests = (await nestProbe.exited) === 0;
         // The check asks for socat first, which a CI image may lack; the nesting answer is only comparable past it.
-        const problem =
-          Bun.which("socat") === null ? undefined : await sandboxProblem("linux", () => Promise.resolve(false));
+        const problem = Bun.which("socat") === null ? undefined : await sandboxProblem("linux");
         if (!nests) {
           if (problem !== undefined) expect(problem).toContain("inside another bwrap");
           return;

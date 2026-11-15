@@ -22,7 +22,7 @@ export interface CustodianCheckDeps {
   readonly sandboxProblem: (platform: "darwin" | "linux") => Promise<string | null>;
   readonly weakerNested: () => Promise<boolean>;
   /** The seat's own `sandboxDrilled`; a seam so a test on any host can say the mode was drilled. */
-  readonly drilled: (platform: "darwin" | "linux", weakerNested: boolean) => boolean;
+  readonly drilled: (platform: "darwin" | "linux") => boolean;
   /**
    * Why the round's `seanced` would not run under the sandbox's masks, or would undo them (`toolchainProblem`: a shim
    * bun, an allow entry over a masked path), null when it is safe; given the machine's repo and exclave roots.
@@ -68,7 +68,7 @@ export async function custodianChecks(o: {
   if (problem !== null) checks.push({ level: "fail", message: problem });
   if (platform === "linux") {
     const nested = await deps.weakerNested();
-    if (!deps.drilled(platform, nested)) checks.push({ level: "fail", message: SANDBOX_UNDRILLED });
+    if (!deps.drilled(platform)) checks.push({ level: "fail", message: SANDBOX_UNDRILLED });
     else if (nested) {
       checks.push({
         level: "warn",

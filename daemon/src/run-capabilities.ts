@@ -577,7 +577,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       return;
     }
     const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
-    if (!(opts.sandboxDrilled ?? sandboxDrilled)(platform, await weakerNested())) {
+    if (!(opts.sandboxDrilled ?? sandboxDrilled)(platform)) {
       log.warn(`custodian: ${SANDBOX_UNDRILLED}`);
       if (cancelled) return;
       await audit.refused("sandbox_undrilled");

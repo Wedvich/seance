@@ -1094,12 +1094,12 @@ nothing checked it. The last is the gap they leave.
   one `COMMANDS` table, so a new `seanced` command is denied to it by default, and it is **for a cheap model's
   mistakes, never a boundary**: `bash -c` and interpreters get around it. The daemon's verbs check every act that
   goes through them (custodian 4, built: "The custodian frame kind"), and that is all they bound. What bounds the round is
-  its sandbox (custodian 4b, built and drilled 2026-11-14 on macOS and Linux's weaker nested mode, "The custodian's seat", "Contained"): it reads only
+  its sandbox (custodian 4b, built and drilled 2026-11-14 on macOS and Linux, "The custodian's seat", "Contained"): it reads only
   its own directories and the read-only toolchain (everything under `$HOME`, the state dir and the config dir, the repo
   and exclave roots and the Data-volume aliases of them is masked, and the Read tool is held to the round dir by an
   allow rule and secret denies), reaches **no network** (`allowedDomains: []`) and **one socket that acts, its
   own**, which serves the verbs only (the tmux socket, the daemon's main socket and every other path socket are masked or
-  not listed), under a built environment with nothing inherited. A host where that cannot be shown (strict-mode Linux on a
+  not listed), under a built environment with nothing inherited. A host where that cannot be shown (Linux on a
   CPU the vsock filter has no table for, a checkout outside the allowed set) runs no round. What it still reads, by decision: the system tree, the toolchain,
   whatever a pane shows (`capture`), macOS `launchctl print` and `defaults read`, and on the weaker nested Linux mode the
   host `/proc`'s `cmdline` and `status`. The round's seed, notes and agent text never reach a
@@ -8762,7 +8762,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   missed often enough that worktrees piled up, so "Nothing lost" adds one, as a further way to pass whose
   failure only keeps.
 
-## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), rounds live since custodian 4b (2026-11-14; containment drilled on macOS and weaker-mode Linux)
+## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), rounds live since custodian 4b (2026-11-14; containment drilled on macOS and on Linux in both bwrap modes under the vsock filter)
 
 A daemon with a `custodian` key in its `config.json` holds one seat, decides once a minute with no model call
 that a round is due, picks the exclave to run it in, starts a fresh Claude session in a sandbox that reaches one socket of its own, behind a generated fence,
@@ -8784,7 +8784,7 @@ decision is recorded here.
   machine), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
   start a round in a developer's tmux), and the platform is macOS or Linux. WSL reports `linux`,
   gets the Linux fence and is untested.
-- **Contained (custodian 4b, built 2026-11-14; drilled the same day on macOS and on Linux's weaker nested mode).** Rounds were held (`ROUNDS_LIVE = false`,
+- **Contained (custodian 4b, built 2026-11-14; drilled the same day on macOS and on Linux's weaker nested mode, on strict-mode Linux under the vsock filter, and on the weaker mode again under that filter 2026-11-15).** Rounds were held (`ROUNDS_LIVE = false`,
   owner decisions 2026-11-13 and 2026-11-14) first because no verb existed, then because the code review of
   custodian 4 showed the verbs bound only what goes through them: the round's sandbox reached the tmux socket (for
   `capture-pane`) and the daemon's plain local ops, and its reads were unrestricted with github.com reachable, so an
@@ -8817,12 +8817,12 @@ decision is recorded here.
   socket dir it expects) and the launch checks again with that round's own roots and the tmux dir it asked the server
   for; the launch's refusal (`LaunchRefused`) is audited `op=refused reason=toolchain` once, not as `launch_failed`, and
   the seat then starts no further round in that process (a fix is a restart, which checks again). Doctor fails with
-  the same text. And **strict-mode Linux** (a host with
-  `enableWeakerNestedSandbox` off: bare metal or a VM) runs rounds only under the **vsock filter** (below, drilled on
-  WSL2 2026-11-14), so one whose CPU the filter has no table for (`vsockFilter`: x64 and arm64) is refused
+  the same text. And **Linux**, in either bwrap mode, runs rounds
+  only under the **vsock filter** (below; drilled in strict mode on WSL2 2026-11-14 and in the weaker nested mode on an
+  LXC container 2026-11-15), so a Linux host whose CPU the filter has no table for (`vsockFilter`: x64 and arm64) is refused
   `op=refused reason=sandbox_undrilled` with one warn (`sandboxDrilled`, one function; `seanced doctor` fails with the
   same text, `SANDBOX_UNDRILLED`), and the launch refuses it again (`LaunchRefused`, `toolchain`).
-  **The vsock filter (strict-mode Linux only).** A network namespace does not cover `AF_VSOCK`, and srt's own seccomp
+  **The vsock filter (all Linux, both bwrap modes).** A network namespace does not cover `AF_VSOCK`, and srt's own seccomp
   filter is off under `allowAllUnixSockets` (on, it knows only `AF_UNIX`): the WSL drill's first runs connected from
   inside the round to the Windows host (CID 2, port 50000), a channel out of the sandbox to whatever listens there.
   So the launch script runs claude under an outer `bwrap --dev-bind / / --seccomp 3 -- …` reading
@@ -8836,10 +8836,14 @@ decision is recorded here.
   leader), so the round counts as running claude by its `@seance-custodian` mark (`isRegistered`), as a séance spawn
   does by its start command, or the deadline's graceful close would read it unregistered and kill it. Claude Code's bwrap then runs inside
   another, which an AppArmor profile can forbid (Ubuntu 24.04's `bwrap-userns-restrict` allows `/usr/bin/bwrap` a user
-  namespace only unnested, as on GitHub's runners), so the seat's sandbox check probes the nested form in strict mode
-  and refuses such a host (`sandboxProblem`) rather than fail every round's start. **Not on the weaker mode:** Thad's drill ran without it and no drill has
-  probed vsock in an LXC container (one shares the host's kernel, so CID 2 is no host there, but the host's own VMs
-  may listen); widening it there is a re-drill.
+  namespace only unnested, as on GitHub's runners), so the seat's sandbox check probes the nested form (in both modes)
+  and refuses such a host (`sandboxProblem`) rather than fail every round's start. **The weaker mode too (2026-11-15).**
+  It ran without the filter until then. Probed on Thad (Proxmox LXC, kernel 7.0): `socket(AF_VSOCK)` is created in the
+  container, the host kernel's `vsock_loopback` answers CID 1 and CID 2, and a listener in the container was reached from
+  inside `bwrap --unshare-net --unshare-user`. A container shares its host's kernel, and no network namespace covers its
+  vsock, so a round could reach any vsock listener on that kernel (the host's, another container's). No listener was
+  found on ports 0–65535 of either CID, and CIDs 3 and up had no transport (`ENODEV`), but containment does not rest on
+  what happens to listen today. bwrap nests there, so the weaker mode takes the same outer wrapper.
   Both go through `CustodianAudit.refused` and then the same leftover sweep a seat that is off runs, so a round the
   last process left is still closed. **Drilled 2026-11-14 (injected-round battery, every row of the table above and every read the masks close, by the route
   a hostile model would take: `cat`, `bash -c`, the Read tool, re-parented and double-forked processes, planted symlinks
@@ -8868,8 +8872,17 @@ decision is recorded here.
     `binfmt_misc` handler (`/init`, flag `F`) and fails there (`UtilGetPpid … Failed to parse`), never running.
     **Found in runs 1 and 2: `AF_VSOCK` to CID 2 port 50000 connected from the round** (above); run 3, with the
     filter, refused it `EAFNOSUPPORT` on every port tried.
+  - **Linux weaker nested mode again, under the vsock filter (2026-11-15), Thad: no hole** (1 run, round healthy,
+    sonnet low effort, default exclave). The same three harness rows as 2026-11-14 (S13's home holds `.bun`,
+    `.local` and `repos`, allow entries' parents; E1's three reached sockets are srt's bridge sockets in the round tmp
+    dir; E2's 106 readable files are bun's transpiler cache, none older than 10 minutes, so the round's own writes).
+    Every baked secret Read refused once, all 12 planted links refused, no marker, S20 sees 98 host pids (the weaker
+    mode's accepted `/proc`). A row added for this drill, **V1**: with a vsock listener outside that a control
+    connect from outside had reached, `socket` and `socketpair` of `AF_VSOCK` (stream and dgram) and connects to CID
+    1, 2 and 3 failed `EAFNOSUPPORT` and `io_uring_setup` `EPERM`, run plainly, through `bash -c` and from a
+    re-parented process, and the listener logged nothing.
   - **Not drilled:** strict-mode Linux on bare metal (the filter covers a VM's vsock alike, but nobody has run the
-    battery there), and vsock on the weaker mode. Changing a mask, the fence, the built
+    battery there). Changing a mask, the fence, the built
     environment or the round socket needs a re-drill before any of this is claimed again. The drills' rounds did not
     interrupt or nudge, so those two verbs' live behavior is still the open details in docs/custodian.md.
   - **Found and fixed in the drill:** with bun installed through mise, PATH's bun is `…/installs/bun/latest/bin/bun`,
@@ -9144,7 +9157,7 @@ decision is recorded here.
     failed `bwrap: cannot open … Read-only file system`). The weaker mode drops `--disable-userns`, so a sandboxed
     command that creates a user namespace can undo the write denies (`unshare -Ur` ran) and the host `/proc` stays
     readable. **Decided (owner, 2026-11-13): accept both,** and the Linux drill is the one thing 4b's guard rests on (it ran, in an LXC container, weaker mode):
-    strict-mode Linux runs rounds only under the vsock filter (above), drilled on WSL2. Linux needs **`bubblewrap` and `socat`**
+    Linux runs rounds only under the vsock filter (above), in both modes, drilled on WSL2 and on Thad. Linux needs **`bubblewrap` and `socat`**
     (`apt install bubblewrap socat`; without them `failIfUnavailable` refuses to start): `sandboxProblem` checks
     them and runs one real `bwrap` probe (a host that forbids unprivileged user namespaces, e.g. AppArmor's
     `apparmor_restrict_unprivileged_userns`, fails every command) through the daemon's exec path (argv array, bare
@@ -9254,7 +9267,7 @@ decision is recorded here.
   its frames every session there is `unobserved` and `close` never acts on it. **And one per exclave lacking the
   `inbox` mod** (custodian 8): `nudge` delivers through its listener and answers `no_listener` without one. **Since 4b
   the probes always run** (they were silent while rounds were held, the two mod warns included). Added: a `fail` on
-  strict-mode Linux on a CPU the vsock filter has no table for, with the seat's own text
+  Linux on a CPU the vsock filter has no table for, with the seat's own text
   (`SANDBOX_UNDRILLED`: rounds are refused there), a `fail` for a `toolchainProblem` ("… rounds refuse to start"; since the review a shim bun is
   one of its causes, no longer a doctor-only `warn`, and the seat refuses it too). No doctor version check for Claude
   Code or the sandbox runtime (owner decision 2026-11-14): a round that exits at its start with no verb is audited `start_failed`.
@@ -9280,7 +9293,8 @@ decision is recorded here.
   descendants on the main socket** (re-parenting escapes it; the socket the round cannot reach is the bound); and
   **running strict-mode Linux undrilled** (the masks rest on bubblewrap and the pid namespace there, which nobody had
   watched; refused until a drill, rather than a doctor warning a seat then ignores; the WSL drill then found vsock
-  open, hence the filter); and **blocking vsock by srt's own filter** (it is off under `allowAllUnixSockets`, and on it
+  open, hence the filter); **keeping the filter to strict mode** (an LXC container's round reaches its host kernel's
+  vsock loopback through a fresh network namespace, 2026-11-15); and **blocking vsock by srt's own filter** (it is off under `allowAllUnixSockets`, and on it
   refuses every `AF_UNIX` socket, the round's own included).
 
 ## Self-update (added 2026-08-02)
@@ -12179,7 +12193,7 @@ stdin), `interrupt <pane>`, `notes` and `done` (C22–C34, C37–C40, C42; `capt
 daemon's main socket answers the kind `unsupported`, and its directory is masked in the round's sandbox. **The verbs
 still bound only what goes through them**, and what bounds the rest of the round is its sandbox: no tmux socket, no
 other acting socket, no network, and reads confined to its own directories and the read-only toolchain. The sandbox's
-**drill (2026-11-14) found no hole on macOS, on Linux's weaker nested mode and on strict-mode Linux (WSL2) under its vsock filter**, so the docs say _contained_ for those. That is why `capture` and `pr` exist: the round once
+**drill (2026-11-14) found no hole on macOS and on Linux in both bwrap modes under its vsock filter (strict: WSL2; weaker nested: LXC, re-drilled under the filter 2026-11-15)**, so the docs say _contained_ for those. That is why `capture` and `pr` exist: the round once
 read a screen through `tmux capture-pane` and a PR through `gh`, both of which need a reach the sandbox no longer has.
 
 - **The frame is bound by the kernel, to the round the seat record names, and nothing else.** `{v: 1, kind:
@@ -12475,7 +12489,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   `custodian-agent.test.ts` runs every such example in the checklist under a profile that denies all writes on macOS.
   **Never killed for being stuck (C28):** no verb force-closes a busy session, and none ends, requeues or continues a task.
 - **Threat model.** The round reads untrusted text and may call any verb with any argument; these checks bound
-  every act that goes through a verb, and **the round's sandbox bounds the rest** (4b, built and drilled on macOS and weaker-mode Linux): see
+  every act that goes through a verb, and **the round's sandbox bounds the rest** (4b, built and drilled on macOS and on Linux in both bwrap modes): see
   "The custodian's seat" for the masks, the built environment and the per-reach table. A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The
   frame has nine verbs and takes no path, branch, session id, task id, key or command: a pane id (re-read and bound to
   `ours` by the daemon), a reason from a closed set, text that is stored, counted or delivered as a message and never

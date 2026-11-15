@@ -1,8 +1,9 @@
 /**
- * The seccomp filter strict-mode Linux wraps the round in (DESIGN.md, "The custodian's seat", "Contained"). The WSL
- * drill (2026-11-14) found `AF_VSOCK` open from inside the round's sandbox: a network namespace does not cover vsock,
- * and srt's own seccomp filter is off under `allowAllUnixSockets` (and knows only `AF_UNIX` when on), so a round
- * connected to the Windows host (CID 2). The launch script runs claude under an outer `bwrap --seccomp` with this
+ * The seccomp filter Linux wraps the round in, in both bwrap modes (DESIGN.md, "The custodian's seat", "Contained").
+ * The WSL drill (2026-11-14) found `AF_VSOCK` open from inside the round's sandbox: a network namespace does not cover
+ * vsock, and srt's own seccomp filter is off under `allowAllUnixSockets` (and knows only `AF_UNIX` when on), so a round
+ * connected to the Windows host (CID 2). An LXC container (2026-11-15) reached its host kernel's vsock loopback the same
+ * way. The launch script runs claude under an outer `bwrap --seccomp` with this
  * filter; a seccomp filter is inherited by every child and no child can lift it, srt's inner bwrap included.
  *
  * Classic BPF over `seccomp_data`: `socket`/`socketpair` with family `AF_VSOCK` fail `EAFNOSUPPORT`; `io_uring_setup`
@@ -43,7 +44,7 @@ const ARCHES: Readonly<Record<string, ArchTable>> = {
 
 type Insn = readonly [code: number, jt: number, jf: number, k: number];
 
-/** The filter for `arch` (`process.arch`), or null where none is written: such a host runs no strict-mode round. */
+/** The filter for `arch` (`process.arch`), or null where none is written: such a host runs no Linux round. */
 export function vsockFilter(arch: string): Uint8Array | null {
   const table = ARCHES[arch];
   if (table === undefined) return null;

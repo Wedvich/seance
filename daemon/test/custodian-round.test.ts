@@ -16,6 +16,7 @@ import {
   removeRoundTmp,
 } from "../src/custodian-launch.ts";
 import type { PrView } from "../src/custodian-frame.ts";
+import { vsockFilter } from "../src/custodian-seccomp.ts";
 import { CUSTODIAN_SOCKET_NAME, startCustodianSocket } from "../src/custodian-socket.ts";
 import { createCustodianFlags } from "../src/custodian-flags.ts";
 import { createCustodianVerbs } from "../src/custodian-verbs.ts";
@@ -127,7 +128,7 @@ interface Rig {
  * A seat over the real launch and the real close, with a clock the test moves and a tick it calls: the deadline is
  * crossed by moving the clock, never by waiting for one.
  */
-function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
+function seatOver(record: SeatRecord = {}, given?: { now: number }, weakerNested = false): Rig {
   const clock = given ?? { now: Date.now() };
   const audit: string[] = [];
   const rounds: RoundEntry[] = [];
@@ -181,7 +182,7 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
         agents,
         notes: null,
         tmuxSession: "main",
-        weakerNested: false,
+        weakerNested,
         platform,
         custodianSocket: testSocket,
         rootMasks: [],
@@ -278,6 +279,9 @@ describe("a round, with the stubs for claude", () => {
     }
     // The window runs a script in the round's own tmp dir, not a command string for the owner's `default-shell` to parse.
     expect((await stat(join(tmpDir, "run.sh"))).mode & 0o777).toBe(0o700);
+    if (platform === "linux") {
+      expect(await readFile(join(tmpDir, "run.sh"), "utf8")).toContain("\nexec bwrap --dev-bind / / --seccomp 3 -- ");
+    }
     expect(fence.sandbox.network.allowedDomains).toEqual([]);
     if (platform === "darwin") expect(fence.sandbox.network.allowUnixSockets).toEqual([socketDir]);
     else expect(fence.sandbox.network.allowAllUnixSockets).toBe(true);
@@ -345,6 +349,31 @@ describe("a round, with the stubs for claude", () => {
     expect(r.saved.record).toEqual({ lastEndedAt: r.clock.now });
     r.seat.stop();
   });
+
+  test.skipIf(platform !== "linux")(
+    "Linux's weaker nested mode runs the round under the same vsock filter as strict mode",
+    async () => {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.stuck;
+      const r = seatOver({}, undefined, true);
+      await r.seat.start();
+      await r.seat.tick();
+      await onlyRound();
+      const tmpDir = r.saved.record.round?.tmpDir ?? "";
+      expect(tmpDir).toMatch(ROUND_TMP);
+      const bpf = join(tmpDir, "seccomp.bpf");
+      expect(await readFile(join(tmpDir, "run.sh"), "utf8")).toContain(
+        `\nexec bwrap --dev-bind / / --seccomp 3 -- /usr/bin/env -i `,
+      );
+      expect((await stat(bpf)).mode & 0o777).toBe(0o600);
+      const filter = vsockFilter(process.arch);
+      expect(filter).not.toBeNull();
+      expect((await readFile(bpf)).toString("base64")).toBe(Buffer.from(filter ?? []).toString("base64"));
+      r.clock.now += TIMEOUT;
+      await r.seat.tick();
+      await noRounds();
+      r.seat.stop();
+    },
+  );
 
   test("stuck: a claude that never reaches its TUI is killed at the deadline", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.stuck;
