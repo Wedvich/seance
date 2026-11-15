@@ -32,6 +32,7 @@ import {
 import type { SchedulerConfig, SeatProfile } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
+import { mayStack, stackOf } from "./stack.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
 import { traitFilter } from "./traits.ts";
 
@@ -90,6 +91,8 @@ interface Pass {
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
   readonly skills: readonly string[];
+  /** Where the work it builds on lives: `spec.base`, else its stacking predecessor's machine. */
+  readonly base: Placement | undefined;
 }
 
 export function route(input: RouteInput): Decision {
@@ -110,6 +113,7 @@ export function route(input: RouteInput): Decision {
         : null,
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
+    base: task.spec.base ?? stackedAt(task, input.tasks),
   };
   const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
   const attached = input.attachments === true || task.spec.attachments !== undefined;
@@ -120,6 +124,7 @@ export function route(input: RouteInput): Decision {
       ...machineFilter(machine, now, config),
       ...continueFilter(task, machine),
       ...attachmentsFilter(attached, machine),
+      ...stackFilter(task, machine),
       ...caps,
     ];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
@@ -216,7 +221,7 @@ function judge(
   const components: ScoreComponents = {
     accountPressure: account.pressure,
     machinePressure: Math.max(status.cpu ?? 0, status.mem ?? 0) / 100,
-    dependencyDistance: distance(task.spec.base, placement),
+    dependencyDistance: distance(pass.base, placement),
     queuePressure: inFlight.filter((t) => (t.assignment ?? t.reservation)?.deviceId === machine.deviceId).length,
     ...(keepFree === 0 ? {} : { keepFree }),
   };
@@ -364,6 +369,19 @@ function continueFilter(task: Task, machine: Machine): Reason[] {
  * Only a daemon advertising the capability fetches a manifest; any other would
  * refuse the spawn as malformed. A pin on such a machine waits, as on one offline.
  */
+/** A daemon that cannot stack would drop `baseBranch` and start from the default branch silently. */
+function stackFilter(task: Task, machine: Machine): Reason[] {
+  if (!mayStack(task.spec) || machine.capabilities?.includes(CAPABILITIES.baseBranch) === true) return [];
+  return [{ code: "base_unsupported" }];
+}
+
+/** Where its stacking predecessor ran, while it stacks on that one's branch: its clone may already hold it. */
+function stackedAt(task: Task, tasks: readonly Task[]): Placement | undefined {
+  if (!mayStack(task.spec)) return undefined;
+  const stack = stackOf(task, new Map(tasks.map((t) => [t.id, t])));
+  return stack.on === "branch" ? stack.at : undefined;
+}
+
 function attachmentsFilter(attached: boolean, machine: Machine): Reason[] {
   if (!attached || machine.capabilities?.includes(CAPABILITIES.attachments) === true) return [];
   return [{ code: "attachments_unsupported" }];

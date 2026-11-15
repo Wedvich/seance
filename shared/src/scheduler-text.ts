@@ -148,6 +148,8 @@ export function reasonText(reason: Reason): string {
       return "its daemon can't continue a session yet (needs seanced update)";
     case "attachments_unsupported":
       return "its daemon can't fetch attachments yet (needs seanced update)";
+    case "base_unsupported":
+      return "its daemon can't stack on another task's branch yet (needs seanced update)";
     case "auth_missing":
       return "not signed in";
     case "auth_expired":

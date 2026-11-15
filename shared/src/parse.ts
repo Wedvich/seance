@@ -1434,6 +1434,7 @@ function parseReason(value: unknown): Reason | null {
     case "predecessor_account":
     case "continue_unsupported":
     case "attachments_unsupported":
+    case "base_unsupported":
     case "auth_missing":
     case "auth_expired":
     case "base_unpushed":

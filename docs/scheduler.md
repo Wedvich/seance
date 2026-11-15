@@ -128,8 +128,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   `TaskProgress.exit`, acted on by `failed` from exit status (M4 below, **Done**; DESIGN.md
   _Daemon_, "Exit status").
 - **`SpawnRequest.baseBranch?`**, `base_not_found` and the `"baseBranch"` capability are in the
-  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`), and the daemon acts on them (2026-11-15:
-  DESIGN.md _Daemon_, "Stacked worktrees"). Still to build (Stacking, below): the leader's half.
+  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`), with `noBase?`. Built (Stacking, below):
+  DESIGN.md _Scheduler_, "Stacking" and _Daemon_, "Stacked worktrees".
 - **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` and
   `push-unsubscribe` included. `enqueue` stays a `store-put`, never a leader op.
 
@@ -172,9 +172,11 @@ they now live:
 **Routing, ahead.** M4 adds:
 
 - Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
-  filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
-  _Stacking_); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
-- Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
+  filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): a daemon that cannot stack (`base_unsupported`, built,
+  DESIGN.md "Stacking"; the sketched `base_unpushed` is never emitted, since an `opened` edge
+  releases only on a pushed branch); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
+- Score: `dependencyDistance` reads the stacking predecessor's placement (built, DESIGN.md
+  "Stacking"; `TaskSpec.base` stays unwritten). The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
@@ -405,7 +407,7 @@ of M4 has landed.
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
 | 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
-| 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
+| 2     | Stacking — **Done**                                                | authoring surface; #28                                                 | L                        |
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
@@ -679,45 +681,13 @@ of M4 has landed.
   `PickerMachine` takes the live `status`, and the registry cache folds `lastHeardAt` into its
   existing `lastSeen` key rather than storing `status`, so an older cached entry still parses.
 
-- **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
-  dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
-  with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
-  Corrected by the review (R2):
-  - _The daemon has to make the worktree._ `claude --worktree` creates the worktree itself from
-    `origin/<default>`, and no CLI flag overrides that (DESIGN.md "Worktree mode does no git
-    preparation"). So "start the worktree from this branch" means the daemon creates it.
-    _Decided (#3):_ spike whether `claude --worktree <name>` reuses an existing worktree. Either
-    way the daemon runs `git worktree add --no-track -B worktree-<name> … origin/<base>` and keeps
-    the `.claude/worktrees` layout reap and branch-state rely on; if claude does not reuse it, the
-    daemon runs plain `claude` inside the worktree it made (the owner added this fallback, so the
-    spike's result does not stall stacking on a second decision).
-  - _Fetches are keyed by repo, not branch._ `base-fetch.ts` keys its in-flight fetch by common
-    dir alone, so two bases in one repo would share one fetch.
-  - _Decided (#4), which dependency stacks:_ only `after: opened`, the first in `deps` order, and
-    only on a pushed predecessor. `released` already frees an `opened` edge only with a PR and a
-    pushed branch; the one way past it is a predecessor `done` without either (`mark-done`, a
-    no-PR session end, a `here` task), and that dependent starts from `origin/<default>` with the
-    preamble saying there was nothing to stack on. No placement restriction (the review's, dropped:
-    it served only that case).
-  - _Decided (#15), validating `baseBranch`:_ `check-ref-format` rules at every hop (today a
-    branch name is only length-checked in `shared/src/parse.ts`), and pass
-    `refs/remotes/origin/<b>` after `--end-of-options`. Through `shq()` if it ever reaches the
-    shell string.
-  - _Decided (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
-    knows it, so the PR is the handoff.
-  - _Daemon half built_ (2026-11-15; DESIGN.md _Daemon_, "Stacked worktrees", which is now the
-    record of it). `isSpawnRequest` takes `baseBranch` only as `isBranchName` passes it and only
-    beside `mode: "worktree"`, and the handler only from the scheduler's own task spawn (else
-    `launch_error`, never dropped); `fetchBase` fetches `+refs/heads/<b>:refs/remotes/origin/<b>`
-    keyed by common dir and branch, fail-closed (`base_not_found`, nothing left behind); the daemon
-    adds the worktree at the fetched tip's sha after `--end-of-options`, `-b worktree-<name>`, under
-    reap's lock; #3's spike showed `claude --worktree <name>` (2.1.325) reuses it, so the flag stays;
-    the seed names the base, `gh pr view <b>` as the handoff, `gh pr create --base <b>` and the
-    manual rebase once `<b>` merges; the launch ledger notes `stackedOn`, which branch-state uses so a
-    predecessor's commits are not the dependent's own work; `CAPABILITIES.baseBranch` is advertised.
-    Left, the leader: choose the base per #4, hold it to `isBranchName`, send it only to a machine
-    advertising the capability, decide what `base_not_found` does to the task, and the "nothing to
-    stack on" case (the daemon takes `noBase: true` for it).
+- **Stacking** — **Done** (2026-11-16). A dependent task's worktree starts from its predecessor's
+  branch; an unresolvable base fails `base_not_found`. DESIGN.md is the record: _Scheduler_,
+  "Stacking" for the leader's half (#4's predecessor, #15's leader hop, `base_unsupported`,
+  `noBase`, the distance score, the failure), and _Daemon_, "Stacked worktrees" for the daemon's
+  (#3's worktree, the fetch keyed by branch, #15's daemon hop, the preamble). #5 stands: no
+  transcript path, the PR is the handoff. Gap: a rebase after the predecessor changes is manual
+  ("Stacked rebases", below).
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
   #13 lapse with it; **Done** 2026-10-20 (PR #249), recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
   `claude --safe-mode --no-session-persistence --output-format json -p /usage` with the exclave's config dir, and Claude
