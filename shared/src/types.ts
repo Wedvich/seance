@@ -1081,7 +1081,7 @@ export interface MachineInfo {
  * field — a daemon without it spawns a duplicate rather than refusing one.
  * `baseBranch`: the spawn field (M4, stacking) — a daemon without it drops the
  * field and starts the worktree from the default branch, so a leader sends it
- * only to a daemon advertising this. No daemon does yet. `exitStatus`: its
+ * only to a daemon advertising this. `exitStatus`: its
  * `sessions` `progress` carries `TaskProgress.exit` — a leader then settles a
  * PR-less `ended` event by that machine's next answer, not by the event, whose
  * hook runs before the pane dies (DESIGN.md, Daemon, "Exit status").
@@ -1771,10 +1771,18 @@ export interface SpawnRequest {
    * malformed otherwise; resolved against `refs/remotes/origin/<b>`, never
    * interpolated, and unresolvable is `base_not_found`. An old daemon drops it
    * and starts from the default branch, so it is sent only to a daemon
-   * advertising `CAPABILITIES.baseBranch`. Accepted in shape today, acted on by
-   * none.
+   * advertising `CAPABILITIES.baseBranch`. Set only by the leader's dispatch,
+   * to the stacking predecessor's own `Task.branch` (DESIGN.md, Scheduler, "Stacking").
    */
   readonly baseBranch?: string;
+  /**
+   * The task stacks on a predecessor that left nothing to stack on — `done` with no PR or
+   * pushed branch (mark-done, a no-PR session end, a `here` task) — so its worktree starts
+   * from the default branch and its preamble says so (decided #4). Only ever `true`, never
+   * beside `baseBranch`; set only by the leader's dispatch, sent only to a daemon advertising
+   * `CAPABILITIES.baseBranch`. A note for the session's preamble: it changes no git act.
+   */
+  readonly noBase?: true;
   /**
    * The failed task whose worktree the session resumes. Required exactly when
    * `mode` is `"continue"`. Bounded by `TASK_ID_PATTERN`; resolved against the

@@ -141,16 +141,25 @@ describe("relay ops are audited", () => {
     }
   });
 
-  test("any baseBranch is rejected until stacking lands: a spawn must not silently start from the default branch", async () => {
-    for (const baseBranch of ["", "-x", "a..b", "a b", "HEAD", "a.lock", "x".repeat(BRANCH_MAX_LENGTH + 1), 7]) {
+  test("a baseBranch git would not take as a branch name, or beside a mode with no worktree, is rejected", async () => {
+    for (const fields of [
+      ...["", "-x", "a..b", "a b", "HEAD", "a.lock", "x".repeat(BRANCH_MAX_LENGTH + 1), 7].map((baseBranch) => ({
+        baseBranch,
+        mode: "worktree",
+      })),
+      // Dropped beside these, the session would start from the default branch.
+      { baseBranch: "martin/pen-1-stack", mode: "here" },
+      { baseBranch: "martin/pen-1-stack", mode: "continue", continues: "t-1", taskId: "t-2" },
+      // `noBase` is only ever `true`, and never beside a base it contradicts.
+      { noBase: false, mode: "worktree" },
+      { noBase: "yes", mode: "worktree" },
+      { noBase: true, baseBranch: "martin/pen-1-stack", mode: "worktree" },
+    ]) {
       lines.length = 0;
       // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
-      await createHandler(ctx)(spawnNope({ baseBranch }));
-      expect(logged()).toContain("audit spawn origin=relay rejected");
+      await createHandler(ctx)(spawnNope(fields));
+      expect(logged(), JSON.stringify(fields)).toContain("audit spawn origin=relay rejected");
     }
-    lines.length = 0;
-    await createHandler(ctx)(spawnNope({ baseBranch: "martin/pen-1-stack" }));
-    expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
   test("a malformed manifest is rejected, never dropped: a session must not start without its files", async () => {
@@ -1025,6 +1034,97 @@ describe("metrics answers from the store, within one envelope", () => {
   test("a daemon without a store answers with a code instead of leaving the chart to time out", async () => {
     const reply = await metricsReply(null, { from: NOW, to: NOW, step: 30 });
     expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+  });
+});
+
+describe("a stacked spawn's base branch", () => {
+  const BASE = "martin/pen-1-stack";
+  const TIP = "a".repeat(40);
+
+  const stacked = (extra: Record<string, unknown> = {}): Plain =>
+    request("spawn", {
+      repo: "myrepo",
+      mode: "worktree",
+      taskId: "stk",
+      client: SCHEDULER_CLIENT,
+      baseBranch: BASE,
+      ...extra,
+    });
+
+  function rig() {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    const bases: (string | undefined)[] = [];
+    const backend: SessionBackend = {
+      spawn: (req) => {
+        bases.push(req.baseBranch);
+        return Promise.resolve({
+          window: "s",
+          path: "/r/.claude/worktrees/s",
+          registered: true,
+          handle: "@1",
+          session: "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90",
+          stackedOn: TIP,
+        });
+      },
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+    };
+    const handlerCtx: HandlerContext = { ...ctx, backend, getRepos: () => REPOS, tasks };
+    return { ledger, tasks, bases, handlerCtx };
+  }
+
+  test("sealed from the scheduler, over the relay or in process, the backend gets it and the start is noted; the name is never audited", async () => {
+    const relay = rig();
+    const relayReply = await createHandler(relay.handlerCtx)(stacked(), SCHEDULER_ID);
+    const local = rig();
+    const localReply = await createLocalOps(local.handlerCtx, "leader").spawn({
+      repo: "myrepo",
+      mode: "worktree",
+      taskId: "stk",
+      client: SCHEDULER_CLIENT,
+      baseBranch: BASE,
+    });
+    for (const [reply, { ledger, bases }] of [
+      [relayReply?.payload, relay],
+      [localReply, local],
+    ] as const) {
+      expect(reply).toMatchObject({ ok: true });
+      expect(bases).toEqual([BASE]);
+      expect(ledger.notes()).toEqual([expect.objectContaining({ taskId: "stk", stackedOn: TIP })]);
+      // Internal: the leader reads progress, and the start is the daemon's own fact.
+      expect(JSON.stringify(ledger.progress())).not.toContain(TIP);
+    }
+    expect(logged()).toContain("baseBranch=true");
+    expect(logged()).not.toContain(BASE);
+  });
+
+  test("from any other sender, or with no task id, it is refused before anything is recorded or run", async () => {
+    const cases: readonly (readonly [string, (h: HandlerContext) => Promise<Plain | null>])[] = [
+      ["an app", (h) => createHandler(h)(stacked(), APP_ID)],
+      ["no sender", (h) => createHandler(h)(stacked(), undefined)],
+      ["the local socket", (h) => createHandler(h, "local")(stacked(), undefined)],
+      ["another client", (h) => createHandler(h)(stacked({ client: "mcp" }), SCHEDULER_ID)],
+      ["no task id", (h) => createHandler(h)(stacked({ taskId: undefined }), SCHEDULER_ID)],
+    ];
+    for (const [why, send] of cases) {
+      const { ledger, bases, handlerCtx } = rig();
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await send(handlerCtx);
+      expect(reply?.payload, why).toMatchObject({ ok: false, code: "launch_error" });
+      expect(bases, why).toEqual([]);
+      expect(ledger.notes(), why).toEqual([]);
+      expect(logged(), why).toContain("failed code=launch_error");
+    }
+  });
+
+  test("a continuation of a stacked task notes the same start, from this ledger", async () => {
+    const { ledger, tasks, handlerCtx } = rig();
+    await createHandler(handlerCtx)(stacked(), SCHEDULER_ID);
+    expect(tasks.continuation("stk")).toMatchObject({ stackedOn: TIP });
+    // The ledger is what carries it: a continuation's spawn names no base.
+    expect(ledger.notes().find((note) => note.taskId === "stk")?.stackedOn).toBe(TIP);
   });
 });
 

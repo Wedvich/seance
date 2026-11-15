@@ -12,7 +12,7 @@ import {
 } from "@seance/shared";
 import { autonomyNote } from "./autonomy.ts";
 import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
-import { freshenBase } from "./base-fetch.ts";
+import { fetchBase, freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile, exclaveSettingsFile } from "./exclaves.ts";
@@ -197,7 +197,8 @@ export function continuePreamble(
 }
 
 /**
- * Worktree mode creates no worktree, deliberately. `claude --worktree` resolves
+ * Worktree mode creates no worktree, deliberately — bar a stacked spawn, whose base claude has no flag for
+ * (`addStackedWorktree`). `claude --worktree` resolves
  * the default branch and runs `git worktree add --no-track -B <branch> <path>
  * origin/<default>` itself — its `worktree.baseRef` setting defaults to
  * `"fresh"`, meaning exactly that, and only a machine that sets it to `"head"`
@@ -225,6 +226,44 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string, session: string 
       `on branch worktree-${worktreeName}. Before starting the task, set this worktree up per ` +
       `the repo's own docs (check CLAUDE.md's worktree-setup section and/or README), including ` +
       `copying any .env from the main checkout at ${repo.path}.`,
+  };
+}
+
+/**
+ * A stacked worktree, made by `addStackedWorktree` at its base's tip before launch: `claude --worktree <name>`
+ * finds it there and runs in it as it stands (spiked on 2.1.325, interactive and `-p`: no reset, no second
+ * add), so the flag, the launch dir and the `.claude/worktrees` layout stay a plain worktree spawn's.
+ * `base` passed `isBranchName`; the seed is a file, never the shell string, and the session is told its PR's
+ * base, since a PR against the default branch of a squash-merging repo carries the predecessor's commits.
+ */
+function prepareStacked(repo: RepoEntry, worktreeName: string, base: string, session: string | undefined): Prepared {
+  const worktree = prepareWorktree(repo, worktreeName, session);
+  return {
+    ...worktree,
+    preamble:
+      `${worktree.preamble}\n\n` +
+      `This task is STACKED on \`${base}\`, the branch of the task it depends on: the worktree starts from ` +
+      `origin/${base}, not from the default branch, so its commits are already in your history. Its pull request ` +
+      `is your handoff: read it first (\`gh pr view ${base}\`: its description, diff and review comments). ` +
+      `Open your own pull request against that branch (\`gh pr create --base ${base}\`), never against the ` +
+      `default branch: the repo squash-merges, so a pull request there would carry ${base}'s commits too and ` +
+      `could merge them unreviewed. Once ${base}'s pull request merges, this branch needs a rebase onto the ` +
+      `default branch and its pull request retargeted; séance does not do that for you.`,
+  };
+}
+
+/**
+ * A task that would have stacked on a predecessor that left nothing to stack on (`SpawnRequest.noBase`, decided
+ * #4): a plain worktree spawn, from the default branch, whose preamble says why. A constant: no wire text.
+ */
+function prepareUnstacked(repo: RepoEntry, worktreeName: string, session: string | undefined): Prepared {
+  const worktree = prepareWorktree(repo, worktreeName, session);
+  return {
+    ...worktree,
+    preamble:
+      `${worktree.preamble}\n\n` +
+      `This task depends on another that left nothing to stack on (it finished with no pull request or pushed ` +
+      `branch), so the worktree starts from the default branch as usual.`,
   };
 }
 
@@ -734,6 +773,77 @@ async function readdLocked(repo: RepoEntry, path: string, branch: string): Promi
   log.info(`re-added ${path} from its local branch for a continuation`);
 }
 
+/** What `addStackedWorktree` made: the worktree's name under `.claude/worktrees` and the commit it starts at. */
+interface Stacked {
+  readonly name: string;
+  readonly sha: string;
+}
+
+/**
+ * Makes a stacked spawn's worktree at `sha`, the tip `fetchBase` read of `origin/<base>` (DESIGN.md, "Stacked
+ * worktrees"): `worktree add --no-track -b worktree-<name> <path> --end-of-options <sha>`, as claude's own add
+ * but `-b`, never `-B` (a branch of that name is someone's, never reset), and at the sha just read rather than
+ * the ref, so a fetch landing meanwhile cannot move what the ledger notes. The name is chosen inside the lock,
+ * so two spawns of one slug never pick the same. Under reap's lock and the re-add queue, as a continuation's
+ * re-add: reap's sweeps must not run beside a worktree being made. A failure leaves nothing behind: the
+ * half-made worktree and its branch are removed.
+ */
+async function addStackedWorktree(repo: RepoEntry, slug: string, sha: string): Promise<Stacked> {
+  try {
+    return await serialReadd(() => withReapLock(() => addStackedLocked(repo, slug, sha)));
+  } catch (err) {
+    if (err instanceof SpawnFailure) throw err;
+    if (err instanceof ReapBusy) {
+      throw new SpawnFailure("launch_error", `could not make the stacked worktree: ${err.message}; try again shortly`);
+    }
+    const why = err instanceof Error ? err.message : String(err);
+    throw new SpawnFailure("launch_error", `could not make the stacked worktree: ${why}`);
+  }
+}
+
+async function addStackedLocked(repo: RepoEntry, slug: string, sha: string): Promise<Stacked> {
+  // A checkout runs the filters repo-local config names, which a session can write.
+  const refused = await repoConfigRefusal(repo.path);
+  if (refused !== null) {
+    throw new SpawnFailure("launch_error", `making a stacked worktree is refused: repo-local ${refused}`);
+  }
+  const name = await freeWorktreeName(repo, slug);
+  const path = join(await canonical(repo.path), ".claude", "worktrees", name);
+  // Anything at the leaf (a symlink included) would have git write the checkout through it.
+  if ((await lstat(path).catch(() => null)) !== null) {
+    throw new SpawnFailure("launch_error", `could not make the stacked worktree: ${path} already exists`);
+  }
+  const branch = `worktree-${name}`;
+  const added = await hardenedGit(
+    repo.path,
+    ["worktree", "add", "--no-track", "-b", branch, path, "--end-of-options", sha],
+    READD_TIMEOUT_MS,
+  );
+  const undo = async (why: string): Promise<never> => {
+    // Nothing but this call's own fresh checkout lives there, under the reap lock and the re-add queue.
+    let removed = await hardenedGit(repo.path, ["worktree", "remove", path], READD_TIMEOUT_MS);
+    if (removed.exitCode !== 0) {
+      removed = await hardenedGit(repo.path, ["worktree", "remove", "--force", path], READD_TIMEOUT_MS);
+    }
+    // Only while it still names the commit this call made it at: never a branch moved by anything else.
+    await hardenedGit(repo.path, ["update-ref", "-d", `refs/heads/${branch}`, sha]);
+    if (removed.exitCode !== 0 && (await lstat(path).catch(() => null)) !== null) {
+      log.warn(`a stacked worktree failed and the half-made tree could not be removed: ${removed.stderr.trim()}`);
+    }
+    throw new SpawnFailure("launch_error", `could not make the stacked worktree: ${why}`);
+  };
+  if (added.exitCode !== 0) return undo(added.stderr.trim());
+  const [head, onBranch] = await Promise.all([
+    hardenedGit(path, ["rev-parse", "HEAD"]),
+    hardenedGit(path, ["symbolic-ref", "HEAD"]),
+  ]);
+  if (head.stdout.trim() !== sha || onBranch.stdout.trim() !== `refs/heads/${branch}`) {
+    return undo("it is not at its base");
+  }
+  if ((await canonical(path)) !== path) return undo("it is not under the clone's .claude/worktrees");
+  return { name, sha };
+}
+
 function liveInside(panes: readonly PaneInfo[], path: string): Promise<PaneInfo | undefined> {
   return Promise.all(
     panes
@@ -838,20 +948,42 @@ async function spawnUntracked(
     throw new SpawnFailure("not_continuable", "a continuation needs its launch record's worktree");
   }
 
+  const base = request.baseBranch;
+  // The handler takes a base only beside worktree mode; a backend reached any other way refuses it rather than
+  // starting from the default branch, the hazard the field exists for.
+  if (base !== undefined && request.mode !== "worktree") {
+    throw new SpawnFailure("launch_error", "a base branch is for a worktree spawn only");
+  }
+
   // Network, so it runs beside the local steps; it never throws, so nothing
-  // between here and its await can leave it rejecting unobserved.
-  const freshened = freshenBase(repo, request.mode);
+  // between here and its await can leave it rejecting unobserved. A stacked
+  // spawn fetches its base instead, before its worktree is made.
+  const freshened = base === undefined ? freshenBase(repo, request.mode) : Promise.resolve(undefined);
+
+  const slug = slugify(request.title ?? request.prompt ?? "session");
+  let stacked: Stacked | undefined;
+  if (base !== undefined) {
+    const tip = await fetchBase(repo, base);
+    if (!tip.ok) throw new SpawnFailure("base_not_found", tip.message);
+    stacked = await addStackedWorktree(repo, slug, tip.sha);
+  }
 
   // answer claude's trust dialog before it can block the session (fails open — see trust.ts)
   await ensureRepoTrusted(repo.path, exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
 
-  const slug = slugify(request.title ?? request.prompt ?? "session");
-  const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);
+  const worktreeName = stacked?.name ?? (request.mode === "here" ? slug : await freeWorktreeName(repo, slug));
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
   // Every task gets an id of the daemon's own, so a continuation can name the conversation it resumes.
   const session = request.taskId === undefined ? undefined : crypto.randomUUID();
-  const prepared = request.mode === "here" ? prepareHere(repo, session) : prepareWorktree(repo, worktreeName, session);
+  const prepared =
+    request.mode === "here"
+      ? prepareHere(repo, session)
+      : base !== undefined
+        ? prepareStacked(repo, worktreeName, base, session)
+        : request.noBase === true
+          ? prepareUnstacked(repo, worktreeName, session)
+          : prepareWorktree(repo, worktreeName, session);
   const allowBypass = await planAllowsBypass(request, repo, opts);
   const inner = await buildInnerCommand(
     prepared,
@@ -862,7 +994,8 @@ async function spawnUntracked(
   );
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
-  return launchWindow(prepared, inner, windowName, request, opts, note);
+  const outcome = await launchWindow(prepared, inner, windowName, request, opts, note);
+  return stacked === undefined ? outcome : { ...outcome, stackedOn: stacked.sha };
 }
 
 async function launchWindow(

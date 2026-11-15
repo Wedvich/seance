@@ -812,6 +812,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.capabilities).toEqual([
         "metrics",
         "taskId",
+        "baseBranch",
         "exitStatus",
         "reportedDone",
         "pinAccount",

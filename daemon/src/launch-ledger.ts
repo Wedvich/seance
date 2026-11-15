@@ -74,6 +74,8 @@ export interface LaunchSite {
    * (`TaskNote.continuedPr`).
    */
   readonly continuedPr?: string;
+  /** A stacked launch's start commit (`TaskNote.stackedOn`): `SpawnOutcome.stackedOn`, or the continued launch's. */
+  readonly stackedOn?: string;
 }
 
 /** What `crypto.randomUUID` makes, the only shape `--resume` is ever handed. */
@@ -146,6 +148,12 @@ export interface TaskNote {
   readonly oom?: OomSample;
   /** `judgeOomKill`'s verdict, noted with a SIGKILL `exit` (`TaskProgress.oomKill`). */
   readonly oomKill?: boolean;
+  /**
+   * A stacked launch's start: the commit its worktree was made at, `origin/<baseBranch>`'s tip (40 or 64 hex).
+   * Branch-state counts nothing at or behind it as own work, since that is the predecessor's; a continuation
+   * of the task carries it over. Sticky; internal, never in `TaskProgress`, never read from a frame.
+   */
+  readonly stackedOn?: string;
 }
 
 /** How `LaunchLedger.apply` ended; see there. */
@@ -224,6 +232,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     cancelled,
     continuedPr,
     vanished,
+    stackedOn,
   } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
@@ -255,6 +264,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(cancelled === true ? { cancelled: true as const } : {}),
     ...(inherited === undefined ? {} : { continuedPr: inherited }),
     ...(vanished === true ? { vanished: true as const } : {}),
+    ...(typeof stackedOn === "string" && TIP_PATTERN.test(stackedOn) ? { stackedOn } : {}),
   };
 }
 
@@ -365,6 +375,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
       ? {}
       : { continuedPr: patch.continuedPr ?? base?.continuedPr }),
     ...(patch.vanished === true || base?.vanished === true ? { vanished: true as const } : {}),
+    ...((patch.stackedOn ?? base?.stackedOn) === undefined ? {} : { stackedOn: patch.stackedOn ?? base?.stackedOn }),
   };
 }
 
@@ -398,7 +409,7 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
   );
 }
 
-/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr` and `session` write but are no progress: they never move `at`. */
+/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr`, `stackedOn` and `session` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
   return (
     sameProgress(a, b) &&
@@ -408,6 +419,7 @@ function sameNote(a: NotedTask, b: NotedTask): boolean {
     a.handedOff === b.handedOff &&
     a.cancelled === b.cancelled &&
     a.continuedPr === b.continuedPr &&
+    a.stackedOn === b.stackedOn &&
     a.session === b.session
   );
 }
@@ -677,6 +689,7 @@ export class LaunchLedger {
       readonly path: string;
       readonly session?: string;
       readonly continuedPr?: string;
+      readonly stackedOn?: string;
     },
     prUrl?: string,
     server?: number,
@@ -696,6 +709,7 @@ export class LaunchLedger {
         ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
         ...(isSessionId(site?.session) ? { session: site.session } : {}),
         ...(site?.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
+        ...(site?.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
         ...(prUrl === undefined ? {} : { prUrl }),
         ...(server === undefined ? {} : { server }),
       });

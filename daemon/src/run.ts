@@ -348,6 +348,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       capabilities: [
         CAPABILITIES.metrics,
         CAPABILITIES.taskId,
+        CAPABILITIES.baseBranch,
         CAPABILITIES.exitStatus,
         CAPABILITIES.reportedDone,
         CAPABILITIES.pinAccount,
