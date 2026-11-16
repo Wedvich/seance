@@ -136,6 +136,8 @@ export interface QueueRow {
   readonly carriesOn: LineageLine | null;
   /** The task its work was passed to, one line; null for any other task. */
   readonly passedTo: LineageLine | null;
+  /** What its worktree started from, by the leader's `Task.stack`, one line; null until a stacked dispatch ran. */
+  readonly stackedOn: LineageLine | null;
   /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
   readonly continuing: { readonly id: string; readonly text: string } | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
@@ -427,6 +429,27 @@ export function passedToLine(
   return lineage(`Passed to ${titles.get(next) ?? `task ${next.slice(0, 8)}`}`, next, revealable);
 }
 
+/**
+ * `Task.stack` in words: the predecessor's branch, or the default branch and why. Its `task` is the one holding
+ * the work, after any pass, so it can differ from the dep the form named.
+ */
+export function stackedOnLine(
+  task: Task,
+  titles: ReadonlyMap<string, string>,
+  revealable: ReadonlySet<string>,
+): LineageLine | null {
+  const { stack } = task;
+  if (stack === undefined) return null;
+  const name = titles.get(stack.task) ?? `task ${stack.task.slice(0, 8)}`;
+  const text =
+    stack.on === "branch"
+      ? `Stacked on ${name}`
+      : stack.on === "merged"
+        ? `Started from the default branch: ${name} had merged`
+        : `Started from the default branch: ${name} left nothing to stack on`;
+  return lineage(text, stack.task, revealable);
+}
+
 // Live cards link nothing: the other end may sit in collapsed Asleep or in Older, which this view cannot see.
 const NO_REVEAL: ReadonlySet<string> = new Set();
 
@@ -495,6 +518,7 @@ function rowOf(
     continues: continuesLine(task, titles),
     carriesOn: carriesOnLine(task, titles, NO_REVEAL),
     passedTo: passedToLine(task, titles, NO_REVEAL),
+    stackedOn: stackedOnLine(task, titles, NO_REVEAL),
     continuing: continuingOf(task, tasks),
     placement: placementLine(task, state, now),
     batch: batchLine(task),

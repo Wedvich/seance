@@ -33,6 +33,7 @@ describe("which predecessor it stacks on", () => {
   test("a pushed, unmerged predecessor's own branch, and where it ran", () => {
     expect(stackOf(dependent([opened("a1")]), byId(pred("a1")))).toEqual({
       on: "branch",
+      task: "a1",
       branch: "worktree-a1",
       at: { deviceId: "a", exclave: "main" },
     });
@@ -46,7 +47,10 @@ describe("which predecessor it stacks on", () => {
   test("a predecessor passed to a successor stacks on the successor's branch", () => {
     const old = pred("a1", { state: "superseded", successor: "a1s", pushed: true });
     const successor = pred("a1s", { branch: "worktree-a1s" });
-    expect(stackOf(dependent([opened("a1")]), byId(old, successor))).toMatchObject({ branch: "worktree-a1s" });
+    expect(stackOf(dependent([opened("a1")]), byId(old, successor))).toMatchObject({
+      task: "a1s",
+      branch: "worktree-a1s",
+    });
   });
 
   test("a predecessor whose PR merged starts from the default branch, with no note", () => {
@@ -55,7 +59,7 @@ describe("which predecessor it stacks on", () => {
       pred("a1", { merged: true }),
       pred("a1", { pr: { state: "merged", at: NOW } }),
     ]) {
-      expect(stackOf(dependent([opened("a1")]), byId(merged))).toEqual({ on: "default" });
+      expect(stackOf(dependent([opened("a1")]), byId(merged))).toEqual({ on: "merged", task: "a1" });
     }
   });
 
@@ -72,7 +76,7 @@ describe("which predecessor it stacks on", () => {
       pred("a1", { spec: spec({ mode: "here" }), branch: "main" }),
       pred("a1", { branch: "../escape" }),
     ]) {
-      expect(stackOf(dependent([opened("a1")]), byId(nothing))).toEqual({ on: "nothing" });
+      expect(stackOf(dependent([opened("a1")]), byId(nothing))).toEqual({ on: "nothing", task: "a1" });
     }
   });
 
@@ -134,29 +138,33 @@ describe("dispatching a stacked task", () => {
     return { sent: fleet.spawns.find((s) => s.request.taskId === task.id)?.request, scheduler };
   }
 
-  test("sends the predecessor's branch as baseBranch", async () => {
-    const { sent } = await dispatched(pred("a1"));
+  test("sends the predecessor's branch as baseBranch, and records what it stacked on", async () => {
+    const { sent, scheduler } = await dispatched(pred("a1"));
     expect(sent).toMatchObject({ baseBranch: "worktree-a1", client: SCHEDULER_CLIENT, taskId: "b" });
     expect(sent).not.toHaveProperty("noBase");
+    expect(scheduler.task("b")).toMatchObject({ state: "running", stack: { task: "a1", on: "branch" } });
   });
 
   test("a merged predecessor starts it from the default branch, with no note", async () => {
-    const { sent } = await dispatched(pred("a1", { state: "done", doneBy: "merged" }));
+    const { sent, scheduler } = await dispatched(pred("a1", { state: "done", doneBy: "merged" }));
     expect(sent).toBeDefined();
     expect(sent).not.toHaveProperty("baseBranch");
     expect(sent).not.toHaveProperty("noBase");
+    expect(scheduler.task("b")?.stack).toEqual({ task: "a1", on: "merged" });
   });
 
   test("a predecessor done with no PR starts it from the default branch, noting there was nothing to stack on", async () => {
     const { prUrl: _pr, pushed: _pushed, ...bare } = pred("a1");
-    const { sent } = await dispatched({ ...bare, state: "done", doneBy: "manual" });
+    const { sent, scheduler } = await dispatched({ ...bare, state: "done", doneBy: "manual" });
     expect(sent).toMatchObject({ noBase: true });
     expect(sent).not.toHaveProperty("baseBranch");
+    expect(scheduler.task("b")?.stack).toEqual({ task: "a1", on: "nothing" });
   });
 
   test("base_not_found fails it in words, and its dependents with it", async () => {
     const { scheduler } = await dispatched(pred("a1"), { code: "base_not_found", message: "origin/worktree-a1: none" });
     expect(scheduler.task("b")).toMatchObject({ state: "failed", failure: { code: "base_not_found" } });
+    expect(scheduler.task("b")).not.toHaveProperty("stack");
     expect(scheduler.task("b")?.failure?.message).toStartWith("the branch of the task it stacks on is not on origin");
     expect(scheduler.task("c")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });

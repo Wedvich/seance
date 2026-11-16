@@ -2922,7 +2922,7 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
-  test("shows a task's dependencies, batch, reported settle and Linear link", async () => {
+  test("shows a task's dependencies, stack, batch, reported settle and Linear link", async () => {
     const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
@@ -2939,8 +2939,8 @@ describe("get_queue", () => {
               linear: { issue: "ENG-9" },
             },
           }),
-          task({ id: "t-2", state: "running", merged: true }),
-          task({ id: "t-3", state: "done", doneBy: "reported" }),
+          task({ id: "t-2", state: "running", merged: true, stack: { task: "t-0", on: "branch" } }),
+          task({ id: "t-3", state: "done", doneBy: "reported", stack: { task: "t-0", on: "nothing" } }),
         ],
         at: 6_000,
       },
@@ -2955,6 +2955,10 @@ describe("get_queue", () => {
     });
     expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
+    // What its worktree started from: the predecessor's branch, or the default branch and why.
+    expect(tasks[1].stackedOn).toEqual({ task: "t-0", base: "branch" });
+    expect(tasks[2].stackedOn).toEqual({ task: "t-0", base: "nothing" });
+    expect(tasks[0]).not.toHaveProperty("stackedOn");
     expect(tasks[2].doneBy).toBe("reported");
     expect(tasks[2]).not.toHaveProperty("until");
     lazy.stop();

@@ -279,6 +279,24 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
       expect(rows[1]?.passedTo).toBeNull();
     });
 
+    test("a stacked task names the task it started from, linked when shown", () => {
+      const stacked = archived("t-next", {
+        spec: { repo: ORIGIN, mode: "worktree", title: "Next work" },
+        stack: { task: "t-old", on: "branch" },
+      });
+      const [, next] = deriveOlder(state({ list: page([old, stacked]) }), NOW)?.rows ?? [];
+      expect(next?.stackedOn).toEqual({ text: "Stacked on Old work", reveal: "t-old" });
+      const merged = archived("t-next", {
+        spec: { repo: ORIGIN, mode: "worktree" },
+        stack: { task: "t-gone", on: "merged" },
+      });
+      const [alone] = deriveOlder(state({ list: page([merged]) }), NOW)?.rows ?? [];
+      expect(alone?.stackedOn).toEqual({
+        text: "Started from the default branch: task t-gone had merged",
+        reveal: null,
+      });
+    });
+
     test("a drained successor says its machine closed", () => {
       const [, next] = deriveOlder(state({ list: page([old, successor("drain")]) }), NOW)?.rows ?? [];
       expect(next?.carriesOn).toEqual({ text: "Carries on Old work after its machine closed", reveal: "t-old" });

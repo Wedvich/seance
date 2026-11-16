@@ -1,4 +1,4 @@
-import { isBranchName, type Placement, type TaskSpec } from "@seance/shared";
+import { isBranchName, type Placement, type TaskSpec, type TaskStack } from "@seance/shared";
 import { holder } from "./deps.ts";
 import type { Task } from "./task.ts";
 
@@ -7,12 +7,15 @@ import type { Task } from "./task.ts";
  * - `branch`: its stacking predecessor's pushed, unmerged branch, and where that predecessor ran;
  * - `nothing`: that predecessor finished with no PR or pushed branch to stack on (mark-done, a no-PR
  *   session end, a `here` task) — the default branch, and the session is told so;
- * - `default`: no stacking predecessor, or one whose PR merged — the default branch holds its work, and
- *   its branch may already be deleted.
+ * - `merged`: that predecessor's PR merged — the default branch holds its work, and its branch may already
+ *   be deleted;
+ * - `default`: no stacking predecessor.
+ *
+ * `task` is the predecessor holding the work, what `Task.stack` records (`stackRecord`).
  */
 export type Stack =
-  | { readonly on: "branch"; readonly branch: string; readonly at?: Placement }
-  | { readonly on: "nothing" }
+  | { readonly on: "branch"; readonly task: string; readonly branch: string; readonly at?: Placement }
+  | { readonly on: "nothing" | "merged"; readonly task: string }
   | { readonly on: "default" };
 
 const DEFAULT: Stack = { on: "default" };
@@ -44,11 +47,14 @@ export function stackOf(task: Task, byId: ReadonlyMap<string, Task>): Stack {
   const direct = first === undefined ? undefined : byId.get(first.task);
   const pred = direct === undefined ? null : holder(direct, byId);
   if (pred === null) return DEFAULT;
-  if (merged(pred)) return DEFAULT;
-  if (pred.pushed !== true || pred.spec.mode === "here" || !isBranchName(pred.branch)) return { on: "nothing" };
+  if (merged(pred)) return { on: "merged", task: pred.id };
+  if (pred.pushed !== true || pred.spec.mode === "here" || !isBranchName(pred.branch)) {
+    return { on: "nothing", task: pred.id };
+  }
   const at = pred.assignment;
   return {
     on: "branch",
+    task: pred.id,
     branch: pred.branch,
     ...(at === undefined ? {} : { at: { deviceId: at.deviceId, exclave: at.exclave } }),
   };
@@ -62,4 +68,9 @@ function merged(task: Task): boolean {
   if (task.state === "done" && task.doneBy === "merged") return true;
   if (task.pr?.state === "merged") return task.pr.stacked !== true;
   return task.merged === true;
+}
+
+/** What `Task.stack` keeps of a dispatch's stack: none without a predecessor, and never the branch name. */
+export function stackRecord(stack: Stack): TaskStack | undefined {
+  return stack.on === "default" ? undefined : { task: stack.task, on: stack.on };
 }

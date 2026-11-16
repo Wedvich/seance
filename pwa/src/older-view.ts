@@ -16,7 +16,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { accountDisplayName } from "./machines-view.ts";
-import { carriesOnLine, FLAG_LABELS, passedToLine, prNames, type QueueRow } from "./queue-view.ts";
+import { carriesOnLine, FLAG_LABELS, passedToLine, prNames, stackedOnLine, type QueueRow } from "./queue-view.ts";
 import {
   AUTONOMY_LABELS,
   NO_OLDER_FILTERS,
@@ -217,6 +217,7 @@ function archivedRow(
     continuing: null,
     carriesOn: carriesOnLine(task, chain.titles, chain.revealable),
     passedTo: passedToLine(task, chain.titles, chain.revealable),
+    stackedOn: stackedOnLine(task, chain.titles, chain.revealable),
     placement: [originLabel(task.spec.repo), ...(account === null ? [] : [account])].join(" · "),
     batch: null,
     busy: false,
