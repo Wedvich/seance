@@ -1940,7 +1940,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
-- `queue { tasks? }` → `{ tasks, holds, at, unreadable?, globalMax? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
+- `queue { tasks? }` → `{ tasks, holds, at, unreadable?, globalMax?, passRefused? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
   `needs-input` leading, newest first within each) with their latest
   decisions, prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task); a decision past the reply's budget carries
   only its winner, counted in `trimmed` (Scheduler, "The leader"). `tasks` asks for those ids
@@ -1952,6 +1952,10 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   the holds are): what fills the store without ever running. `globalMax` is the leader's
   in-flight cap, the denominator of the Queue header's "8/8 running"; `run-now` places past it, so
   the numerator may exceed it ("9/8"). Absent from an older leader, whose header shows the bare count.
+  `passRefused` lists the session passes (`session-pass`) this term refused in the last ten minutes, whatever the
+  filter, as `{ taskId, code, sentAt? }` — `code` the wire code `pass` would answer, `sentAt` the refused frame's own
+  `at` (the sending daemon's clock) — at most 64, memory only: what `pass_to_successor` reads to tell its session why
+  no successor came (2026-11-16). Parsed leniently, a bad list or entry costing only that explanation.
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan?, autonomy?, skill? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
@@ -4143,7 +4147,20 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `lost`) marks it `leftRunning`, as `mark-done` does a `lost` one, and leaves its session alone,
   as a `branch-state` settle does: the slot is freed while the session may still run, so the
   exclave can be over-committed until it exits, and the card says the session may still be running.
-  Under `until: "reported"` it only records `merged: true`, as above. `closed` is recorded in
+  Under `until: "reported"` it only records `merged: true`, as above. Such a task takes no successor: a
+  session still working after its merge (a follow-up PR, a dev check, evals) that calls `pass_to_successor` is
+  refused `finished`, before its push when its tool can see that (MCP server, `pass_to_successor`).
+  _Decided (2026-11-16, after a session passed a task its first PR had settled and was never told it
+  failed): keep the merge's settle, and say so to the session and the spawner_ (the tool's text; `until`'s
+  description on `spawn_session` and `queue_batch` names post-merge work as a reason for `"reported"`). The
+  merge is the contract of `until: "merged"`: `after: "done"` dependents and the freed slot are what the
+  spawner asked for, and a dependent released at the merge may already be running on it. _Rejected:
+  re-opening a merge-settled task for a pass_ — it rewrites a finished record (never written, above), whose
+  dependents were released by it, and its PR is merged, so the pass's own PR check refuses `pr_not_open`
+  anyway. _Rejected: holding the settle while the session is live_ — a Claude session does not exit at its
+  prompt, so every merged task would hold its slot and its `after: "done"` dependents until someone closed
+  its pane (what `until: "reported"` already offers, opted into), and "active" (busy rather than idle at a
+  turn's end) is a per-turn flicker, not a fact the settle can rest on. `closed` is recorded in
   `Task.pr` and moves nothing, and a finished task is never written. The local-git merge above stays as the
   fallback where `gh` is absent. No ordering of one reading against the last by `at`: it would
   compare two leaders' clocks. A session that opens several PRs is settled by its primary, the
@@ -10614,12 +10631,23 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   the schema's `maxLength` counts code points). The session's own path, registered beside
   `hand_off_task`. Gated on the verified leader advertising `successorSelf` (without a fleet it
   refuses: it cannot confirm the scheduler takes session passes; a 2a leader advertises only
-  `successor` and would drop the event). It sends the local-socket `pass` frame ("Session events"), and
-  on `ok` polls the leader's queue for up to 30 s for the task's `successor` and says whether it was
-  confirmed; unconfirmed says the branch is pushed, the leader may still confirm or may have refused (for
-  example the PR's head is another branch), and that the session must do no further work and end its
-  turn either way: the session is closed at the turn's end only if the leader confirms, and a commit
-  made after the push is not carried. The tool waits for its daemon `OP_TIMEOUT_MS["push-branch"]` plus
+  `successor` and would drop the event). **Before the push** (2026-11-16) it reads the leader's queue for its
+  own task, by this machine's device id and `$TMUX_PANE` against the tasks' `assignment.pane`, and refuses, with
+  nothing pushed, when every task in that pane is finished with no `successor`: the leader would refuse it
+  `finished`. The pane is the session's claim, so the check only ever refuses early what the leader refuses
+  anyway, and anything unclear (no read, no pane, a live task in it) is left to the daemon and the leader;
+  the binding stays the daemon's peer pid. A task its merge settled while the session kept working
+  (Scheduler, "Done detection") is worded as such: done by that PR's merge under `until: "merged"`, nothing
+  left to pass, the session not closed, and the work left carried on in the session or queued as a new task
+  with `spawn_session` whose prompt is the record and names the branch. It then sends the local-socket
+  `pass` frame ("Session events"), and on `ok` polls the leader's queue for up to 30 s for the leader's
+  word: the task's `successor` (passed: end the turn), the task finished with none (refused, worded as
+  above, the branch named as pushed), or a `passRefused` entry for the task stamped at or after the call's
+  start on this machine's clock, which the daemon's `at` is on (refused: the code and its text, the pushed
+  branch, the session not closed by the pass and what to do instead). A refusal is the tool's error. Only
+  with none of these does it say the branch is pushed, that as of now no successor exists, that the
+  session is closed at its turn's end only if the leader still records one, to check `get_queue` before
+  passing again, and to end its turn — an older leader, which keeps no refusals, reads that way. The tool waits for its daemon `OP_TIMEOUT_MS["push-branch"]` plus
   30 s (120 s, past a push and the fetch after a rejected one), and an unanswered call (a timeout or a lost
   connection) is never worded as a refusal: it may have pushed and sent the pass, so the text says so, tells
   the session to check `get_queue` before pushing or passing again, and to end its turn. The call's
@@ -11965,11 +11993,17 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   caller abandoned after that is the unavoidable window. A session that lies about
   passing can do no more than one that pushes its own branch and runs `/exit`; the leader's PR-head
   check bounds what it can claim, and the worst case of an unconfirmed pass is a pushed branch no
-  successor follows. The session is told only "not
-  confirmed"; telling it why the leader refused is a docs/scheduler.md _Later_ item. The leader logs
-  each refusal at warn with the task and the sending machine (never the record or the branch), the one
-  trace of a stalled pass, since the task stays `running` and idle until someone sees it on the Queue
-  screen (an alert for it is that same _Later_ item). _Decided: a `pass-close` answered `no_pane` sets the
+  successor follows. The session is told the leader's answer (2026-11-16): `session-pass` stays
+  fire-and-forget, and the leader keeps each session pass it refuses in memory (`sessionPassRefusals`, ten
+  minutes, at most 64, the frame's `at` beside the code), which `queue` lists as `passRefused` and
+  `pass_to_successor` reads (MCP server). _Decided: an answer read from the queue, not a synchronous reply_:
+  a reply would need a new leader → daemon op (or a reply to an event op), a capability to gate it, and the
+  daemon holding the local frame open across a relay round trip, for what the tool already polls the queue
+  for; the queue also shows the task finished, which an older leader's refusal of a finished task can be
+  read from too. The leader also logs each refusal at warn with the task and the sending machine (never the
+  record or the branch), and a refusal other than `conflict`, `finished` or `not_found` is pushed as
+  `pass-refused`; a refused pass leaves the daemon's mark on the pane unconfirmed, so it closes nothing
+  (a later `hand_off_task` there still answers `passed` until the pane's `ended` drops the mark). _Decided: a `pass-close` answered `no_pane` sets the
   task's close deadline to now_ (the session is gone, so no turn's end will close it, and the 2-minute
   grace only holds the successor blocked), and reconcile's re-ask is not awaited by the tick.
 - **The drain ask's hook** (built 2026-11-13; "The drain's session ask"). While this machine is closed, a bound,

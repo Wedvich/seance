@@ -51,6 +51,7 @@ import {
   type RepoEntry,
   type RequestOp,
   type SchedulerAvailability,
+  TASK_PHASES,
   type DrainView,
   type SessionsResponse,
   type SpawnClient,
@@ -749,7 +750,7 @@ const UNTIL_FIELD = z
   .enum(TASK_UNTIL)
   .optional()
   .describe(
-    `What settles the task. "merged" (default): its PR merging, or its session ending. "reported": a merge settles nothing; the session settles it by calling ${REPORT_DONE_TOOL} when it is truly finished (a deploy watched, say), which lets dependents wait for that. It needs a prompt, to which the instruction to report is appended, and the session needs the seance MCP server installed in its exclave`,
+    `What settles the task. "merged" (default): its PR merging, or its session ending — the first merge settles it even while its session keeps working, after which it can no longer be passed to a successor. "reported": a merge settles nothing; the session settles it by calling ${REPORT_DONE_TOOL} when it is truly finished (a deploy watched, a follow-up PR, evals run after the merge, say), which lets dependents wait for that. It needs a prompt, to which the instruction to report is appended, and the session needs the seance MCP server installed in its exclave`,
   );
 
 const PIN_FIELD = z
@@ -1001,6 +1002,8 @@ export function buildMcpServer(
   passOwnTask: typeof passToSuccessor = passToSuccessor,
   passPoll: PassPoll = PASS_POLL,
   sendMsg: typeof sendMessage = sendMessage,
+  /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
+  ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1710,7 +1713,7 @@ export function buildMcpServer(
     PASS_SELF_TOOL,
     {
       title: "Pass this session's task to a successor session",
-      description: `Pass this scheduler task to a successor session when this one is running out of usage, or the owner asks. Commit everything first: the daemon pushes this worktree's branch to its upstream and refuses a dirty tree (nothing is pushed then). \`record\` is the whole of what the successor knows besides the branch and the PR it reads itself: what is done, what is left, decisions taken and why, how to verify; at most ${SUCCESSOR_RECORD_MAX} characters. Call it last and end the turn with one line: this session is closed when the turn ends, and nothing done after the push is carried. To pass your own task use this; \`pass_task\` is for other tasks and closes the target session at once. Not \`hand_off_task\`, which leaves a finished PR to the scheduler. Needs a scheduler leader that takes session passes; the call is refused before anything is pushed when there is none. If the task has a PR whose branch this worktree does not track, it is refused and tells you what to push first.`,
+      description: `Pass this scheduler task to a successor session when this one is running out of usage, or the owner asks. Commit everything first: the daemon pushes this worktree's branch to its upstream and refuses a dirty tree (nothing is pushed then). \`record\` is the whole of what the successor knows besides the branch and the PR it reads itself: what is done, what is left, decisions taken and why, how to verify; at most ${SUCCESSOR_RECORD_MAX} characters. Call it last and end the turn with one line: this session is closed when the turn ends, and nothing done after the push is carried. To pass your own task use this; \`pass_task\` is for other tasks and closes the target session at once. Not \`hand_off_task\`, which leaves a finished PR to the scheduler. Needs a scheduler leader that takes session passes; the call is refused before anything is pushed when there is none. If the task has a PR whose branch this worktree does not track, it is refused and tells you what to push first. A task the scheduler already counts finished (its PR merged under until "merged", even while this session kept working) takes no successor: refused, nothing pushed, and it says what to do instead. The answer says whether the scheduler recorded the successor or refused the pass, and why; only a recorded pass closes this session.`,
       inputSchema: z.strictObject({
         record: z.string().min(1).describe("What the successor needs: done, left, decisions, how to verify"),
       }),
@@ -1739,6 +1742,16 @@ export function buildMcpServer(
             }. Nothing was pushed.`,
           );
         }
+        // Before the push: a task the scheduler already counts as finished (a merge settles `until: "merged"` while the
+        // session still runs) can have no successor, and the session must hear that, not "not confirmed".
+        const settled = local === null ? null : await ownSettledTask(lease.scheduler, local.deviceId, ownPane());
+        if (settled !== null) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: no successor can be made. ${settledText(settled)} Nothing was pushed. ${settledInstead(null)}`,
+          );
+        }
+        // The daemon stamps its `session-pass` with its own clock, this machine's: a refusal stamped earlier answers an earlier pass.
+        const sentSince = Date.now();
         // The cancellation closes the daemon's connection, which is what keeps an interrupted call from passing later.
         const result = await passOwnTask(record, { signal: ctx.mcpReq.signal });
         // No answer is not a refusal: the daemon may have pushed and sent the pass, and closes this session at its turn's end.
@@ -1748,17 +1761,28 @@ export function buildMcpServer(
           );
         }
         if (!result.ok) return errorResult(`${PASS_SELF_TOOL} refused: ${result.text}`);
-        const taskId = result.pass?.taskId;
-        if (taskId === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);
-        const successor = await successorOf(lease.scheduler, taskId, passPoll);
-        if (successor !== null) {
-          return textResult(
-            `passed: the scheduler recorded successor ${successor} for task ${taskId}; its branch is pushed. ${END_THE_TURN}`,
-          );
+        const ack = result.pass;
+        if (ack === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);
+        const { taskId, remoteBranch } = ack;
+        const verdict = await passVerdict(lease.scheduler, taskId, sentSince, passPoll);
+        switch (verdict.kind) {
+          case "passed":
+            return textResult(
+              `passed: the scheduler recorded successor ${verdict.successor} for task ${taskId}; its branch is pushed. ${END_THE_TURN}`,
+            );
+          case "finished":
+            return errorResult(
+              `${PASS_SELF_TOOL} refused: no successor exists. ${settledText(verdict.task)} The branch was pushed (${remoteBranch}) before the scheduler said so. ${settledInstead(remoteBranch)}`,
+            );
+          case "refused":
+            return errorResult(
+              `${PASS_SELF_TOOL} refused: no successor exists — the scheduler refused the pass: ${sessionPassRefusalText(verdict.code)} (${verdict.code}). The branch is pushed (${remoteBranch}). ${REFUSED_INSTEAD}`,
+            );
+          case "unconfirmed":
+            return textResult(
+              `${PASS_SELF_TOOL}: the branch is pushed (${remoteBranch}), but after ${Math.round(passPoll.windowMs / 1000)} s no successor is recorded for task ${taskId} and the scheduler gave no answer, so as of now no successor exists. If the leader still records one, this session closes when this turn ends; if it refused, the session stays open and is not closed by this pass. Before passing again, check get_queue: a successor on task ${taskId} means the pass stood. ${END_THE_TURN}`,
+            );
         }
-        return textResult(
-          `the branch is pushed but no successor was recorded yet; the leader may still confirm, or may have refused (for example the PR's head is another branch). ${END_THE_TURN}`,
-        );
       });
     },
   );
@@ -1807,23 +1831,103 @@ export function buildMcpServer(
  * could not be read, or the leader answered with an error. Never throws: the push has happened, and the
  * session is told what it knows.
  */
-async function successorOf(scheduler: SchedulerLeg, taskId: string, poll: PassPoll): Promise<string | null> {
+/** What `pass_to_successor` read of its pass from the leader's queue. */
+type PassVerdict =
+  | { readonly kind: "passed"; readonly successor: string }
+  /** The task is finished with no successor: none can come. */
+  | { readonly kind: "finished"; readonly task: Task }
+  /** The leader's refusal of this pass (`QueueResponse.passRefused`, stamped at or after `sentSince`). */
+  | { readonly kind: "refused"; readonly code: string }
+  | { readonly kind: "unconfirmed" };
+
+/**
+ * The leader's word on a session's own pass, read from its queue until the window closes: a successor, a finished
+ * task, or the refusal the leader keeps for it. `session-pass` is fire-and-forget, so this read is its only answer.
+ * An older leader keeps no refusals: its refusal reads `unconfirmed` unless the task is finished.
+ */
+async function passVerdict(
+  scheduler: SchedulerLeg,
+  taskId: string,
+  sentSince: number,
+  poll: PassPoll,
+): Promise<PassVerdict> {
   const until = Date.now() + poll.windowMs;
   for (;;) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- one read at a time, the leader's confirmation being what is waited for
       const queue = await scheduler.queue();
       if (queue !== null && !("ok" in queue)) {
-        const successor = queue.tasks.find((t) => t.id === taskId)?.successor;
-        if (successor !== undefined) return successor;
+        const task = queue.tasks.find((t) => t.id === taskId);
+        if (task?.successor !== undefined) return { kind: "passed", successor: task.successor };
+        if (task !== undefined && TASK_PHASES[task.state] === "finished") return { kind: "finished", task };
+        const refusal = queue.passRefused?.find(
+          (r) => r.taskId === taskId && r.sentAt !== undefined && r.sentAt >= sentSince,
+        );
+        if (refusal !== undefined) return { kind: "refused", code: refusal.code };
       }
     } catch {
-      return null;
+      return { kind: "unconfirmed" };
     }
-    if (Date.now() + poll.everyMs > until) return null;
+    if (Date.now() + poll.everyMs > until) return { kind: "unconfirmed" };
     // oxlint-disable-next-line no-await-in-loop -- see above
     await Bun.sleep(poll.everyMs);
   }
+}
+
+/**
+ * The calling session's task when the leader already counts it finished with no successor, else null. Found by
+ * this machine and `$TMUX_PANE` against the tasks' assignments: a claim, not a binding, which only ever refuses
+ * early what the leader would refuse anyway (`finished`); anything unclear (no read, no pane, a live task in the
+ * pane) is left to the daemon and the leader.
+ */
+async function ownSettledTask(
+  scheduler: SchedulerLeg,
+  deviceId: string,
+  pane: string | undefined,
+): Promise<Task | null> {
+  if (pane === undefined || pane === "") return null;
+  let queue: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+  try {
+    queue = await scheduler.queue();
+  } catch {
+    return null;
+  }
+  if (queue === null || "ok" in queue) return null;
+  const mine = queue.tasks.filter((t) => t.assignment?.deviceId === deviceId && t.assignment.pane === pane);
+  if (mine.some((t) => TASK_PHASES[t.state] !== "finished" || t.successor !== undefined)) return null;
+  return mine.toSorted((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+}
+
+/** Why a finished task takes no successor, in the session's terms. */
+function settledText(task: Task): string {
+  if (task.state === "done" && task.doneBy === "merged") {
+    const pr = task.prUrl === undefined ? "its pull request" : `its pull request ${task.prUrl}`;
+    return `Task ${task.id} is already done: ${pr} merged, and a task queued with until "merged" (the default) is settled by that merge even while its session keeps working, so the scheduler counts its work finished and has released what waited on it.`;
+  }
+  const by = task.state === "done" && task.doneBy !== undefined ? ` (by ${task.doneBy})` : "";
+  return `Task ${task.id} is already ${task.state}${by}, so the scheduler has nothing left to pass on.`;
+}
+
+/** What a session whose task is finished does with work left over. `branch`: what was pushed, when it was. */
+function settledInstead(branch: string | null): string {
+  const named = branch === null ? "this worktree's branch (push it first)" : `branch ${branch}`;
+  return `This session is not closed and stays open. Instead: carry the remaining work on here; or, if this session cannot go on, queue it as a new task with spawn_session, your record as its prompt, telling it to check out ${named} and carry on from there.`;
+}
+
+/** Said after any refusal of a pushed pass: nothing will close the session. */
+const REFUSED_INSTEAD =
+  "This session is not closed by the pass and stays open. Instead: fix the cause and call pass_to_successor again, or carry on here; if this session cannot go on, end the turn with a summary of what is left, so its owner can act.";
+
+/** A session pass's refusal, where the generic wording would mislead a session whose branch is already pushed. */
+const SESSION_PASS_REFUSED: Readonly<Record<string, string | undefined>> = {
+  pr_unreadable: "the scheduler could not read the task's pull request to check the pushed branch against it",
+  branch_mismatch:
+    "the pushed branch is not the task's pull request's branch, or the pull request is from a fork; push this work to the pull request's branch, then pass again",
+  conflict: "the task changed while the pass ran; call pass_to_successor again",
+};
+
+function sessionPassRefusalText(code: string): string {
+  return SESSION_PASS_REFUSED[code] ?? schedulerErrorText(code);
 }
 
 /**

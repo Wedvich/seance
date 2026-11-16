@@ -91,6 +91,7 @@ export function sessionPassInput(pass: SessionPass, from: string): NonNullable<P
     pushed: { remoteBranch: pass.remoteBranch, tip: pass.tip },
     ...(pass.record === undefined ? {} : { record: pass.record }),
     ...(pass.drain === true ? { drain: true as const } : {}),
+    sentAt: pass.at,
   };
 }
 

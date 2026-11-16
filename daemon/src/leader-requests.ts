@@ -32,6 +32,7 @@ import {
   type Decision,
   type DiscardResponse,
   type IdleTaskRef,
+  type PassRefusalRef,
   type PassResponse,
   type PauseHold,
   type PauseResponse,
@@ -79,6 +80,10 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
     unreadable,
     scheduler.idle(),
     scheduler.globalMax(),
+    scheduler.sessionPassRefusals().map(({ taskId, code, sentAt }): PassRefusalRef => {
+      const wire = PASS_REFUSALS[code].code;
+      return sentAt === undefined ? { taskId, code: wire } : { taskId, code: wire, sentAt };
+    }),
   );
 }
 
@@ -130,6 +135,7 @@ export function boundedQueue(
   unreadable: readonly UnreadableTaskRef[] = [],
   idle: readonly IdleTaskRef[] = [],
   globalMax?: number,
+  passRefused: readonly PassRefusalRef[] = [],
 ): QueueResponse {
   const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
@@ -146,6 +152,7 @@ export function boundedQueue(
     jsonBytes(holds) -
     (unreadable.length === 0 ? 0 : jsonBytes(unreadable)) -
     (idle.length === 0 ? 0 : jsonBytes(idle)) -
+    (passRefused.length === 0 ? 0 : jsonBytes(passRefused)) -
     newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
   const byClaim = [
     ...newest.filter((t) => LIVE_DECISION.has(t.state)),
@@ -180,6 +187,7 @@ export function boundedQueue(
     ...(unreadable.length === 0 ? {} : { unreadable }),
     ...(idle.length === 0 ? {} : { idle }),
     ...(globalMax === undefined ? {} : { globalMax }),
+    ...(passRefused.length === 0 ? {} : { passRefused }),
   };
 }
 
