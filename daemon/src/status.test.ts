@@ -187,7 +187,15 @@ describe("fitStatus", () => {
     expect(crowded.cu).toEqual(cu);
     expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
     const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
-    const worst = fitStatus({ ...status(12), ae, cu, drn: true, cl: 1_763_000_000_000, dr: 1_763_000_300_000, sess: [9] });
+    const worst = fitStatus({
+      ...status(12),
+      ae,
+      cu,
+      drn: true,
+      cl: 1_763_000_000_000,
+      dr: 1_763_000_300_000,
+      sess: [9],
+    });
     expect(worst.cu).toEqual(cu);
     expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
   });

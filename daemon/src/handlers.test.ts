@@ -1632,7 +1632,12 @@ describe("a closed machine", () => {
   /** A plain object stub: the injected seam, not mocked package code. */
   const sets: { open: boolean; mode: CloseMode }[] = [];
   function availabilityStub(initial: number | null = null): MachineAvailability {
-    let state: State = { deviceId: "d", repos: [], scannedAt: null, ...(initial === null ? {} : { closed: { at: initial } }) };
+    let state: State = {
+      deviceId: "d",
+      repos: [],
+      scannedAt: null,
+      ...(initial === null ? {} : { closed: { at: initial } }),
+    };
     return {
       closed: () => closedOf(state),
       set: (open, mode) => {

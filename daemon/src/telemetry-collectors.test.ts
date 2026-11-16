@@ -109,7 +109,11 @@ describe("the collector registry", () => {
   test("`dr` rides beside `cl` only, never alone", async () => {
     let closed: number | null = T0 - 5_000;
     let drainAt: number | null = null;
-    const telemetry = createTelemetry(MetricsStore.memory(), { ...sources, closed: () => closed, drainAt: () => drainAt });
+    const telemetry = createTelemetry(MetricsStore.memory(), {
+      ...sources,
+      closed: () => closed,
+      drainAt: () => drainAt,
+    });
     expect(await telemetry.tick(T0)).not.toHaveProperty("dr");
     drainAt = T0 - 1_000;
     const draining = await telemetry.tick(T0 + 30_000);

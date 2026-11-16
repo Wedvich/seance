@@ -127,7 +127,7 @@ describe("closed", () => {
       }
       await Bun.write(path, JSON.stringify({ ...fresh, closed: { at: "x", drainAt: 5 } }));
       const damaged = await loadOrInitState(path);
-      expect(drainingOf(damaged)?.cl).toBe(closedOf(damaged));
+      expect(drainingOf(damaged)?.cl ?? null).toBe(closedOf(damaged));
     } finally {
       warn.mockRestore();
     }

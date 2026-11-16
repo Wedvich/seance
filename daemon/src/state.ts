@@ -148,8 +148,10 @@ export function availabilityChange(
   at: number,
 ): { readonly next: State; readonly outcome: AvailabilityOutcome } {
   const cl = closedOf(state);
-  if (open) return cl === null ? { next: state, outcome: "unchanged" } : { next: withoutClosed(state), outcome: "reopened" };
-  if (cl === null) return { next: { ...state, closed: { at, drainAt: mode === "soft" ? null : at } }, outcome: "closed" };
+  if (open)
+    return cl === null ? { next: state, outcome: "unchanged" } : { next: withoutClosed(state), outcome: "reopened" };
+  if (cl === null)
+    return { next: { ...state, closed: { at, drainAt: mode === "soft" ? null : at } }, outcome: "closed" };
   if (mode !== "soft" && drainingOf(state) === null) {
     return { next: { ...state, closed: { at: cl, drainAt: at } }, outcome: "drain_started" };
   }
