@@ -78,6 +78,9 @@ export function machine(deviceId: string, fields: Partial<Machine> = {}): Machin
   };
 }
 
+/** `machine`'s capabilities plus `baseBranch`: a daemon a task with an `after: "opened"` edge may route to. */
+export const STACKS = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.baseBranch];
+
 /** A manifest entry as the PWA would mint it; the scheduler reads none of its fields. */
 export function attachment(i: number): AttachmentRef {
   return {

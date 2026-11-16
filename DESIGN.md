@@ -1872,14 +1872,14 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   request's `taskId` (Daemon, "Task ids"). Advertised as `"taskId"` in
   `capabilities`, since an old daemon ignores the field and spawns a duplicate.
   `baseBranch` (M4, stacking; the daemon acts on it since 2026-11-15, Daemon, "Stacked
-  worktrees"; no leader sends it yet) is the branch a stacked worktree starts from, refused
+  worktrees"; the leader sends it since 2026-11-16, Scheduler, "Stacking") is the branch a stacked worktree starts from, refused
   `base_not_found` when a fetch of it from origin does not land. It is
   held to `isBranchName` (`shared/src/parse.ts`: `git check-ref-format` on
   `refs/heads/<b>`, no leading `-`, not `HEAD`) at every hop: the daemon's
   `isSpawnRequest` rejects one that fails it, or one beside any mode but `worktree` (fail
   closed: dropped, the session would start from the default branch, the hazard the
-  capability exists for), and the leader is to check the predecessor's
-  `Task.branch` before sending it (stacking), since a task record's branch is only
+  capability exists for), and the leader checks the predecessor's
+  `Task.branch` before sending it (Scheduler, "Stacking"), since a task record's branch is only
   length-checked. The daemon takes it only on a spawn sealed `from` the scheduler with
   `client: "scheduler"` and a `taskId` (or the leader's in-process dispatch), the gate
   attachments have; any other sender is refused `launch_error` before anything is recorded,
@@ -3564,6 +3564,48 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reason. The successor carries the old task's `requires` (`successorSpec`), so the traits filter
   ("Traits filter") applies to it unchanged: a trait is a machine capability the work needs, not
   a place the old task happened to run, and the old machine had it.
+- **Stacking** (built 2026-11-16, docs/scheduler.md M4 _Stacking_, decisions #4 and #15; the daemon's
+  half, the worktree made from `origin/<b>`, is Daemon, "Stacked worktrees"). A dependent task's worktree
+  starts from its predecessor's branch, so B `after: "opened"` on A builds on A's commit, not on a
+  default branch that lacks it. The leader's half is `scheduler/src/stack.ts`:
+  - _Which predecessor (#4):_ a task may stack (`mayStack`) when it is a fresh worktree task (no
+    `continues`, no `succeeds`: a continuation resumes its own worktree, a successor its predecessor's
+    remote branch) with an `after: "opened"` edge. Its stacking predecessor is its **first**
+    `after: "opened"` dep in `deps` order, followed through a pass chain (`holder`) to the task holding the
+    work now. Only one: a worktree has one base, and the order the author wrote is the only order there is.
+  - _What it stacks on (`stackOf`, read at dispatch):_ `baseBranch` = that predecessor's own `Task.branch`,
+    never a branch an app names, sent only when it is pushed (`Task.pushed`), holds `isBranchName` (#15:
+    a record's branch is only length-checked) and its PR has not merged. A predecessor whose PR merged
+    (`doneBy: "merged"`, `Task.merged`, or `pr.state: "merged"`) starts the task from the default branch,
+    which holds its work and whose copy of its branch may already be deleted. A merge into a stacked parent's
+    branch (`pr.stacked`) is not one: the default branch lacks the work, so it still stacks. Anything else —
+    a predecessor `done` with no PR or pushed branch (mark-done, a no-PR session end), a `here` task, a
+    branch `isBranchName` refuses — leaves nothing to stack on: the spawn carries `noBase: true`, the daemon
+    starts from the default branch as it would anyway, and its preamble says the predecessor left nothing to
+    stack on (#4). `noBase` is only ever `true`, never beside `baseBranch`, changes no git act, and rides the
+    same capability. `released` already frees an `opened` edge only with a PR and a pushed branch, so a
+    `done` predecessor is the only way to `nothing`.
+  - _Routing (`base_unsupported`):_ a task that may stack is a hard filter on `CAPABILITIES.baseBranch`,
+    as attachments is: an older daemon drops `baseBranch` and starts from the default branch silently,
+    the hazard the capability exists for. Judged from the spec (`mayStack`), not from what the
+    predecessor did, so the routing filter and the dispatch after it never disagree when a predecessor
+    pushes or merges in between: a predecessor that merged still keeps its dependent off an older daemon
+    (accepted: the fleet updates as one). Older readers drop `base_unsupported` as any unknown reason. A
+    pin on an incapable machine waits there.
+  - _Placement (`dependencyDistance`):_ the score's distance reads `TaskSpec.base` when set, else the
+    stacking predecessor's own assignment while it stacks on a branch: 0 on its exclave, 0.25 on its
+    machine, 0.5 elsewhere (weight 4). A preference, never a filter (#4 dropped the review's placement
+    restriction): the branch is pushed, so any machine can fetch it. `TaskSpec.base` stays unset by every
+    client; nothing writes it.
+  - _`base_not_found`:_ the verdict fails the task with the code and a message naming the cause first
+    ("the branch of the task it stacks on is not on origin"), the daemon's detail after it, and its
+    dependents fail `dependency_failed` with it. Not re-routed to the default branch: a branch deleted between
+    the predecessor's merge and the leader's reading of it is the one benign cause, and starting without the
+    predecessor's work silently is what the code exists to refuse; re-queueing the task once the merge reads
+    is the owner's call.
+  - _Not built:_ a restack when the predecessor's branch moves in review (docs/scheduler.md, "Stacked
+    rebases"), and lineage or a richer handoff preamble (predecessor title, PR URL) from the leader: the
+    daemon's preamble names the base branch, and the PR is the handoff (#5).
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below), nor a
   released task (asleep or idle, below).

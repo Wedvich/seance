@@ -3,7 +3,7 @@ import { DEP_MISSING_GRACE_MS, REPLAY_WINDOW_MS, STORE_TOMBSTONE_MS, type TaskDe
 import { MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { ADMIT_MAX_AGE_MS } from "../src/deps.ts";
 import { prunable } from "../src/prune.ts";
-import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec, STACKS } from "./fixtures.ts";
 
 /**
  * Admission and hand-declared dependencies (M3 item 4a, PR 0b's semantics),
@@ -14,7 +14,7 @@ import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 const PR = "https://github.com/acme/app/pull/7";
 const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as const;
 
-function setup(fleet = new FakeFleet([machine("a")])) {
+function setup(fleet = new FakeFleet([machine("a", { capabilities: STACKS })])) {
   const clock = { now: NOW };
   const store = new MemoryQueueStore({ now: () => clock.now });
   const scheduler = new Scheduler({ store: readerChecked(store, () => clock.now), fleet, now: () => clock.now });

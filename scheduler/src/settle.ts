@@ -414,6 +414,9 @@ function provesNeverLanded(reply: SessionsAnswer, reservedAt: number | undefined
   return reply.ledgerSince + REPLAY_WINDOW_MS <= reservedAt;
 }
 
+/** Its own words first: the daemon's say which fetch or ref failed, not that the task stacked. */
+const BASE_NOT_FOUND = "the branch of the task it stacks on is not on origin (deleted, or never pushed there)";
+
 /**
  * One spawn resolves its reservation exactly once, with no second spawn:
  * started or already running → `running`; never delivered → `ready`, to be
@@ -435,6 +438,7 @@ export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Tas
   if (reply.code === UNDELIVERED || reply.code === "machine_closed") return advance(task, "ready");
   if (reply.code === UNREACHABLE || isTransportError(reply.code)) return null;
   // A daemon's message can carry a whole stderr; the record keeps a line of it.
-  const failure = { code: reply.code, message: reply.message.slice(0, TASK_FAILURE_LIMITS.message) };
+  const message = reply.code === "base_not_found" ? `${BASE_NOT_FOUND}: ${reply.message}` : reply.message;
+  const failure = { code: reply.code, message: message.slice(0, TASK_FAILURE_LIMITS.message) };
   return advance(task, "failed", { failure });
 }

@@ -67,6 +67,7 @@ import {
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable, unprunable } from "./prune.ts";
+import { stackOf } from "./stack.ts";
 import { drainDue, stampDrain, stampDrainRefusal } from "./drain-trigger.ts";
 import { quotaDue, spillAlerted, stampQuota } from "./quota-trigger.ts";
 import { accountOfPlacement, accountResetAt, exhaustion, route, type Decision, type Exhaustion } from "./route.ts";
@@ -2269,6 +2270,9 @@ export class Scheduler {
 
   async #dispatch(task: Task, at: Reservation, decision: Decision): Promise<void> {
     const { spec } = task;
+    // Read now, not at routing: a predecessor's merge or push in between changes the base, never the target,
+    // since routing filtered every daemon that cannot stack by the spec alone (`base_unsupported`).
+    const stack = stackOf(task, new Map(this.tasks().map((t) => [t.id, t])));
     const reply = await this.#fleet.spawn(at.deviceId, {
       repo: at.clone,
       mode: spec.mode,
@@ -2280,6 +2284,8 @@ export class Scheduler {
       ...(spec.autonomy === undefined ? {} : { autonomy: spec.autonomy }),
       ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
       ...(spec.attachments === undefined ? {} : { attachments: spec.attachments }),
+      ...(stack.on === "branch" ? { baseBranch: stack.branch } : {}),
+      ...(stack.on === "nothing" ? { noBase: true } : {}),
       // A successor holds its predecessor's PR (`#runPass`); its daemon notes it so the session may hand it off.
       // Never under `until: "reported"`: a hand-off leaves no session to report, so the task would sit
       // awaiting-merge until `merge_expired`; withholding it keeps the daemon's `prless` refusal.

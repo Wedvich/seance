@@ -2913,6 +2913,12 @@ export type Reason =
   | { readonly code: "continue_unsupported" }
   /** The task carries attachments and the machine does not advertise `CAPABILITIES.attachments`. */
   | { readonly code: "attachments_unsupported" }
+  /**
+   * M4, stacking: the task may stack (`mayStack`: a worktree task with an `after: "opened"` edge) and the
+   * machine does not advertise `CAPABILITIES.baseBranch`, whose daemon would drop `baseBranch` and start
+   * from the default branch silently. Judged from the spec, so routing and the dispatch after it agree.
+   */
+  | { readonly code: "base_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */
   | { readonly code: "auth_expired" }

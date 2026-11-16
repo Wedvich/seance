@@ -639,14 +639,20 @@ describe("settings record: the leader's term creates it, and no later term repla
  * on a new `branch` of the fixture clone. Returns its path.
  */
 async function realWorktree(taskId: string, branch: string): Promise<string> {
+  const noted = await notedWorktree(taskId);
+  await rm(noted, { recursive: true, force: true });
+  const added = await exec(["git", "worktree", "add", "-q", "-b", branch, noted], { cwd: stack.fixture.repoPath });
+  expect(added.exitCode).toBe(0);
+  return noted;
+}
+
+/** The worktree the suite daemon's launch ledger noted for a task's launch. */
+async function notedWorktree(taskId: string): Promise<string> {
   const ledger = JSON.parse(await Bun.file(join(process.env["SEANCE_STATE_DIR"] ?? "", "launched.json")).text()) as {
     readonly progress: readonly { readonly taskId: string; readonly path?: string }[];
   };
   const noted = ledger.progress.find((p) => p.taskId === taskId)?.path;
   if (noted === undefined) throw new Error("the launch ledger noted no worktree for the task");
-  await rm(noted, { recursive: true, force: true });
-  const added = await exec(["git", "worktree", "add", "-q", "-b", branch, noted], { cwd: stack.fixture.repoPath });
-  expect(added.exitCode).toBe(0);
   return noted;
 }
 
@@ -1402,6 +1408,72 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
       await cancelTask(app.client, id);
       if (second !== null) await tmux(["kill-session", "-t", second.tmuxSession]).catch(() => undefined);
       await second?.stop();
+      app.stop();
+    }
+  }, 60_000);
+});
+
+describe("stacking: the leader's dispatch ↔ the daemon's worktree from origin/<base>", () => {
+  // The leader reads the predecessor's own branch off its record, holds it to `isBranchName` and sends it as
+  // `baseBranch`; the daemon fetches it and makes the worktree from it. A predecessor `done` by its session
+  // with a PR open and its branch pushed releases an `after: "opened"` edge and is not merged, so it stacks.
+  test("a task after: opened on a predecessor with a pushed branch starts from that branch's commit", async () => {
+    const predecessor = "e2e-stack-pred";
+    const dependent = "e2e-stack-next";
+    const branch = "stack-e2e-pred";
+    const app = startApp(stack);
+    let window: string | undefined;
+    try {
+      const pushed = await stack.fixture.pushBranch(branch);
+      const tip = (await exec(["git", "rev-parse", "HEAD"], { cwd: pushed })).stdout.trim();
+      expect(await originRef(`refs/heads/${branch}`)).toBe(tip);
+      await stack.seedTask({
+        id: predecessor,
+        spec: { repo: "github.com/acme/app", mode: "worktree" },
+        state: "done",
+        doneBy: "session",
+        prUrl: "https://github.com/acme/app/pull/9",
+        branch,
+        pushed: true,
+        createdAt: Date.now(),
+      });
+      await stack.restartDaemon();
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === stack.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.capabilities?.includes(CAPABILITIES.baseBranch) === true,
+          ),
+        "the leader verified and the machine advertising baseBranch",
+      );
+      const origin = fixtureOrigin(ready);
+      if (origin === null) throw new Error("the fixture machine lists no repo origin");
+      const queued = await app.client.createTask({
+        id: dependent,
+        spec: { repo: origin, mode: "worktree", deps: [{ task: predecessor, after: "opened" }] },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(queued).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(dependent))?.body?.state === "running",
+        "the stacked task to run",
+        20_000,
+      );
+      window = (await stack.queue().get(dependent))?.body?.assignment?.window;
+      const holds = await exec(["git", "merge-base", "--is-ancestor", tip, "HEAD"], {
+        cwd: await notedWorktree(dependent),
+      });
+      expect(holds.exitCode).toBe(0);
+    } finally {
+      await cancelTask(app.client, dependent);
+      if (window !== undefined) await killWindow(window).catch(() => undefined);
       app.stop();
     }
   }, 60_000);
