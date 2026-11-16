@@ -936,6 +936,67 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
 });
 
 describe("drain: a closed machine ↔ leader ↔ the machine's push and close", () => {
+  /** A verified leader, a machine advertising close, drainPass and softClose, and a committed worktree task running on it. */
+  async function runningWorktreeTask(
+    app: ReturnType<typeof startApp>,
+    taskId: string,
+    branch: string,
+  ): Promise<{ readonly window: string | undefined; readonly tip: string; readonly origin: string }> {
+    await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+    await stack.daemon.leader.settled();
+    const ready = await app.waitForApp(
+      (state) =>
+        state.relay.scheduler.kind === "ready" &&
+        state.relay.machines.some(
+          (m) =>
+            m.deviceId === stack.deviceId &&
+            m.connected &&
+            m.repos.length > 0 &&
+            m.capabilities?.includes(CAPABILITIES.close) === true &&
+            m.capabilities.includes(CAPABILITIES.drainPass) &&
+            m.capabilities.includes(CAPABILITIES.softClose),
+        ),
+      "the leader verified and the machine advertising close, drainPass and softClose",
+    );
+    const origin = fixtureOrigin(ready);
+    if (origin === null) throw new Error("the fixture machine lists no repo origin");
+    expect(
+      await app.client.createTask({
+        id: taskId,
+        spec: { repo: origin, mode: "worktree" },
+        state: "queued",
+        createdAt: Date.now(),
+      }),
+    ).toEqual({ ok: true, landedEarlier: false });
+    await pollUntil(
+      async () => (await stack.queue().get(taskId))?.body?.state === "running",
+      "the task to run",
+      20_000,
+    );
+    const window = (await stack.queue().get(taskId))?.body?.assignment?.window;
+    const worktree = await realWorktree(taskId, branch);
+    await Bun.write(join(worktree, "drain.txt"), "work\n");
+    expect((await exec(["git", "add", "drain.txt"], { cwd: worktree })).exitCode).toBe(0);
+    const committed = await exec(
+      [
+        "git",
+        "-c",
+        "user.email=e2e@seance.test",
+        "-c",
+        "user.name=e2e",
+        "commit",
+        "-q",
+        "--no-gpg-sign",
+        "-m",
+        "drain",
+      ],
+      { cwd: worktree },
+    );
+    expect(committed.exitCode).toBe(0);
+    const tip = (await exec(["git", "rev-parse", "HEAD"], { cwd: worktree })).stdout.trim();
+    return { window, tip, origin };
+  }
+
   // The outside drain no unit test joins: the app's `availability` close, the leader's pass loop seeing `cl`
   // in the real status after the (shortened) grace, the real push of the real worktree, the successor held
   // back by the `closed` filter on the only machine, and the old pane's close. Only the session is a stand-in.
@@ -950,57 +1011,9 @@ describe("drain: a closed machine ↔ leader ↔ the machine's push and close", 
     let successorId: string | undefined;
     let closed = false;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
-      await stack.daemon.leader.settled();
-      const ready = await app.waitForApp(
-        (state) =>
-          state.relay.scheduler.kind === "ready" &&
-          state.relay.machines.some(
-            (m) =>
-              m.deviceId === stack.deviceId &&
-              m.connected &&
-              m.repos.length > 0 &&
-              m.capabilities?.includes(CAPABILITIES.close) === true &&
-              m.capabilities.includes(CAPABILITIES.drainPass),
-          ),
-        "the leader verified and the machine advertising close and drainPass",
-      );
-      const origin = fixtureOrigin(ready);
-      if (origin === null) throw new Error("the fixture machine lists no repo origin");
-      expect(
-        await app.client.createTask({
-          id: taskId,
-          spec: { repo: origin, mode: "worktree" },
-          state: "queued",
-          createdAt: Date.now(),
-        }),
-      ).toEqual({ ok: true, landedEarlier: false });
-      await pollUntil(
-        async () => (await stack.queue().get(taskId))?.body?.state === "running",
-        "the task to run",
-        20_000,
-      );
-      window = (await stack.queue().get(taskId))?.body?.assignment?.window;
-      const worktree = await realWorktree(taskId, branch);
-      await Bun.write(join(worktree, "drain.txt"), "work\n");
-      expect((await exec(["git", "add", "drain.txt"], { cwd: worktree })).exitCode).toBe(0);
-      const committed = await exec(
-        [
-          "git",
-          "-c",
-          "user.email=e2e@seance.test",
-          "-c",
-          "user.name=e2e",
-          "commit",
-          "-q",
-          "--no-gpg-sign",
-          "-m",
-          "drain",
-        ],
-        { cwd: worktree },
-      );
-      expect(committed.exitCode).toBe(0);
-      const tip = (await exec(["git", "rev-parse", "HEAD"], { cwd: worktree })).stdout.trim();
+      const started = await runningWorktreeTask(app, taskId, branch);
+      window = started.window;
+      const { tip } = started;
 
       const reply = await app.client.request<{ ok?: boolean; closed?: number | null }>(stack.deviceId, "availability", {
         open: false,
@@ -1055,6 +1068,99 @@ describe("drain: a closed machine ↔ leader ↔ the machine's push and close", 
       if (window !== undefined) await killWindow(window);
     }
   }, 120_000);
+
+  // The leader ticks only on a machine-list change or its 30 s interval, so a bare sleep would pass against a
+  // leader that ignored `softClose`: an app's create ticks it (and the task it queues waits on the closed machine),
+  // and the queued task leaving `queued` shows that tick ran after the grace.
+  test("a soft close passes nothing; a drain then passes the task on", async () => {
+    const taskId = "e2e-soft-close-task";
+    const branch = "soft-close-e2e";
+    const probeId = "e2e-soft-close-probe";
+    const audit = spyOn(console, "log");
+    const lines = (needle: string): string[] =>
+      audit.mock.calls.map((args) => args.join(" ")).filter((l) => l.includes(needle));
+    const app = startApp(stack);
+    let window: string | undefined;
+    let successorId: string | undefined;
+    let closed = false;
+    let probed = false;
+    const machineStatus = (): { readonly cl?: number; readonly dr?: number } | undefined =>
+      app.client.getState().machines.find((m) => m.deviceId === stack.deviceId)?.status;
+    try {
+      const started = await runningWorktreeTask(app, taskId, branch);
+      window = started.window;
+
+      const soft = await app.client.request<{ ok?: boolean; closed?: number | null }>(stack.deviceId, "availability", {
+        open: false,
+        soft: true,
+      });
+      closed = true;
+      expect(soft).toMatchObject({ closed: expect.any(Number) });
+      await pollUntil(() => (machineStatus()?.cl ?? 0) > 0, "the status to carry cl", 20_000);
+      expect(machineStatus()?.dr).toBeUndefined();
+      await pollUntil(
+        () => lines("audit availability").some((l) => l.includes("outcome=closed soft=true")),
+        "the soft close's audit line",
+        10_000,
+      );
+
+      await Bun.sleep(3 * DRAIN_GRACE_MS);
+      const created = await app.client.createTask({
+        id: probeId,
+        spec: { repo: started.origin, mode: "worktree" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toMatchObject({ ok: true, landedEarlier: false });
+      probed = true;
+      await pollUntil(
+        async () => (await stack.queue().get(probeId))?.body?.state === "ready",
+        "the leader to tick after the grace",
+        20_000,
+      );
+      await Bun.sleep(3_000);
+      // `drained` is the write-ahead stamp, written before any pass I/O: its absence proves none was attempted.
+      expect((await stack.queue().get(taskId))?.body?.drained).toBeUndefined();
+      expect(lines("audit pass").some((l) => l.includes("trigger=drain"))).toBe(false);
+      expect((await stack.queue().get(taskId))?.body?.state).toBe("running");
+      expect(machineStatus()?.dr).toBeUndefined();
+
+      const drain = await app.client.request<{ ok?: boolean; closed?: number | null }>(stack.deviceId, "availability", {
+        open: false,
+      });
+      expect(drain).toEqual(soft);
+      await pollUntil(
+        () => lines("audit availability").some((l) => l.includes("outcome=drain_started")),
+        "the drain's audit line",
+        10_000,
+      );
+      await pollUntil(() => (machineStatus()?.dr ?? 0) > 0, "the status to carry dr", 20_000);
+      await pollUntil(
+        () => lines("audit pass task=").some((l) => l.includes(`task="${taskId}"`) && l.includes("trigger=drain")),
+        "the drain's pass audit line",
+        60_000,
+      );
+      expect(await originRef(`refs/heads/${branch}`)).toBe(started.tip);
+      await pollUntil(
+        async () => {
+          const old = (await stack.queue().get(taskId))?.body;
+          successorId = old?.successor;
+          return old?.state === "superseded" && successorId !== undefined;
+        },
+        "the old task to be superseded, naming the successor",
+        20_000,
+      );
+    } finally {
+      audit.mockRestore();
+      // While closed, so the waiting successor is ended where it stands rather than dispatched on reopen.
+      if (successorId !== undefined) await cancelTask(app.client, successorId);
+      if (probed) await cancelTask(app.client, probeId);
+      await cancelTask(app.client, taskId);
+      if (closed) await app.client.request(stack.deviceId, "availability", { open: true });
+      app.stop();
+      if (window !== undefined) await killWindow(window);
+    }
+  }, 180_000);
 });
 
 describe("hand-off: a successor's inherited PR ↔ the leader's dispatch ↔ the daemon's hand-off", () => {

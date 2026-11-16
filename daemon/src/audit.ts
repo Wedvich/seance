@@ -309,11 +309,11 @@ export function passCloseAudit(
 export function availabilityAudit(
   origin: SpawnOrigin,
   sink: AuditSink,
-): (opened: boolean | null, outcome: string, now?: boolean) => Promise<void> {
-  return async (opened, outcome, now) => {
-    const nowNote = now === true ? " now=true" : "";
+): (opened: boolean | null, outcome: string, now?: boolean, soft?: boolean) => Promise<void> {
+  return async (opened, outcome, now, soft) => {
+    const notes = `${now === true ? " now=true" : ""}${soft === true ? " soft=true" : ""}`;
     await sink(
-      `audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}${nowNote}`,
+      `audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}${notes}`,
     );
   };
 }

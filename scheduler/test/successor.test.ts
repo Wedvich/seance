@@ -2269,6 +2269,30 @@ describe("the drain pass", () => {
     expect(s.fleet.despawns).toHaveLength(1);
   });
 
+  test("a soft-closed softClose machine passes nothing until its drain starts, then once the wait is over", async () => {
+    const s = setup([machine("a", { capabilities: [...CAPABLE, CAPABILITIES.softClose] })]);
+    await running(s, true);
+    close(s, "a");
+    later(s, 3 * WAIT);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+    expect(s.scheduler.task("old")?.state).toBe("running");
+
+    s.fleet.fleet = s.fleet.fleet.map((m) =>
+      m.deviceId === "a" ? { ...m, status: status({ cl: CL, dr: s.clock.now }) } : m,
+    );
+    s.fleet.beat(s.clock.now);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+
+    later(s, WAIT);
+    await tick(s.scheduler);
+    const old = s.scheduler.task("old");
+    expect(old?.state).toBe("superseded");
+    const successor = s.scheduler.task(old?.successor ?? "");
+    expect(successor?.spec.succeeds).toMatchObject({ task: "old", trigger: "drain" });
+  });
+
   test("the successor is placed on another machine when one can take it", async () => {
     const s = setup(twoMachines());
     await running(s, true);

@@ -106,6 +106,25 @@ describe("the collector registry", () => {
     expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
   });
 
+  test("`dr` rides beside `cl` only, never alone", async () => {
+    let closed: number | null = T0 - 5_000;
+    let drainAt: number | null = null;
+    const telemetry = createTelemetry(MetricsStore.memory(), {
+      ...sources,
+      closed: () => closed,
+      drainAt: () => drainAt,
+    });
+    expect(await telemetry.tick(T0)).not.toHaveProperty("dr");
+    drainAt = T0 - 1_000;
+    const draining = await telemetry.tick(T0 + 30_000);
+    expect(draining.cl).toBe(T0 - 5_000);
+    expect(draining.dr).toBe(T0 - 1_000);
+    closed = null;
+    const open = await telemetry.tick(T0 + 60_000);
+    expect(open).not.toHaveProperty("cl");
+    expect(open).not.toHaveProperty("dr");
+  });
+
   test("the custodian's view becomes `cu` only while the seat has one, and adds nothing to the store", async () => {
     let view: CustodianStatus | null = null;
     const store = MetricsStore.memory();

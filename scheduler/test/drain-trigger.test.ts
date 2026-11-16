@@ -63,6 +63,34 @@ describe("drainDue", () => {
   });
 });
 
+describe("drainDue from the drain's start", () => {
+  const softClosed = (status_ = status({ cl: CL })): ReturnType<typeof machine> =>
+    closed({
+      capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.successor, CAPABILITIES.softClose],
+      status: status_,
+    });
+  const X = 3 * WAIT;
+
+  test("a softClose machine with `cl` only is never due, however long it waits", () => {
+    expect(drainDue(task(), softClosed(), CL + 100 * WAIT, DEFAULT_CONFIG)).toBe(false);
+  });
+
+  test("with `dr` it waits the grace from `dr`, not from `cl`", () => {
+    const draining = softClosed(status({ cl: CL, dr: CL + X }));
+    expect(drainDue(task(), draining, CL + WAIT, DEFAULT_CONFIG)).toBe(false);
+    expect(drainDue(task(), draining, CL + X + WAIT - 1, DEFAULT_CONFIG)).toBe(false);
+    expect(drainDue(task(), draining, CL + X + WAIT, DEFAULT_CONFIG)).toBe(true);
+  });
+
+  test("the stamp stays keyed on `cl` when the drain started from `dr`", () => {
+    const draining = softClosed(status({ cl: CL, dr: CL + X }));
+    expect(stampDrain(task(), draining, CL + X + WAIT, DEFAULT_CONFIG)?.drained).toEqual({
+      at: CL,
+      tried: CL + X + WAIT,
+    });
+  });
+});
+
 describe("stampDrain", () => {
   test("writes the attempt, dropping an old refusal, and declines a task no longer due", () => {
     const old = task({ drained: { at: CL - 1, tried: 5, refused: "dirty_worktree" } });

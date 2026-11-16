@@ -131,6 +131,8 @@ export interface WiringCtx {
   readonly stopped: () => boolean;
   /** This machine's `cl`, or null while open (`closedOf(state)`): a session pass sent then carries `drain`. */
   readonly closed: () => number | null;
+  /** This machine's close and drain start while it drains (`drainingOf`); null while open or soft-closed. */
+  readonly draining: () => { readonly cl: number; readonly drainAt: number } | null;
   /** The status loop's `refresh`, late-bound: the seat's view moved and the row should turn over within a beat. */
   readonly refreshStatus?: () => void;
   /** The running source's sha, for `custodian/seat.json`; null when unknown. */
@@ -251,7 +253,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     despawn === undefined
       ? undefined
       : createDrainAsk({
-          closed: ctx.closed,
+          draining: ctx.draining,
           panes: listPanePids,
           askable: (taskId) => ctx.endedTasks.askable(taskId),
           marked: (pane) => late.events?.marked(pane) ?? false,

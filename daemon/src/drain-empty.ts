@@ -5,6 +5,7 @@ import { log } from "./log.ts";
  * while it is closed at a `cl` (DESIGN.md, "The drain's outside pass"). Fed by the status loop's own
  * sessions read, so it costs no read of its own and is as fine as that beat. Memory only, once per `cl` per
  * process: a restart while closed may log a `cl` again, which the line carries for a reader to fold.
+ * On a soft close nothing is drained, so the line then measures the sessions' own finish from `cl`, not a drain; read it with the `availability` line's `soft=true`.
  * Counts only what this daemon itself knows (its panes); moved and stuck are the leader's lines.
  */
 export interface DrainEmptyWatch {

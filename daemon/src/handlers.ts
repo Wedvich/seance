@@ -75,6 +75,7 @@ import { log } from "./log.ts";
 import type { Messages } from "./messages.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
+import type { AvailabilityOutcome, CloseMode } from "./state.ts";
 import { isUpdateAvailable } from "./update-notice.ts";
 
 export interface HandlerContext {
@@ -128,11 +129,11 @@ export interface CustodianControl {
 
 export interface MachineAvailability {
   readonly closed: () => number | null;
-  /** Persists, then refreshes status; `changed` false when it already was. Throws when the write fails. */
+  /** Persists, then refreshes status; `outcome` `unchanged` when nothing changed. Throws when the write fails. */
   readonly set: (
     open: boolean,
-    now?: boolean,
-  ) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
+    mode: CloseMode,
+  ) => Promise<{ readonly closed: number | null; readonly outcome: AvailabilityOutcome }>;
 }
 
 /** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
@@ -793,7 +794,8 @@ async function handleMessageReceipt(
 /**
  * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
  * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
- * machine's own sticky `closed` and refreshes `status`; `now` moves the drain ask's interrupt deadline to now (ignored on an open).
+ * machine's own sticky `closed` and refreshes `status`. A plain close starts the drain; `soft` closes without one (a later
+ * plain close then starts it, outcome `drain_started`); `now` moves the drain ask's interrupt deadline to now. Both are ignored on an open.
  */
 async function handleAvailability(
   ctx: HandlerContext,
@@ -812,15 +814,16 @@ async function handleAvailability(
     return { ok: false, code: "invalid_request", message: "malformed availability request" };
   }
   if (ctx.availability === undefined) {
-    await audit(request.open, "unsupported", request.now);
+    await audit(request.open, "unsupported", request.now, request.soft);
     return { ok: false, code: "unsupported", message: "this daemon cannot be closed" };
   }
   try {
-    const { closed, changed } = await ctx.availability.set(request.open, request.now === true);
-    await audit(request.open, !changed ? "unchanged" : request.open ? "reopened" : "closed", request.now);
+    const mode: CloseMode = request.soft === true ? "soft" : request.now === true ? "now" : "drain";
+    const { closed, outcome } = await ctx.availability.set(request.open, mode);
+    await audit(request.open, outcome, request.now, request.soft);
     return { ok: true, closed };
   } catch (err) {
-    await audit(request.open, "internal_error", request.now);
+    await audit(request.open, "internal_error", request.now, request.soft);
     log.error(`availability: could not save state: ${String(err)}`);
     return { ok: false, code: "internal_error", message: "could not save this machine's state" };
   }

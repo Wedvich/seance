@@ -2425,6 +2425,14 @@ describe("M4 shapes", () => {
     expect(parseDecision(decide({ code: "closed" }))?.candidates[0]?.rejected).toEqual([{ code: "closed" }]);
   });
 
+  test("`dr`, the drain's start, is kept only beside `cl` as a finite positive number", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, cl: 100, dr: 200 })).toEqual({ at: 1, scan: 2, cl: 100, dr: 200 });
+    expect(parseMachineStatus({ at: 1, scan: 2, cl: 100 })).not.toHaveProperty("dr");
+    expect(parseMachineStatus({ at: 1, scan: 2, dr: 200 })).toBeNull();
+    for (const dr of [0, -1, Number.NaN, "1", true, null])
+      expect(parseMachineStatus({ at: 1, scan: 2, cl: 100, dr })).toBeNull();
+  });
+
   test("a status carries the custodian's view as `cu`; a bad one is dropped alone and the rest of the status stays", () => {
     const rc = `session_${"A".repeat(64)}`;
     const good = { s: "running", e: 1_763_000_000, n: [999, 0, 3], rc } as const;
@@ -2516,7 +2524,18 @@ describe("M4 shapes", () => {
     expect(parseAvailabilityRequest({ open: false, now: true })).toEqual({ open: false, now: true });
     expect(parseAvailabilityRequest({ open: true, now: true })).toEqual({ open: true, now: true });
     expect(parseAvailabilityRequest({ open: false, now: false })).toEqual({ open: false });
-    for (const bad of [null, "x", {}, { open: "false" }, { open: true, now: 1 }])
+    expect(parseAvailabilityRequest({ open: false, soft: true })).toEqual({ open: false, soft: true });
+    expect(parseAvailabilityRequest({ open: true, soft: true })).toEqual({ open: true, soft: true });
+    expect(parseAvailabilityRequest({ open: false, soft: false })).toEqual({ open: false });
+    for (const bad of [
+      null,
+      "x",
+      {},
+      { open: "false" },
+      { open: true, now: 1 },
+      { open: false, soft: 1 },
+      { open: false, soft: true, now: true },
+    ])
       expect(parseAvailabilityRequest(bad)).toBeNull();
     expect(parseAvailabilityResponse({ ok: true, closed: null })).toEqual({ ok: true, closed: null });
     expect(parseAvailabilityResponse({ ok: true, closed: 5 })).toEqual({ ok: true, closed: 5 });
