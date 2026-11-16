@@ -19,6 +19,7 @@ import {
   accountDisplayName,
   deriveArchivist,
   deriveCloseSheet,
+  deriveDrainSheet,
   custodianMenu,
   deriveMachines,
   type CustodianRow,
@@ -102,6 +103,7 @@ describe("the drain row and the close sheet", () => {
 
   test("a closed machine's row says what is moving and lists what is stuck", () => {
     expect(draw(inputs())?.drain).toEqual({
+      draining: true,
       summary: "moving 1 · 2 stuck",
       stuck: ["t2: Can't move: runs in the clone", "Not a task: close it yourself"],
     });
@@ -223,6 +225,96 @@ describe("the close sheet for a drainAsk machine", () => {
     expect(deriveCloseSheet(old, inputs([running("t1")]))[1]).toBe(
       "1 running task will be passed to other machines in 10 minutes unless you reopen it.",
     );
+  });
+});
+
+describe("the soft close", () => {
+  const SOFT = [CAPABILITIES.close, CAPABILITIES.softClose, CAPABILITIES.drainAsk];
+  const leader = machine({
+    deviceId: "lead",
+    name: "lead",
+    capabilities: [CAPABILITIES.drain, CAPABILITIES.drainPass, CAPABILITIES.softClose],
+  });
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "lead", term: 1 };
+  const CL = NOW - 60_000;
+  const running = (id: string, state: Task["state"] = "running"): Task => ({
+    id,
+    spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "x", title: id },
+    state,
+    createdAt: 1,
+    assignment: { deviceId: "dev-1", exclave: "default", clone: "seance" },
+  });
+  const pane = (taskId: string): SessionEntry => ({ window: "w", repo: "seance", path: "/x", taskId });
+  const inputs = (tasks: Task[], idle: string[] = []): DrainInputs => ({
+    passes: true,
+    tasks,
+    sessions: { "dev-1": { sessions: tasks.map((t) => pane(t.id)) } },
+    idle,
+  });
+  const cardOf = (m: Machine, others: readonly Machine[] = [leader], drains?: DrainInputs) =>
+    deriveMachines([m, ...others], NOW, ready, {}, [], undefined, true, drains).cards[0];
+
+  test("Close is soft only where the machine and the verified leader both advertise softClose", () => {
+    expect(cardOf(machine({ capabilities: SOFT }))?.softClose).toBe(true);
+    expect(cardOf(machine({ capabilities: [CAPABILITIES.close] }))?.softClose).toBe(false);
+    const oldLeader = { ...leader, capabilities: [CAPABILITIES.drain, CAPABILITIES.drainPass] };
+    expect(cardOf(machine({ capabilities: SOFT }), [oldLeader])?.softClose).toBe(false);
+    // A leader that only claims it, unverified, offers nothing soft.
+    const unverified = deriveMachines([machine({ capabilities: SOFT }), leader], NOW, {
+      kind: "unverified",
+      deviceId: "lead",
+      term: 1,
+    }).cards[0];
+    expect(unverified?.softClose).toBe(false);
+  });
+
+  test("the soft sheet leads with what Close leaves running, then the drain's lines under Close and drain", () => {
+    const open = machine({ capabilities: SOFT });
+    expect(deriveCloseSheet(open, inputs([running("t1")]), NO_LEADER, true)).toEqual([
+      "Close stops new work on mac. Running tasks keep going until they finish or you drain the machine.",
+      "Close and drain: 1 running task will be asked to pass itself at its next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
+    ]);
+    const note = "mac runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const leads = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
+    expect(deriveCloseSheet(open, inputs([running("t1")]), leads, true).at(-1)).toBe(note);
+  });
+
+  test("a soft-closed machine's row says what still runs, and what is idle or waiting on you", () => {
+    const soft = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL } });
+    const tasks = [running("t1"), running("t2"), running("t3", "needs-input")];
+    expect(cardOf(soft, [leader], inputs(tasks, ["t2"]))?.drain).toEqual({
+      draining: false,
+      summary: "running 1 · 1 idle at its prompt · 1 waiting on you",
+      stuck: [],
+    });
+    const draining = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL, dr: CL } });
+    expect(cardOf(draining, [leader], inputs(tasks, ["t2"]))?.drain).toMatchObject({
+      draining: true,
+      summary: "moving 3",
+    });
+  });
+
+  test("Drain and Drain now on a soft close; Drain now alone while the ask's grace runs; none after it or while open", () => {
+    const at = (status: Partial<MachineStatus>, caps: readonly string[] = SOFT) =>
+      cardOf(machine({ capabilities: caps, status: { at: S - 5, scan: 1, ...status } }))?.drainActions;
+    expect(at({ cl: CL })).toEqual(["drain", "now"]);
+    expect(at({ cl: CL }, [CAPABILITIES.close, CAPABILITIES.softClose])).toEqual(["drain"]);
+    expect(at({ cl: CL, dr: NOW - 299_000 })).toEqual(["now"]);
+    expect(at({ cl: CL, dr: NOW - 300_000 })).toEqual([]);
+    // A daemon without softClose drained from `cl`.
+    expect(at({ cl: NOW - 60_000 }, [CAPABILITIES.close, CAPABILITIES.drainAsk])).toEqual(["now"]);
+    expect(at({})).toEqual([]);
+    // No close can be sent without a verified drain leader.
+    const closed = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL } });
+    expect(deriveMachines([closed], NOW, NO_LEADER).cards[0]?.drainActions).toEqual([]);
+  });
+
+  test("the Drain sheet says what the drain will do with what still runs there", () => {
+    const soft = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL } });
+    expect(deriveDrainSheet(soft, inputs([running("t1")]))).toEqual([
+      "mac is closed. Draining it moves its running work off it.",
+      "1 running task will be asked to pass itself at its next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
+    ]);
   });
 });
 

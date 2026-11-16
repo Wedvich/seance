@@ -2230,7 +2230,7 @@ describe("store", () => {
     }
   });
 
-  test("a drain-now close sends now to a drainAsk machine under a drain leader, and is refused locally for one without", async () => {
+  test("a close sends soft, drain or now as asked, and soft or now is refused locally for a machine without its capability", async () => {
     const leaderId = listed.autoLeader;
     const info = await seal(
       key,
@@ -2239,7 +2239,7 @@ describe("store", () => {
         id: leaderId,
         ts: Date.now(),
         op: "machine-info",
-        payload: { ...machineInfo("Lead"), capabilities: ["drain"] },
+        payload: { ...machineInfo("Lead"), capabilities: ["drain", "softClose"] },
       },
     );
     const socket = await connectDaemon(relay);
@@ -2259,7 +2259,7 @@ describe("store", () => {
       relay,
       key,
       asks,
-      { ...machineInfo("Asks"), capabilities: ["close", "drainAsk"] },
+      { ...machineInfo("Asks"), capabilities: ["close", "drainAsk", "softClose"] },
       {
         sessions: () => ({ sessions: [], at: Date.now() }),
         availability: (payload) => {
@@ -2286,12 +2286,24 @@ describe("store", () => {
       await waitForApp(online(asks), "asking machine online");
       await waitForApp(online(plain), "plain machine online");
       await waitForApp((s) => s.relay.scheduler.kind === "ready", "leader verified");
-      await store.setMachineOpen(plain, false, true);
+      await store.setMachineOpen(plain, false, "now");
       const refused = store.getState().availability[plain];
       expect(refused?.kind === "failed" ? refused.text : "").toContain("can't drain now");
+      // An older daemon would drop `soft` and drain: never sent.
+      await store.setMachineOpen(plain, false, "soft");
+      const hard = store.getState().availability[plain];
+      expect(hard?.kind === "failed" ? hard.text : "").toContain("can't close without draining");
       expect(askedBy.plain).toEqual([]);
-      await store.setMachineOpen(asks, false, true);
-      expect(askedBy.asks).toEqual([{ open: false, now: true }]);
+      await store.setMachineOpen(asks, false, "now");
+      await store.setMachineOpen(asks, false, "soft");
+      await store.setMachineOpen(asks, false, "drain");
+      await store.setMachineOpen(asks, false);
+      expect(askedBy.asks).toEqual([
+        { open: false, now: true },
+        { open: false, soft: true },
+        { open: false },
+        { open: false },
+      ]);
     } finally {
       socket.close();
       asking.close();

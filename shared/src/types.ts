@@ -1368,7 +1368,7 @@ export interface MachineStatus {
    */
   readonly cl?: number;
   /**
-   * Unix ms the drain of this close began (`closed.drainAt`, docs/drain.md §13): only beside `cl`; absent while
+   * Unix ms the drain of this close began (`closed.drainAt`, docs/drain.md N5): only beside `cl`; absent while
    * soft-closed, while open, and from an older daemon. Never trimmed: a trimmed `dr` would stop a drain the owner
    * started. Not `QuotaObservation.dr` (seven-day reset), a field of a quota entry.
    */

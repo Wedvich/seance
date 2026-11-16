@@ -764,7 +764,7 @@ describe("set_machine_open", () => {
 
   async function call(
     fake: FakeRelay,
-    args: { machine: string; open: boolean; now?: boolean },
+    args: { machine: string; open: boolean; now?: unknown; drain?: unknown; [key: string]: unknown },
   ): Promise<{ readonly text: string; readonly error: boolean }> {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, fakeLocal());
@@ -874,6 +874,69 @@ describe("set_machine_open", () => {
       lazy.stop();
       expect(result.isError).toBe(true);
       expect(fake.requests).toHaveLength(1);
+    });
+  });
+
+  describe("the soft close", () => {
+    const SOFT = ["close", "drain", "drainAsk", "drainPass", "softClose"];
+    const SOFT_LEADER = machine({ capabilities: SOFT });
+    const SOFT_TARGET = machine({ deviceId: "device-2", name: "homelab", capabilities: SOFT });
+    const soft = (machines = [SOFT_LEADER, SOFT_TARGET]): FakeRelay => {
+      const fake = fakeRelay(machines, () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      return fake;
+    };
+
+    test("is the default under the gate, and says the tasks keep going", async () => {
+      const fake = soft();
+      const { text, error } = await call(fake, { machine: "homelab", open: false });
+      expect(error).toBe(false);
+      expect(text).toBe(
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+      );
+      expect(fake.requests).toEqual([
+        { deviceId: "device-2", op: "availability", payload: { open: false, soft: true } },
+      ]);
+    });
+
+    test("drain sends today's close; now implies drain", async () => {
+      const fake = soft();
+      await call(fake, { machine: "homelab", open: false, drain: true });
+      await call(fake, { machine: "homelab", open: false, now: true });
+      expect(fake.requests.map((r) => r.payload)).toEqual([{ open: false }, { open: false, now: true }]);
+    });
+
+    test("no soft close without softClose on the target or the leader", async () => {
+      const oldTarget = soft([SOFT_LEADER, { ...SOFT_TARGET, capabilities: ["close", "drainAsk"] }]);
+      await call(oldTarget, { machine: "homelab", open: false });
+      const oldLeader = soft([machine({ capabilities: ["drain", "drainPass"] }), SOFT_TARGET]);
+      await call(oldLeader, { machine: "homelab", open: false });
+      expect([...oldTarget.requests, ...oldLeader.requests].map((r) => r.payload)).toEqual([
+        { open: false },
+        { open: false },
+      ]);
+    });
+
+    test("drain and now are true only, and the input is strict", async () => {
+      const fake = soft();
+      for (const args of [
+        { machine: "homelab", open: false, drain: false },
+        { machine: "homelab", open: false, now: false },
+        { machine: "homelab", open: false, soft: true },
+      ]) {
+        expect((await call(fake, args)).error).toBe(true);
+      }
+      expect(fake.requests).toEqual([]);
+    });
+
+    test("closing the verified leader softly carries the leader note", async () => {
+      const fake = soft([SOFT_LEADER, SOFT_TARGET]);
+      fake.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+      const { text } = await call(fake, { machine: "homelab", open: false });
+      expect(text.split("\n")).toEqual([
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+        "homelab runs the queue: while it is down, the queue stops unless another machine can take over.",
+      ]);
     });
   });
 
@@ -4363,7 +4426,10 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
   interface Listed {
     readonly name: string;
     readonly drain?: {
-      readonly moving: number;
+      readonly draining: boolean;
+      readonly moving?: number;
+      readonly running?: number;
+      readonly idle?: number;
       readonly waitingOnYou: number;
       readonly moved: number;
       readonly stuck: readonly { readonly taskId?: string; readonly reason: string }[];
@@ -4407,6 +4473,7 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
     );
     const listed = await list(fake);
     expect(listed.find((m) => m.name === "homelab")?.drain).toEqual({
+      draining: true,
       moving: 2,
       waitingOnYou: 1,
       moved: 1,
@@ -4414,6 +4481,33 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
       empty: false,
     });
     expect(listed.find((m) => m.name === "MacBook Pro")).not.toHaveProperty("drain");
+  });
+
+  test("a soft-closed machine says it is not draining, and what still runs there, idle or not", async () => {
+    const soft = { ...closedBox, capabilities: ["close", "softClose"] };
+    const fake = drainRelay(
+      [LEADER, soft],
+      () => ({
+        tasks: [
+          mkTask("t1"),
+          mkTask("t2"),
+          mkTask("t3", { state: "needs-input" }),
+          mkTask("t4", { spec: { repo: "github.com/m/seance", mode: "here", prompt: "x" } }),
+        ],
+        at: 1,
+        idle: [{ taskId: "t2", since: 1 }],
+      }),
+      () => ({ sessions: [pane("t1"), pane("t2"), pane("t3"), pane("t4")], at: 1 }),
+    );
+    expect((await list(fake)).find((m) => m.name === "homelab")?.drain).toEqual({
+      draining: false,
+      running: 2,
+      idle: 1,
+      waitingOnYou: 1,
+      moved: 0,
+      stuck: [],
+      empty: false,
+    });
   });
 
   test("a closed machine whose sessions cannot be read says empty is unknown", async () => {

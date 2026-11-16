@@ -12,6 +12,7 @@ import {
 } from "../src/state.ts";
 import {
   canDrainNow,
+  canSoftClose,
   deriveCloseAvailability,
   deriveDrainAvailability,
   derivePinProblem,
@@ -356,6 +357,22 @@ describe("banner and button", () => {
     expect(deriveCloseAvailability(relay({ machines: [target] }), target)).toBe(false);
     const mute = machine({ capabilities: [] });
     expect(deriveCloseAvailability(leading([CAPABILITIES.drain]), mute)).toBe(false);
+  });
+
+  test("a soft close is offered only where the target and the verified leader both advertise softClose", () => {
+    const soft = machine({ capabilities: [CAPABILITIES.close, CAPABILITIES.softClose] });
+    const leading = (target: Machine, capabilities: string[], kind: "ready" | "unverified" = "ready"): RelayState =>
+      relay({
+        machines: [target, machine({ deviceId: "dev-2", name: "Lead", capabilities })],
+        scheduler: { kind, deviceId: "dev-2", term: 1 },
+      });
+    expect(canSoftClose(leading(soft, [CAPABILITIES.drain, CAPABILITIES.softClose]), soft)).toBe(true);
+    expect(canSoftClose(leading(soft, [CAPABILITIES.drain]), soft)).toBe(false);
+    expect(canSoftClose(leading(soft, [CAPABILITIES.drain, CAPABILITIES.softClose], "unverified"), soft)).toBe(false);
+    // softClose without drain: no close may be sent at all.
+    expect(canSoftClose(leading(soft, [CAPABILITIES.softClose]), soft)).toBe(false);
+    const hard = machine({ capabilities: [CAPABILITIES.close] });
+    expect(canSoftClose(leading(hard, [CAPABILITIES.drain, CAPABILITIES.softClose]), hard)).toBe(false);
   });
 
   test("Drain now is offered only to a machine that advertises drainAsk, whatever else it advertises", () => {

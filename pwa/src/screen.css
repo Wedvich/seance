@@ -2330,6 +2330,27 @@
   color: var(--warn);
 }
 
+/* A closed machine's Drain / Drain now, under its drain row: small, so the card stays a status card. */
+.fleet-drain-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.fleet-drain-actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.8125rem;
+}
+
+.fleet-drain-actions button:disabled {
+  opacity: 0.5;
+}
+
 /* Wraps between its parts, never inside one: a 390px card holds two or three. */
 .custodian-row {
   display: flex;

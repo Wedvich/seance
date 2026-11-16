@@ -19,7 +19,7 @@ import {
 import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
-import { queueTasksFor, waitForDrain } from "./availability-client.ts";
+import { queueTasksFor, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import {
   autoFleet,
@@ -1046,6 +1046,87 @@ describe("seanced close / open", () => {
     }
   });
 
+  describe("the soft close", () => {
+    const SOFT = ["close", "drain", "drainAsk", "drainPass", "softClose"];
+    const leader = machine({ capabilities: SOFT });
+    const target = (fields: Partial<Machine> = {}): Machine =>
+      machine({ deviceId: "device-2", name: "homelab", capabilities: SOFT, ...fields });
+
+    async function close(
+      machines: readonly Machine[],
+      flags: { now?: boolean; drain?: boolean } = {},
+    ): Promise<{ outcome: AvailabilityOutcome; requests: unknown[] }> {
+      const fake = fakeRelay(machines, () => ({ ok: true, closed: 9_000 }));
+      fake.setState({ scheduler: LEADING });
+      const lazy = new LazyRelay({ create: () => fake });
+      try {
+        const outcome = await availabilityViaFleet(
+          "homelab",
+          false,
+          flags.now === true,
+          relayFleet(lazy),
+          () => Promise.resolve("device-1"),
+          false,
+          flags.drain === true,
+        );
+        return { outcome, requests: fake.requests.map((r) => r.payload) };
+      } finally {
+        lazy.stop();
+      }
+    }
+
+    test("is the default where the target and the verified leader advertise softClose, and says the tasks keep going", async () => {
+      const { outcome, requests } = await close([leader, target()]);
+      expect(requests).toEqual([{ open: false, soft: true }]);
+      expect(outcome.text).toBe(
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+      );
+      expect(outcome.closed).toMatchObject({ at: 9_000, draining: false });
+    });
+
+    test("--drain and --now send today's close; --now with now", async () => {
+      const drained = await close([leader, target()], { drain: true });
+      expect(drained.requests).toEqual([{ open: false }]);
+      expect(drained.outcome.text).toContain("asked to pass themselves");
+      expect(drained.outcome.closed?.draining).toBe(true);
+      expect((await close([leader, target()], { now: true })).requests).toEqual([{ open: false, now: true }]);
+    });
+
+    test("a target or a leader without softClose gets today's close and wording", async () => {
+      const oldTarget = target({ capabilities: ["close", "drainAsk"] });
+      const old = await close([leader, oldTarget]);
+      expect(old.requests).toEqual([{ open: false }]);
+      expect(old.outcome.text).toContain("asked to pass themselves");
+      expect(old.outcome.closed?.draining).toBe(true);
+      const oldLeader = machine({ capabilities: ["close", "drain", "drainPass"] });
+      expect((await close([oldLeader, target()])).requests).toEqual([{ open: false }]);
+    });
+
+    test("a drain on a soft-closed machine says it is draining it; a soft close of a closed one changes nothing", async () => {
+      const softClosed = target({ status: { at: 1, scan: 1, cl: 9_000 } });
+      const since = new Date(9_000).toISOString();
+      const drained = await close([leader, softClosed], { drain: true });
+      expect(drained.outcome.text).toBe(
+        `homelab was already closed (since ${since}); draining it: its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it`,
+      );
+      expect(drained.outcome.closed?.draining).toBe(true);
+      const again = await close([leader, softClosed]);
+      expect(again.outcome.text).toBe(`homelab was already closed (since ${since})`);
+      expect(again.outcome.closed?.draining).toBe(false);
+      // Already draining: a soft request is the daemon's `unchanged`, and the wait follows the drain.
+      const draining = target({ status: { at: 1, scan: 1, cl: 9_000, dr: 9_000 } });
+      expect((await close([leader, draining])).outcome.closed?.draining).toBe(true);
+    });
+
+    test("closing the verified leader softly still carries the leader note", async () => {
+      const { outcome } = await close([target({ deviceId: "device-1" })]);
+      expect(outcome.text.split("\n")).toEqual([
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+        "homelab runs the queue: while it is down, the queue stops unless another machine can take over.",
+      ]);
+    });
+  });
+
   test("a machine with no daemon state has no this-machine to act on", async () => {
     const fake = fakeRelay([self]);
     const lazy = new LazyRelay({ create: () => fake });
@@ -1120,6 +1201,7 @@ describe("seanced close --wait", () => {
     fake: ReturnType<typeof fakeRelay>,
     pollMs = 1,
     offlineGraceMs = 30,
+    draining = true,
   ): Promise<{ code: number; text: string; printed: string[] }> {
     const lazy = new LazyRelay({ create: () => fake });
     const printed: string[] = [];
@@ -1128,6 +1210,7 @@ describe("seanced close --wait", () => {
         fleet: relayFleet(lazy),
         deviceId: "device-1",
         closedAt: CL,
+        draining,
         pollMs,
         offlineGraceMs,
         print: (line) => printed.push(line),
@@ -1277,11 +1360,84 @@ describe("seanced close --wait", () => {
       asked.push(request);
       return Promise.resolve({ tasks: request?.tasks === undefined ? [] : [task("old-t")], at: 1 });
     };
-    expect(await queueTasksFor({ queue, queueByIdUnsupported: true }, ["old-t"])).toEqual([]);
+    expect(await queueTasksFor({ queue, queueByIdUnsupported: true }, ["old-t"])).toEqual({ tasks: [], idle: [] });
     expect(asked).toEqual([undefined]);
     asked.length = 0;
-    expect(await queueTasksFor({ queue }, ["old-t"])).toEqual([task("old-t")]);
+    expect(await queueTasksFor({ queue }, ["old-t"])).toEqual({ tasks: [task("old-t")], idle: [] });
     expect(asked).toEqual([undefined, { tasks: ["old-t"] }]);
+  });
+
+  test("a soft close's wait says it waits for the tasks to finish on their own, and tells running from idle", async () => {
+    let polls = 0;
+    const soft = closedBox({ capabilities: ["close", "drain", "drainPass", "softClose"] });
+    const fake = polled(soft, {
+      sessions: () => {
+        polls += 1;
+        return { sessions: polls < 3 ? [pane("t1"), pane("t2")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1"), task("t2")], at: 1, idle: [{ taskId: "t2", since: 1 }] }),
+    });
+    const outcome = await wait(fake, 1, 30, false);
+    expect(outcome.code).toBe(0);
+    expect(outcome.printed).toEqual([
+      "MacBook Pro: waiting for its tasks to finish on their own; nothing is moved until you drain it (seanced close --drain), and a task idle at its prompt never finishes",
+      "MacBook Pro: running 1 · 1 idle at its prompt",
+    ]);
+  });
+
+  test("a soft close's wait says once when only idle or waiting tasks remain, since it would never end by itself", async () => {
+    let polls = 0;
+    const soft = closedBox({ capabilities: ["close", "drain", "drainPass", "softClose"] });
+    const fake = polled(soft, {
+      sessions: () => {
+        polls += 1;
+        return { sessions: polls < 6 ? [pane("t1")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1, idle: [{ taskId: "t1", since: 1 }] }),
+    });
+    const outcome = await wait(fake, 1, 30, false);
+    expect(outcome.code).toBe(0);
+    expect(outcome.printed).toHaveLength(3);
+    expect(outcome.printed[1]).toContain("nothing left is running");
+    expect(outcome.printed[1]).toContain("seanced close --drain");
+    expect(outcome.printed[2]).toBe("MacBook Pro: 1 idle at its prompt");
+  });
+
+  test("a reopen after the owner started the drain says the drain stopped", async () => {
+    let polls = 0;
+    const caps = ["close", "drain", "drainPass", "softClose"] as const;
+    const fake = polled(closedBox({ capabilities: [...caps], status: { at: 1, scan: 1, cl: CL, dr: CL + 1 } }), {
+      sessions: () => {
+        polls += 1;
+        if (polls === 2) fake.setState({ machines: [closedBox({ capabilities: [...caps], status: undefined })] });
+        return { sessions: [pane("t1")], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    expect(await wait(fake, 1, 30, false)).toMatchObject({
+      code: 1,
+      text: "MacBook Pro was reopened; the drain stopped",
+    });
+  });
+
+  test("a drain started while a soft close's wait runs shows from the status", async () => {
+    let polls = 0;
+    const caps = ["close", "drain", "drainPass", "softClose"] as const;
+    const fake = polled(closedBox({ capabilities: [...caps] }), {
+      sessions: () => {
+        polls += 1;
+        if (polls === 2) {
+          fake.setState({
+            machines: [closedBox({ capabilities: [...caps], status: { at: 1, scan: 1, cl: CL, dr: CL + 1 } })],
+          });
+        }
+        return { sessions: polls < 4 ? [pane("t1")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    const outcome = await wait(fake, 1, 30, false);
+    expect(outcome.code).toBe(0);
+    expect(outcome.printed.slice(1)).toEqual(["MacBook Pro: running 1", "MacBook Pro: moving 1"]);
   });
 
   test("an older close's cl is not a reopen", async () => {
