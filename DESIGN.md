@@ -8505,8 +8505,10 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   cl=<cl> after_ms=<ms> peak=<n>` (`grep 'drain: empty'` in its log), the first time its live panes read empty
   while it is closed at `cl` (`daemon/src/drain-empty.ts`). The panes are the status loop's own sessions read
   (`watchedSessions`), the list the `sessions` op answers and `drainView` reads `empty` from, so it costs no read
-  of its own and is as fine as that beat (`STATUS_INTERVAL_MS`, 30 s, plus the refresh a close asks for); `cl`
-  is taken before the read, and a failed read never counts as empty. `after_ms` is the daemon's clock less
+  of its own and is as fine as that beat (`STATUS_INTERVAL_MS`, 30 s, plus the refresh a close asks for), a beat
+  that starts only once the daemon has registered, so one that cannot reach the relay logs nothing until it can (`after_ms`
+  then runs to that point); `cl` is read before and after the list and counts only if unchanged (a reopen
+  meanwhile makes it unobserved), and a failed read never counts as empty. `after_ms` is the daemon's clock less
   `cl` (the same clock), `peak` the most panes a read saw since this `cl` was first seen. Memory only, once per
   `cl` per process: a reopen forgets it, a later close is watched afresh, and a restart while closed may log the
   same `cl` again (after the downtime), which a reader folds by `cl`. A box already empty at its close logs

@@ -70,17 +70,17 @@ One line each; the text is in DESIGN.md.
 - **§4 The drain: ask, then pass, then report.** Step A (the session ask, with its two spikes): "The drain's
   session ask". Steps B and C (the outside pass, the report): "The drain's outside pass".
 - **§5 Progress, and "empty":** `drainView` in `shared/src/drain.ts`, "The drain's outside pass".
+- **§6 Leadership** (a closed leader keeps leading; the close sheet's, `seanced close`'s and
+  `set_machine_open`'s warning): "Closing a machine". Its "Later" stays below.
 - **§8 Surfaces:** PWA switch, close sheet, drain row, `seanced close`/`open`, MCP `set_machine_open` and
   `list_machines`' `drain`: "Closing a machine", "The drain's outside pass" and "The drain's session ask" (`now`,
   "Drain now", the ask's wording). Raycast: none (spawn-only).
 - **§9 Threat model:** the invariants list ("Closing is the owner's act", "The drain's session ask is constant
   keys…") and `CLAUDE.md`.
-- **§6 Leadership** (a closed leader keeps leading; the close sheet's, `seanced close`'s and
-  `set_machine_open`'s warning): "Closing a machine". Its "Later" stays below.
 - **§12's time from close to empty:** "The drain's outside pass" (the daemon's `drain: empty` line).
 - **Build order:** items 1 to 3 are built, in that order, each in its own PR.
 
-## Not built
+## Left
 
 ### 6. Leadership — _Later_
 

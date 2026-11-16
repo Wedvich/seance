@@ -80,4 +80,20 @@ describe("the drain's time to empty", () => {
     expect(await read()).toEqual([]);
     expect(lines).toEqual(["drain: empty cl=1000 after_ms=6000 peak=0"]);
   });
+
+  test("a reopen while the list is in flight leaves it unobserved: no line for an abandoned drain", async () => {
+    const { observe, lines, at } = watch();
+    at.now = 7_000;
+    let cl: number | null = 1_000;
+    const read = watchedSessions(
+      async () => {
+        cl = null;
+        return [];
+      },
+      () => cl,
+      { observe },
+    );
+    expect(await read()).toEqual([]);
+    expect(lines).toEqual([]);
+  });
 });

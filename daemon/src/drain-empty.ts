@@ -34,8 +34,9 @@ export function createDrainEmptyWatch(deps: {
 }
 
 /**
- * `read` with each successful list fed to `watch`. `cl` is taken before the read, so an empty list was
- * listed after that close; a failed read rejects as before and never reaches the watch (unread is not empty).
+ * `read` with each successful list fed to `watch`. `cl` counts only if it is the same before and after the
+ * read: a reopen (or reopen and re-close) while the list was in flight makes it unobserved, so an empty list
+ * was listed under that close; a failed read rejects as before and never reaches the watch (unread is not empty).
  */
 export function watchedSessions<T>(
   read: () => Promise<readonly T[]>,
@@ -45,7 +46,7 @@ export function watchedSessions<T>(
   return async () => {
     const cl = closed();
     const list = await read();
-    watch.observe(cl, list.length);
+    watch.observe(closed() === cl ? cl : null, list.length);
     return list;
   };
 }
