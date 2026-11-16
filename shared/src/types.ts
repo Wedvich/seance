@@ -3865,6 +3865,20 @@ export interface QueueResponse {
    * ceiling on `running` — a task placed past the caps (`run-now`) overprovisions it. Absent from older leaders.
    */
   readonly globalMax?: number;
+  /**
+   * Session passes (`session-pass`, fire-and-forget) this leader refused in the last ten minutes, whatever
+   * `QueueRequest.tasks` asked for: what `pass_to_successor` reads to tell its session why no successor came.
+   * Memory only, so a new term shows none. Absent from older leaders, and when there are none.
+   */
+  readonly passRefused?: readonly PassRefusalRef[];
+}
+
+/** A session's own pass the leader refused: the code, and the `SessionPass.at` it answers (the sender's clock). */
+export interface PassRefusalRef {
+  readonly taskId: string;
+  /** A `SchedulerErrorCode`, raw as read, as `SchedulerError.code` is. */
+  readonly code: string;
+  readonly sentAt?: number;
 }
 
 /** A task released for sitting idle at its prompt, and since when it has (leader's clock, ms). */

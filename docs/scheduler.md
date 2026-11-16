@@ -1270,7 +1270,10 @@ of M4 has landed.
        and despawn it causes audit under their own origins. It is a leader-internal act, not a new surface.
      - **Session-pass refusals.** A session's own pass the leader refuses with a code other than `conflict`,
        `finished` or `not_found` raises a `pass-refused` alert, once per task per term (in memory: a new
-       leader may alert once more).
+       leader may alert once more). The session itself is told every refusal (2026-11-16): the leader keeps
+       it ten minutes and `queue` lists it (`passRefused`), which `pass_to_successor` reads after its push; a
+       task already finished (its merge settled it under `until: "merged"`) is refused before the push
+       (DESIGN.md, MCP server, `pass_to_successor`, and Scheduler, "Done detection").
      - _The spec this was built from:_
      - **Trigger.** The leader evaluates it every tick from what it already holds: `quotaOf`'s
        windows, `creditsSpent` and the spill notion (`Candidate.spill.spending`). An account is
@@ -1511,9 +1514,8 @@ of M4 has landed.
     - a PWA "passed to" link on the finished card;
     - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
-    - the self path telling the session why the leader refused after the push (today: "not
-      confirmed" plus the leader's warn line) and a Queue-screen mark for a session pass the leader
-      refused (the push alert, `pass-refused`, is built);
+    - a Queue-screen mark for a session pass the leader refused (the push alert, `pass-refused`, and
+      telling the session why, `QueueResponse.passRefused`, are built);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch;
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).

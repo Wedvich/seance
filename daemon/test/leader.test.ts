@@ -406,6 +406,60 @@ describe("queue-changed", () => {
     }
   });
 
+  test("a session's pass refused for a task its merge settled is listed by queue with the daemon's stamp, so the session can learn of it", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    // Settled by its merge while the session kept working: finished, so takeover asks `b` about no session.
+    await store.put(
+      "t-m",
+      0,
+      task("t-m", {
+        state: "done",
+        doneBy: "merged",
+        leftRunning: true,
+        assignment: { deviceId: "b", ...target, pane: "%3" },
+      }),
+    );
+    const { leader, replies } = leaderOver(relay, store);
+    const listed = async (): Promise<QueueResponse["passRefused"]> => {
+      leader.deliver(await appRequest("queue"));
+      return queueReply((await replies.next()).response.payload).passRefused;
+    };
+    try {
+      leader.lead(1);
+      await leader.settled();
+      expect(await listed()).toBeUndefined();
+      const at = Date.now();
+      const payload = {
+        session: "%3",
+        taskId: "t-m",
+        exclave: "default",
+        remoteBranch: "feature/x",
+        tip: "a".repeat(40),
+        record: "r",
+        at,
+      };
+      leader.deliver(
+        await seal(
+          key,
+          { to: SCHEDULER_ID, from: "b" },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "session-pass", payload },
+        ),
+      );
+      let refused: QueueResponse["passRefused"];
+      await pollUntil(async () => {
+        refused = await listed();
+        return refused !== undefined;
+      }, "the refusal to be listed");
+      expect(refused).toEqual([{ taskId: "t-m", code: "finished", sentAt: at }]);
+      expect((await store.get("t-m"))?.body).toMatchObject({ state: "done", doneBy: "merged" });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
   test("an idle release whose stamp the store refuses is still named in a nudge and listed: the release is the clock's, not the write's", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
@@ -2694,12 +2748,17 @@ describe("leader in the daemon", () => {
       tip: "a".repeat(40),
       at: 1,
     };
-    expect(sessionPassInput(pass, "a")).toEqual({ from: "a", pushed: { remoteBranch: "feature/x", tip: pass.tip } });
+    expect(sessionPassInput(pass, "a")).toEqual({
+      from: "a",
+      pushed: { remoteBranch: "feature/x", tip: pass.tip },
+      sentAt: 1,
+    });
     expect(sessionPassInput({ ...pass, record: "r", drain: true }, "a")).toEqual({
       from: "a",
       pushed: { remoteBranch: "feature/x", tip: pass.tip },
       record: "r",
       drain: true,
+      sentAt: 1,
     });
   });
 

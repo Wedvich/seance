@@ -1419,6 +1419,23 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
   });
 
+  test("queue lists refused session passes, each one alone; a bad list costs only the explanations, never the reply", () => {
+    const refused = { taskId: "t-1", code: "finished", sentAt: 4 };
+    const stampless = { taskId: "t-2", code: "branch_mismatch" };
+    expect(
+      parseQueueReply({
+        tasks: [],
+        at: 5,
+        passRefused: [refused, { ...stampless, sentAt: "4" }, { taskId: "t:3", code: "finished" }, { taskId: "t-4" }],
+      }),
+    ).toEqual({ tasks: [], at: 5, passRefused: [refused, stampless] });
+    expect(parseQueueReply({ tasks: [], at: 5, passRefused: [] })).toEqual({ tasks: [], at: 5 });
+    expect(parseQueueReply({ tasks: [], at: 5, passRefused: {} })).toEqual({ tasks: [], at: 5 });
+    expect(
+      parseQueueReply({ tasks: [], at: 5, passRefused: Array.from({ length: MAX_TASKS + 1 }, () => refused) }),
+    ).toEqual({ tasks: [], at: 5 });
+  });
+
   test("queue lists unreadable records, each one alone: a bad entry costs its own discard, too many the reply", () => {
     const junk = { taskId: "t-9", version: 3, reason: "unopenable" };
     const later = { taskId: "t-8", version: 1, reason: "sealed_elsewhere" };

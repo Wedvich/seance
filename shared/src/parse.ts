@@ -163,6 +163,7 @@ import {
   type UnreadableTaskRef,
   type IdleRelease,
   type IdleTaskRef,
+  type PassRefusalRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -2634,6 +2635,12 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   // Lenient: a cap that is not a positive integer only costs the header its denominator.
   const globalMax = value["globalMax"];
   const cap = typeof globalMax === "number" && Number.isInteger(globalMax) && globalMax > 0 ? globalMax : undefined;
+  // Lenient, whole and per entry: a bad list only costs a refused session pass its explanation ("not confirmed").
+  const listedRefused = value["passRefused"];
+  const passRefused =
+    Array.isArray(listedRefused) && listedRefused.length <= MAX_TASKS
+      ? listedRefused.map(parsePassRefusalRef).filter((entry) => entry !== null)
+      : undefined;
   return {
     tasks,
     at: value["at"],
@@ -2641,7 +2648,15 @@ export function parseQueueReply(value: unknown): QueueReply | null {
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
     ...(idle === undefined || idle.length === 0 ? {} : { idle }),
     ...(cap === undefined ? {} : { globalMax: cap }),
+    ...(passRefused === undefined || passRefused.length === 0 ? {} : { passRefused }),
   };
+}
+
+function parsePassRefusalRef(value: unknown): PassRefusalRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
+  const { code, sentAt } = value;
+  if (!isName(code, TASK_FAILURE_LIMITS.code)) return null;
+  return { taskId: value["taskId"], code, ...(isFiniteNumber(sentAt) ? { sentAt } : {}) };
 }
 
 function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
