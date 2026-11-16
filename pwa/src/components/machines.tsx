@@ -5,6 +5,7 @@ import type {
   AccountCard,
   ArchivistCard,
   CustodianRow,
+  DrainAction,
   Gauge,
   GaugeIcon,
   MachineCard,
@@ -20,7 +21,7 @@ import {
   type HistoryView,
 } from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
-import { canDrainNow, type ConnectionState } from "../view.ts";
+import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
@@ -54,12 +55,17 @@ export function MachinesScreen(props: {
   custodian: CustodianControlState;
   /** Round now, pause or resume a machine's custodian (the card's menu, for a machine advertising `custodian`). */
   onCustodian: (deviceId: string, request: CustodianRequest) => void;
-  /** Asks a machine to close (false) or reopen (true); `now` is the close sheet's "Drain now". The confirm sheet for a close is this screen's. */
-  onSetOpen: (deviceId: string, open: boolean, now?: boolean) => void;
-  /** The registry, which the confirm sheet's words are derived from (`closeSheet`). */
+  /**
+   * Asks a machine to close (false) or reopen (true); `close` says how: soft, drained, or drained now (the sheets'
+   * buttons, and Drain / Drain now on a closed machine). The confirm sheets are this screen's.
+   */
+  onSetOpen: (deviceId: string, open: boolean, close?: CloseKind) => void;
+  /** The registry, which the confirm sheets' words are derived from (`closeSheet`, `drainSheet`). */
   machines: readonly Machine[];
-  /** The confirm sheet's lines for a machine (`deriveCloseSheet`). */
-  closeSheet: (machine: Machine) => readonly string[];
+  /** The close sheet's lines for a machine (`deriveCloseSheet`); `soft` when its Close stops new work only. */
+  closeSheet: (machine: Machine, soft: boolean) => readonly string[];
+  /** The Drain sheet's lines for a soft-closed machine (`deriveDrainSheet`). */
+  drainSheet: (machine: Machine) => readonly string[];
   /** Reads a machine's sessions and the queue afresh: asked as the confirm sheet opens. */
   onReadDrain: (deviceId: string) => void;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
@@ -86,6 +92,7 @@ export function MachinesScreen(props: {
     onSetOpen,
     machines,
     closeSheet,
+    drainSheet,
     onReadDrain,
     onDismiss,
     onShowHistory,
@@ -95,9 +102,17 @@ export function MachinesScreen(props: {
     onRename,
   } = props;
   const { renaming } = accounts;
-  const [closing, setClosing] = useState<string | null>(null);
-  const closingCard = closing === null ? undefined : view.cards.find((card) => card.deviceId === closing);
-  const closingMachine = closing === null ? undefined : machines.find((machine) => machine.deviceId === closing);
+  // The open confirm sheet: closing an open machine, or Drain / Drain now on a closed one.
+  const [closing, setClosing] = useState<{ readonly deviceId: string; readonly act: "close" | DrainAction } | null>(
+    null,
+  );
+  const closingCard = closing === null ? undefined : view.cards.find((card) => card.deviceId === closing.deviceId);
+  const closingMachine =
+    closing === null ? undefined : machines.find((machine) => machine.deviceId === closing.deviceId);
+  const confirm = (deviceId: string, close: CloseKind) => (): void => {
+    setClosing(null);
+    onSetOpen(deviceId, false, close);
+  };
   // Kept while the account is briefly unreported (a sign-out in between), so a typed draft survives; Cancel or Save closes it.
   const seen = useRef<AccountCard | undefined>(undefined);
   const found = view.accounts.find((account) => account.accountId === renaming);
@@ -143,7 +158,11 @@ export function MachinesScreen(props: {
             onToggleOpen={(open) => {
               if (open) return onSetOpen(card.deviceId, true);
               onReadDrain(card.deviceId);
-              setClosing(card.deviceId);
+              setClosing({ deviceId: card.deviceId, act: "close" });
+            }}
+            onDrain={(act) => {
+              onReadDrain(card.deviceId);
+              setClosing({ deviceId: card.deviceId, act });
             }}
           />
         ))}
@@ -165,23 +184,12 @@ export function MachinesScreen(props: {
           />
         ))}
       </div>
-      {closingCard !== undefined && closingMachine !== undefined && (
+      {closing !== null && closingCard !== undefined && closingMachine !== undefined && (
         <CloseMachineDialog
-          name={closingCard.name}
-          lines={closeSheet(closingMachine)}
+          {...closeDialog(closing.act, closingCard, closingMachine, closeSheet, drainSheet, (close) =>
+            confirm(closingCard.deviceId, close),
+          )}
           onClose={() => setClosing(null)}
-          onConfirm={() => {
-            setClosing(null);
-            onSetOpen(closingCard.deviceId, false);
-          }}
-          {...(canDrainNow(closingMachine)
-            ? {
-                onDrainNow: () => {
-                  setClosing(null);
-                  onSetOpen(closingCard.deviceId, false, true);
-                },
-              }
-            : {})}
         />
       )}
       {renamed !== undefined && (
@@ -210,14 +218,29 @@ function MachineCardView(props: {
   onHideHistory: () => void;
   /** The switch's new state: true reopens at once, false asks for confirmation first. */
   onToggleOpen: (open: boolean) => void;
+  /** Drain or Drain now on a closed machine: asks for confirmation first. */
+  onDrain: (act: DrainAction) => void;
 }): JSX.Element {
-  const { card, history, ranges, availability, custodian, onCustodian, onShowHistory, onHideHistory, onToggleOpen } =
-    props;
+  const {
+    card,
+    history,
+    ranges,
+    availability,
+    custodian,
+    onCustodian,
+    onShowHistory,
+    onHideHistory,
+    onToggleOpen,
+    onDrain,
+  } = props;
   // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
   const here = availability[card.deviceId] ?? null;
   const asked = here?.kind === "sending" || here?.kind === "sent" ? here.open : null;
   const switchOn = asked ?? card.openSwitch === "on";
   const closed = here?.kind === "sent" ? !here.open : card.closed;
+  // Only for the machine's own closed state: a sent close or reopen leaves them hidden until its status agrees.
+  const drainActions = closed && card.closed && here?.kind !== "sent" ? card.drainActions : [];
+  const sending = here?.kind === "sending";
   const asking = custodian[card.deviceId] ?? null;
   const custodianState = custodianMenu(card, asking);
   const offersMenu = card.charts || history !== null || card.openSwitch !== null || card.custodianControls;
@@ -256,6 +279,15 @@ function MachineCardView(props: {
                   onToggle={() => onToggleOpen(!switchOn)}
                 />
               )}
+              {drainActions.map((act) => (
+                <MenuItem
+                  key={act}
+                  label={DRAIN_LABELS[act]}
+                  icon={<DrainIcon />}
+                  disabled={sending}
+                  onClick={() => onDrain(act)}
+                />
+              ))}
               {card.custodianControls && (
                 <>
                   {card.openSwitch !== null && <MenuDivider />}
@@ -291,12 +323,23 @@ function MachineCardView(props: {
       )}
       {card.drain !== null && closed && (
         <div className="fleet-note">
-          <p>Draining: {card.drain.summary}</p>
+          <p>
+            {card.drain.draining ? "Draining" : "Closed"}: {card.drain.summary}
+          </p>
           {keyed(card.drain.stuck).map(({ key, line }) => (
             <p key={key} className="fleet-warn">
               {line}
             </p>
           ))}
+          {drainActions.length > 0 && (
+            <div className="fleet-drain-actions">
+              {drainActions.map((act) => (
+                <button key={act} type="button" disabled={sending} onClick={() => onDrain(act)}>
+                  {DRAIN_LABELS[act]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
       {asking?.kind === "failed" && (
@@ -591,18 +634,75 @@ function keyed(lines: readonly string[]): { readonly key: string; readonly line:
   });
 }
 
-/** A close needs a yes: it stops the scheduler's new work landing there. Reopening needs none. */
-function CloseMachineDialog(props: {
-  name: string;
-  lines: readonly string[];
-  onClose: () => void;
-  onConfirm: () => void;
-  /** Present for a machine that asks its sessions to pass themselves (`canDrainNow`): close and interrupt them at once. */
-  onDrainNow?: () => void;
-}): JSX.Element {
-  const { name, lines, onClose, onConfirm, onDrainNow } = props;
+const DRAIN_LABELS: Record<DrainAction, string> = { drain: "Drain", now: "Drain now" };
+
+interface DialogAction {
+  readonly label: string;
+  readonly onClick: () => void;
+}
+
+interface CloseDialogContent {
+  readonly title: string;
+  readonly lines: readonly string[];
+  /** Quieter actions, before the primary one. */
+  readonly quiet: readonly DialogAction[];
+  readonly primary: DialogAction;
+}
+
+/**
+ * Which sheet an act opens. Closing a soft-capable machine: Close is soft and primary, with Close and drain and Drain
+ * now (where its daemon asks its sessions) as quieter choices; otherwise Close drains, as before. Drain on a
+ * soft-closed machine offers Drain now beside it; Drain now while draining cuts the ask's grace.
+ */
+function closeDialog(
+  act: "close" | DrainAction,
+  card: MachineCard,
+  machine: Machine,
+  closeSheet: (machine: Machine, soft: boolean) => readonly string[],
+  drainSheet: (machine: Machine) => readonly string[],
+  confirm: (close: CloseKind) => () => void,
+): CloseDialogContent {
+  const asks = canDrainNow(machine);
+  const drainNow: DialogAction = { label: "Drain now", onClick: confirm("now") };
+  if (act === "close") {
+    return {
+      title: `Close ${card.name}?`,
+      lines: closeSheet(machine, card.softClose),
+      quiet: card.softClose
+        ? [{ label: "Close and drain", onClick: confirm("drain") }, ...(asks ? [drainNow] : [])]
+        : asks
+          ? [drainNow]
+          : [],
+      primary: { label: "Close", onClick: confirm(card.softClose ? "soft" : "drain") },
+    };
+  }
+  if (act === "drain") {
+    return {
+      title: `Drain ${card.name}?`,
+      lines: drainSheet(machine),
+      quiet: card.drainActions.includes("now") ? [drainNow] : [],
+      primary: { label: "Drain", onClick: confirm("drain") },
+    };
+  }
+  // A soft close offers Drain beside Drain now; a drain under way offers Drain now alone.
+  const soft = card.drainActions.includes("drain");
+  return {
+    title: `Drain ${card.name} now?`,
+    lines: soft
+      ? drainSheet(machine)
+      : [
+          `${card.name} is draining. Drain now interrupts its sessions' turns at once instead of 5 minutes after the drain began.`,
+        ],
+    quiet: [],
+    primary: drainNow,
+  };
+}
+
+/** A close or a drain needs a yes: one stops the scheduler's new work landing there, the other moves what runs. Reopening needs none. */
+function CloseMachineDialog(props: CloseDialogContent & { onClose: () => void }): JSX.Element {
+  const { title, lines, quiet, primary, onClose } = props;
   return (
-    <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
+    <Sheet title={title} variant="dialog" onClose={onClose}>
       <div className="rename">
         {keyed(lines).map(({ key, line }) => (
           <p key={key} className="rename-hint">
@@ -613,17 +713,27 @@ function CloseMachineDialog(props: {
           <button type="button" className="quiet" onClick={onClose}>
             Cancel
           </button>
-          {onDrainNow !== undefined && (
-            <button type="button" className="quiet" onClick={onDrainNow}>
-              Drain now
+          {quiet.map((action) => (
+            <button key={action.label} type="button" className="quiet" onClick={action.onClick}>
+              {action.label}
             </button>
-          )}
-          <button type="button" className="primary" onClick={onConfirm}>
-            Close
+          ))}
+          <button type="button" className="primary" onClick={primary.onClick}>
+            {primary.label}
           </button>
         </div>
       </div>
     </Sheet>
+  );
+}
+
+function DrainIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M4 12h12" />
+      <path d="M12 7l5 5-5 5" />
+      <path d="M20 5v14" />
+    </StrokeIcon>
   );
 }
 

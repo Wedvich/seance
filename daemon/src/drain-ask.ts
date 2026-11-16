@@ -1,4 +1,4 @@
-import type { NeedsInputReason, SessionState } from "@seance/shared";
+import { DRAIN_INTERRUPT_MS, type NeedsInputReason, type SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
 import { KEY_GAP_MS } from "./despawn.ts";
 import { INPUT_BOX_RULE } from "./pane-activity.ts";
@@ -32,8 +32,8 @@ export const DRAIN_PROMPT =
   "record of where you stand and what comes next, including any question you were waiting on the person to " +
   "answer, and end your turn. Do not start anything new.";
 
-/** How long a turn may run after the drain's start before it is interrupted. */
-export const DRAIN_INTERRUPT_MS = 300_000;
+// In shared because the PWA offers "Drain now" only until this deadline has passed.
+export { DRAIN_INTERRUPT_MS };
 /** How long an interrupted pane gets to reach a turn-ended idle before it is skipped (step B covers it). */
 export const DRAIN_SKIP_MS = 30_000;
 

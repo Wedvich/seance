@@ -7,7 +7,13 @@ import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
-import { deriveArchivist, deriveCloseSheet, deriveMachines } from "./machines-view.ts";
+import {
+  deriveArchivist,
+  deriveCloseSheet,
+  deriveDrainSheet,
+  deriveMachines,
+  type DrainInputs,
+} from "./machines-view.ts";
 import { deriveOlder } from "./older-view.ts";
 import { archiveCharts } from "./state.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
@@ -120,6 +126,12 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       </main>
     </SettingsDialog>
   );
+  const drainInputs = (): DrainInputs => ({
+    passes: deriveDrainAvailability(state.relay),
+    tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
+    sessions: state.sessions,
+    idle: state.queueView?.kind === "ok" ? state.queueView.idle.map((ref) => ref.taskId) : [],
+  });
   const machines = (onDismiss?: () => void): JSX.Element => (
     <MachinesScreen
       view={deriveMachines(
@@ -130,11 +142,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         state.relay.fleetQuota,
         archiveCharts(state.relay.archivist, state.accounts.nameable),
         state.relay.status === "open",
-        {
-          passes: deriveDrainAvailability(state.relay),
-          tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
-          sessions: state.sessions,
-        },
+        drainInputs(),
       )}
       archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
       relayLine={view.relayLine}
@@ -145,20 +153,11 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       availability={state.availability}
       custodian={state.custodian}
       onCustodian={(deviceId, request) => void store.custodianControl(deviceId, request)}
-      closeSheet={(machine) =>
-        deriveCloseSheet(
-          machine,
-          {
-            passes: deriveDrainAvailability(state.relay),
-            tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
-            sessions: state.sessions,
-          },
-          state.relay.scheduler,
-        )
-      }
+      closeSheet={(machine, soft) => deriveCloseSheet(machine, drainInputs(), state.relay.scheduler, soft)}
+      drainSheet={(machine) => deriveDrainSheet(machine, drainInputs())}
       machines={state.relay.machines}
       onReadDrain={(deviceId) => store.readDrain(deviceId)}
-      onSetOpen={(deviceId, open, drainNow) => void store.setMachineOpen(deviceId, open, drainNow)}
+      onSetOpen={(deviceId, open, close) => void store.setMachineOpen(deviceId, open, close)}
       onDismiss={onDismiss}
       onShowHistory={(target, range) => void store.showHistory(target, range)}
       onHideHistory={() => store.hideHistory()}

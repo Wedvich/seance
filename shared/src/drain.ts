@@ -10,6 +10,13 @@ import type { DrainRefusal, SessionEntry, Task } from "./types.ts";
  * task record. Imports nothing that logs, since `seanced mcp` reaches it.
  */
 
+/**
+ * How long a turn may run after the drain's start before the daemon interrupts it (the session ask's deadline,
+ * `daemon/src/drain-ask.ts`); `now` moves it to the request. Past it "Drain now" has nothing left to speed up: the
+ * leader's pass, 10 minutes after the start, never sees `now`.
+ */
+export const DRAIN_INTERRUPT_MS = 300_000;
+
 export type DrainStuckReason = "here" | "untasked" | "unplaced" | "refused";
 
 export interface DrainStuck {

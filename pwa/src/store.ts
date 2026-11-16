@@ -86,11 +86,12 @@ import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
 import { UploadQueue } from "./upload-queue.ts";
 import { taskTitle } from "./task-title.ts";
-import type { AppState } from "./view.ts";
+import type { AppState, CloseKind } from "./view.ts";
 import {
   attachmentsRefusal,
   canDrainNow,
   canHold,
+  canSoftClose,
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
   deriveCloseAvailability,
@@ -1197,7 +1198,7 @@ export class Store {
    * success: the machine's next `status` carries `cl`, so the asked state is held (`sent`) meanwhile.
    * Machines are independent: only a second toggle of the same machine mid-request is dropped.
    */
-  async setMachineOpen(deviceId: string, open: boolean, now?: boolean): Promise<void> {
+  async setMachineOpen(deviceId: string, open: boolean, close: CloseKind = "drain"): Promise<void> {
     if (this.#state.availability[deviceId]?.kind === "sending") return;
     const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
     if (machine === undefined) {
@@ -1213,9 +1214,15 @@ export class Store {
       return;
     }
     // `now` is the drain's no-wait: only a daemon that asks its sessions honours it, so it is never sent to another.
-    const drainNow = now === true && !open;
+    const drainNow = close === "now" && !open;
     if (drainNow && !canDrainNow(machine)) {
       this.#setAvailability(deviceId, { kind: "failed", text: "This machine can't drain now yet" });
+      return;
+    }
+    // A daemon or leader without `softClose` would drain anyway: never sent where the sheet would not offer it.
+    const soft = close === "soft" && !open;
+    if (soft && !canSoftClose(this.#state.relay, machine)) {
+      this.#setAvailability(deviceId, { kind: "failed", text: "This machine can't close without draining yet" });
       return;
     }
     this.#setAvailability(deviceId, { kind: "sending", open });
@@ -1223,6 +1230,7 @@ export class Store {
       const reply = await this.#client.request<AvailabilityResponse>(deviceId, "availability", {
         open,
         ...(drainNow ? { now: true } : {}),
+        ...(soft ? { soft: true } : {}),
       });
       const parsed = parseAvailabilityResponse(reply);
       if (parsed === null) throw new Error("unreadable reply");
@@ -1236,7 +1244,7 @@ export class Store {
     } catch (err) {
       this.#setAvailability(deviceId, {
         kind: "failed",
-        text: `Couldn't ${open ? "reopen" : "close"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
+        text: `Couldn't ${open ? "reopen" : closedAt(machine) === null ? "close" : "drain"} ${machine.name}:${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }
