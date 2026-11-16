@@ -1151,6 +1151,9 @@ export interface MachineInfo {
  * counts or offering `seanced close --wait`.
  * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (drain step A) and honours
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
+ * `softClose`: as a daemon, honours `availability`'s `soft`, keeps `closed.drainAt` and reports `MachineStatus.dr`; as a
+ * leader, drains a machine only from `drainStart` (`dr`, else `cl` for a daemon without it). A client offers the soft
+ * close only to a target advertising it under a verified leader advertising it.
  * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
  * (docs/messaging.md); advertised only where the host names a socket's peer.
  * `messageRoute`: as a daemon, answers the leader's `deliver-message` and `message-receipt`; as a leader, routes a
@@ -1191,6 +1194,7 @@ export const CAPABILITIES = {
   drain: "drain",
   drainPass: "drainPass",
   drainAsk: "drainAsk",
+  softClose: "softClose",
   messages: "messages",
   messageRoute: "messageRoute",
   messageReply: "messageReply",
@@ -1363,6 +1367,12 @@ export interface MachineStatus {
    * quota entry.
    */
   readonly cl?: number;
+  /**
+   * Unix ms the drain of this close began (`closed.drainAt`, docs/drain.md N5): only beside `cl`; absent while
+   * soft-closed, while open, and from an older daemon. Never trimmed: a trimmed `dr` would stop a drain the owner
+   * started. Not `QuotaObservation.dr` (seven-day reset), a field of a quota entry.
+   */
+  readonly dr?: number;
   /**
    * The custodian seat's view (docs/custodian.md; DESIGN.md, "The custodian's status and the Machines row"):
    * display-only, never trimmed by `fitStatus`, absent from a daemon with no seat. Not `QuotaObservation.cu`
@@ -1913,10 +1923,16 @@ export type DespawnErrorCode = (typeof DESPAWN_ERROR_CODES)[number];
 /** `exited`: claude left on its own once asked. `killed`: it didn't, or `force` said not to wait. */
 export type DespawnOutcome = "exited" | "killed";
 
-/** `now` is the drain's no-wait: a close's interrupt deadline moves to now (a daemon advertising `CAPABILITIES.drainAsk`); ignored on an open, and by an older daemon. */
+/**
+ * `now` is the drain's no-wait: a close's interrupt deadline moves to now (a daemon advertising `CAPABILITIES.drainAsk`);
+ * ignored on an open, and by an older daemon. `soft` closes without draining (a daemon advertising
+ * `CAPABILITIES.softClose`): `true` only; beside `now` the request is refused (`invalid_request`), even on an open. Otherwise ignored on an open
+ * and by an older daemon (which closes and drains).
+ */
 export interface AvailabilityRequest {
   readonly open: boolean;
   readonly now?: boolean;
+  readonly soft?: boolean;
 }
 
 export const AVAILABILITY_ERROR_CODES = [
@@ -3865,6 +3881,20 @@ export interface QueueResponse {
    * ceiling on `running` — a task placed past the caps (`run-now`) overprovisions it. Absent from older leaders.
    */
   readonly globalMax?: number;
+  /**
+   * Session passes (`session-pass`, fire-and-forget) this leader refused in the last ten minutes, whatever
+   * `QueueRequest.tasks` asked for: what `pass_to_successor` reads to tell its session why no successor came.
+   * Memory only, so a new term shows none. Absent from older leaders, and when there are none.
+   */
+  readonly passRefused?: readonly PassRefusalRef[];
+}
+
+/** A session's own pass the leader refused: the code, and the `SessionPass.at` it answers (the sender's clock). */
+export interface PassRefusalRef {
+  readonly taskId: string;
+  /** A `SchedulerErrorCode`, raw as read, as `SchedulerError.code` is. */
+  readonly code: string;
+  readonly sentAt?: number;
 }
 
 /** A task released for sitting idle at its prompt, and since when it has (leader's clock, ms). */

@@ -363,32 +363,39 @@ export async function cmdPass(argv: readonly string[]): Promise<void> {
 
 /**
  * Exported for tests. `close` and `open` take at most the one machine they act on; none means this one.
- * `close` alone takes `--wait` (block until the machine is empty) and `--now` (interrupt its sessions at once).
+ * `close` alone takes `--wait` (block until the machine is empty), `--drain` (start the drain: the close before soft
+ * close existed) and `--now` (interrupt its sessions at once; implies `--drain`).
  */
 export function parseAvailabilityArgs(
   argv: readonly string[],
   verb: "close" | "open",
-): { readonly machine: string | null; readonly wait: boolean; readonly now: boolean } {
+): { readonly machine: string | null; readonly wait: boolean; readonly now: boolean; readonly drain: boolean } {
   const usage =
-    verb === "close" ? "usage: seanced close [<machine>] [--now] [--wait]" : "usage: seanced open [<machine>]";
-  const flags = verb === "close" ? ["--wait", "--now"] : [];
+    verb === "close"
+      ? "usage: seanced close [<machine>] [--drain] [--now] [--wait]"
+      : "usage: seanced open [<machine>]";
+  const flags = verb === "close" ? ["--wait", "--now", "--drain"] : [];
   const wait = argv.includes("--wait") && verb === "close";
   const now = argv.includes("--now") && verb === "close";
+  const drain = now || (argv.includes("--drain") && verb === "close");
   const words = argv.filter((arg) => !flags.includes(arg));
   const [machine] = words;
   if (words.length > 1 || machine?.startsWith("-") === true) throw new Error(usage);
-  return { machine: machine ?? null, wait, now };
+  return { machine: machine ?? null, wait, now, drain };
 }
 
-/** Closes a machine to new scheduled work (default: this one); the scheduler passes its running tasks on, and `--wait` blocks until it is empty. Over the relay (`cli-auto.ts`). */
+/**
+ * Closes a machine to new scheduled work (default: this one): soft where it and the leader support it (running tasks
+ * finish where they are), `--drain` to pass them on, `--wait` to block until it is empty. Over the relay (`cli-auto.ts`).
+ */
 export async function cmdClose(argv: readonly string[]): Promise<void> {
-  const { machine, wait, now } = parseAvailabilityArgs(argv, "close");
-  return cmdAvailabilityAuto(machine, false, now, wait);
+  const { machine, wait, now, drain } = parseAvailabilityArgs(argv, "close");
+  return cmdAvailabilityAuto(machine, false, now, wait, drain);
 }
 
 /** Reopens a closed machine. */
 export async function cmdOpen(argv: readonly string[]): Promise<void> {
-  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false);
+  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false, false);
 }
 
 const AMEND_USAGE =

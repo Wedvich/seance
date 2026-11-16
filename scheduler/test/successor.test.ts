@@ -13,6 +13,7 @@ import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
   Scheduler,
+  SESSION_PASS_REFUSAL_TTL_MS,
   StoreRevoked,
   type PassResult,
   type PrHeadReading,
@@ -1376,6 +1377,48 @@ describe("the session's own pass", () => {
     expect(s.lines.some((l) => l.includes("op=session-pass") && l.includes(`from="b"`))).toBe(true);
   });
 
+  test("a task its merge settled while the session kept working is refused `finished`, and the refusal is kept for the session to read", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s);
+    // `until: "merged"`, the default: the forge's word settles the task though its session still runs.
+    await s.scheduler.onPrStatus(old.id, PR, { state: "merged", at: NOW });
+    expect(s.scheduler.task(old.id)).toMatchObject({ state: "done", doneBy: "merged", leftRunning: true });
+    expect(s.scheduler.sessionPassRefusals()).toEqual([]);
+
+    const sent = { ...self("done: a; left: b"), sentAt: NOW - 5 };
+    expect(await s.scheduler.pass(old.id, "session", sent)).toEqual({ ok: false, code: "finished" });
+    expect(s.creates).toEqual([]);
+    expect(s.fleet.passCloses).toEqual([]);
+    expect(s.scheduler.task(old.id)).toMatchObject({ state: "done", doneBy: "merged" });
+    expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    expect(s.scheduler.sessionPassRefusals()).toEqual([{ taskId: old.id, code: "finished", sentAt: NOW - 5, at: NOW }]);
+
+    // Only a session's own pass is kept: an outside pass has a caller that hears its answer.
+    const other = setup([machine("a", { capabilities: SELF })]);
+    const t = await running(other);
+    await other.scheduler.cancel(t.id);
+    expect(await other.scheduler.pass(t.id)).toMatchObject({ ok: false, code: "finished" });
+    expect(other.scheduler.sessionPassRefusals()).toEqual([]);
+
+    // It expires, so a queue read carries no stale refusal for long.
+    s.clock.now += SESSION_PASS_REFUSAL_TTL_MS;
+    expect(s.scheduler.sessionPassRefusals()).toEqual([]);
+  });
+
+  test("a later session pass of the task drops its earlier refusal, and one that passes leaves none", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s);
+    s.prHead = { ...OPEN, head: "other/branch" };
+    expect(await s.scheduler.pass(old.id, "session", { ...self(), sentAt: 1 })).toMatchObject({
+      ok: false,
+      code: "branch_mismatch",
+    });
+    expect(s.scheduler.sessionPassRefusals()).toMatchObject([{ taskId: old.id, code: "branch_mismatch", sentAt: 1 }]);
+    s.prHead = OPEN;
+    ok(await s.scheduler.pass(old.id, "session", { ...self(), sentAt: 2 }));
+    expect(s.scheduler.sessionPassRefusals()).toEqual([]);
+  });
+
   test("the pass is refused before anything is created when the machine lacks successorSelf or the host cannot arm a close", async () => {
     const plain = setup();
     const a = await running(plain, false);
@@ -2224,6 +2267,30 @@ describe("the drain pass", () => {
     ).toContainEqual({ code: "closed" });
     expect(s.lines).toContain(`audit pass task="old" successor="${successor?.id}" trigger=drain`);
     expect(s.fleet.despawns).toHaveLength(1);
+  });
+
+  test("a soft-closed softClose machine passes nothing until its drain starts, then once the wait is over", async () => {
+    const s = setup([machine("a", { capabilities: [...CAPABLE, CAPABILITIES.softClose] })]);
+    await running(s, true);
+    close(s, "a");
+    later(s, 3 * WAIT);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+    expect(s.scheduler.task("old")?.state).toBe("running");
+
+    s.fleet.fleet = s.fleet.fleet.map((m) =>
+      m.deviceId === "a" ? { ...m, status: status({ cl: CL, dr: s.clock.now }) } : m,
+    );
+    s.fleet.beat(s.clock.now);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+
+    later(s, WAIT);
+    await tick(s.scheduler);
+    const old = s.scheduler.task("old");
+    expect(old?.state).toBe("superseded");
+    const successor = s.scheduler.task(old?.successor ?? "");
+    expect(successor?.spec.succeeds).toMatchObject({ task: "old", trigger: "drain" });
   });
 
   test("the successor is placed on another machine when one can take it", async () => {

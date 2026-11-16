@@ -46,6 +46,7 @@ import {
 import { needsAttention } from "./asleep.ts";
 import { formatBytes, typeLabel, type PickedFile } from "./attachments.ts";
 import { taskTitle } from "./task-title.ts";
+import type { Moment } from "./timed.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -319,6 +320,11 @@ export function formatSeen(lastSeen: number, now: number): string {
   return `${Math.floor(elapsed / DAY)}d ago`;
 }
 
+/** `formatSeen` with its instant kept, for a line that shows the timestamp on hover. */
+export function seen(at: number, now: number): Moment {
+  return { text: formatSeen(at, now), at };
+}
+
 function sessionCount(state: AppState, deviceId: string): number | null {
   const entry = state.sessions[deviceId];
   if (entry === undefined || entry === "unknown") return null;
@@ -453,6 +459,22 @@ export function derivePassAvailability(relay: RelayState): boolean {
 export function deriveCloseAvailability(relay: RelayState, machine: Machine): boolean {
   return (
     machine.capabilities?.includes(CAPABILITIES.close) === true && verifiedLeaderAdvertises(relay, CAPABILITIES.drain)
+  );
+}
+
+/** What a close asks: `soft` stops new work only, `drain` moves running tasks too, `now` drains without the grace. */
+export type CloseKind = "soft" | "drain" | "now";
+
+/**
+ * Whether the close sheet's Close is soft (no drain until asked): a close may be sent, and both `machine` and the
+ * verified leader advertise `softClose`. An older daemon would drop `soft` and drain; an older leader would pass on
+ * `cl` alone. Otherwise the sheet keeps the close and words it as before.
+ */
+export function canSoftClose(relay: RelayState, machine: Machine): boolean {
+  return (
+    deriveCloseAvailability(relay, machine) &&
+    machine.capabilities?.includes(CAPABILITIES.softClose) === true &&
+    verifiedLeaderAdvertises(relay, CAPABILITIES.softClose)
   );
 }
 

@@ -35,6 +35,7 @@ import { settlingInput } from "./input-debounce.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
+import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
@@ -43,6 +44,7 @@ import {
   deriveRunNowAvailability,
   failedBody,
   formatSeen,
+  seen,
   type AppState,
 } from "./view.ts";
 
@@ -98,10 +100,10 @@ export function disarmRow(rowId: string, armed: string | null): string | null {
 export interface QueueRow {
   readonly id: string;
   readonly title: string;
-  readonly headline: string;
-  readonly body: string | null;
+  readonly headline: Timed;
+  readonly body: Timed | null;
   readonly dot: QueueDot | null;
-  readonly age: string;
+  readonly age: Moment;
   readonly canCancel: boolean;
   readonly canMarkDone: boolean;
   /** Cancelling despawns a session: the button asks twice. */
@@ -195,7 +197,7 @@ export interface QueueSection {
 
 export interface HoldRow {
   readonly key: string;
-  readonly text: string;
+  readonly text: Timed;
   readonly account?: string;
 }
 
@@ -233,13 +235,14 @@ function statusLine(state: AppState): { text: string; available: boolean } {
   return { text: `Scheduler on ${leader?.name ?? scheduler.deviceId}`, available: true };
 }
 
-function holdText(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): string {
-  if (hold.account === undefined) return "The whole queue is paused until resumed";
+function holdText(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): Timed {
+  if (hold.account === undefined) return ["The whole queue is paused until resumed"];
   const who = accountDisplayName(known, hold.account, state.accounts.aliases);
-  if (hold.until === "resume") return `${who} is paused until resumed`;
+  if (hold.until === "resume") return [`${who} is paused until resumed`];
+  if (hold.resumeAt === undefined) return [`${who} is paused until its quota resets`];
   // `formatUntil` reads "resets in 3h"; inside this sentence the verb is already said.
-  const when = hold.resumeAt === undefined ? "" : ` (${formatUntil(hold.resumeAt, now).replace(/^resets /u, "")})`;
-  return `${who} is paused until its quota resets${when}`;
+  const when = { text: formatUntil(hold.resumeAt, now).replace(/^resets /u, ""), at: hold.resumeAt };
+  return timed`${who} is paused until its quota resets (${when})`;
 }
 
 function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): HoldRow {
@@ -269,13 +272,18 @@ function startNowFor(task: Task): StartNowItem {
 }
 
 /** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
-function bodyOf(
+function bodyOf(task: Task, machines: readonly Machine[], now: number, skew: number, idleSince?: number): Timed | null {
+  const line = bodyLine(task, machines, now, skew, idleSince);
+  return typeof line === "string" ? [line] : line;
+}
+
+function bodyLine(
   task: Task,
   machines: readonly Machine[],
   now: number,
   skew: number,
   idleSince?: number,
-): string | null {
+): string | Timed | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
@@ -296,9 +304,9 @@ function bodyOf(
     const clause = `${wait.slice(0, 1).toUpperCase()}${wait.slice(1)}`;
     return task.needsInputSince === undefined
       ? clause
-      : `${clause} since ${formatSeen(task.needsInputSince - skew, now)}`;
+      : timed`${clause} since ${seen(task.needsInputSince - skew, now)}`;
   }
-  if (idleSince !== undefined) return `Idle at its prompt since ${formatSeen(idleSince, now)} — its slot is free`;
+  if (idleSince !== undefined) return timed`Idle at its prompt since ${seen(idleSince, now)} — its slot is free`;
   return null;
 }
 
@@ -503,7 +511,7 @@ function rowOf(
     headline: taskHeadline(task, state.relay.machines, now),
     body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
-    age: formatSeen(task.createdAt, now),
+    age: seen(task.createdAt, now),
     canCancel: actionable,
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
@@ -688,7 +696,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .map((task) => ({
       id: task.id,
       title: taskTitle(task),
-      headline: taskHeadline(task, state.relay.machines, now),
+      headline: plain(taskHeadline(task, state.relay.machines, now)),
       when: held.get(task.id) ?? null,
     }));
   const shown = new Set(listed.map((option) => option.id));

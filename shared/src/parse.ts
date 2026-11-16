@@ -163,6 +163,7 @@ import {
   type UnreadableTaskRef,
   type IdleRelease,
   type IdleTaskRef,
+  type PassRefusalRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -635,7 +636,9 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (drn !== undefined && drn !== true) return null;
   const { cl } = value;
   if (cl !== undefined && !(isFiniteNumber(cl) && cl > 0)) return null;
-  // Unlike `drn` and `cl`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
+  const { dr } = value;
+  if (dr !== undefined && !(isFiniteNumber(dr) && dr > 0 && cl !== undefined)) return null;
+  // Unlike `drn`, `cl` and `dr`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
   const cu = value["cu"] === undefined ? null : parseCustodianStatus(value["cu"]);
   return {
     at: value["at"],
@@ -656,6 +659,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(tu === undefined ? {} : { tu }),
     ...(drn === undefined ? {} : { drn }),
     ...(cl === undefined ? {} : { cl }),
+    ...(dr === undefined ? {} : { dr }),
     ...(cu === null ? {} : { cu }),
   };
 }
@@ -2386,12 +2390,18 @@ export function parsePushBranchResponse(value: unknown): PushBranchResponse | nu
   return typeof pushed === "boolean" ? { ok: true, remoteBranch, tip, pushed } : null;
 }
 
-/** `availability`, at the daemon: `now` is kept only as `true` (the drain's no-wait); a non-boolean refuses the request. */
+/** `availability`, at the daemon: `now` and `soft` are kept only as `true`; a non-boolean, or `soft` beside `now`, refuses the request. */
 export function parseAvailabilityRequest(value: unknown): AvailabilityRequest | null {
   if (!isRecord(value) || typeof value["open"] !== "boolean") return null;
-  const { now } = value;
+  const { now, soft } = value;
   if (now !== undefined && typeof now !== "boolean") return null;
-  return { open: value["open"], ...(now === true ? { now: true as const } : {}) };
+  if (soft !== undefined && typeof soft !== "boolean") return null;
+  if (soft === true && now === true) return null;
+  return {
+    open: value["open"],
+    ...(now === true ? { now: true as const } : {}),
+    ...(soft === true ? { soft: true as const } : {}),
+  };
 }
 
 /** An `availability` answer at a client: a code it does not know reads as a failure. */
@@ -2634,6 +2644,12 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   // Lenient: a cap that is not a positive integer only costs the header its denominator.
   const globalMax = value["globalMax"];
   const cap = typeof globalMax === "number" && Number.isInteger(globalMax) && globalMax > 0 ? globalMax : undefined;
+  // Lenient, whole and per entry: a bad list only costs a refused session pass its explanation ("not confirmed").
+  const listedRefused = value["passRefused"];
+  const passRefused =
+    Array.isArray(listedRefused) && listedRefused.length <= MAX_TASKS
+      ? listedRefused.map(parsePassRefusalRef).filter((entry) => entry !== null)
+      : undefined;
   return {
     tasks,
     at: value["at"],
@@ -2641,7 +2657,15 @@ export function parseQueueReply(value: unknown): QueueReply | null {
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
     ...(idle === undefined || idle.length === 0 ? {} : { idle }),
     ...(cap === undefined ? {} : { globalMax: cap }),
+    ...(passRefused === undefined || passRefused.length === 0 ? {} : { passRefused }),
   };
+}
+
+function parsePassRefusalRef(value: unknown): PassRefusalRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
+  const { code, sentAt } = value;
+  if (!isName(code, TASK_FAILURE_LIMITS.code)) return null;
+  return { taskId: value["taskId"], code, ...(isFiniteNumber(sentAt) ? { sentAt } : {}) };
 }
 
 function parseIdleTaskRef(value: unknown): IdleTaskRef | null {

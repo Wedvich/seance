@@ -67,6 +67,10 @@ interface Rig {
   readonly clock: ReturnType<typeof clock>;
   panes: BoundPane[];
   cl: number | null;
+  /** When the drain began; null reads as `cl` (a plain close). */
+  drainAt: number | null;
+  /** Soft-closed: `cl` set, no drain. */
+  soft: boolean;
   askable: Set<string> | "all";
   marked: Set<string>;
   shown: boolean;
@@ -87,6 +91,8 @@ function rig(): Rig {
     clock: c,
     panes: [pane("%1", "t-1")],
     cl: CL,
+    drainAt: null,
+    soft: false,
     askable: "all",
     marked: new Set(),
     shown: true,
@@ -97,7 +103,7 @@ function rig(): Rig {
     ask: undefined as never,
   };
   const ask = createDrainAsk({
-    closed: () => r.cl,
+    draining: () => (r.cl === null || r.soft ? null : { cl: r.cl, drainAt: r.drainAt ?? r.cl }),
     panes: () => Promise.resolve(r.panes),
     askable: (taskId) => r.askable === "all" || r.askable.has(taskId),
     marked: (p) => r.marked.has(p),
@@ -164,7 +170,7 @@ async function withheldAtTurnEnd(): Promise<Rig> {
     r.afterScreen = undefined;
     r.askable = new Set();
   };
-  await r.ask.closed(CL, false);
+  await r.ask.drain(CL, false);
   await settle();
   r.askable = "all";
   expect(argsOf(r)).toEqual(WITHHELD);
@@ -184,7 +190,7 @@ describe("typing", () => {
   test("a pane whose last frame was a turn-ended idle gets C-c, the text, then Enter, and never an Escape", async () => {
     const r = rig();
     turnEnd(r);
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual(TYPING);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
@@ -194,7 +200,7 @@ describe("typing", () => {
     const r = rig();
     turnEnd(r);
     r.shown = false;
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
@@ -208,7 +214,7 @@ describe("typing", () => {
     const r = rig();
     turnEnd(r);
     r.throwKey = "-l";
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"]]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
@@ -228,15 +234,15 @@ describe("typing", () => {
       r.afterScreen = undefined;
       r.shown = false;
     };
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.audits.map((a) => `${a.taskId}:${a.outcome}`).toSorted()).toEqual(["t-1:typed", "t-2:skipped"]);
     const before = argsOf(r).length;
     frame(r, "busy");
     frame(r, "busy", { pane: "%2", taskId: "t-2" });
     r.clock.advance(INTERRUPT_MS * 2);
-    await r.ask.closed(CL, false);
-    await r.ask.closed(CL, true);
+    await r.ask.drain(CL, false);
+    await r.ask.drain(CL, true);
     await settle();
     expect(argsOf(r)).toHaveLength(before);
     expect(r.audits.map((a) => a.outcome)).not.toContain("interrupted");
@@ -251,7 +257,7 @@ describe("typing", () => {
       reads += 1;
       if (reads === 3) r.shown = true;
     };
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT], ["Enter"]]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
@@ -260,7 +266,7 @@ describe("typing", () => {
   test("a busy pane gets nothing until a turn-ended idle arrives; a plain idle never types", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.keys).toEqual([]);
     frame(r, "idle");
@@ -278,7 +284,7 @@ describe("typing", () => {
       r.onTyped = undefined;
       frame(r, "busy");
     };
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
     turnEnd(r);
@@ -294,7 +300,7 @@ describe("typing", () => {
       r.onTyped = undefined;
       turnEnd(r);
     };
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([...TYPING.slice(0, 2), ...TYPING]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
@@ -303,7 +309,7 @@ describe("typing", () => {
   test("a pass mark set while waiting means the next turn-ended idle gets no keys at all", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.marked.add("%1");
     turnEnd(r);
     await settle();
@@ -314,7 +320,7 @@ describe("typing", () => {
   test("a task that became unaskable while waiting is not typed into", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.askable = new Set();
     turnEnd(r);
     await settle();
@@ -325,7 +331,7 @@ describe("typing", () => {
     const r = rig();
     turnEnd(r);
     r.afterScreen = () => r.marked.add("%1");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
   });
@@ -334,7 +340,7 @@ describe("typing", () => {
     const r = rig();
     turnEnd(r);
     r.failKey = "-l";
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"]]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
@@ -347,7 +353,7 @@ describe("typing", () => {
     const r = rig();
     turnEnd(r);
     r.failKey = "C-c";
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
@@ -362,7 +368,7 @@ describe("typing", () => {
     const r = rig();
     turnEnd(r);
     r.failKey = "Enter";
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
@@ -378,7 +384,7 @@ describe("the interrupt", () => {
   test("an open question gets Esc at once and the text only at the next turn-ended idle", async () => {
     const r = rig();
     frame(r, "needs-input", { reason: "question" });
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "interrupted" }]);
@@ -391,7 +397,7 @@ describe("the interrupt", () => {
   test("a question that opens while waiting gets Esc at once", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     frame(r, "needs-input", { reason: "question" });
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
@@ -400,7 +406,7 @@ describe("the interrupt", () => {
   test("a permission wait is treated as busy: no Esc before the deadline, never text while it waits", async () => {
     const r = rig();
     frame(r, "needs-input", { reason: "permission" });
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.keys).toEqual([]);
     frame(r, "needs-input");
@@ -414,7 +420,7 @@ describe("the interrupt", () => {
   test("no text while needs-input, whatever the reason", async () => {
     const r = rig();
     frame(r, "needs-input", { reason: "question" });
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     frame(r, "needs-input", { reason: "permission" });
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
@@ -423,7 +429,7 @@ describe("the interrupt", () => {
   test("no turn-ended idle within the skip window skips the pane, with no further keys", async () => {
     const r = rig();
     frame(r, "needs-input", { reason: "question" });
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.clock.advance(SKIP_MS);
     await settle();
     expect(r.audits.map((a) => a.outcome)).toEqual(["interrupted", "skipped"]);
@@ -435,7 +441,7 @@ describe("the interrupt", () => {
   test("a busy pane gets Esc at cl + the interrupt wait, then the text at the turn-ended idle", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.clock.advance(INTERRUPT_MS - 1);
     await settle();
     expect(r.keys).toEqual([]);
@@ -447,30 +453,54 @@ describe("the interrupt", () => {
     expect(argsOf(r)).toEqual([["Escape"], ...TYPING]);
   });
 
+  test("the deadline runs from the drain's start, not the close", async () => {
+    const r = rig();
+    r.drainAt = CL + 60_000;
+    frame(r, "busy");
+    await r.ask.drain(CL, false);
+    r.clock.advance(INTERRUPT_MS);
+    await settle();
+    expect(r.keys).toEqual([]);
+    r.clock.advance(60_000);
+    await settle();
+    expect(argsOf(r)).toEqual([["Escape"]]);
+  });
+
+  test("a soft-closed machine asks nothing: not at start(), not at drain()", async () => {
+    const r = rig();
+    r.soft = true;
+    frame(r, "busy");
+    r.clock.advance(INTERRUPT_MS * 2);
+    r.ask.start();
+    await r.ask.drain(CL, true);
+    await settle();
+    expect(r.keys).toEqual([]);
+  });
+
   test("now interrupts at once, on a fresh close and on an already-closed machine", async () => {
     const fresh = rig();
     frame(fresh, "busy");
-    await fresh.ask.closed(CL, true);
+    await fresh.ask.drain(CL, true);
     await settle();
     expect(argsOf(fresh)).toEqual([["Escape"]]);
 
     const later = rig();
     frame(later, "busy");
-    await later.ask.closed(CL, false);
+    await later.ask.drain(CL, false);
     await settle();
     expect(later.keys).toEqual([]);
-    await later.ask.closed(CL, true);
+    await later.ask.drain(CL, true);
     await settle();
     expect(argsOf(later)).toEqual([["Escape"]]);
     // Once per entry.
-    await later.ask.closed(CL, true);
+    await later.ask.drain(CL, true);
     await settle();
     expect(argsOf(later)).toEqual([["Escape"]]);
   });
 
   test("a pane whose state was never seen is interrupted at the deadline and skipped after", async () => {
     const r = rig();
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.clock.advance(INTERRUPT_MS);
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
@@ -503,7 +533,7 @@ describe("the interrupt", () => {
       r.onTyped = undefined;
       frame(r, "busy");
     };
-    await r.ask.closed(CL, true);
+    await r.ask.drain(CL, true);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT], ["Escape"]]);
   });
@@ -511,7 +541,7 @@ describe("the interrupt", () => {
   test("no Escape once the machine reads as open, before the reopen reaches the ask", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.cl = null;
     r.clock.advance(INTERRUPT_MS);
     frame(r, "needs-input", { reason: "question" });
@@ -525,7 +555,7 @@ describe("the interrupt", () => {
       const r = rig();
       frame(r, "needs-input", { reason: "question" });
       r[mode] = "Escape";
-      await r.ask.closed(CL, false);
+      await r.ask.drain(CL, false);
       await settle();
       expect(r.keys).toEqual([]);
       expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
@@ -537,7 +567,7 @@ describe("lifecycle", () => {
   test("reopening before the deadline sends nothing further and cancels the skip timer", async () => {
     const r = rig();
     frame(r, "needs-input", { reason: "question" });
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     r.cl = null;
     r.ask.reopened();
@@ -555,7 +585,7 @@ describe("lifecycle", () => {
       r.cl = null;
       r.ask.reopened();
     };
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
   });
@@ -563,14 +593,14 @@ describe("lifecycle", () => {
   test("a pane reused for another task, or ended, drops its entry with no keys", async () => {
     const reused = rig();
     frame(reused, "busy");
-    await reused.ask.closed(CL, false);
+    await reused.ask.drain(CL, false);
     turnEnd(reused, { taskId: "t-2" });
     await settle();
     expect(reused.keys).toEqual([]);
 
     const ended = rig();
     frame(ended, "busy");
-    await ended.ask.closed(CL, false);
+    await ended.ask.drain(CL, false);
     frame(ended, "ended");
     turnEnd(ended);
     await settle();
@@ -580,7 +610,7 @@ describe("lifecycle", () => {
   test("a hand-off or pass close starting on that very frame drops the entry", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     frame(r, "idle", { turnEnded: true, closing: true });
     await settle();
     expect(r.keys).toEqual([]);
@@ -608,7 +638,7 @@ describe("lifecycle", () => {
     ] as const) {
       turnEnd(r, { pane: id, taskId });
     }
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.keys).toEqual([]);
   });
@@ -634,12 +664,12 @@ describe("lifecycle", () => {
   test("a later close with a new cl asks afresh", async () => {
     const r = rig();
     turnEnd(r);
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.audits).toHaveLength(1);
     r.cl = CL + 10;
     turnEnd(r);
-    await r.ask.closed(CL + 10, false);
+    await r.ask.drain(CL + 10, false);
     await settle();
     expect(r.audits).toHaveLength(2);
   });
@@ -650,7 +680,7 @@ describe("lifecycle", () => {
     expect(r.ask.holds("%1")).toBe(false);
     frame(r, "busy", { pane: "%1", taskId: "t-1" });
     frame(r, "busy", { pane: "%2", taskId: "t-2" });
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.ask.holds("%1")).toBe(true);
     expect(r.ask.holds("%3")).toBe(false);
@@ -667,7 +697,7 @@ describe("lifecycle", () => {
     const r = rig();
     turnEnd(r);
     r.shown = false;
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     await settle();
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
     expect(r.ask.holds("%1")).toBe(false);
@@ -676,11 +706,11 @@ describe("lifecycle", () => {
   test("after stop() nothing is sent", async () => {
     const r = rig();
     frame(r, "busy");
-    await r.ask.closed(CL, false);
+    await r.ask.drain(CL, false);
     r.ask.stop();
     r.clock.advance(INTERRUPT_MS * 2);
     turnEnd(r);
-    await r.ask.closed(CL, true);
+    await r.ask.drain(CL, true);
     await settle();
     expect(r.keys).toEqual([]);
   });
@@ -765,7 +795,7 @@ describe("createLateDrainAsk", () => {
     const r = rig();
     frame(r, "busy");
     const late = createLateDrainAsk();
-    late.closed(CL, true);
+    late.drain(CL, true);
     late.wire(r.ask, CL);
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
@@ -775,7 +805,7 @@ describe("createLateDrainAsk", () => {
     const plain = rig();
     frame(plain, "busy");
     const a = createLateDrainAsk();
-    a.closed(CL, false);
+    a.drain(CL, false);
     a.wire(plain.ask, CL);
     await settle();
     expect(plain.keys).toEqual([]);
@@ -783,22 +813,33 @@ describe("createLateDrainAsk", () => {
     const reopened = rig();
     frame(reopened, "busy");
     const b = createLateDrainAsk();
-    b.closed(CL, true);
+    b.drain(CL, true);
     b.reopened();
     b.wire(reopened.ask, CL);
     await settle();
     expect(reopened.keys).toEqual([]);
   });
 
+  test("a now replays only for a draining close: wired with no drain, nothing goes", async () => {
+    const r = rig();
+    r.soft = true;
+    frame(r, "busy");
+    const late = createLateDrainAsk();
+    late.drain(CL, true);
+    late.wire(r.ask, null);
+    await settle();
+    expect(r.keys).toEqual([]);
+  });
+
   test("a now replays only while the machine is still closed, and an ask wired later takes calls directly", async () => {
     const r = rig();
     frame(r, "busy");
     const late = createLateDrainAsk();
-    late.closed(CL, true);
+    late.drain(CL, true);
     late.wire(r.ask, null);
     await settle();
     expect(r.keys).toEqual([]);
-    late.closed(CL, true);
+    late.drain(CL, true);
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
   });

@@ -155,7 +155,7 @@ export interface SchedulerConfig {
    */
   readonly quotaPassRetryMs: number;
   /**
-   * How long after a machine's `cl` the leader leaves its sessions alone before it passes their tasks off
+   * How long after a machine's drain start (`drainStart`: `dr`, or `cl` from a daemon without `softClose`) the leader leaves its sessions alone before it passes their tasks off
    * (docs/drain.md `DRAIN_SELF_PASS_MS`): the window in which a reopen stops the drain before any session is
    * ended, and in which a session may pass itself. `drainWaitMs` is the one predicate that reads it.
    * Clients carry it as the literal "10 minutes" (the close sheet, `seanced close`, MCP `set_machine_open`): a

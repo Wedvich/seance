@@ -9,6 +9,9 @@ import { MESSAGE_PUSH_MAX, type CustodianEvent } from "@seance/shared";
 import type { CloseRefusal, CustodianReply, CustodianReplyCode, KeptWhy, PrView } from "./custodian-frame.ts";
 import { createCustodianFlags, type CustodianFlags } from "./custodian-flags.ts";
 import {
+  bottomOfScreen,
+  CAPTURE_MAX_BYTES,
+  CAPTURE_MAX_LINES,
   closeVerdict,
   createCustodianVerbs,
   pruneNotes,
@@ -475,6 +478,52 @@ describe("sessions", () => {
 });
 
 describe("capture", () => {
+  const reply = async (screen: string): Promise<unknown> => {
+    const r = rig();
+    r.state.screen = screen;
+    return r.verbs.handle(capture(), process.pid);
+  };
+
+  test("trailing blank lines are dropped without counting as truncated", async () => {
+    expect(await reply("top\nbottom\n\n   \n")).toMatchObject({ text: "top\nbottom", truncated: false });
+  });
+
+  test("a tall screen keeps its last lines", async () => {
+    const lines = Array.from({ length: CAPTURE_MAX_LINES + 5 }, (_, at) => `line ${at}`);
+    expect(await reply(lines.join("\n"))).toMatchObject({
+      text: lines.slice(5).join("\n"),
+      truncated: true,
+    });
+  });
+
+  test("a wide screen keeps the last lines that fit the byte cap, cut at a line and never inside a character", async () => {
+    const line = "\u00E6".repeat(100); // 200 bytes of two-byte characters
+    const result = bottomOfScreen(Array.from({ length: 30 }, () => line).join("\n"));
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(CAPTURE_MAX_BYTES);
+    expect(result.text.split("\n").every((kept) => kept === line)).toBe(true);
+    expect(result.text.split("\n")).toHaveLength(Math.floor((CAPTURE_MAX_BYTES + 1) / 201));
+  });
+
+  test("a last line alone over the byte cap keeps its tail, cut at a character", () => {
+    const result = bottomOfScreen(`${"x".repeat(50)}\n${"\u2500".repeat(2000)}`);
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(CAPTURE_MAX_BYTES);
+    expect(result.text).toMatch(/^\u2500+$/);
+    expect(bottomOfScreen("\u2500".repeat(2000)).truncated).toBe(true);
+  });
+
+  test("an all-blank screen is empty and not truncated", () => {
+    expect(bottomOfScreen("  \n\n \n")).toEqual({ text: "", truncated: false });
+  });
+
+  test("the line cap drops the lines above and trailing blanks are never counted", () => {
+    const lines = Array.from({ length: CAPTURE_MAX_LINES + 5 }, (_, n) => `l${n}`);
+    const result = bottomOfScreen(`${lines.join("\n")}\n\n\n`);
+    expect(result.truncated).toBe(true);
+    expect(result.text.split("\n")).toEqual(lines.slice(-CAPTURE_MAX_LINES));
+  });
+
   test("a session of ours: the visible screen as text, counted, never audited or logged", async () => {
     const r = rig();
     r.state.screen = "the pane's text";
@@ -483,6 +532,7 @@ describe("capture", () => {
       verb: "capture",
       pane: "%1",
       text: "the pane's text",
+      truncated: false,
     });
     expect(r.counts).toEqual(["capture ok"]);
     expect(r.lines).toEqual([]);

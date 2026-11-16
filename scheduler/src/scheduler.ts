@@ -32,6 +32,7 @@ import {
   type SuccessorTrigger,
   type Target,
   closedAt,
+  drainStart,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -287,7 +288,25 @@ export interface SessionPassInput {
   readonly record?: string;
   /** The daemon sent it while its machine was closed: `trigger: "drain"` when the machine's status carries `cl`. */
   readonly drain?: true;
+  /** `SessionPass.at`, the daemon's clock: echoed in `sessionPassRefusals` so the session's own tool can tell its pass's verdict from an earlier one's. */
+  readonly sentAt?: number;
 }
+
+/**
+ * A session's own pass the leader refused (`sessionPassRefusals`): the refusal, the daemon's `sentAt` it answers, and
+ * when the leader decided it (its own clock, for expiry only). Memory only, so a new term forgets it.
+ */
+export interface SessionPassRefusal {
+  readonly taskId: string;
+  readonly code: Extract<PassResult, { readonly ok: false }>["code"];
+  readonly sentAt?: number;
+  readonly at: number;
+}
+
+/** How long a session pass's refusal stays readable: the session's tool reads it within seconds of its push. */
+export const SESSION_PASS_REFUSAL_TTL_MS = 10 * 60_000;
+/** At most this many refusals are kept, the oldest dropped first: a refusal is rare, and each is read once. */
+const SESSION_PASS_REFUSALS_MAX = 64;
 
 /** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
 interface ByHand {
@@ -426,6 +445,11 @@ export class Scheduler {
   readonly #autoTargets = new Map<string, readonly string[]>();
   /** Tasks whose session's own refused pass was alerted this term (`pass-refused`): once each, in memory, since a refusal is rare. */
   readonly #passRefusedAlerted = new Set<string>();
+  /**
+   * Task id → its session's latest own pass, refused (`sessionPassRefusals`). The pass is fire-and-forget, so this is
+   * the only way its session learns why no successor came: `queue` carries it to the tool that sent the pass.
+   */
+  readonly #sessionPassRefusals = new Map<string, SessionPassRefusal>();
   /**
    * Task id → when the leader closes its session itself, for a task carrying `successor` whose close has
    * not landed. Entered before the commit write (so no pass sees a task carrying `successor` that no
@@ -1391,6 +1415,40 @@ export class Scheduler {
     session?: SessionPassInput,
     since?: number,
   ): Promise<PassResult> {
+    if (session === undefined) return this.#passTask(taskId, trigger, session, since);
+    // A new pass of the task answers for itself: an earlier refusal must not be read as this one's.
+    this.#sessionPassRefusals.delete(taskId);
+    return this.#passTask(taskId, trigger, session, since).then((result) => {
+      if (!result.ok) this.#noteSessionRefusal(taskId, result.code, session.sentAt);
+      return result;
+    });
+  }
+
+  /** Session passes this leader refused within `SESSION_PASS_REFUSAL_TTL_MS`: `queue` shows them. */
+  sessionPassRefusals(): readonly SessionPassRefusal[] {
+    const now = this.#now();
+    return [...this.#sessionPassRefusals.values()].filter((r) => now - r.at < SESSION_PASS_REFUSAL_TTL_MS);
+  }
+
+  #noteSessionRefusal(taskId: string, code: SessionPassRefusal["code"], sentAt: number | undefined): void {
+    const now = this.#now();
+    for (const [id, refusal] of this.#sessionPassRefusals) {
+      if (now - refusal.at >= SESSION_PASS_REFUSAL_TTL_MS) this.#sessionPassRefusals.delete(id);
+    }
+    this.#sessionPassRefusals.delete(taskId);
+    this.#sessionPassRefusals.set(taskId, { taskId, code, ...(sentAt === undefined ? {} : { sentAt }), at: now });
+    for (const id of this.#sessionPassRefusals.keys()) {
+      if (this.#sessionPassRefusals.size <= SESSION_PASS_REFUSALS_MAX) break;
+      this.#sessionPassRefusals.delete(id);
+    }
+  }
+
+  #passTask(
+    taskId: string,
+    trigger: SuccessorTrigger,
+    session: SessionPassInput | undefined,
+    since: number | undefined,
+  ): Promise<PassResult> {
     const joined = this.#passInFlight.get(taskId);
     if (joined !== undefined) {
       this.#log(`pass joined task=${quote(taskId)}`);
@@ -1400,7 +1458,9 @@ export class Scheduler {
       info.joinedBySession = true;
       // The drain pass refused before it created anything must not swallow the session's: that one holds the
       // commit and the record the outside pass could not make.
-      return joined.then((result) => (result.ok || info.created ? result : this.pass(taskId, trigger, session, since)));
+      return joined.then((result) =>
+        result.ok || info.created ? result : this.#passTask(taskId, trigger, session, since),
+      );
     }
     const info = {
       trigger: session === undefined ? trigger : ("session" as const),
@@ -1923,7 +1983,7 @@ export class Scheduler {
 
   /**
    * The drain's outside pass (docs/drain.md §4 step B; DESIGN.md, "Closing a machine"): each machine whose
-   * status carries `cl` has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
+   * whose drain has started (`drainStart`) has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
    * has gone by (`drainDue`). Not gated on placement: the successor waits `ready` when no machine can take
    * it, which is what routing's `closed` filter says. Detached (`#drainPasses`), like the quota trigger's
    * passes. Named so it never reads as `drain()`, the test quiescence helper.
@@ -1936,7 +1996,7 @@ export class Scheduler {
       .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id));
     for (const machine of this.#fleet.machines()) {
       const cl = closedAt(machine);
-      if (cl === null || this.#drainPasses.has(machine.deviceId)) continue;
+      if (cl === null || drainStart(machine) === null || this.#drainPasses.has(machine.deviceId)) continue;
       const task = running.find(
         (t) =>
           drainDue(t, machine, now, config) &&

@@ -22,6 +22,7 @@ import {
   type ExclaveInfo,
   type Machine,
   type MachineStatus,
+  type QueueResponse,
   type RequestOp,
   type Task,
   type TaskSpec,
@@ -85,6 +86,7 @@ async function connectedClient(
   passOwnTask?: typeof passToSuccessor,
   passPoll?: PassPoll,
   sendMsg?: typeof sendMessage,
+  ownPane: () => string | undefined = () => undefined,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -96,7 +98,7 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg), {
+  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane), {
     transport: serverTransport,
   });
   await client.connect(clientTransport);
@@ -762,7 +764,7 @@ describe("set_machine_open", () => {
 
   async function call(
     fake: FakeRelay,
-    args: { machine: string; open: boolean; now?: boolean },
+    args: { machine: string; open: boolean; now?: unknown; drain?: unknown; [key: string]: unknown },
   ): Promise<{ readonly text: string; readonly error: boolean }> {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, fakeLocal());
@@ -778,6 +780,29 @@ describe("set_machine_open", () => {
     expect(error).toBe(false);
     expect(text).toBe("homelab is closed to new work; running work finishes where it is");
     expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: false } }]);
+  });
+
+  test("closing the verified leader adds the leader note on its own line, fresh or already closed; a reopen does not", async () => {
+    const leading = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close", "drain"] });
+    const note = "homelab runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const fake = fakeRelay([LEADER, leading], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    const { text } = await call(fake, { machine: "homelab", open: false });
+    expect(text).toBe(`homelab is closed to new work; running work finishes where it is\n${note}`);
+
+    const already = machine({
+      deviceId: "device-2",
+      name: "homelab",
+      capabilities: ["close", "drain"],
+      status: { at: 1, scan: 1, cl: 1_763_000_000_000 },
+    });
+    const again = fakeRelay([LEADER, already], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    again.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    expect((await call(again, { machine: "homelab", open: false })).text.endsWith(`\n${note}`)).toBe(true);
+
+    const reopen = fakeRelay([LEADER, leading], () => ({ ok: true, closed: null }));
+    reopen.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    expect((await call(reopen, { machine: "homelab", open: true })).text).toBe("homelab is open for work");
   });
 
   describe("the drain's session ask", () => {
@@ -849,6 +874,69 @@ describe("set_machine_open", () => {
       lazy.stop();
       expect(result.isError).toBe(true);
       expect(fake.requests).toHaveLength(1);
+    });
+  });
+
+  describe("the soft close", () => {
+    const SOFT = ["close", "drain", "drainAsk", "drainPass", "softClose"];
+    const SOFT_LEADER = machine({ capabilities: SOFT });
+    const SOFT_TARGET = machine({ deviceId: "device-2", name: "homelab", capabilities: SOFT });
+    const soft = (machines = [SOFT_LEADER, SOFT_TARGET]): FakeRelay => {
+      const fake = fakeRelay(machines, () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      return fake;
+    };
+
+    test("is the default under the gate, and says the tasks keep going", async () => {
+      const fake = soft();
+      const { text, error } = await call(fake, { machine: "homelab", open: false });
+      expect(error).toBe(false);
+      expect(text).toBe(
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+      );
+      expect(fake.requests).toEqual([
+        { deviceId: "device-2", op: "availability", payload: { open: false, soft: true } },
+      ]);
+    });
+
+    test("drain sends today's close; now implies drain", async () => {
+      const fake = soft();
+      await call(fake, { machine: "homelab", open: false, drain: true });
+      await call(fake, { machine: "homelab", open: false, now: true });
+      expect(fake.requests.map((r) => r.payload)).toEqual([{ open: false }, { open: false, now: true }]);
+    });
+
+    test("no soft close without softClose on the target or the leader", async () => {
+      const oldTarget = soft([SOFT_LEADER, { ...SOFT_TARGET, capabilities: ["close", "drainAsk"] }]);
+      await call(oldTarget, { machine: "homelab", open: false });
+      const oldLeader = soft([machine({ capabilities: ["drain", "drainPass"] }), SOFT_TARGET]);
+      await call(oldLeader, { machine: "homelab", open: false });
+      expect([...oldTarget.requests, ...oldLeader.requests].map((r) => r.payload)).toEqual([
+        { open: false },
+        { open: false },
+      ]);
+    });
+
+    test("drain and now are true only, and the input is strict", async () => {
+      const fake = soft();
+      for (const args of [
+        { machine: "homelab", open: false, drain: false },
+        { machine: "homelab", open: false, now: false },
+        { machine: "homelab", open: false, soft: true },
+      ]) {
+        expect((await call(fake, args)).error).toBe(true);
+      }
+      expect(fake.requests).toEqual([]);
+    });
+
+    test("closing the verified leader softly carries the leader note", async () => {
+      const fake = soft([SOFT_LEADER, SOFT_TARGET]);
+      fake.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+      const { text } = await call(fake, { machine: "homelab", open: false });
+      expect(text.split("\n")).toEqual([
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+        "homelab runs the queue: while it is down, the queue stops unless another machine can take over.",
+      ]);
     });
   });
 
@@ -4042,6 +4130,10 @@ describe("pass_to_successor", () => {
       readonly queued?: (n: number) => readonly Task[];
       readonly machines?: readonly Machine[];
       readonly leading?: boolean;
+      /** The queue read number n carries these refused session passes. */
+      readonly refused?: (n: number) => QueueResponse["passRefused"];
+      /** This box (`device-2`, the task's) and the session's pane, for the check before the push. */
+      readonly pane?: string;
     } = {},
   ): Promise<{
     text: string;
@@ -4053,7 +4145,15 @@ describe("pass_to_successor", () => {
     let reads = 0;
     const signals: (AbortSignal | undefined)[] = [];
     const fake = fakeRelay(opts.machines ?? leaderMachines(), (op) => {
-      if (op === "queue") return { tasks: opts.queued?.(reads++) ?? [active], at: 6_000 };
+      if (op === "queue") {
+        const n = reads++;
+        const passRefused = opts.refused?.(n);
+        return {
+          tasks: opts.queued?.(n) ?? [active],
+          at: 6_000,
+          ...(passRefused === undefined ? {} : { passRefused }),
+        };
+      }
       return new Error(`unexpected ${op}`);
     });
     if (opts.leading !== false) fake.setState({ scheduler: LEADING });
@@ -4061,7 +4161,7 @@ describe("pass_to_successor", () => {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(
       lazy,
-      null,
+      opts.pane === undefined ? null : fakeLocal(undefined, { deviceId: AT.deviceId }),
       () => {},
       undefined,
       undefined,
@@ -4071,6 +4171,8 @@ describe("pass_to_successor", () => {
         return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
       },
       POLL,
+      undefined,
+      () => opts.pane,
     );
     // Faked only once connected, so the handshake runs on real time; the call's own timers then fire only
     // as the loop below moves the clock, one poll interval per step.
@@ -4196,10 +4298,96 @@ describe("pass_to_successor", () => {
   test("no successor within the window is told as such, not as a failure, and still ends the turn", async () => {
     const result = await callSelf({ queued: () => [active] });
     expect(result.error).toBe(false);
-    expect(result.text).toContain("the branch is pushed but no successor was recorded yet");
+    expect(result.text).toContain("the branch is pushed (feature/x)");
+    expect(result.text).toContain("as of now no successor exists");
+    expect(result.text).toContain("check get_queue");
     expect(result.text).toContain("end your turn now");
     // One read at the start and one per interval through the window's last instant.
     expect(result.queueReads).toBe(31);
+  });
+
+  describe("a task its merge settled while this session kept working", () => {
+    const MERGED_PR = "https://github.com/m/seance/pull/186";
+    const settled: Task = {
+      ...active,
+      state: "done",
+      doneBy: "merged",
+      leftRunning: true,
+      prUrl: MERGED_PR,
+      assignment: { ...AT, window: "fix-it", pane: "%7" },
+    };
+
+    test("is refused before the daemon pushes anything, saying why and what to do instead", async () => {
+      const result = await callSelf({ pane: "%7", queued: () => [settled] });
+      expect(result.error).toBe(true);
+      expect(result.passed).toEqual([]);
+      expect(result.queueReads).toBe(1);
+      expect(result.text).toContain("pass_to_successor refused: no successor can be made");
+      expect(result.text).toContain(`Task t-1 is already done: its pull request ${MERGED_PR} merged`);
+      expect(result.text).toContain('until "merged"');
+      expect(result.text).toContain("Nothing was pushed");
+      expect(result.text).toContain("spawn_session");
+      expect(result.text).not.toContain("end your turn now");
+    });
+
+    test("is left to the daemon and the leader when the pane is another's, unknown, or carries a live task", async () => {
+      const elsewhere = await callSelf({ pane: "%8", queued: () => [settled] });
+      expect(elsewhere.passed).toHaveLength(1);
+      const unknown = await callSelf({ queued: () => [settled] });
+      expect(unknown.passed).toHaveLength(1);
+      // A continuation in the same pane: the live task is the one the pass is for.
+      const live: Task = { ...active, id: "t-2", createdAt: settled.createdAt + 1, assignment: settled.assignment };
+      const reused = await callSelf({ pane: "%7", queued: () => [settled, { ...live, successor: "t-3" }] });
+      expect(reused.passed).toHaveLength(1);
+    });
+
+    test("found finished after the push (the merge read landed in between) is a plain refusal, not 'not confirmed'", async () => {
+      const result = await callSelf({ queued: (n) => [n < 2 ? active : settled] });
+      expect(result.passed).toHaveLength(1);
+      expect(result.queueReads).toBe(3);
+      expect(result.error).toBe(true);
+      expect(result.text).toContain("pass_to_successor refused: no successor exists");
+      expect(result.text).toContain("is already done: its pull request");
+      expect(result.text).toContain("The branch was pushed (feature/x)");
+      expect(result.text).toContain("This session is not closed and stays open");
+      expect(result.text).not.toContain("end your turn now");
+    });
+  });
+
+  describe("the leader's refusal of the pass", () => {
+    test("reaches the session as an error naming the code, the pushed branch and what to do", async () => {
+      const result = await callSelf({
+        refused: (n) => (n < 1 ? undefined : [{ taskId: "t-1", code: "branch_mismatch", sentAt: Date.now() }]),
+      });
+      expect(result.queueReads).toBe(2);
+      expect(result.error).toBe(true);
+      expect(result.text).toContain("pass_to_successor refused: no successor exists — the scheduler refused the pass");
+      expect(result.text).toContain("(branch_mismatch)");
+      expect(result.text).toContain("push this work to the pull request's branch");
+      expect(result.text).toContain("The branch is pushed (feature/x)");
+      expect(result.text).toContain("not closed by the pass and stays open");
+      expect(result.text).not.toContain("nothing was pushed");
+    });
+
+    test("an earlier pass's refusal, or another task's, is not this one's", async () => {
+      const stale = await callSelf({ refused: () => [{ taskId: "t-1", code: "conflict", sentAt: 1 }] });
+      expect(stale.error).toBe(false);
+      expect(stale.text).toContain("as of now no successor exists");
+      const stampless = await callSelf({ refused: () => [{ taskId: "t-1", code: "conflict" }] });
+      expect(stampless.error).toBe(false);
+      const other = await callSelf({
+        refused: () => [{ taskId: "t-9", code: "conflict", sentAt: Date.now() + 60_000 }],
+      });
+      expect(other.error).toBe(false);
+    });
+
+    test("a successor in the same read wins over a refusal", async () => {
+      const result = await callSelf({
+        queued: () => [{ ...active, successor: "t-2" }],
+        refused: () => [{ taskId: "t-1", code: "conflict", sentAt: Date.now() + 60_000 }],
+      });
+      expect(result.text).toContain("recorded successor t-2");
+    });
   });
 
   test("an ok with no ack has nothing to confirm and says only that it was sent", async () => {
@@ -4238,7 +4426,10 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
   interface Listed {
     readonly name: string;
     readonly drain?: {
-      readonly moving: number;
+      readonly draining: boolean;
+      readonly moving?: number;
+      readonly running?: number;
+      readonly idle?: number;
       readonly waitingOnYou: number;
       readonly moved: number;
       readonly stuck: readonly { readonly taskId?: string; readonly reason: string }[];
@@ -4282,6 +4473,7 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
     );
     const listed = await list(fake);
     expect(listed.find((m) => m.name === "homelab")?.drain).toEqual({
+      draining: true,
       moving: 2,
       waitingOnYou: 1,
       moved: 1,
@@ -4289,6 +4481,33 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
       empty: false,
     });
     expect(listed.find((m) => m.name === "MacBook Pro")).not.toHaveProperty("drain");
+  });
+
+  test("a soft-closed machine says it is not draining, and what still runs there, idle or not", async () => {
+    const soft = { ...closedBox, capabilities: ["close", "softClose"] };
+    const fake = drainRelay(
+      [LEADER, soft],
+      () => ({
+        tasks: [
+          mkTask("t1"),
+          mkTask("t2"),
+          mkTask("t3", { state: "needs-input" }),
+          mkTask("t4", { spec: { repo: "github.com/m/seance", mode: "here", prompt: "x" } }),
+        ],
+        at: 1,
+        idle: [{ taskId: "t2", since: 1 }],
+      }),
+      () => ({ sessions: [pane("t1"), pane("t2"), pane("t3"), pane("t4")], at: 1 }),
+    );
+    expect((await list(fake)).find((m) => m.name === "homelab")?.drain).toEqual({
+      draining: false,
+      running: 2,
+      idle: 1,
+      waitingOnYou: 1,
+      moved: 0,
+      stuck: [],
+      empty: false,
+    });
   });
 
   test("a closed machine whose sessions cannot be read says empty is unknown", async () => {

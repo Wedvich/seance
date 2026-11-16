@@ -3,9 +3,13 @@ import {
   CAPABILITIES,
   closedAt,
   custodianOf,
+  DRAIN_INTERRUPT_MS,
+  drainStart,
   drainStuckText,
   drainSummary,
   drainView,
+  leaderCloseNote,
+  leadsQueue,
   knownAccounts,
   type KnownAccount,
   effectivePct,
@@ -46,7 +50,8 @@ import {
   type HistoryRange,
   type HistoryTarget,
 } from "./state.ts";
-import { canDrainNow, formatSeen } from "./view.ts";
+import { timed, type Moment, type Timed } from "./timed.ts";
+import { canDrainNow, formatSeen, seen } from "./view.ts";
 
 /**
  * The machines screen, derived in one pure pass like `deriveView`: pressure and
@@ -83,13 +88,13 @@ export interface MachineCard {
   readonly deviceId: string;
   readonly name: string;
   readonly connected: boolean;
-  readonly meta: string;
+  readonly meta: Timed;
   /** Null for every machine but the relay's nominee. */
   readonly role: SchedulerRole | null;
   /** The build its daemon runs — short sha, commit age, branch; null from a daemon that doesn't say. */
-  readonly build: string | null;
+  readonly build: Timed | null;
   /** Set only when its last reported update attempt was a skip or a failure; carries its age, since the next check may not have run yet. */
-  readonly updateNote: string | null;
+  readonly updateNote: Timed | null;
   /** CPU, memory, and disk fill (percent used on the fullest watched path; red under the scheduler's floor). */
   readonly gauges: readonly Gauge[];
   readonly note: string | null;
@@ -104,6 +109,17 @@ export interface MachineCard {
    * around a closed machine (`drain`), since an older one would fail the tasks it sends there.
    */
   readonly openSwitch: "on" | "off" | null;
+  /**
+   * The close sheet's Close is soft (`canSoftClose` over the registry): the machine and the verified leader advertise
+   * `softClose`. Otherwise Close drains, as before either did.
+   */
+  readonly softClose: boolean;
+  /**
+   * What the drain row and the menu offer a closed machine: on a soft close Drain, and Drain now where its daemon asks
+   * its sessions (`drainAsk`); while draining, Drain now only until the ask's interrupt (`DRAIN_INTERRUPT_MS` past
+   * `drainStart`), after which it has nothing left to speed up. Empty while open or where no close may be sent.
+   */
+  readonly drainActions: readonly DrainAction[];
   /** A closed machine's drain under a `drainPass` leader: null otherwise, and while the queue is unread. */
   readonly drain: DrainRow | null;
   /** The custodian seat's row: null unless the machine advertises `custodian`. */
@@ -176,8 +192,13 @@ export function custodianMenu(card: Pick<MachineCard, "custodian">, asking: Devi
   };
 }
 
+/** A closed machine's further step: start its drain, or start it (or cut its grace) with no wait. */
+export type DrainAction = "drain" | "now";
+
 export interface DrainRow {
-  /** `drainSummary`: "moving 2 · 1 stuck", "empty". */
+  /** The drain has started; false on a soft close, whose summary is what still runs there. */
+  readonly draining: boolean;
+  /** `drainSummary`: "moving 2 · 1 stuck", "empty", or soft "running 2 · 1 idle at its prompt". */
   readonly summary: string;
   /** One line per session the drain cannot move. */
   readonly stuck: readonly string[];
@@ -191,6 +212,8 @@ export interface DrainInputs {
   readonly tasks: readonly Task[] | null;
   /** Per machine, its `sessions` read; "unknown" when it did not answer. */
   readonly sessions: Readonly<Record<string, { readonly sessions: readonly SessionEntry[] } | "unknown">>;
+  /** The queue read's `idle`: tasks released for sitting at their prompt, lagging the turn's end by 10 minutes. */
+  readonly idle?: readonly string[];
 }
 
 const NO_DRAINS: DrainInputs = { passes: false, tasks: null, sessions: {} };
@@ -208,7 +231,9 @@ function stuckLine(tasks: readonly Task[], stuck: DrainStuck): string {
 
 function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
   if (!inputs.passes || inputs.tasks === null || closedAt(machine) === null) return null;
-  const view = drainView(machine, inputs.tasks, sessionsOf(inputs, machine.deviceId));
+  const view = drainView(machine, inputs.tasks, sessionsOf(inputs, machine.deviceId), {
+    ...(inputs.idle === undefined ? {} : { idle: inputs.idle }),
+  });
   // Not yet read is not unreadable: say so until the first answer.
   const reading =
     inputs.sessions[machine.deviceId] === undefined &&
@@ -216,6 +241,7 @@ function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
     view.moving.length === 0 &&
     view.stuck.length === 0;
   return {
+    draining: view.draining,
     summary: reading ? "reading sessions" : drainSummary(view),
     stuck: view.stuck.map((entry) => stuckLine(inputs.tasks ?? [], entry)),
   };
@@ -223,26 +249,55 @@ function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
 
 const ASK_LINE = "Its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes).";
 
+const NO_LEADER: SchedulerAvailability = { kind: "none" };
+
 /**
  * The close sheet's words: what happens to the running work. Without a `drainPass` leader, item 1's
- * line; with one, the tasks that will be passed and the sessions that cannot be.
+ * line; with one, the tasks that will be passed and the sessions that cannot be. A soft Close leads with what it
+ * leaves running, and the drain's lines follow under "Close and drain". Closing the verified leader ends with
+ * `leaderCloseNote`: it keeps leading while closed, soft or not.
  */
-export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAINS): readonly string[] {
-  const first = `Closing ${machine.name} stops new work landing on it.`;
+export function deriveCloseSheet(
+  machine: Machine,
+  inputs: DrainInputs = NO_DRAINS,
+  scheduler: SchedulerAvailability = NO_LEADER,
+  soft = false,
+): readonly string[] {
+  // Read as open: the sheet's list is prospective, so no stamp or successor of an earlier close counts.
+  const drain = drainLines(machine, inputs, { cl: null });
+  const lines = soft
+    ? [
+        `Close stops new work on ${machine.name}. Running tasks keep going until they finish or you drain the machine.`,
+        // Every line, not just the first: the stuck ones are the drain's, a plain Close moves nothing.
+        ...drain.map((line) => `Close and drain: ${lowerFirst(line)}`),
+      ]
+    : [`Closing ${machine.name} stops new work landing on it.`, ...drain];
+  return leadsQueue(machine, scheduler) ? [...lines, leaderCloseNote(machine.name)] : lines;
+}
+
+/** The Drain confirm for a soft-closed machine: what its drain will do with what still runs there. */
+export function deriveDrainSheet(machine: Machine, inputs: DrainInputs = NO_DRAINS): readonly string[] {
+  return [`${machine.name} is closed. Draining it moves its running work off it.`, ...drainLines(machine, inputs, {})];
+}
+
+function lowerFirst(line: string): string {
+  return line.charAt(0).toLowerCase() + line.slice(1);
+}
+
+function drainLines(machine: Machine, inputs: DrainInputs, at: { readonly cl?: null }): readonly string[] {
   const asks = canDrainNow(machine);
   // The drain's reads (queue, sessions) are taken only under a `drainPass` leader, so no counts without one.
-  if (!inputs.passes) return [first, asks ? ASK_LINE : "Running work finishes where it is."];
+  if (!inputs.passes) return [asks ? ASK_LINE : "Running work finishes where it is."];
   if (inputs.tasks === null) {
     return [
-      first,
       asks
         ? `${ASK_LINE.slice(0, -1)}; any left are passed to other machines 10 minutes after, unless you reopen it.`
         : "Its running tasks are passed to other machines 10 minutes after, unless you reopen it.",
     ];
   }
   const sessions = sessionsOf(inputs, machine.deviceId);
-  const view = drainView(machine, inputs.tasks, sessions, null);
-  const lines = [first];
+  const view = drainView(machine, inputs.tasks, sessions, { ...at, draining: true });
+  const lines: string[] = [];
   const n = view.moving.length;
   if (n > 0 && asks) {
     lines.push(
@@ -276,7 +331,7 @@ export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAI
 
 export interface QuotaBar extends Gauge {
   /** Trailing text: when a window resets, or credits spent of their cap ("$42 of $50"). */
-  readonly note: string | null;
+  readonly note: Timed | null;
 }
 
 /** accountId to alias, as `AccountsState.aliases` holds it. */
@@ -299,7 +354,7 @@ export interface AccountCard {
   /** Named, `exclaves` leads it, since the title no longer says them. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
-  readonly observed: string;
+  readonly observed: Timed;
   /** The machine to read this account's quota history from without the archive; null when none online can serve it. */
   readonly historyFrom: string | null;
   /** Whether a chart can be asked for: from `historyFrom`, or merged from the archive while it charts accounts. */
@@ -351,6 +406,11 @@ export function formatUntil(at: number, now: number): string {
   if (left < HOUR) return `resets in ${Math.max(1, Math.floor(left / MINUTE))}m`;
   if (left < DAY) return `resets in ${Math.floor(left / HOUR)}h`;
   return `resets in ${Math.floor(left / DAY)}d`;
+}
+
+/** `formatUntil` with its instant kept, for a line that shows the timestamp on hover. */
+export function until(at: number, now: number): Moment {
+  return { text: formatUntil(at, now), at };
 }
 
 /**
@@ -413,17 +473,17 @@ const UPDATE_TROUBLE: Record<UpdateOutcome, string | null> = {
   restart_failed: "failed, updated on disk but the restart failed",
 };
 
-function updateNote(machine: Machine, now: number): string | null {
+function updateNote(machine: Machine, now: number): Timed | null {
   const report = machine.lastUpdate;
   if (report === undefined) return null;
   const trouble = UPDATE_TROUBLE[report.outcome];
-  return trouble === null ? null : `Last update attempt ${formatSeen(report.at, now)}: ${trouble}.`;
+  return trouble === null ? null : timed`Last update attempt ${seen(report.at, now)}: ${trouble}.`;
 }
 
-function buildLine(source: SourceInfo | undefined, now: number): string | null {
+function buildLine(source: SourceInfo | undefined, now: number): Timed | null {
   if (source === undefined) return null;
   const where = source.branch ?? "detached";
-  return `${source.sha.slice(0, 12)} · committed ${formatSeen(source.commitTs, now)} · ${where}`;
+  return timed`${source.sha.slice(0, 12)} · committed ${seen(source.commitTs, now)} · ${where}`;
 }
 
 /**
@@ -440,10 +500,27 @@ function schedulerLine(machines: readonly Machine[], scheduler: SchedulerAvailab
   return `scheduler on ${name ?? scheduler.deviceId.slice(0, 8)} · term ${scheduler.term}`;
 }
 
-/** The verified leader advertises `drain` over an open relay: the gate `deriveCloseAvailability` applies, over the registry alone. */
-function leaderDrains(machines: readonly Machine[], scheduler: SchedulerAvailability, relayOpen: boolean): boolean {
+/**
+ * The verified leader advertises `capability` over an open relay: for `drain`, the gate `deriveCloseAvailability`
+ * applies, and for `softClose` `canSoftClose`'s leader half, over the registry alone.
+ */
+function leaderAdvertises(
+  machines: readonly Machine[],
+  scheduler: SchedulerAvailability,
+  relayOpen: boolean,
+  capability: string,
+): boolean {
   if (!relayOpen || scheduler.kind !== "ready") return false;
-  return machines.find((m) => m.deviceId === scheduler.deviceId)?.capabilities?.includes(CAPABILITIES.drain) === true;
+  return machines.find((m) => m.deviceId === scheduler.deviceId)?.capabilities?.includes(capability) === true;
+}
+
+function drainActions(machine: Machine, canClose: boolean, now: number): readonly DrainAction[] {
+  // An asleep machine answers nothing, so a drain asked of it would only fail.
+  if (!canClose || !machine.connected || closedAt(machine) === null) return [];
+  const asks = canDrainNow(machine);
+  const start = drainStart(machine);
+  if (start === null) return asks ? ["drain", "now"] : ["drain"];
+  return asks && now < start + DRAIN_INTERRUPT_MS ? ["now"] : [];
 }
 
 function machineCard(
@@ -453,9 +530,10 @@ function machineCard(
   aliases: AccountAliases,
   known: readonly KnownAccount[],
   archived: boolean,
-  canDrain: boolean,
+  leader: { readonly drains: boolean; readonly softCloses: boolean },
   drains: DrainInputs,
 ): MachineCard {
+  const canDrain = leader.drains;
   const closed = closedAt(machine) !== null;
   const canClose = machine.capabilities?.includes(CAPABILITIES.close) === true;
   // Not drawn for an asleep card: its status is the one the relay kept, and its
@@ -467,9 +545,10 @@ function machineCard(
     status?.mem === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.mem], status.mem, "mem"),
     status?.disk === undefined ? null : diskGauge(status.disk, status.free),
   ].filter((entry): entry is Gauge => entry !== null);
+  const updated = status === undefined ? timed`` : timed` · updated ${seen(status.at * 1000, now)}`;
   const meta = machine.connected
-    ? `${machine.platform}${status === undefined ? "" : ` · updated ${formatSeen(status.at * 1000, now)}`}`
-    : `asleep · last seen ${formatSeen(lastHeardAt(machine), now)}`;
+    ? timed`${machine.platform}${updated}`
+    : timed`asleep · last seen ${seen(lastHeardAt(machine), now)}`;
 
   return {
     deviceId: machine.deviceId,
@@ -492,6 +571,9 @@ function machineCard(
     charts: servesMetrics(machine) || (archived && !machine.connected),
     closed,
     openSwitch: !canClose ? null : closed ? "off" : canDrain ? "on" : null,
+    softClose:
+      canClose && canDrain && leader.softCloses && machine.capabilities?.includes(CAPABILITIES.softClose) === true,
+    drainActions: drainActions(machine, canClose && canDrain, now),
     drain: drainRow(machine, drains),
     custodian: custodianRow(machine, status, now),
     custodianControls: machine.connected && machine.capabilities?.includes(CAPABILITIES.custodian) === true,
@@ -514,8 +596,8 @@ function servesMetrics(machine: Machine): boolean {
 function quotaBar(label: string, pct: number, resetsAt: number | undefined, now: number): QuotaBar {
   const bar = gauge(label, effectivePct(pct, resetsAt, now));
   if (resetsAt === undefined) return { ...bar, note: null };
-  if (resetsAt * 1000 <= now) return { ...bar, note: "reset" };
-  return { ...bar, note: formatUntil(resetsAt * 1000, now) };
+  if (resetsAt * 1000 <= now) return { ...bar, note: ["reset"] };
+  return { ...bar, note: [until(resetsAt * 1000, now)] };
 }
 
 /**
@@ -547,7 +629,7 @@ function creditsBar({ c, cu, cl }: QuotaReading): QuotaBar {
   // Credits are only on screen while a window is full, so spending them is never "fine": no green band.
   const bar = base.level === "ok" ? { ...base, level: "warn" as const } : base;
   if (cu === undefined || cl === undefined) return { ...bar, note: null };
-  return { ...bar, note: `${money.format(cu / 100)} of ${money.format(cl / 100)}` };
+  return { ...bar, note: [`${money.format(cu / 100)} of ${money.format(cl / 100)}`] };
 }
 
 /**
@@ -559,16 +641,16 @@ function historyHost(group: AccountGroup, newest: Machine | undefined): string |
   return group.charted[0] ?? null;
 }
 
-function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): string {
+function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): Timed {
   if (quota === undefined) {
-    return "No quota seen yet. It shows once a session has run and its machine has reported.";
+    return ["No quota seen yet. It shows once a session has run and its machine has reported."];
   }
   // Only the fleet quota record outlives its observer's registry entry.
   if (observer === undefined) {
-    return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on a machine no longer listed`;
+    return timed`${quota.observation.s} · ${seen(quota.observation.at * 1000, now)} on a machine no longer listed`;
   }
   const where = observer.connected ? observer.name : `${observer.name}, asleep`;
-  return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on ${where}`;
+  return timed`${quota.observation.s} · ${seen(quota.observation.at * 1000, now)} on ${where}`;
 }
 
 /**
@@ -660,19 +742,14 @@ export function deriveMachines(
   drains: DrainInputs = NO_DRAINS,
 ): MachinesView {
   const known = knownAccounts(machines);
+  const leader = {
+    drains: leaderAdvertises(machines, scheduler, relayOpen, CAPABILITIES.drain),
+    softCloses: leaderAdvertises(machines, scheduler, relayOpen, CAPABILITIES.softClose),
+  };
   return {
     scheduler: schedulerLine(machines, scheduler),
     cards: machines.map((machine) =>
-      machineCard(
-        machine,
-        now,
-        scheduler,
-        aliases,
-        known,
-        archive.machine,
-        leaderDrains(machines, scheduler, relayOpen),
-        drains,
-      ),
+      machineCard(machine, now, scheduler, aliases, known, archive.machine, leader, drains),
     ),
     accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),
     ranges: { machine: historyRanges(archive.machine), account: historyRanges(archive.account) },
@@ -689,9 +766,9 @@ export interface ArchivistRow {
 export interface ArchivistCard {
   readonly name: string;
   readonly online: boolean;
-  readonly meta: string;
+  readonly meta: Timed;
   /** The build its service runs; null from an archivist that was not updated since it learned to say. */
-  readonly build: string | null;
+  readonly build: Timed | null;
   /** Empty offline, and online until a reply for this very device is held. */
   readonly rows: readonly ArchivistRow[];
   /** Only offline: what is hidden until it is back. */
@@ -759,7 +836,7 @@ export function deriveArchivist(
     return {
       name: ARCHIVIST_NAME,
       online: false,
-      meta: `offline · last seen ${formatSeen(entry.lastSeen, now)}`,
+      meta: timed`offline · last seen ${seen(entry.lastSeen, now)}`,
       build,
       rows: [],
       note: ARCHIVIST_OFFLINE_NOTE,
@@ -769,7 +846,7 @@ export function deriveArchivist(
   const reply = held?.deviceId === entry.deviceId ? held.reply : null;
   const ingests = reply === null ? [] : Object.values(reply.lastIngest).filter((at) => at !== null);
   const meta =
-    ingests.length === 0 ? entry.platform : `${entry.platform} · last ingest ${formatSeen(Math.max(...ingests), now)}`;
+    ingests.length === 0 ? [entry.platform] : timed`${entry.platform} · last ingest ${seen(Math.max(...ingests), now)}`;
   const database = reply === null ? null : bytesText(reply.database.archiveBytes + reply.database.metricsBytes);
   return {
     name: ARCHIVIST_NAME,

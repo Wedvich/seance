@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ArchivedTask, ArchivistEntry, Machine, RelayState, Task } from "@seance/shared";
 import { deriveOlder, olderRequest } from "../src/older-view.ts";
+import { plain as lineText } from "../src/timed.ts";
 import {
   CLOSED_OLDER,
   DEFAULT_FORM,
@@ -189,9 +190,9 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
     const [card] = deriveOlder(state({ list: page([row]) }), NOW)?.rows ?? [];
     expect(card).toMatchObject({
       title: "Task t-1",
-      headline: "Its PR merged on box-a",
-      age: "2d ago",
-      body: "Created 3d ago.",
+      headline: ["Its PR merged on box-a"],
+      age: { text: "2d ago", at: NOW - 2 * DAY },
+      body: ["Created ", { text: "3d ago", at: NOW - 3 * DAY }, "."],
       placement: "acme/app · Work",
       canCancel: false,
       canMarkDone: false,
@@ -224,9 +225,9 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
       { machine: "old-box" },
     );
     const [card] = deriveOlder(state({ list: page([row]) }), NOW)?.rows ?? [];
-    expect(card?.headline).toBe("It failed on old-box");
+    expect(card?.headline).toEqual(["It failed on old-box"]);
     expect(card?.dot).toBe("err");
-    expect(card?.body).toMatch(/Created 3d ago\.$/u);
+    expect(lineText(card?.body ?? [])).toMatch(/Created 3d ago\.$/u);
     expect(card?.body).not.toBe("Created 3d ago.");
   });
 
@@ -241,7 +242,7 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
       { machine: "old-box" },
     );
     const [card] = deriveOlder(state({ list: page([row]) }), NOW)?.rows ?? [];
-    expect(card?.headline).toBe("Passed to a successor on old-box");
+    expect(card?.headline).toEqual(["Passed to a successor on old-box"]);
     expect(card?.dot).toBeNull();
     const sheet = deriveOlder(state({ sheet: "outcome" }), NOW)?.sheet;
     expect(sheet?.options.map((o) => o.label)).toEqual(["Any", "Done", "Failed", "Cancelled", "Passed on"]);

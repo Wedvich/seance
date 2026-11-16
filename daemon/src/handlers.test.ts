@@ -41,6 +41,7 @@ import { termFleet } from "./leader-adapters.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
 import { EndedTasks, LaunchesClosed } from "./session-events.ts";
+import { availabilityChange, closedOf, type CloseMode, type State } from "./state.ts";
 
 // The audit trail is what's under test, so collect it at the seam the daemon
 // injects rather than off stdout, which is only where daemonSink happens to
@@ -1629,20 +1630,28 @@ describe("a scheduler spawn that continues a failed task", () => {
 
 describe("a closed machine", () => {
   /** A plain object stub: the injected seam, not mocked package code. */
-  const sets: { open: boolean; now: boolean | undefined }[] = [];
+  const sets: { open: boolean; mode: CloseMode }[] = [];
   function availabilityStub(initial: number | null = null): MachineAvailability {
-    let closed = initial;
+    let state: State = {
+      deviceId: "d",
+      repos: [],
+      scannedAt: null,
+      ...(initial === null ? {} : { closed: { at: initial } }),
+    };
     return {
-      closed: () => closed,
-      set: (open, now) => {
-        sets.push({ open, now });
-        const was = closed;
-        if (open ? was === null : was !== null) return Promise.resolve({ closed: was, changed: false });
-        closed = open ? null : Date.now();
-        return Promise.resolve({ closed, changed: true });
+      closed: () => closedOf(state),
+      set: (open, mode) => {
+        sets.push({ open, mode });
+        const change = availabilityChange(state, open, mode, Date.now());
+        state = change.next;
+        return Promise.resolve({ closed: closedOf(state), outcome: change.outcome });
       },
     };
   }
+  const availabilityStubClosed = (payload: unknown): number | null =>
+    typeof payload === "object" && payload !== null && "closed" in payload && typeof payload.closed === "number"
+      ? payload.closed
+      : null;
   const dispatch = (taskId: string, extra: Record<string, unknown> = {}): Plain =>
     request("spawn", { repo: "myrepo", mode: "here", taskId, client: SCHEDULER_CLIENT, ...extra });
 
@@ -1830,16 +1839,53 @@ describe("a closed machine", () => {
       await handle(ask(false, { now: false }), APP_ID);
       await handle(ask(true, { now: true }), APP_ID);
       expect(sets).toEqual([
-        { open: false, now: false },
-        { open: false, now: true },
-        { open: false, now: false },
-        { open: true, now: true },
+        { open: false, mode: "drain" },
+        { open: false, mode: "now" },
+        { open: false, mode: "drain" },
+        { open: true, mode: "now" },
       ]);
       expect(trail()).toEqual([
         "audit availability origin=relay open=false outcome=closed",
         "audit availability origin=relay open=false outcome=unchanged now=true",
         "audit availability origin=relay open=false outcome=unchanged",
         "audit availability origin=relay open=true outcome=reopened now=true",
+      ]);
+    });
+
+    test("a soft close audits soft=true and drains nothing; a plain or now close after it starts the drain", async () => {
+      sets.length = 0;
+      const handle = createHandler({ ...ctx, availability: availabilityStub() });
+      const first = await handle(ask(false, { soft: true }), APP_ID);
+      const at = availabilityStubClosed(first?.payload);
+      expect((await handle(ask(false), APP_ID))?.payload).toEqual({ ok: true, closed: at });
+      await handle(ask(true), APP_ID);
+      await handle(ask(false, { soft: true }), APP_ID);
+      await handle(ask(false, { now: true }), APP_ID);
+      await handle(ask(false, { soft: true }), APP_ID);
+      await handle(ask(true, { soft: true }), APP_ID);
+      expect(sets.map((x) => x.mode)).toEqual(["soft", "drain", "drain", "soft", "now", "soft", "soft"]);
+      expect(trail()).toEqual([
+        "audit availability origin=relay open=false outcome=closed soft=true",
+        "audit availability origin=relay open=false outcome=drain_started",
+        "audit availability origin=relay open=true outcome=reopened",
+        "audit availability origin=relay open=false outcome=closed soft=true",
+        "audit availability origin=relay open=false outcome=drain_started now=true",
+        "audit availability origin=relay open=false outcome=unchanged soft=true",
+        "audit availability origin=relay open=true outcome=reopened soft=true",
+      ]);
+    });
+
+    test("soft beside now, or a non-boolean soft, is invalid_request and set is not called", async () => {
+      sets.length = 0;
+      const handle = createHandler({ ...ctx, availability: availabilityStub() });
+      expect((await handle(ask(false, { soft: true, now: true }), APP_ID))?.payload).toMatchObject({
+        code: "invalid_request",
+      });
+      expect((await handle(ask(false, { soft: 1 }), APP_ID))?.payload).toMatchObject({ code: "invalid_request" });
+      expect(sets).toEqual([]);
+      expect(trail()).toEqual([
+        "audit availability origin=relay open=- outcome=invalid_request",
+        "audit availability origin=relay open=- outcome=invalid_request",
       ]);
     });
 

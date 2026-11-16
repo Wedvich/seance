@@ -15,6 +15,7 @@ import {
 } from "@seance/shared";
 import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
 import { NEEDS_INPUT_SCREEN_MS, nextReveal } from "../src/input-debounce.ts";
+import { plain as lineText } from "../src/timed.ts";
 import {
   AVAILABILITY_IDLE,
   CUSTODIAN_CONTROL_IDLE,
@@ -224,8 +225,12 @@ describe("deriveQueue", () => {
     const rows = view.sections.find((s) => s.title === "Asleep")?.rows ?? [];
     const settles = "Settles when its machine wakes; cancel or mark done to give up on it";
     expect(rows[4]).toMatchObject({
-      headline: "Asleep on MacBook · default — its machine went to sleep 10m ago.",
-      body: settles,
+      headline: [
+        "Asleep on MacBook · default — its machine went to sleep ",
+        { text: "10m ago", at: NOW - 600_000 },
+        ".",
+      ],
+      body: [settles],
     });
     const needs = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
     expect(needs.map((r) => r.body)).not.toContain(settles);
@@ -286,7 +291,10 @@ describe("deriveQueue", () => {
   test("an escalated task says how long it has waited, and attention follows it", () => {
     const stuck = task("stuck", { state: "needs-input", escalated: true, needsInputSince: NOW - 3 * 3_600_000 });
     const view = deriveQueue(state(ok([stuck])), NOW);
-    expect(view.sections[0]?.rows[0]).toMatchObject({ dot: "err", body: "Waiting for input since 3h ago" });
+    expect(view.sections[0]?.rows[0]).toMatchObject({
+      dot: "err",
+      body: ["Waiting for input since ", { text: "3h ago", at: NOW - 3 * 3_600_000 }],
+    });
     expect(view.attention).toBe(true);
     const quiet = deriveQueue(state(ok([task("ask", { state: "needs-input" })])), NOW);
     expect(quiet.attention).toBe(false);
@@ -296,7 +304,7 @@ describe("deriveQueue", () => {
   test("a failed task is worded by failedBody, including the codes the scheduler sets itself", () => {
     for (const code of ["lost_expired", "merge_expired", "repo_not_found", "queue_expired"]) {
       const view = deriveQueue(state(ok([task("f", { state: "failed", failure: { code, message: "m" } })])), NOW);
-      expect(view.sections[0]?.rows[0]?.body).toBe(failedBody(code));
+      expect(view.sections[0]?.rows[0]?.body).toEqual([failedBody(code)]);
       expect(view.sections[0]?.rows[0]?.dot).toBe("err");
     }
   });
@@ -304,11 +312,11 @@ describe("deriveQueue", () => {
   test("a failed session's card says how it ended, from the exit status its failure carries", () => {
     const failure = { code: "session_failed", message: "m", exit: 137 };
     const view = deriveQueue(state(ok([task("f", { state: "failed", failure })])), NOW);
-    expect(view.sections[0]?.rows[0]?.body).toBe(failedBody("session_failed", 137));
-    expect(view.sections[0]?.rows[0]?.body).toContain("killed (SIGKILL), possibly out of memory");
+    expect(view.sections[0]?.rows[0]?.body).toEqual([failedBody("session_failed", 137)]);
+    expect(lineText(view.sections[0]?.rows[0]?.body ?? [])).toContain("killed (SIGKILL), possibly out of memory");
     const judged = { ...failure, oomKill: true };
     const confirmed = deriveQueue(state(ok([task("f", { state: "failed", failure: judged })])), NOW);
-    expect(confirmed.sections[0]?.rows[0]?.body).toContain(
+    expect(lineText(confirmed.sections[0]?.rows[0]?.body ?? [])).toContain(
       "killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died),",
     );
   });
@@ -331,7 +339,7 @@ describe("deriveQueue", () => {
         ],
       },
     });
-    const body = deriveQueue(state(ok([held])), NOW).sections[0]?.rows[0]?.body;
+    const body = lineText(deriveQueue(state(ok([held])), NOW).sections[0]?.rows[0]?.body ?? []);
     expect(body).toContain("Waiting: FullBox · default:");
     expect(body).toContain(reasonText(over));
     expect(body).not.toContain("Mac");
@@ -594,7 +602,7 @@ describe("deriveQueue", () => {
       NOW,
     );
     expect(view.paused).toBe(true);
-    expect(view.holds.map((h) => h.text)).toEqual([
+    expect(view.holds.map((h) => lineText(h.text))).toEqual([
       "The whole queue is paused until resumed",
       "me@acme.dev is paused until its quota resets (in 3h)",
       "acct unknown- is paused until resumed",
@@ -636,7 +644,7 @@ describe("deriveQueue", () => {
       ),
       NOW,
     );
-    expect(view.holds.map((h) => h.text)).toEqual([
+    expect(view.holds.map((h) => lineText(h.text))).toEqual([
       "me@acme.dev (org 1a2b3c4d) is paused until resumed",
       "me@acme.dev (org 9f8e7d6c) is paused until resumed",
       "acct abcdefgh (org org-p) is paused until resumed",
@@ -669,7 +677,7 @@ describe("deriveQueue", () => {
       ),
       NOW,
     );
-    expect(view.holds.map((h) => h.text)).toEqual(["Acme is paused until resumed"]);
+    expect(view.holds.map((h) => lineText(h.text))).toEqual(["Acme is paused until resumed"]);
   });
 
   test("the list stays up while the leader is away, and the empty line says why", () => {
@@ -737,7 +745,7 @@ describe("deriveQueue", () => {
       ["Finished", ["settled"]],
     ]);
     const row = view.sections.find((s) => s.title === "Idle")?.rows[0];
-    expect(row?.body).toBe("Idle at its prompt since 20m ago — its slot is free");
+    expect(lineText(row?.body ?? [])).toBe("Idle at its prompt since 20m ago — its slot is free");
     expect(row?.markDoneEndsSession).toBe(true);
     expect(view.summary).toBe("1 running · 1 idle · 0 waiting");
     expect(deriveQueue(state(ok([busy])), NOW).summary).toBe("1 running · 0 waiting");
@@ -950,7 +958,9 @@ describe("continuing a failed task", () => {
       state: "failed",
       failure: { code: "not_continuable", message: "its worktree is locked (on a usb disk)" },
     });
-    expect(rowOf([failed, refused], "c", CAN)?.body).toContain("its worktree is locked (on a usb disk)");
+    expect(lineText(rowOf([failed, refused], "c", CAN)?.body ?? [])).toContain(
+      "its worktree is locked (on a usb disk)",
+    );
   });
 
   test("not offered when the leader cannot take a continue task, though the machine it ran on can", () => {
@@ -1450,7 +1460,7 @@ describe("the screen debounce on needs-input", () => {
     const v = view(waiting({ remoteSession: "session_01TuECqfR7Twko9QJm98sWAw" }));
     expect(titles(v)).toEqual(["Running"]);
     expect(v.sections[0]?.rows[0]).toMatchObject({
-      headline: expect.stringMatching(/^It's running/u),
+      headline: [expect.stringMatching(/^It's running/u)],
       answer: null,
       dot: "ok",
     });
@@ -1462,7 +1472,9 @@ describe("the screen debounce on needs-input", () => {
       waiting({ needsInputSince: NOW - NEEDS_INPUT_SCREEN_MS - 1_000, inputReason: "permission", inputTool: "Bash" }),
     );
     expect(titles(v)).toEqual(["Needs you"]);
-    expect(v.sections[0]?.rows[0]?.headline).toMatch(/^It may be waiting for permission to use Bash on /u);
+    expect(lineText(v.sections[0]?.rows[0]?.headline ?? [])).toMatch(
+      /^It may be waiting for permission to use Bash on /u,
+    );
   });
 
   test("the comparison is on the leader's clock, whatever the device's", () => {
@@ -1483,7 +1495,10 @@ describe("the screen debounce on needs-input", () => {
 
   test("the escalated body says why, and a question reads as one", () => {
     const body = (fields: Partial<Task>) =>
-      view(waiting({ escalated: true, needsInputSince: NOW - 31 * 60_000, ...fields })).sections[0]?.rows[0]?.body;
+      lineText(
+        view(waiting({ escalated: true, needsInputSince: NOW - 31 * 60_000, ...fields })).sections[0]?.rows[0]?.body ??
+          [],
+      );
     expect(body({ inputReason: "permission", inputTool: "Bash" })).toBe(
       "May be waiting for permission to use Bash since 31m ago",
     );
@@ -1499,7 +1514,7 @@ describe("the screen debounce on needs-input", () => {
   test("the escalated body ages a leader-clock stamp against the device's", () => {
     const skew = HOUR;
     const t = waiting({ escalated: true, needsInputSince: NOW + skew - 31 * 60_000 }, skew);
-    expect(view(t, skew).sections[0]?.rows[0]?.body).toBe("Waiting for input since 31m ago");
+    expect(lineText(view(t, skew).sections[0]?.rows[0]?.body ?? [])).toBe("Waiting for input since 31m ago");
   });
 
   test("the After sheet headlines a settling task as the Queue screen does", () => {
