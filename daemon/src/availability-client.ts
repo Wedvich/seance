@@ -241,7 +241,7 @@ export async function waitForDrain(opts: {
         line = `${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}; trying again`;
       } else {
         unreadable = 0;
-        const view = drainView(machine, tasks, sessions.sessions, opts.closedAt);
+        const view = drainView(machine, tasks, sessions.sessions, { cl: opts.closedAt });
         const lineOf = (s: (typeof view.stuck)[number]): string => `${s.taskId ?? "-"} ${drainStuckText(s)}`;
         if (view.empty === true) {
           const unplaced = view.stuck.filter((s) => s.reason === "unplaced").map(lineOf);

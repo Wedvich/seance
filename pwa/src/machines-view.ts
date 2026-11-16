@@ -255,7 +255,7 @@ function closeSheetLines(machine: Machine, inputs: DrainInputs): readonly string
     ];
   }
   const sessions = sessionsOf(inputs, machine.deviceId);
-  const view = drainView(machine, inputs.tasks, sessions, null);
+  const view = drainView(machine, inputs.tasks, sessions, { cl: null, draining: true });
   const lines = [first];
   const n = view.moving.length;
   if (n > 0 && asks) {
