@@ -45,11 +45,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   `seanced close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
   machine"; the leader's outside pass (item 2: `trigger: "drain"`, `Task.drained`, `drainView`, `seanced close --wait`) is built too, in DESIGN.md, "The drain's outside pass", and so is the session ask (item 3: `CAPABILITIES.drainAsk`, `now`, the
   `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". §6's close warning (a closed leader keeps leading) is in
-  "Closing a machine" and §12's time-to-empty line in "The drain's outside pass"; what is left in the file is
-  §6's "Later" (re-register without the lead role once empty), §12's list of measures and §13's surfaces (the soft
-  close by default for clients: PWA, `seanced close`, MCP; its wire, daemon and leader part is built: `soft`,
-  `closed.drainAt`, `MachineStatus.dr`, `drainStart`, `CAPABILITIES.softClose`, in the three DESIGN.md sections above).
-  Read it before scheduler routing or shutdown work.
+  "Closing a machine" and §12's time-to-empty line in "The drain's outside pass", and so is the soft close by default
+  (N5: `soft`, `closed.drainAt`, `MachineStatus.dr`, `drainStart`, `CAPABILITIES.softClose`, and the clients' surfaces —
+  the PWA's soft Close, Drain and Drain now, `seanced close --drain`, MCP `drain` — in the three DESIGN.md sections
+  above); what is left in the file is §6's "Later" (re-register without the lead role once empty) and §12's list of
+  measures. Read it before scheduler routing or shutdown work.
 - **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
@@ -335,7 +335,9 @@ green:
   advertising `CAPABILITIES.close` under a verified leader advertising `CAPABILITIES.drain`. `availability`'s
   `now` is `true` only, honoured only by a daemon advertising `CAPABILITIES.drainAsk`, offered only to such a target
   (refused locally otherwise, before anything is sent), and never persisted. `availability`'s `soft` is `true`
-  only, never beside `now` (`invalid_request`), and never persisted; a `closed.drainAt` it cannot read loads as not
+  only, never beside `now` (`invalid_request`), never persisted, and sent by a client only to a target advertising
+  `CAPABILITIES.softClose` under a verified leader advertising it (refused locally otherwise in the PWA, the draining
+  close sent instead by the CLI and MCP; an older daemon would drop it and drain); a `closed.drainAt` it cannot read loads as not
   draining; `MachineStatus.dr` is sent only beside `cl` and never trimmed by `fitStatus`; and the leader's outside pass
   drains a machine only from `drainStart` (`shared/src/status-reader.ts`: `dr`, else `cl` for a daemon not advertising
   `CAPABILITIES.softClose`, else never).

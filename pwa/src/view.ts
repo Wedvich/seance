@@ -462,6 +462,22 @@ export function deriveCloseAvailability(relay: RelayState, machine: Machine): bo
   );
 }
 
+/** What a close asks: `soft` stops new work only, `drain` moves running tasks too, `now` drains without the grace. */
+export type CloseKind = "soft" | "drain" | "now";
+
+/**
+ * Whether the close sheet's Close is soft (no drain until asked): a close may be sent, and both `machine` and the
+ * verified leader advertise `softClose`. An older daemon would drop `soft` and drain; an older leader would pass on
+ * `cl` alone. Otherwise the sheet keeps the close and words it as before.
+ */
+export function canSoftClose(relay: RelayState, machine: Machine): boolean {
+  return (
+    deriveCloseAvailability(relay, machine) &&
+    machine.capabilities?.includes(CAPABILITIES.softClose) === true &&
+    verifiedLeaderAdvertises(relay, CAPABILITIES.softClose)
+  );
+}
+
 /**
  * Whether `machine`'s daemon asks its sessions to pass themselves when closed and honours `now` (`drainAsk`):
  * the close sheet's ask wording and "Drain now" are gated on it, never on `close` or `drain`.

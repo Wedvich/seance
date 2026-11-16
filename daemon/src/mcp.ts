@@ -346,10 +346,13 @@ async function readDrains(
   const paneTaskIds = sessions.flatMap((reply) =>
     (reply?.sessions ?? []).flatMap((s) => (s.taskId === undefined ? [] : [s.taskId])),
   );
-  const tasks = await queueTasksFor(leg, paneTaskIds);
-  if (tasks === null) return views;
+  const queue = await queueTasksFor(leg, paneTaskIds);
+  if (queue === null) return views;
   closed.forEach((machine, index) => {
-    views.set(machine.deviceId, drainView(machine, tasks, sessions[index]?.sessions ?? null));
+    views.set(
+      machine.deviceId,
+      drainView(machine, queue.tasks, sessions[index]?.sessions ?? null, { idle: queue.idle }),
+    );
   });
   return views;
 }
@@ -408,7 +411,14 @@ function describeMachine(
       ? {}
       : {
           drain: {
-            moving: drain.moving.length,
+            draining: drain.draining,
+            // Soft-closed, nothing moves: `running`, `idle` and `waitingOnYou` are disjoint, as in the PWA and CLI summary.
+            ...(drain.draining
+              ? { moving: drain.moving.length }
+              : {
+                  running: drain.moving.filter((m) => !m.idle && !m.waitingOnYou).length,
+                  idle: drain.moving.filter((m) => m.idle && !m.waitingOnYou).length,
+                }),
             waitingOnYou: drain.moving.filter((m) => m.waitingOnYou).length,
             moved: drain.moved.length,
             stuck: drain.stuck.map((s) => ({
@@ -1028,7 +1038,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `moving` tasks still being passed to other machines (`waitingOnYou` of them waiting on a person), `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `draining` false for a soft close, whose drain has not been started (nothing is moved: `running` tasks still working there, `idle` ones idle at their prompt, which never finish on their own and are what a drain is for (the leader counts one idle 10 minutes after its turn ended), and `waitingOnYou` ones waiting on a person), true once it has (`moving` tasks still being passed to other machines, `waitingOnYou` of them waiting on a person); then `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1653,26 +1663,33 @@ export function buildMcpServer(
     {
       title: "Close or reopen a machine",
       description:
-        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); the scheduler's leader passes its running tasks to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them), and a direct spawn still runs. Closing needs the scheduler's leader to support it. Closing the machine that leads the queue is allowed and the reply says so: the queue runs only while that machine is up. A machine whose daemon supports it also asks each running session to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes; `now` (closing only, a machine advertising drain-now) interrupts its sessions at once instead of after 5 minutes, and a session waiting on the person has its question dismissed. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
+        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations), and a direct spawn still runs. Where the machine and the scheduler's leader support it the close is soft: its running tasks keep going until they finish, and nothing is interrupted or moved until you drain it (`drain`, also on a machine already closed). A drain (or any close elsewhere) asks each running session, on a daemon that supports it, to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes, and has the leader pass what is left to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them). `now` (a machine advertising drain-now; implies `drain`) interrupts its sessions at once instead of after 5 minutes, and a session waiting on the person has its question dismissed. Closing needs the scheduler's leader to support it. Closing the machine that leads the queue is allowed and the reply says so: the queue runs only while that machine is up. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
       inputSchema: z.strictObject({
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),
-        now: z
-          .boolean()
+        drain: z
+          .literal(true)
           .optional()
           .describe(
-            "closing only: interrupt its sessions at once instead of after 5 minutes (a machine advertising drain-now)",
+            "closing only: start the drain (ask, then pass), not a soft close; on a soft-closed machine it starts its drain",
+          ),
+        now: z
+          .literal(true)
+          .optional()
+          .describe(
+            "closing only: drain, interrupting its sessions at once instead of after 5 minutes (a machine advertising drain-now)",
           ),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ machine, open, now }) =>
+    async ({ machine, open, drain, now }) =>
       withFleet(async (lease) => {
         const outcome = await setMachineOpen({
           ref: machine,
           selfId: null,
           open,
           ...(now === undefined ? {} : { now }),
+          ...(drain === undefined ? {} : { drain }),
           lease,
         });
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
