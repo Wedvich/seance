@@ -10,7 +10,7 @@ import { log } from "./log.ts";
 const AGENT = `---
 name: custodian
 description: Does a thing.
-tools: Bash, Read
+tools: Bash
 ---
 
 Prompt body.
@@ -54,7 +54,7 @@ describe("the committed agent definition", () => {
     expect(parsed).toBeObject();
     const agents = parsed as Record<string, { description: string; prompt: string; tools: string[] }>;
     expect(Object.keys(agents)).toEqual(["custodian"]);
-    expect(agents["custodian"]?.tools).toEqual(["Bash", "Read"]);
+    expect(agents["custodian"]?.tools).toEqual(["Bash"]);
     expect(agents["custodian"]?.prompt.length).toBeGreaterThan(100);
     expect(agents["custodian"]?.description).not.toBe("");
   });
@@ -86,14 +86,14 @@ describe("the committed agent definition", () => {
 describe("parseAgent", () => {
   test("turns the file into the --agents JSON", () => {
     expect(JSON.parse(parseAgent(AGENT))).toEqual({
-      custodian: { description: "Does a thing.", prompt: "Prompt body.", tools: ["Bash", "Read"] },
+      custodian: { description: "Does a thing.", prompt: "Prompt body.", tools: ["Bash"] },
     });
   });
 
   test("an extra frontmatter key, a wider tool list, another name or a missing part is refused", () => {
-    expect(() => parseAgent(AGENT.replace("tools: Bash, Read", "tools: Bash, Read\nmodel: opus"))).toThrow();
-    expect(() => parseAgent(AGENT.replace("tools: Bash, Read", "tools: Bash, Read, Write"))).toThrow(/tools must be/u);
-    expect(() => parseAgent(AGENT.replace("tools: Bash, Read", "tools: Read, Bash"))).toThrow(/tools must be/u);
+    expect(() => parseAgent(AGENT.replace("tools: Bash", "tools: Bash\nmodel: opus"))).toThrow();
+    expect(() => parseAgent(AGENT.replace("tools: Bash", "tools: Bash, Write"))).toThrow(/tools must be/u);
+    expect(() => parseAgent(AGENT.replace("tools: Bash", "tools: Bash, Read"))).toThrow(/tools must be/u);
     expect(() => parseAgent(AGENT.replace("name: custodian", "name: other"))).toThrow(/name must be/u);
     expect(() => parseAgent(AGENT.replace("description: Does a thing.\n", ""))).toThrow(/missing/u);
     expect(() => parseAgent(AGENT.replace("name: custodian\n", "name: custodian\nname: custodian\n"))).toThrow(

@@ -1100,8 +1100,8 @@ nothing checked it. The last is the gap they leave.
   goes through them (custodian 4, built: "The custodian frame kind"), and that is all they bound. What bounds the round is
   its sandbox (custodian 4b, built and drilled 2026-11-14 on macOS and Linux, "The custodian's seat", "Contained"): it reads only
   its own directories and the read-only toolchain (everything under `$HOME`, the state dir and the config dir, the repo
-  and exclave roots and the Data-volume aliases of them is masked, and the Read tool is held to the round dir by an
-  allow rule and secret denies), reaches **no network** (`allowedDomains: []`) and **one socket that acts, its
+  and exclave roots and the Data-volume aliases of them is masked, and the round has no Read tool, with secret denies
+  kept behind that), reaches **no network** (`allowedDomains: []`) and **one socket that acts, its
   own**, which serves the verbs only (the tmux socket, the daemon's main socket and every other path socket are masked or
   not listed), under a built environment with nothing inherited. A host where that cannot be shown (Linux on a
   CPU the vsock filter has no table for, a checkout outside the allowed set) runs no round. What it still reads, by decision: the system tree, the toolchain,
@@ -9253,11 +9253,13 @@ decision is recorded here.
   window (`new-window -d`, so a round every quarter hour never takes the owner's terminal's focus) named
   `custodian` and started `-c <round dir>`.
   - **The agent** is a markdown file in the repo (`daemon/custodian/agent.md`: a frontmatter of exactly `name`,
-    `description` and `tools: Bash, Read`, then the checklist), turned into `--agents` JSON on argv
+    `description` and `tools: Bash`, then the checklist), turned into `--agents` JSON on argv
     (`custodian-agent.ts`); a file naming any other key or tool is refused rather than launched. `--agents <file>`
     is read only with `--print`, and `--add-dir` (which would load a `.claude/agents/`) also widens the sandbox's
-    write scope. `tools: Bash, Read` holds for the main thread (checked by a real round asked to use Write and
-    Edit: "my tool set has only Bash and Read"). Its prompt replaces the system prompt, and its `permissionMode`
+    write scope. The tool list holds for the main thread (checked by a real round asked to use Write and
+    Edit: "my tool set has only Bash and Read", when Read was still on it). Read was dropped (2026-11-16): a
+    tool output over Claude Code's persist threshold lands under `<config dir>/projects/`, which the fence denies,
+    so the round could not read its own output, and every read it needs is a verb. Its prompt replaces the system prompt, and its `permissionMode`
     is ignored for the main thread, so the mode is the flag. The prompt stays short and on argv: tmux refuses an
     over-long command, and the real-tmux test launches the real text.
   - **`--permission-mode dontAsk`** is the only mode that holds C20's last rule: in `default` a host off the
@@ -9276,10 +9278,10 @@ decision is recorded here.
     0700 tmp dir keeps it off argv and out of `ps`. So is the seed, on stdin as spawn's is. Neither is writable
     from the round's sandbox, which writes only `<tmp>/claude-<uid>`.
   - **The fence** (`custodianFence`, `custodian-fence.ts`, pure and generated; its shape is constant, the paths the
-    daemon's): `permissions.defaultMode: dontAsk`, `allow: ["Read(//<round dir>/**)", "Bash(seanced custodian *)"]`
-    (under `dontAsk` the Read tool, which runs outside the sandbox, is otherwise refused outside the round dir; the
-    double slash is Claude Code's absolute-path form, and a single one silently matches nothing) and the deny list
-    below; `sandbox` with `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false`,
+    daemon's): `permissions.defaultMode: dontAsk`, `allow: ["Bash(seanced custodian *)"]`
+    (under `dontAsk` everything else is refused) and the deny list below, whose `Read(//…)` rules stay for the Read
+    tool, which runs outside the sandbox, in case Claude Code auto-allows a read or the tool comes back (the double
+    slash is Claude Code's absolute-path form, and a single one silently matches nothing); `sandbox` with `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false`,
     `autoAllowBashIfSandboxed` (C18's near-full shell: every sandboxed command no rule denies runs),
     `filesystem.denyWrite: [<round dir>]`, `filesystem.denyRead` and `allowRead` (the masks, below),
     `network.allowedDomains: []` and the socket key below. `enableWeakerNetworkIsolation` is **gone**: it existed
@@ -9342,8 +9344,8 @@ decision is recorded here.
     files, `.gitconfig`, `.bashrc`, `.mcp.json` and the like, plus `.vscode` and `.idea`). The round dir is read-only
     already, and a protected name that does not exist there is bound as an empty placeholder the sandbox cannot
     create in a read-only directory, so `ensureRoundDir` creates each one first (`PROTECTED_NAMES`, `PROTECTED_DIRS`,
-    `roundDirPlanted` leaves them alone, but reads a symlink or a hardlinked file anywhere in the dir as a plant: the
-    Read tool is allowed the round dir, and a link there would carry it to any file the uid reads). The list tracks
+    `roundDirPlanted` leaves them alone, but reads a symlink or a hardlinked file anywhere in the dir as a plant: a
+    link there would carry any reader of the round dir to any file the uid reads). The list tracks
     Claude Code's and drifts with its versions; a name a later release adds fails the round's start, and
     a round that exits within `START_FAILED_MS` (2 minutes) of its start with no verb called, in the process that
     launched it, is ended and audited `reason=start_failed` (the round log's too), apart from `exited`. It says when,
@@ -12522,8 +12524,12 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   hung one) and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
   screen text is returned: a screen is read in memory to judge a close and dropped. Classification runs four at a
   time.
-- **`capture` (4b)** answers one pane's visible screen as plain text (`capture-pane` with no attributes: the styled capture
-  is `close`'s draft check alone), for the round to judge a session by what it shows now. The pane is re-read at the
+- **`capture` (4b)** answers the bottom of one pane's visible screen as plain text (`capture-pane` with no attributes: the
+  styled capture is `close`'s draft check alone), for the round to judge a session by what it shows now: trailing blank
+  lines dropped, then at most the last 60 lines and 4 KiB of UTF-8, cut at a line (`bottomOfScreen`), with `truncated`
+  saying whether lines above were cut. The bottom is where a final report, a draft or a dialog shows, and the cap keeps
+  several captures under Claude Code's ~30 KB persist threshold: a larger output lands in a file under the denied
+  `<config dir>/projects/`, which a real round could not read and then tried to loop around, a command `dontAsk` refuses. The pane is re-read at the
   act and refused as `close` refuses it where it applies: `gone` (also an unreadable screen), `marked` (the round's own
   pane or another custodian pane) and `foreign` (a hand-started pane: its screen is the owner's, not a session's). The
   text goes to the round and nowhere else: no audit line, no log, no cache; the verb's count is the round log's. A
@@ -12807,7 +12813,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   daemon's other frame kinds (`Plain` `despawn` with `force: true`: the main socket is masked and the round's own socket
   answers only the `custodian` kind), the other sockets that act as the user (the systemd user bus, Docker, an
   ssh-agent: masked on Linux, unlisted on macOS), signals (confined to the sandbox), and the round's reads of `state.json`'s identity
-  seed, `~/.ssh` and the `gh` credential (masked, and the Read tool is held to the round dir) with nowhere to send them
+  seed, `~/.ssh` and the `gh` credential (masked, and no Read tool, with its denies kept) with nowhere to send them
   (`allowedDomains: []`). 4b's bound is positive, not an ancestry refusal on the main socket (a re-parented process
   escapes that): the round reaches one socket of its own that serves the verbs only. **Accepted, by decision:** the
   reads listed under "What gets through", and a prompt injection that talks the round into a wrong but permitted verb
