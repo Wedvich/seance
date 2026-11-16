@@ -25,7 +25,7 @@ import {
 } from "../state.ts";
 import { matchesFilter, splitMatch } from "../sheet-filter.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { formatSeen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
+import { seen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
@@ -801,7 +801,7 @@ function PreviewCard(props: {
           summary={describeDecision(decision, machines, now, "would")}
           title="PLACEMENT PREVIEW"
           quota={false}
-          age={formatSeen(decision.at, now)}
+          age={seen(decision.at, now)}
         />
         {refresh}
       </div>

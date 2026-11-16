@@ -48,7 +48,8 @@ import {
   type HistoryRange,
   type HistoryTarget,
 } from "./state.ts";
-import { canDrainNow, formatSeen } from "./view.ts";
+import { timed, type Moment, type Timed } from "./timed.ts";
+import { canDrainNow, formatSeen, seen } from "./view.ts";
 
 /**
  * The machines screen, derived in one pure pass like `deriveView`: pressure and
@@ -85,13 +86,13 @@ export interface MachineCard {
   readonly deviceId: string;
   readonly name: string;
   readonly connected: boolean;
-  readonly meta: string;
+  readonly meta: Timed;
   /** Null for every machine but the relay's nominee. */
   readonly role: SchedulerRole | null;
   /** The build its daemon runs — short sha, commit age, branch; null from a daemon that doesn't say. */
-  readonly build: string | null;
+  readonly build: Timed | null;
   /** Set only when its last reported update attempt was a skip or a failure; carries its age, since the next check may not have run yet. */
-  readonly updateNote: string | null;
+  readonly updateNote: Timed | null;
   /** CPU, memory, and disk fill (percent used on the fullest watched path; red under the scheduler's floor). */
   readonly gauges: readonly Gauge[];
   readonly note: string | null;
@@ -290,7 +291,7 @@ function closeSheetLines(machine: Machine, inputs: DrainInputs): readonly string
 
 export interface QuotaBar extends Gauge {
   /** Trailing text: when a window resets, or credits spent of their cap ("$42 of $50"). */
-  readonly note: string | null;
+  readonly note: Timed | null;
 }
 
 /** accountId to alias, as `AccountsState.aliases` holds it. */
@@ -313,7 +314,7 @@ export interface AccountCard {
   /** Named, `exclaves` leads it, since the title no longer says them. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
-  readonly observed: string;
+  readonly observed: Timed;
   /** The machine to read this account's quota history from without the archive; null when none online can serve it. */
   readonly historyFrom: string | null;
   /** Whether a chart can be asked for: from `historyFrom`, or merged from the archive while it charts accounts. */
@@ -365,6 +366,11 @@ export function formatUntil(at: number, now: number): string {
   if (left < HOUR) return `resets in ${Math.max(1, Math.floor(left / MINUTE))}m`;
   if (left < DAY) return `resets in ${Math.floor(left / HOUR)}h`;
   return `resets in ${Math.floor(left / DAY)}d`;
+}
+
+/** `formatUntil` with its instant kept, for a line that shows the timestamp on hover. */
+export function until(at: number, now: number): Moment {
+  return { text: formatUntil(at, now), at };
 }
 
 /**
@@ -427,17 +433,17 @@ const UPDATE_TROUBLE: Record<UpdateOutcome, string | null> = {
   restart_failed: "failed, updated on disk but the restart failed",
 };
 
-function updateNote(machine: Machine, now: number): string | null {
+function updateNote(machine: Machine, now: number): Timed | null {
   const report = machine.lastUpdate;
   if (report === undefined) return null;
   const trouble = UPDATE_TROUBLE[report.outcome];
-  return trouble === null ? null : `Last update attempt ${formatSeen(report.at, now)}: ${trouble}.`;
+  return trouble === null ? null : timed`Last update attempt ${seen(report.at, now)}: ${trouble}.`;
 }
 
-function buildLine(source: SourceInfo | undefined, now: number): string | null {
+function buildLine(source: SourceInfo | undefined, now: number): Timed | null {
   if (source === undefined) return null;
   const where = source.branch ?? "detached";
-  return `${source.sha.slice(0, 12)} · committed ${formatSeen(source.commitTs, now)} · ${where}`;
+  return timed`${source.sha.slice(0, 12)} · committed ${seen(source.commitTs, now)} · ${where}`;
 }
 
 /**
@@ -481,9 +487,10 @@ function machineCard(
     status?.mem === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.mem], status.mem, "mem"),
     status?.disk === undefined ? null : diskGauge(status.disk, status.free),
   ].filter((entry): entry is Gauge => entry !== null);
+  const updated = status === undefined ? timed`` : timed` · updated ${seen(status.at * 1000, now)}`;
   const meta = machine.connected
-    ? `${machine.platform}${status === undefined ? "" : ` · updated ${formatSeen(status.at * 1000, now)}`}`
-    : `asleep · last seen ${formatSeen(lastHeardAt(machine), now)}`;
+    ? timed`${machine.platform}${updated}`
+    : timed`asleep · last seen ${seen(lastHeardAt(machine), now)}`;
 
   return {
     deviceId: machine.deviceId,
@@ -528,8 +535,8 @@ function servesMetrics(machine: Machine): boolean {
 function quotaBar(label: string, pct: number, resetsAt: number | undefined, now: number): QuotaBar {
   const bar = gauge(label, effectivePct(pct, resetsAt, now));
   if (resetsAt === undefined) return { ...bar, note: null };
-  if (resetsAt * 1000 <= now) return { ...bar, note: "reset" };
-  return { ...bar, note: formatUntil(resetsAt * 1000, now) };
+  if (resetsAt * 1000 <= now) return { ...bar, note: ["reset"] };
+  return { ...bar, note: [until(resetsAt * 1000, now)] };
 }
 
 /**
@@ -561,7 +568,7 @@ function creditsBar({ c, cu, cl }: QuotaReading): QuotaBar {
   // Credits are only on screen while a window is full, so spending them is never "fine": no green band.
   const bar = base.level === "ok" ? { ...base, level: "warn" as const } : base;
   if (cu === undefined || cl === undefined) return { ...bar, note: null };
-  return { ...bar, note: `${money.format(cu / 100)} of ${money.format(cl / 100)}` };
+  return { ...bar, note: [`${money.format(cu / 100)} of ${money.format(cl / 100)}`] };
 }
 
 /**
@@ -573,16 +580,16 @@ function historyHost(group: AccountGroup, newest: Machine | undefined): string |
   return group.charted[0] ?? null;
 }
 
-function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): string {
+function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): Timed {
   if (quota === undefined) {
-    return "No quota seen yet. It shows once a session has run and its machine has reported.";
+    return ["No quota seen yet. It shows once a session has run and its machine has reported."];
   }
   // Only the fleet quota record outlives its observer's registry entry.
   if (observer === undefined) {
-    return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on a machine no longer listed`;
+    return timed`${quota.observation.s} · ${seen(quota.observation.at * 1000, now)} on a machine no longer listed`;
   }
   const where = observer.connected ? observer.name : `${observer.name}, asleep`;
-  return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on ${where}`;
+  return timed`${quota.observation.s} · ${seen(quota.observation.at * 1000, now)} on ${where}`;
 }
 
 /**
@@ -703,9 +710,9 @@ export interface ArchivistRow {
 export interface ArchivistCard {
   readonly name: string;
   readonly online: boolean;
-  readonly meta: string;
+  readonly meta: Timed;
   /** The build its service runs; null from an archivist that was not updated since it learned to say. */
-  readonly build: string | null;
+  readonly build: Timed | null;
   /** Empty offline, and online until a reply for this very device is held. */
   readonly rows: readonly ArchivistRow[];
   /** Only offline: what is hidden until it is back. */
@@ -773,7 +780,7 @@ export function deriveArchivist(
     return {
       name: ARCHIVIST_NAME,
       online: false,
-      meta: `offline · last seen ${formatSeen(entry.lastSeen, now)}`,
+      meta: timed`offline · last seen ${seen(entry.lastSeen, now)}`,
       build,
       rows: [],
       note: ARCHIVIST_OFFLINE_NOTE,
@@ -783,7 +790,7 @@ export function deriveArchivist(
   const reply = held?.deviceId === entry.deviceId ? held.reply : null;
   const ingests = reply === null ? [] : Object.values(reply.lastIngest).filter((at) => at !== null);
   const meta =
-    ingests.length === 0 ? entry.platform : `${entry.platform} · last ingest ${formatSeen(Math.max(...ingests), now)}`;
+    ingests.length === 0 ? [entry.platform] : timed`${entry.platform} · last ingest ${seen(Math.max(...ingests), now)}`;
   const database = reply === null ? null : bytesText(reply.database.archiveBytes + reply.database.metricsBytes);
   return {
     name: ARCHIVIST_NAME,

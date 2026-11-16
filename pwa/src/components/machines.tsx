@@ -20,12 +20,14 @@ import {
   type HistoryView,
 } from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
+import type { Timed } from "../timed.ts";
 import { canDrainNow, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
 import { Sheet } from "./sheet.tsx";
+import { TimedText } from "./timed.tsx";
 
 const TARGET_LABELS: Record<HistoryTarget["kind"], string> = { machine: "Load and disk", account: "Quota" };
 
@@ -240,8 +242,14 @@ function MachineCardView(props: {
             )}
             {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
-          <p className="fleet-meta">{card.meta}</p>
-          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
+          <p className="fleet-meta">
+            <TimedText line={card.meta} />
+          </p>
+          {card.build !== null && (
+            <p className="fleet-meta fleet-build">
+              <TimedText line={card.build} />
+            </p>
+          )}
         </div>
         {offersMenu && (
           <>
@@ -307,7 +315,11 @@ function MachineCardView(props: {
       {custodianState.roundRequested && <p className="fleet-note">Round requested</p>}
       {card.custodian !== null && <CustodianLine row={card.custodian} paused={custodianState.paused} />}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
-      {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
+      {card.updateNote !== null && (
+        <p className="fleet-note fleet-warn">
+          <TimedText line={card.updateNote} />
+        </p>
+      )}
 
       {card.exclaves.length > 0 && (
         <ul className="exclaves">
@@ -349,8 +361,14 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
             <span className={card.online ? "dot dot-ok" : "dot"} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
           </div>
-          <p className="fleet-meta">{card.meta}</p>
-          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
+          <p className="fleet-meta">
+            <TimedText line={card.meta} />
+          </p>
+          {card.build !== null && (
+            <p className="fleet-meta fleet-build">
+              <TimedText line={card.build} />
+            </p>
+          )}
         </div>
       </div>
       {card.rows.length > 0 && (
@@ -432,7 +450,9 @@ function AccountCardView(props: {
           ))}
         </div>
       )}
-      <p className="fleet-note">{account.observed}</p>
+      <p className="fleet-note">
+        <TimedText line={account.observed} />
+      </p>
       {history !== null && target !== null && (
         <HistoryChart history={history} ranges={ranges} onPick={(range) => onShowHistory(target, range)} />
       )}
@@ -698,7 +718,7 @@ function SessionCount(props: { count: number }): JSX.Element {
  * leaves the column out entirely (a pressure gauge); `null` keeps it, empty,
  * so a window without a reset stamp stays in line with its siblings.
  */
-function Bar(props: { gauge: Gauge; note?: string | null }): JSX.Element {
+function Bar(props: { gauge: Gauge; note?: Timed | null }): JSX.Element {
   const { gauge, note } = props;
   return (
     <div className={note === undefined ? "bar" : "bar bar-resets"}>
@@ -712,7 +732,7 @@ function Bar(props: { gauge: Gauge; note?: string | null }): JSX.Element {
         <span className={`bar-fill bar-${gauge.level}`} style={{ width: `${gauge.pct}%` }} />
       </span>
       <span className="bar-value">{gauge.pct}%</span>
-      {note !== undefined && <span className="bar-reset">{note ?? ""}</span>}
+      {note !== undefined && <span className="bar-reset">{note !== null && <TimedText line={note} />}</span>}
     </div>
   );
 }
