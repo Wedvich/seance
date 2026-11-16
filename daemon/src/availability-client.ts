@@ -10,6 +10,8 @@ import {
   RequestFailure,
   failureReasonText,
   lastHeardAt,
+  leaderCloseNote,
+  leadsQueue,
   type AvailabilityRequest,
   type SessionsResponse,
   type Task,
@@ -97,13 +99,16 @@ export async function setMachineOpen(opts: {
   }
   if (reply.closed === null) return done(`${target.name} is open for work`);
   const closed = { deviceId: target.deviceId, name: target.name, at: reply.closed };
+  // It keeps leading while closed: said on every close that stands, fresh or not.
+  const leads = leadsQueue(target, lease.scheduler?.availability() ?? { kind: "none" });
+  const standing = (text: string): AvailabilityOutcome =>
+    done(leads ? `${text}\n${leaderCloseNote(target.name)}` : text, closed);
   if (closedAt(target) === reply.closed) {
     const since = new Date(reply.closed).toISOString();
-    return done(
+    return standing(
       asks && now
         ? `${target.name} was already closed (since ${since}); its sessions are being interrupted now`
         : `${target.name} was already closed (since ${since})`,
-      closed,
     );
   }
   // Only a leader that advertises `drainPass` passes the work off; an older one leaves it where it is.
@@ -115,16 +120,14 @@ export async function setMachineOpen(opts: {
   if (asks) {
     const when = now ? "interrupted now" : "interrupted after 5 minutes";
     const left = passes ? "; any left are passed to other machines in 10 minutes unless you reopen it" : "";
-    return done(
+    return standing(
       `${target.name} is closed to new work; its sessions are asked to pass themselves at their next pause (${when})${left}`,
-      closed,
     );
   }
-  return done(
+  return standing(
     passes
       ? `${target.name} is closed to new work; its running tasks will be passed to other machines in 10 minutes unless you reopen it`
       : `${target.name} is closed to new work; running work finishes where it is`,
-    closed,
   );
 }
 

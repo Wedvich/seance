@@ -6,6 +6,8 @@ import {
   drainStuckText,
   drainSummary,
   drainView,
+  leaderCloseNote,
+  leadsQueue,
   knownAccounts,
   type KnownAccount,
   effectivePct,
@@ -223,11 +225,23 @@ function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
 
 const ASK_LINE = "Its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes).";
 
+const NO_LEADER: SchedulerAvailability = { kind: "none" };
+
 /**
  * The close sheet's words: what happens to the running work. Without a `drainPass` leader, item 1's
- * line; with one, the tasks that will be passed and the sessions that cannot be.
+ * line; with one, the tasks that will be passed and the sessions that cannot be. Closing the verified
+ * leader ends with `leaderCloseNote`: it keeps leading while closed.
  */
-export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAINS): readonly string[] {
+export function deriveCloseSheet(
+  machine: Machine,
+  inputs: DrainInputs = NO_DRAINS,
+  scheduler: SchedulerAvailability = NO_LEADER,
+): readonly string[] {
+  const lines = closeSheetLines(machine, inputs);
+  return leadsQueue(machine, scheduler) ? [...lines, leaderCloseNote(machine.name)] : lines;
+}
+
+function closeSheetLines(machine: Machine, inputs: DrainInputs): readonly string[] {
   const first = `Closing ${machine.name} stops new work landing on it.`;
   const asks = canDrainNow(machine);
   // The drain's reads (queue, sessions) are taken only under a `drainPass` leader, so no counts without one.

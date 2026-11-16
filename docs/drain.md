@@ -78,13 +78,11 @@ One line each; the text is in DESIGN.md.
 
 ## Not built
 
-### 6. Leadership
+### 6. Leadership — _Later_
 
-A closed machine keeps leading. The drain's passes need a leader, and moving the term mid-drain only adds a
-takeover. It stops leading when it leaves (leaving.md §1 resigns at SIGTERM). If the box you close is the leader
-and no other nominee is connected, the queue stops while it is down. The PWA's confirm sheet should say so
-("Thad runs the queue; no other machine can take over"). _Later:_ register without the `lead` role once the
-machine is empty, if another nominee is connected, so the queue keeps running through the outage.
+A closed machine keeps leading, and the close warns when it is the leader (built: DESIGN.md, "Closing a
+machine"). _Later:_ register without the `lead` role once the machine is empty, if another nominee is connected,
+so the queue keeps running through the outage.
 
 ### 11. Relation to docs/leaving.md
 

@@ -988,6 +988,26 @@ describe("seanced close / open", () => {
       );
       expect(outcome.ok).toBe(true);
       expect(fake.requests).toEqual([{ deviceId: "device-1", op: "availability", payload: { open: false } }]);
+      // This machine is the verified leader (`LEADING`), and keeps leading while closed.
+      expect(outcome.text.split("\n")).toEqual([
+        "MacBook Pro is closed to new work; running work finishes where it is",
+        "MacBook Pro runs the queue: while it is down, the queue stops unless another machine can take over.",
+      ]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a close of a machine the leader is not carries no leader note", async () => {
+    const other = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close"] });
+    const fake = fakeRelay([self, other], () => ({ ok: true, closed: 9_000 }));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await availabilityViaFleet("homelab", false, false, relayFleet(lazy), () =>
+        Promise.resolve("device-1"),
+      );
+      expect(outcome.text).toBe("homelab is closed to new work; running work finishes where it is");
     } finally {
       lazy.stop();
     }

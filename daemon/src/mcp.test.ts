@@ -782,6 +782,29 @@ describe("set_machine_open", () => {
     expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: false } }]);
   });
 
+  test("closing the verified leader adds the leader note on its own line, fresh or already closed; a reopen does not", async () => {
+    const leading = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close", "drain"] });
+    const note = "homelab runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const fake = fakeRelay([LEADER, leading], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    const { text } = await call(fake, { machine: "homelab", open: false });
+    expect(text).toBe(`homelab is closed to new work; running work finishes where it is\n${note}`);
+
+    const already = machine({
+      deviceId: "device-2",
+      name: "homelab",
+      capabilities: ["close", "drain"],
+      status: { at: 1, scan: 1, cl: 1_763_000_000_000 },
+    });
+    const again = fakeRelay([LEADER, already], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    again.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    expect((await call(again, { machine: "homelab", open: false })).text.endsWith(`\n${note}`)).toBe(true);
+
+    const reopen = fakeRelay([LEADER, leading], () => ({ ok: true, closed: null }));
+    reopen.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    expect((await call(reopen, { machine: "homelab", open: true })).text).toBe("homelab is open for work");
+  });
+
   describe("the drain's session ask", () => {
     const ASKS = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close", "drainAsk"] });
     const PASSING = machine({ capabilities: ["drain", "drainPass"] });
