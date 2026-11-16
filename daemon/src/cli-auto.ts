@@ -329,6 +329,7 @@ export async function availabilityViaFleet(
   fleet: Fleet,
   self: () => Promise<string | null> = ownDeviceId,
   wait = false,
+  drain = false,
 ): Promise<AvailabilityOutcome> {
   const verb = open ? "open" : "close";
   let lease: FleetLease;
@@ -348,7 +349,14 @@ export async function availabilityViaFleet(
       return failed(NO_WAIT_TEXT);
     }
     if (wait && lease.scheduler === null) return failed(NO_WAIT_TEXT);
-    return await setMachineOpen({ ref: machine, selfId: machine === null ? await self() : null, open, now, lease });
+    return await setMachineOpen({
+      ref: machine,
+      selfId: machine === null ? await self() : null,
+      open,
+      now,
+      drain,
+      lease,
+    });
   } finally {
     lease.release();
   }
@@ -362,13 +370,16 @@ export async function cmdAvailabilityAuto(
   open: boolean,
   now: boolean,
   wait: boolean,
+  drain: boolean,
 ): Promise<void> {
   const config = await loadConfig();
   const built = await autoFleet(config);
-  const outcome = await availabilityViaFleet(machine, open, now, built.fleet, undefined, wait).catch((err: unknown) => {
-    built.fleet.stop();
-    throw err;
-  });
+  const outcome = await availabilityViaFleet(machine, open, now, built.fleet, undefined, wait, drain).catch(
+    (err: unknown) => {
+      built.fleet.stop();
+      throw err;
+    },
+  );
   if (!outcome.ok) {
     built.fleet.stop();
     console.error(outcome.text);
@@ -383,6 +394,7 @@ export async function cmdAvailabilityAuto(
     fleet: built.fleet,
     deviceId: outcome.closed.deviceId,
     closedAt: outcome.closed.at,
+    draining: outcome.closed.draining,
     print: (line) => console.log(line),
   }).finally(() => built.fleet.stop());
   (drained.code === 0 ? console.log : console.error)(drained.text);
