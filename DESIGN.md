@@ -8501,8 +8501,19 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   (it fails their `parseSucceeds`), as for `"quota"`; an older leader nominee holds such a record
   unreadable and never places it, and a rolled-back leader neither reads `Task.drained` nor drains at all. A new client against an older leader shows item 1's
   behaviour (no `drainPass`). Deploy order: daemons, then PWA/CLI.
-- **Deferred.** docs/drain.md's §12 time-from-close-to-empty measure is not built; the pass's own `audit pass …
-  trigger=drain` line is the one measure.
+- **Time to empty** (docs/drain.md §12). The closed machine's own daemon logs one line, `drain: empty
+  cl=<cl> after_ms=<ms> peak=<n>` (`grep 'drain: empty'` in its log), the first time its live panes read empty
+  while it is closed at `cl` (`daemon/src/drain-empty.ts`). The panes are the status loop's own sessions read
+  (`watchedSessions`), the list the `sessions` op answers and `drainView` reads `empty` from, so it costs no read
+  of its own and is as fine as that beat (`STATUS_INTERVAL_MS`, 30 s, plus the refresh a close asks for); `cl`
+  is taken before the read, and a failed read never counts as empty. `after_ms` is the daemon's clock less
+  `cl` (the same clock), `peak` the most panes a read saw since this `cl` was first seen. Memory only, once per
+  `cl` per process: a reopen forgets it, a later close is watched afresh, and a restart while closed may log the
+  same `cl` again (after the downtime), which a reader folds by `cl`. A box already empty at its close logs
+  `peak=0`. Counts only what the daemon knows itself: moved and stuck need the leader's queue, which a closed
+  daemon does not hold (a read per beat would be new traffic for a log line), and stay readable from the
+  pass's `audit pass … trigger=drain` lines and the daemon's `audit drain` lines. No task id, no text. Not the
+  clients that call `drainView`: none runs for most drains, and `seanced mcp` never calls `log.ts`.
 - **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
   the stamp is written only by the leader through the one task sealer, never from a frame.
 

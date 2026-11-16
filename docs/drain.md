@@ -2,8 +2,9 @@
 
 **Status: build order items 1 (Close), 2 (the leader's outside pass and the report) and 3 (the session ask)
 are built** and recorded in DESIGN.md, "Closing a machine", "The drain's outside pass" and "The drain's session
-ask". This file keeps the index of names, the decisions the owner made, and what is not built: §6's sheet
-warning and its "Later", §12's time-to-empty measure, and §13, the soft close (decided 2026-11-16, not built). Drafted 2026-11-13. Like
+ask", as are §6's close warning and §12's time-to-empty line. This file keeps the index of names, the decisions
+the owner made, §11, §12's list of measures (every one now read from a line that exists), and what is not built:
+§6's "Later" and §13, the soft close (decided 2026-11-16, not built). Drafted 2026-11-13. Like
 docs/leaving.md, it is the working record until the code lands; each part folded into DESIGN.md as it was built,
 and its text here went.
 
@@ -74,30 +75,17 @@ One line each; the text is in DESIGN.md.
   "Drain now", the ask's wording). Raycast: none (spawn-only).
 - **§9 Threat model:** the invariants list ("Closing is the owner's act", "The drain's session ask is constant
   keys…") and `CLAUDE.md`.
+- **§6 Leadership** (a closed leader keeps leading; the close sheet's, `seanced close`'s and
+  `set_machine_open`'s warning): "Closing a machine". Its "Later" stays below.
+- **§12's time from close to empty:** "The drain's outside pass" (the daemon's `drain: empty` line).
 - **Build order:** items 1 to 3 are built, in that order, each in its own PR.
 
 ## Not built
 
 ### 6. Leadership — _Later_
 
-A closed machine keeps leading, and the close warns when it is the leader (built: DESIGN.md, "Closing a
-machine"). _Later:_ register without the `lead` role once the machine is empty, if another nominee is connected,
-so the queue keeps running through the outage.
-
-### 11. Relation to docs/leaving.md
-
-Closing is what you do before the box goes; `leaving` is the note it sends as it goes. A drained, empty box that
-then shuts down sends `leaving { r: "shutdown" }`, and nothing is interrupted. A box shut down mid-drain gets
-leaving.md's handling for whatever was left. The daemon's launch gate for a restart (`drn`) is unchanged and
-independent: a closed machine that restarts still closes its gate for the restart, and reopens it closed.
-
-### 12. Measures
-
-From audit and leader logs, with no new storage: drains per week (`availability` request lines with
-`open=false`); tasks moved per drain by step (`trigger=drain` pass lines, with the self path told apart by the
-daemon's `origin=successor` push and the ask by its `audit drain` lines); stuck items by reason. **Not built:**
-time from close to empty (logged by the daemon when `drainView` first reads empty after a close); only the first
-three read from lines that exist.
+Register without the `lead` role once the machine is empty, if another nominee is connected, so the queue keeps
+running through the outage.
 
 ### 13. Soft close by default (N5)
 
@@ -153,6 +141,23 @@ persisted, `MachineStatus.dr` is never trimmed, and the leader drains a machine 
 **Build.** Two PRs. (1) The wire, daemon and leader: `soft`, `closed.drainAt`, `dr`, `drainStart`, the ask
 keyed off the drain's start, `CAPABILITIES.softClose`, DESIGN.md and CLAUDE.md. (2) The surfaces: the PWA's
 sheet, drain row and menu, `seanced close --drain`, MCP `drain`, `drainView`'s soft state.
+
+## Kept here
+
+### 11. Relation to docs/leaving.md
+
+Closing is what you do before the box goes; `leaving` is the note it sends as it goes. A drained, empty box that
+then shuts down sends `leaving { r: "shutdown" }`, and nothing is interrupted. A box shut down mid-drain gets
+leaving.md's handling for whatever was left. The daemon's launch gate for a restart (`drn`) is unchanged and
+independent: a closed machine that restarts still closes its gate for the restart, and reopens it closed.
+
+### 12. Measures
+
+From audit and leader logs, with no new storage: drains per week (`availability` request lines with
+`open=false`); tasks moved per drain by step (`trigger=drain` pass lines, with the self path told apart by the
+daemon's `origin=successor` push and the ask by its `audit drain` lines); stuck items by reason; time from close
+to empty (the closed daemon's `drain: empty cl=… after_ms=… peak=…` line, `grep 'drain: empty'` in its log; one
+per `cl` per process, so fold repeats by `cl`: DESIGN.md, "The drain's outside pass").
 
 (The earlier second question, the default grace before interrupting a turn, is settled and built: 5 minutes,
 `--now` and "Drain now" for 0.)
