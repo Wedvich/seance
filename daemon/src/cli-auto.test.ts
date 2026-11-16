@@ -1102,12 +1102,12 @@ describe("seanced close / open", () => {
       expect((await close([oldLeader, target()])).requests).toEqual([{ open: false }]);
     });
 
-    test("a drain on a soft-closed machine says its drain starts now; a soft close of a closed one changes nothing", async () => {
+    test("a drain on a soft-closed machine says it is draining it; a soft close of a closed one changes nothing", async () => {
       const softClosed = target({ status: { at: 1, scan: 1, cl: 9_000 } });
       const since = new Date(9_000).toISOString();
       const drained = await close([leader, softClosed], { drain: true });
       expect(drained.outcome.text).toBe(
-        `homelab was already closed (since ${since}); its drain starts now: its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it`,
+        `homelab was already closed (since ${since}); draining it: its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it`,
       );
       expect(drained.outcome.closed?.draining).toBe(true);
       const again = await close([leader, softClosed]);
@@ -1383,6 +1383,41 @@ describe("seanced close --wait", () => {
       "MacBook Pro: waiting for its tasks to finish on their own; nothing is moved until you drain it (seanced close --drain), and a task idle at its prompt never finishes",
       "MacBook Pro: running 1 · 1 idle at its prompt",
     ]);
+  });
+
+  test("a soft close's wait says once when only idle or waiting tasks remain, since it would never end by itself", async () => {
+    let polls = 0;
+    const soft = closedBox({ capabilities: ["close", "drain", "drainPass", "softClose"] });
+    const fake = polled(soft, {
+      sessions: () => {
+        polls += 1;
+        return { sessions: polls < 6 ? [pane("t1")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1, idle: [{ taskId: "t1", since: 1 }] }),
+    });
+    const outcome = await wait(fake, 1, 30, false);
+    expect(outcome.code).toBe(0);
+    expect(outcome.printed).toHaveLength(3);
+    expect(outcome.printed[1]).toContain("nothing left is running");
+    expect(outcome.printed[1]).toContain("seanced close --drain");
+    expect(outcome.printed[2]).toBe("MacBook Pro: 1 idle at its prompt");
+  });
+
+  test("a reopen after the owner started the drain says the drain stopped", async () => {
+    let polls = 0;
+    const caps = ["close", "drain", "drainPass", "softClose"] as const;
+    const fake = polled(closedBox({ capabilities: [...caps], status: { at: 1, scan: 1, cl: CL, dr: CL + 1 } }), {
+      sessions: () => {
+        polls += 1;
+        if (polls === 2) fake.setState({ machines: [closedBox({ capabilities: [...caps], status: undefined })] });
+        return { sessions: [pane("t1")], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    expect(await wait(fake, 1, 30, false)).toMatchObject({
+      code: 1,
+      text: "MacBook Pro was reopened; the drain stopped",
+    });
   });
 
   test("a drain started while a soft close's wait runs shows from the status", async () => {

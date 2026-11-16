@@ -1244,7 +1244,7 @@ export class Store {
     } catch (err) {
       this.#setAvailability(deviceId, {
         kind: "failed",
-        text: `Couldn't ${open ? "reopen" : closedAt(machine) === null ? "close" : "drain"} ${machine.name}:${err instanceof Error ? err.message : String(err)}`,
+        text: `Couldn't ${open ? "reopen" : closedAt(machine) === null ? "close" : "drain"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }

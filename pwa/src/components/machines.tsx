@@ -684,15 +684,17 @@ function closeDialog(
       primary: { label: "Drain", onClick: confirm("drain") },
     };
   }
-  // A soft close offers Drain beside Drain now; a drain under way offers Drain now alone.
+  // A soft close offers Drain beside Drain now; a drain under way offers Drain now alone. The lines say what this act
+  // does, not the Drain sheet's 5-minute wording: the interrupt is at once, and a session waiting on you is cut off too.
   const soft = card.drainActions.includes("drain");
   return {
     title: `Drain ${card.name} now?`,
-    lines: soft
-      ? drainSheet(machine)
-      : [
-          `${card.name} is draining. Drain now interrupts its sessions' turns at once instead of 5 minutes after the drain began.`,
-        ],
+    lines: [
+      soft
+        ? `${card.name} is closed. Drain now moves its running work off it, and interrupts its sessions' turns at once instead of 5 minutes after the drain began.`
+        : `${card.name} is draining. Drain now interrupts its sessions' turns at once instead of 5 minutes after the drain began.`,
+      "A session waiting on you is interrupted too.",
+    ],
     quiet: [],
     primary: drainNow,
   };

@@ -150,7 +150,7 @@ export async function setMachineOpen(opts: {
       );
     }
     // A soft-closed machine: this request started its drain (`drain_started`).
-    return standing(`${target.name} was already closed (since ${since}); its drain starts now: ${drainText()}`);
+    return standing(`${target.name} was already closed (since ${since}); draining it: ${drainText()}`);
   }
   if (soft) {
     return standing(
@@ -229,6 +229,8 @@ export async function waitForDrain(opts: {
   const print = opts.print ?? ((): void => undefined);
   let sawCurrent = false;
   let saidSoft = false;
+  let saidIdle = false;
+  let draining = opts.draining;
   let lastLine = "";
   const offlineGraceMs = opts.offlineGraceMs ?? RESTART_GRACE_MS;
   let offlineSince: number | null = null;
@@ -259,8 +261,11 @@ export async function waitForDrain(opts: {
       // `status.at` (seconds) and `closedAt` are the daemon's own clock: a status sampled after the close that
       // carries no `cl` says the machine was reopened before this close ever showed.
       const sampledAfter = machine.status !== undefined && machine.status.at * 1000 > opts.closedAt;
+      // A drain the owner starts while this waits shows from the status (`drainStart`).
+      // Sticky: the reopen that ends it carries no `dr`, and must still read as the drain's.
+      if (drainStart(machine) !== null) draining = true;
       if ((cl === null && (sawCurrent || sampledAfter)) || (cl !== null && cl > opts.closedAt)) {
-        return { code: 1, text: `${machine.name} was reopened; the ${opts.draining ? "drain" : "wait"} stopped` };
+        return { code: 1, text: `${machine.name} was reopened; the ${draining ? "drain" : "wait"} stopped` };
       }
       // oxlint-disable-next-line no-await-in-loop -- sessions first: they say which tasks the queue must name
       const reply = await lease.request<SessionsResponse>(deviceId, "sessions", {}).catch(() => null);
@@ -268,8 +273,6 @@ export async function waitForDrain(opts: {
       const paneIds = (sessions?.sessions ?? []).flatMap((x) => (x.taskId === undefined ? [] : [x.taskId]));
       // oxlint-disable-next-line no-await-in-loop -- the second queue read depends on the sessions
       const queue = lease.scheduler === null ? null : await queueTasksFor(lease.scheduler, paneIds);
-      // A drain the owner starts while this waits shows from the status (`drainStart`).
-      const draining = opts.draining || drainStart(machine) !== null;
       if (!draining && !saidSoft) {
         print(
           `${machine.name}: waiting for its tasks to finish on their own; nothing is moved until you drain it (seanced close --drain), and a task idle at its prompt never finishes`,
@@ -301,6 +304,14 @@ export async function waitForDrain(opts: {
           return { code: 2, text: `${machine.name} still runs:\n${view.stuck.map(lineOf).join("\n")}` };
         }
         line = `${machine.name}: ${drainSummary(view)}`;
+        // A soft close's wait ends only when its tasks do, and an idle or waiting one never does: say so once, not by hanging.
+        const onlyStuck = !draining && view.moving.length > 0 && view.moving.every((m) => m.idle || m.waitingOnYou);
+        if (onlyStuck && !saidIdle) {
+          print(
+            `${machine.name}: nothing left is running; what remains sits idle at its prompt or waits on you and will not finish on its own. Drain it (seanced close --drain), or stop this wait`,
+          );
+        }
+        saidIdle = onlyStuck;
       }
       if (line !== lastLine) print(line);
       lastLine = line;

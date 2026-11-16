@@ -4501,7 +4501,7 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
     );
     expect((await list(fake)).find((m) => m.name === "homelab")?.drain).toEqual({
       draining: false,
-      running: 4,
+      running: 2,
       idle: 1,
       waitingOnYou: 1,
       moved: 0,

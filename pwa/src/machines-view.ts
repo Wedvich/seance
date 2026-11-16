@@ -267,7 +267,8 @@ export function deriveCloseSheet(
   const lines = soft
     ? [
         `Close stops new work on ${machine.name}. Running tasks keep going until they finish or you drain the machine.`,
-        ...drain.map((line, i) => (i === 0 ? `Close and drain: ${lowerFirst(line)}` : line)),
+        // Every line, not just the first: the stuck ones are the drain's, a plain Close moves nothing.
+        ...drain.map((line) => `Close and drain: ${lowerFirst(line)}`),
       ]
     : [`Closing ${machine.name} stops new work landing on it.`, ...drain];
   return leadsQueue(machine, scheduler) ? [...lines, leaderCloseNote(machine.name)] : lines;
@@ -508,7 +509,8 @@ function leaderAdvertises(
 }
 
 function drainActions(machine: Machine, canClose: boolean, now: number): readonly DrainAction[] {
-  if (!canClose || closedAt(machine) === null) return [];
+  // An asleep machine answers nothing, so a drain asked of it would only fail.
+  if (!canClose || !machine.connected || closedAt(machine) === null) return [];
   const asks = canDrainNow(machine);
   const start = drainStart(machine);
   if (start === null) return asks ? ["drain", "now"] : ["drain"];
