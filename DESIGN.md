@@ -8468,7 +8468,7 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
   falls back to `cl`; if the soft close is older than the interrupt wait and the grace, every busy pane is Escaped
   and every task passed at once, with no grace. Not fenced (a daemon rollback is rare); a leader change to an older
   version after a soft close drains on `cl` likewise. Its `state.json` keeps `drainAt`, which the old code ignores.
-  _Rejected:_ persisting `soft` (it is `drainAt`'s absence); failing an unreadable `drainAt` toward a drain.
+  _Rejected:_ persisting `soft` (it is `drainAt`'s `null`; an absent `drainAt` is a legacy close, which drains from `at`); failing an unreadable `drainAt` toward a drain.
 
 ### The drain's outside pass — built (drain 2/3)
 
@@ -8553,7 +8553,8 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   behaviour (no `drainPass`). Deploy order: daemons, then PWA/CLI.
 - **Time to empty** (docs/drain.md §12). The closed machine's own daemon logs one line, `drain: empty
   cl=<cl> after_ms=<ms> peak=<n>` (`grep 'drain: empty'` in its log), the first time its live panes read empty
-  while it is closed at `cl` (`daemon/src/drain-empty.ts`). The panes are the status loop's own sessions read
+  while it is closed at `cl` (`daemon/src/drain-empty.ts`; on a soft close, which drains nothing, it still times from `cl`, so it
+  then measures the sessions' own finish, not a drain: read it beside the `soft=true` availability line). The panes are the status loop's own sessions read
   (`watchedSessions`), the list the `sessions` op answers and `drainView` reads `empty` from, so it costs no read
   of its own and is as fine as that beat (`STATUS_INTERVAL_MS`, 30 s, plus the refresh a close asks for), a beat
   that starts only once the daemon has registered, so one that cannot reach the relay logs nothing until it can (`after_ms`
@@ -8661,7 +8662,7 @@ frame, only a mark on a frame it already takes.
   an outside drain pass (step B) whose successor then waits on that daemon's close keeps the predecessor's pane
   until its turn ends or the 2-minute close deadline (`#closePasses`) despawns it, where it used to be closed at
   once. Without `drainAsk` the rule is unchanged. A session pass that joins an outside pass already in flight
-  (the leader's drain pass, started 10 minutes after `cl`) is no longer swallowed by it: if the outside pass was
+  (the leader's drain pass, started `drainSelfPassMs` after `drainStart`: `dr`, or `cl` from a daemon without `softClose`) is no longer swallowed by it: if the outside pass was
   refused before the successor's create (the dirty tree it read before the session committed), the session's
   runs as its own, with the commit and the record, and the drain pass stamps no refusal for it (the task would
   show stuck until the rerun lands; if that fails too, the write-ahead stamp already brings the retry round); one

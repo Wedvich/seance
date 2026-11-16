@@ -134,7 +134,7 @@ From audit and leader logs, with no new storage: drains per week (`availability`
 without `soft=true`, plus `outcome=drain_started`); tasks moved per drain by step (`trigger=drain` pass lines, with the self path told apart by the
 daemon's `origin=successor` push and the ask by its `audit drain` lines); stuck items by reason; time from close
 to empty (the closed daemon's `drain: empty cl=… after_ms=… peak=…` line, `grep 'drain: empty'` in its log; one
-per `cl` per process, so fold repeats by `cl`: DESIGN.md, "The drain's outside pass").
+per `cl` per process, so fold repeats by `cl`: DESIGN.md, "The drain's outside pass"; on a soft close, with no drain running, it measures the sessions' own finish from `cl`: read it beside the `soft=true` availability line).
 
 (The earlier second question, the default grace before interrupting a turn, is settled and built: 5 minutes,
 `--now` and "Drain now" for 0.)

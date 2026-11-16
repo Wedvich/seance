@@ -1105,20 +1105,23 @@ describe("drain: a closed machine ↔ leader ↔ the machine's push and close", 
       );
 
       await Bun.sleep(3 * DRAIN_GRACE_MS);
-      await app.client.createTask({
+      const created = await app.client.createTask({
         id: probeId,
         spec: { repo: started.origin, mode: "worktree" },
         state: "queued",
         createdAt: Date.now(),
       });
+      expect(created).toMatchObject({ ok: true, landedEarlier: false });
       probed = true;
       await pollUntil(
-        async () => (await stack.queue().get(probeId))?.body?.state !== "queued",
+        async () => (await stack.queue().get(probeId))?.body?.state === "ready",
         "the leader to tick after the grace",
         20_000,
       );
       await Bun.sleep(3_000);
-      expect(lines("audit pass task=").some((l) => l.includes("trigger=drain"))).toBe(false);
+      // `drained` is the write-ahead stamp, written before any pass I/O: its absence proves none was attempted.
+      expect((await stack.queue().get(taskId))?.body?.drained).toBeUndefined();
+      expect(lines("audit pass").some((l) => l.includes("trigger=drain"))).toBe(false);
       expect((await stack.queue().get(taskId))?.body?.state).toBe("running");
       expect(machineStatus()?.dr).toBeUndefined();
 

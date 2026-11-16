@@ -125,11 +125,18 @@ export function closedOf(state: State): number | null {
   return typeof at === "number" && Number.isFinite(at) && at > 0 ? at : null;
 }
 
+/** `closed.drainAt` as written, `undefined` when absent (a legacy close) or when `closed` is no record. */
+function drainAtOf(state: State): unknown {
+  const closed: unknown = state.closed;
+  if (typeof closed !== "object" || closed === null) return undefined;
+  return Object.entries(closed).find(([key]) => key === "drainAt")?.[1];
+}
+
 /** This machine's close and the drain's start while it drains; null while open, soft-closed, or when `closed` is unreadable. */
 export function drainingOf(state: State): { readonly cl: number; readonly drainAt: number } | null {
   const cl = closedOf(state);
   if (cl === null) return null;
-  const drainAt: unknown = (state.closed as { drainAt?: unknown }).drainAt;
+  const drainAt = drainAtOf(state);
   if (drainAt === undefined) return { cl, drainAt: cl };
   return typeof drainAt === "number" && Number.isFinite(drainAt) && drainAt > 0 ? { cl, drainAt } : null;
 }
@@ -207,7 +214,7 @@ function failClosed(state: State, path: string): State {
     log.warn(`state at ${path} has an unreadable closed field — staying closed`);
     return { ...state, closed: { at: Date.now() } };
   }
-  if (drainingOf(state) !== null || (state.closed as { drainAt?: unknown }).drainAt === null) return state;
+  if (drainingOf(state) !== null || drainAtOf(state) === null) return state;
   log.warn(`state at ${path} has an unreadable closed.drainAt — closed, not draining`);
   return { ...state, closed: { at, drainAt: null } };
 }

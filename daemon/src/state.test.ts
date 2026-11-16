@@ -126,8 +126,10 @@ describe("closed", () => {
         expect(warn).toHaveBeenCalledTimes(1);
       }
       await Bun.write(path, JSON.stringify({ ...fresh, closed: { at: "x", drainAt: 5 } }));
+      warn.mockClear();
       const damaged = await loadOrInitState(path);
       expect(drainingOf(damaged)?.cl ?? null).toBe(closedOf(damaged));
+      expect(warn).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();
     }
@@ -139,6 +141,8 @@ describe("closed", () => {
     const warn = spyOn(log, "warn").mockImplementation(() => {});
     try {
       expect(JSON.stringify((await readState(path))?.closed)).toBe('{"at":"x"}');
+      await Bun.write(path, JSON.stringify({ ...fresh, closed: { at: 100, drainAt: "x" } }));
+      expect(JSON.stringify((await readState(path))?.closed)).toBe('{"at":100,"drainAt":"x"}');
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();

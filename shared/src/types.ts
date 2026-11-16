@@ -1926,8 +1926,8 @@ export type DespawnOutcome = "exited" | "killed";
 /**
  * `now` is the drain's no-wait: a close's interrupt deadline moves to now (a daemon advertising `CAPABILITIES.drainAsk`);
  * ignored on an open, and by an older daemon. `soft` closes without draining (a daemon advertising
- * `CAPABILITIES.softClose`): `true` only, never beside `now`, ignored on an open and by an older daemon (which closes
- * and drains).
+ * `CAPABILITIES.softClose`): `true` only; beside `now` the request is refused (`invalid_request`), even on an open. Otherwise ignored on an open
+ * and by an older daemon (which closes and drains).
  */
 export interface AvailabilityRequest {
   readonly open: boolean;
