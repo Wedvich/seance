@@ -3,7 +3,7 @@ import type { AppRelay } from "./app-relay.ts";
 
 /**
  * The relay's bucket is DO-wide, not per socket: `LIST_BURST` (16) lists, refilling one per
- * `LIST_REFILL_MS` (8 s) — relay/src/store.ts. Every `seanced mcp` process on every box lists on
+ * `LIST_REFILL_MS` (8 s) — relay/src/store.ts. Every `seance mcp` process on every box lists on
  * its first labelled call, so a refusal (empty bucket) or a loss says the bucket is spent or the
  * relay is slow; asking again at once from each tool call spends what the PWA needs. 60 s is
  * about 7 refills: by then asking is likely to succeed. Neither a reopen nor a `store-changed`
@@ -24,7 +24,7 @@ export const NULL_HOLD_MS = 60_000;
  * `account:` key — relay plaintext, only a hint to list again. A refused or
  * lost listing reads as null (aliases unavailable right now) and is held as null
  * for `NULL_HOLD_MS`, for `hold` reads only. Listed only when a caller asks: an
- * account pin, or `seanced mcp` labelling an account in `list_machines` or `get_queue`.
+ * account pin, or `seance mcp` labelling an account in `list_machines` or `get_queue`.
  */
 export class AccountCache {
   readonly #client: Pick<AppRelay, "listAccounts">;

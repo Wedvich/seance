@@ -154,7 +154,7 @@ describe("selectFleet", () => {
     expect(message).toContain("no PSK");
     expect(message).toContain("no daemon listening");
     expect(message).toContain("is seanced running?");
-    expect(message).toContain("seanced psk-import");
+    expect(message).toContain("seance psk-import");
     // Local ops ride the same socket, so the advice must not promise them.
     expect(message).not.toContain("needs neither");
   });
@@ -198,7 +198,7 @@ describe("selectFleet", () => {
       expect(err).toBeInstanceOf(FleetUnreachable);
       const message = String(err);
       expect(message).toContain(expected);
-      expect(message).toContain("seanced status");
+      expect(message).toContain("seance status");
       // Local ops ride the same daemon, which just failed to answer on that socket.
       expect(message).not.toContain("needs neither");
     }
@@ -212,7 +212,7 @@ describe("selectFleet", () => {
     });
     const message = String(await fleet.open().catch((caught: unknown) => caught));
     expect(message).toContain("not service-delivered");
-    expect(message).toContain("seanced doctor");
+    expect(message).toContain("seance doctor");
     expect(message).not.toContain("update");
     expect(message).not.toContain("is seanced running?");
   });
@@ -308,7 +308,7 @@ describe("brokerFleet", () => {
         const lease = await brokerFleet({ path: double.path }, self).open();
         const scheduler = lease.scheduler;
         if (scheduler === null) throw new Error("expected a scheduler leg");
-        const refused = "this machine's daemon is older than this seanced: restart or update it (seanced update)";
+        const refused = "this machine's daemon is older than this seanced: restart or update it (seance update)";
         expect(scheduler.staleDaemonRequires).toBe(refused);
         expect(await rejection(scheduler.enqueue(REQUIRING))).toMatchObject({ message: refused });
         // A spec that requires nothing still goes through an old daemon.

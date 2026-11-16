@@ -22,9 +22,9 @@ import { SCHEDULER_NEEDS_NEWER_DAEMON, type Fleet, type FleetLease, type Schedul
 import { RESTART_GRACE_MS } from "./local-client.ts";
 
 /**
- * Closing and reopening a machine as an app-role client does it, apart from the MCP SDK so `seanced
+ * Closing and reopening a machine as an app-role client does it, apart from the MCP SDK so `seance
  * close`/`open` and `set_machine_open` share one rule (as `passAuto` is shared). Nothing here may
- * call `log.ts`: `seanced mcp` reaches it, and its stdout is the JSON-RPC channel.
+ * call `log.ts`: `seance mcp` reaches it, and its stdout is the JSON-RPC channel.
  */
 
 const KEYLESS_TEXT =
@@ -77,18 +77,18 @@ export async function setMachineOpen(opts: {
     if (opts.selfId === null) return failed("this machine has no daemon state, so it names no machine here");
     target = lease.machines.find((m) => m.deviceId === opts.selfId);
     if (target === undefined)
-      return failed("this machine is not in the registry — is seanced running? try `seanced status`");
+      return failed("this machine is not in the registry — is seanced running? try `seance status`");
   } else {
     const resolved = resolveMachine(lease.machines, opts.ref);
     if ("error" in resolved) return failed(resolved.error);
     target = resolved.machine;
   }
   if (target.capabilities?.includes(CAPABILITIES.close) !== true) {
-    return failed(`${target.name} cannot be opened or closed yet — its daemon needs \`seanced update\``);
+    return failed(`${target.name} cannot be opened or closed yet — its daemon needs \`seance update\``);
   }
   const asks = target.capabilities?.includes(CAPABILITIES.drainAsk) === true;
   const now = opts.now === true && !open;
-  if (now && !asks) return failed(`${target.name} cannot drain now yet — its daemon needs \`seanced update\``);
+  if (now && !asks) return failed(`${target.name} cannot drain now yet — its daemon needs \`seance update\``);
   // A reopen needs only the target, so a close can always be undone.
   if (!open) {
     if (lease.scheduler === null) return failed(`not closed — ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
@@ -275,7 +275,7 @@ export async function waitForDrain(opts: {
       const queue = lease.scheduler === null ? null : await queueTasksFor(lease.scheduler, paneIds);
       if (!draining && !saidSoft) {
         print(
-          `${machine.name}: waiting for its tasks to finish on their own; nothing is moved until you drain it (seanced close --drain), and a task idle at its prompt never finishes`,
+          `${machine.name}: waiting for its tasks to finish on their own; nothing is moved until you drain it (seance close --drain), and a task idle at its prompt never finishes`,
         );
         saidSoft = true;
       }
@@ -308,7 +308,7 @@ export async function waitForDrain(opts: {
         const onlyStuck = !draining && view.moving.length > 0 && view.moving.every((m) => m.idle || m.waitingOnYou);
         if (onlyStuck && !saidIdle) {
           print(
-            `${machine.name}: nothing left is running; what remains sits idle at its prompt or waits on you and will not finish on its own. Drain it (seanced close --drain), or stop this wait`,
+            `${machine.name}: nothing left is running; what remains sits idle at its prompt or waits on you and will not finish on its own. Drain it (seance close --drain), or stop this wait`,
           );
         }
         saidIdle = onlyStuck;

@@ -3,8 +3,8 @@ import { dirname, join, relative, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 /**
- * `send_message` runs inside `seanced mcp`, whose stdout is the JSON-RPC channel, `seanced inbox` writes the
- * mod's data channel to stdout, and `seanced custodian` prints the round's replies there; a `log.ts` call from any
+ * `send_message` runs inside `seance mcp`, whose stdout is the JSON-RPC channel, `seance inbox` writes the
+ * mod's data channel to stdout, and `seance custodian` prints the round's replies there; a `log.ts` call from any
  * would corrupt it, and message text, notes and a round's summary must never reach a log. So no entry may load
  * `log.ts`, however indirectly: the walk follows every relative import, type-only ones included, since an allowed
  * module that grows an edge to a logging one must fail here.
@@ -56,7 +56,7 @@ describe("the message paths that run where stdout is a protocol channel", () => 
  */
 const STATIC_IMPORT = /^\s*(?:import|export)\s(?:[^;]*?\sfrom\s*)?["']([^"']+)["']/gmu;
 
-describe("what `seanced custodian` loads in the round's sandbox", () => {
+describe("what `seance custodian` loads in the round's sandbox", () => {
   test("main.ts's static import closure stays under daemon/src, node and @seance/shared", async () => {
     const files = new Set<string>();
     const bare = new Set<string>();

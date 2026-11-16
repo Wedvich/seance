@@ -122,7 +122,7 @@ export function tmuxHarvestPanes(audit: Pick<ReapAudit, "closedPane">): HarvestP
 }
 
 /**
- * `DespawnOptions.closing` for a process without the ledger (`seanced despawn`): marks the close in the
+ * `DespawnOptions.closing` for a process without the ledger (`seance despawn`): marks the close in the
  * task's tmux server, for the daemon's harvest to note as `closedHere`. Set before the pane is touched, so
  * any listing that misses the pane postdates the mark, and harvest reads marks after its listing. A kill of
  * the server's last pane takes the mark with the server (DESIGN.md, "Window closed from outside").

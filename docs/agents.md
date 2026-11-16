@@ -72,12 +72,12 @@ the refresh poke are new. Routing filters accounts by the task's agent; `gatedMo
 stay Claude-only. Scoring across agents is the load-balancing question below.
 
 **Session events** (`claude-mods/session-events`). Busy, idle with `turnEnded`, needs-input,
-ended and the PR report come from Claude Code plugin hooks calling `seanced session-event`. A
+ended and the PR report come from Claude Code plugin hooks calling `seance session-event`. A
 `codex-mods` counterpart on Codex's hooks is plausible. The remote session id becomes a link into
 the ChatGPT/Codex app instead of `claude.ai/code/<id>`, in the PWA and in push notifications.
 
 **MCP tools** (`report_task_done`, `hand_off_task`, `pass_to_successor`). Agent-neutral already:
-they bind by peer pid. `seanced mcp` needs registering in each `CODEX_HOME`'s config, as
+they bind by peer pid. `seance mcp` needs registering in each `CODEX_HOME`'s config, as
 `daemon/src/link.ts` does for Claude.
 
 **Clients and the record.** The PWA's model picker grouped by agent, the Accounts and Machines

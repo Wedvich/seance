@@ -121,7 +121,7 @@ export async function dropRoundRequest(path: string = custodianRoundRequestPath(
 }
 
 /**
- * What the seat publishes for `seanced custodian status` and `round` (which answer from files and cannot see the
+ * What the seat publishes for `seance custodian status` and `round` (which answer from files and cannot see the
  * daemon's memory): `cu` without `rc`, whether the host checks failed (a boolean, no detail), and the daemon's
  * version. Republished every tick by a running seat (a heartbeat); a seat whose checks failed writes it once, so the owner's commands treat a view older than five minutes as no report.
  */

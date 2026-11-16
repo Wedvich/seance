@@ -18,10 +18,10 @@ import { EMPTY, flush, sendLine } from "./socket-lines.ts";
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,
- * with no relay, no envelope and no PSK. It exists so `seanced mcp`'s
+ * with no relay, no envelope and no PSK. It exists so `seance mcp`'s
  * `get_sessions` and `despawn_session` aimed at the machine it runs on skip a
  * round trip to Cloudflare and back down the daemon's own websocket. (`spawn`
- * stays on the allowlist only for a `seanced mcp` started before spawns became
+ * stays on the allowlist only for a `seance mcp` started before spawns became
  * queued tasks; the current one never sends it.)
  *
  * Why this shape rather than handing the key out or letting a second process
@@ -32,7 +32,7 @@ import { EMPTY, flush, sendLine } from "./socket-lines.ts";
  * oracle, which same-uid peers make unpoliceable.
  *
  * It grants no authority a same-uid process did not already have: such a process
- * can read `config.json` and take the PSK outright, run `seanced spawn`, or talk
+ * can read `config.json` and take the PSK outright, run `seance spawn`, or talk
  * to the tmux server directly. What it adds is that going through here is the
  * *recorded* way to do it.
  *
@@ -53,7 +53,7 @@ import { EMPTY, flush, sendLine } from "./socket-lines.ts";
  * nothing else — DESIGN.md's "Session events" records the widening.
  *
  * The fourth and fifth are `message` (a session's `send_message` to another task on this machine) and `inbox`
- * (the inbox mod's `seanced inbox` child, which holds its connection open and is written one line per
+ * (the inbox mod's `seance inbox` child, which holds its connection open and is written one line per
  * message). `inbox` is the first frame that *reads* something a session did not write, so both are bound
  * by the kernel's peer pid only and refused where the host names no peer, never by a field a sender
  * claims. DESIGN.md's "Session messages" records the widening.
@@ -468,7 +468,7 @@ export async function localSocketChecks(path: string = socketPath()): Promise<re
     const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
     checks.push({
       level: "warn",
-      message: `${dir} is ${mode}, and its mode is what keeps the op socket to this user — \`seanced restart\` tightens it to 0700`,
+      message: `${dir} is ${mode}, and its mode is what keeps the op socket to this user — \`seance restart\` tightens it to 0700`,
     });
   }
   checks.push(

@@ -485,7 +485,7 @@ of M4 has landed.
   app client bounds a batch index at `createTask`; this item is the clients that write them. MCP:
   `spawn_session`'s `after`, `until`, `linear`, `pin` (a machine, an account or both — the M2
   placement restriction; added 2026-10-23, the account form replacing the exclave one 2026-10-25)
-  and `avoid` (machines to keep it off), and `queue_batch`; `seanced spawn` takes the
+  and `avoid` (machines to keep it off), and `queue_batch`; `seance spawn` takes the
   same placement as `--machine`, `--account` and `--not` (DESIGN.md "`pin` and `avoid` on a spawn"). PWA: the
   auto form's AFTER tile (and, until 2026-10-29, a BATCH tile), the settle-on-report switch (and, until 2026-10-27, a Linear field), and Follow
   up on queue rows. DESIGN.md records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
@@ -585,8 +585,8 @@ of M4 has landed.
     worktree); exact-target routing (only the `(deviceId, exclave, clone)` of the old assignment, only on
     a daemon advertising `continueTask`); the cwd resolved from the daemon's own launch ledger, never from
     the wire; a spawn sealed by the scheduler only (the local socket and every other `from` refused
-    `not_continuable`); a brokered enqueue allowed, so keyless `seanced mcp` works; a CLI,
-    `seanced continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
+    `not_continuable`); a brokered enqueue allowed, so keyless `seance mcp` works; a CLI,
+    `seance continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
     `claude --resume` is untracked by design); a stale worktree lock in Claude's own
     `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
     `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
@@ -671,7 +671,7 @@ of M4 has landed.
   "Asleep machines on the Queue screen", is the record.
 
 - **"Last seen" off the PWA (new, 2026-10-26) — Done.** Raycast's cached-list age and every
-  `seanced mcp` "last seen" (`list_machines`' `lastSeen`, the despawn not-connected refusal,
+  `seance mcp` "last seen" (`list_machines`' `lastSeen`, the despawn not-connected refusal,
   `auto`'s offline-pin note) still read the register's `lastSeen`, so they said "3d ago" of a
   machine that slept minutes ago. Exit: they read `lastHeardAt` like the PWA.
 
@@ -790,7 +790,7 @@ of M4 has landed.
   what the key reveals are DESIGN.md _Scheduler_, "Account records". Exit, met in
   `e2e/accounts.test.ts`: an alias set in one client shows in another through `store-changed`, a
   record whose `accountId` does not hash to its key is ignored, and an old blob put back reads
-  unreadable rather than as the old name. `seanced mcp` and Raycast show them too: DESIGN.md "Account listings" and the Raycast "Scope is spawn" note.
+  unreadable rather than as the old name. `seance mcp` and Raycast show them too: DESIGN.md "Account listings" and the Raycast "Scope is spawn" note.
   - _Correction (R2), deleting an alias:_ the relay tombstoned every prefix apps could create
     into, and a standing tombstone refuses every put for 30 days. Account keys are a deterministic
     HMAC, so under those rules a token holder's delete would have blocked that alias for 30 days.
@@ -938,7 +938,7 @@ of M4 has landed.
     a per-probe cadence below 5 minutes.
   - _Decided, where a task says what it requires:_ one spelling per client, as #390 did for
     autonomy: `requires` (a list of names) on `spawn_session` and each `queue_batch` member;
-    `--requires <name>` (repeatable) on `seanced spawn`; a REQUIRES field on the PWA form offering
+    `--requires <name>` (repeatable) on `seance spawn`; a REQUIRES field on the PWA form offering
     the traits the fleet advertises. `TaskSpec.requires`, at most 4 names. Not on `--now`
     (the direct spawn bypasses routing) — refused there with a message. Not in Raycast for v1. A
     continuation inherits its task's `requires`; a route preview carries it. A client refuses a
@@ -1038,10 +1038,10 @@ of M4 has landed.
   its queue card. DESIGN.md is the record ("CLI spawn", "MCP server", "PWA", "Fleet broker").
   - _Follow-up:_ `route-preview` takes a pin. It drops one today (`parseTaskRequest`), so the
     PWA's placement preview is shown with both pickers on `auto` only.
-  - _Follow-up:_ drop `spawn` from `LOCAL_OPS` and `BROKER_OPS` once no pre-PR-1 `seanced mcp` can
+  - _Follow-up:_ drop `spawn` from `LOCAL_OPS` and `BROKER_OPS` once no pre-PR-1 `seance mcp` can
     still be running — a threat-model change, recorded in DESIGN.md with it.
 
-- **Keyless `auto`** — **Done**: MCP's `auto` and `seanced spawn` on a box that cannot
+- **Keyless `auto`** — **Done**: MCP's `auto` and `seance spawn` on a box that cannot
   read the key go through the daemon's fleet broker (DESIGN.md "Fleet broker", "The scheduler
   actions").
 
@@ -1157,7 +1157,7 @@ of M4 has landed.
     on every load and after every queued task, never remembered), the level as a chip on the Queue
     card off the default, and "Answer in Claude" (the claude.ai link) as the primary button on a
     `needs-input` card.
-  - **Done** (2026-11-12): one spelling per client. `seanced spawn --autonomy <level>` (queued or
+  - **Done** (2026-11-12): one spelling per client. `seance spawn --autonomy <level>` (queued or
     `--now`; the no-op `--auto` is gone), an Autonomy dropdown in Raycast that starts at
     `checkpoint` on every open, and MCP's `plan` input removed, with every tool's input strict so a
     stale `plan` is refused by name instead of stripped. The wire `plan` stays for older readers.
@@ -1189,7 +1189,7 @@ of M4 has landed.
      machine's daemon pushes the clean branch, the leader creates the successor and links the two,
      and the old session is closed.
      - **2a, from outside** — **Done** (2026-11-12): the PWA's "Pass to successor" on a running card,
-       `seanced pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
+       `seance pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
        three; the successor's prompt is the fallback one (below).
      - **2b, from the session** — **Done** (2026-11-12): MCP `pass_to_successor { record }`. The session commits
        and calls it last; its daemon pushes at once and the session's `record` becomes the
@@ -1512,7 +1512,7 @@ of M4 has landed.
       they are not available);
     - a successor that opens its own PR when the old one was closed;
     - a PWA "passed to" link on the finished card;
-    - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
+    - a `seance doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
     - a Queue-screen mark for a session pass the leader refused (the push alert, `pass-refused`, and
       telling the session why, `QueueResponse.passRefused`, are built);
@@ -1553,7 +1553,7 @@ of M4 has landed.
     they're needed.
   - Accepted only while `queued`, `blocked` or `ready` with no spawn out; a reservation or dispatch wins
     with a structured code (`dispatching`, `placed`), and a reservation routed on the old spec declines.
-  - Surfaces: MCP `amend_task` and `seanced amend` (append by default, replace on request), through
+  - Surfaces: MCP `amend_task` and `seance amend` (append by default, replace on request), through
     the broker when keyless. Offered only to a verified leader advertising `CAPABILITIES.amend`. No
     PWA surface in V1 (owner): amending is asked for from an orchestration session, through MCP.
   - _Measure:_ the leader's `audit queue op=amend` lines, by `fields` and `mode`, against cancels of
@@ -1792,7 +1792,7 @@ same PR, with the reason.
   the dashboard without `wrangler tail`.
 - **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
-  and can't dedupe a re-dispatch), while `seanced spawn --now`, the only direct path left, keeps working. Self-update makes
+  and can't dedupe a re-dispatch), while `seance spawn --now`, the only direct path left, keeps working. Self-update makes
   this a short window.
 - **An admitted task the leader never placed** (open, seen once, 2026-11-12). On ubuntu CI (run
   43224839001, attempt 1) `e2e/mcp.test.ts`'s pinned task logged `op=admit` and then nothing for

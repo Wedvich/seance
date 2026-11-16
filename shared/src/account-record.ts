@@ -95,7 +95,7 @@ function twinTag(accountId: string, twins: readonly KnownAccount[]): string {
  * account and left alone, but `known` carries none, so an aliased account's
  * unaliased twin is tagged all the same: the label of one account then reads
  * alike in every client, whether or not that client could read the aliases
- * (a keyless `seanced mcp`, a refused listing).
+ * (a keyless `seance mcp`, a refused listing).
  */
 export function accountName(
   accountId: string,

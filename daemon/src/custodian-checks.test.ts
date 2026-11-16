@@ -112,7 +112,7 @@ describe("custodianChecks", () => {
         message: expect.stringContaining("~/.claude-work: the session-events mod is not installed or enabled"),
       },
     ]);
-    expect(checks[1]?.message).toContain("seanced mod install");
+    expect(checks[1]?.message).toContain("seance mod install");
   });
 
   test("an exclave without the inbox mod warns that nudge can never reach a session", async () => {
@@ -125,7 +125,7 @@ describe("custodianChecks", () => {
       },
     ]);
     expect(checks[1]?.message).toContain("nudge");
-    expect(checks[1]?.message).toContain("seanced mod install");
+    expect(checks[1]?.message).toContain("seance mod install");
   });
 
   test("a sandbox problem fails with its own words", async () => {

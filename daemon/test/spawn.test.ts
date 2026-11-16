@@ -801,7 +801,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 
       await tmuxOk(["kill-window", "-t", killed.pane]);
       await despawnSession(despawned.pane, { force: true, closing: (id) => tasks.closing(id) });
-      // As `seanced despawn` does, in a process without the ledger.
+      // As `seance despawn` does, in a process without the ledger.
       await despawnSession(marked.pane, { force: true, closing: markClosed });
       await tmux(["send-keys", "-t", exited.pane, "-l", "/exit"]);
       await tmux(["send-keys", "-t", exited.pane, "Enter"]);
@@ -905,7 +905,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
         // oxlint-disable-next-line no-await-in-loop -- one pane at a time
         if (other !== "" && other !== pane) await tmuxOk(["kill-pane", "-t", other]);
       }
-      // As `seanced despawn` calls it.
+      // As `seance despawn` calls it.
       const result = await despawnSession(pane, { force: false, closing: markClosed, leaveDeadTask: true });
       expect(result.outcome).toBe("exited");
       expect((await paneInfo(pane))?.dead).toBe(true);
@@ -1777,9 +1777,9 @@ describe("wire input cannot escape the repo set or the shell", () => {
   });
 });
 
-// docs/scheduler.md M4: a plain `seanced spawn` queues through the relay, so
-// `seanced spawn --now` is the form that must still work with the relay unreachable.
-describe("seanced spawn (the CLI, as a subprocess)", () => {
+// docs/scheduler.md M4: a plain `seance spawn` queues through the relay, so
+// `seance spawn --now` is the form that must still work with the relay unreachable.
+describe("seance spawn (the CLI, as a subprocess)", () => {
   test("spawn --now never dials the relay, audited origin=cli, and carries --autonomy", async () => {
     const configDir = join(base, "cli-config");
     const stateDir = join(base, "cli-state");

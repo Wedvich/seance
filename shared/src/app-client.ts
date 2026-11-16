@@ -182,7 +182,7 @@ export class RequestFailure extends Error {
 }
 
 /**
- * The one line per failure reason every surface shows, shared so `seanced mcp`,
+ * The one line per failure reason every surface shows, shared so `seance mcp`,
  * the Raycast extension and any later app-role client explain a reason the same
  * way. Callers add their own op/title framing around it.
  */
@@ -2293,7 +2293,7 @@ export class RelayClient {
    * this build cannot open or read, or one without a key, so push is not set up. A
    * `StoreRefusal` is the relay declining the read, which says nothing about push
    * being set up, and a thrown `RequestFailure` is nothing answering at all.
-   * Logs nothing: this runs inside `seanced mcp`, whose stdout is JSON-RPC.
+   * Logs nothing: this runs inside `seance mcp`, whose stdout is JSON-RPC.
    */
   async pushSettings(endpoint?: string): Promise<PushSettingsReading | StoreRefusal | null> {
     const reply = await this.#store({ t: "store-get", id: crypto.randomUUID(), key: SETTINGS_KEY });

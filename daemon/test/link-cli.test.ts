@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 // in git (without them the created symlink is dead weight), that the symlink
 // actually executes through them, and that unlink survives removing the very
 // file it is running through.
-describe("seanced link/unlink through the CLI", () => {
+describe("seance link/unlink through the CLI", () => {
   let root: string;
   let bin: string;
   let env: Record<string, string | undefined>;
@@ -38,12 +38,21 @@ describe("seanced link/unlink through the CLI", () => {
   };
 
   test("link creates an executable symlink, repeats as a no-op, unlink removes it", async () => {
-    const linked = join(bin, "seanced");
+    const linked = join(bin, "seance");
     expect(await run([process.execPath, mainPath, "link"])).toContain(`linked ${linked}`);
     // Through the symlink itself — the shebang and the committed +x bit.
-    expect(await run([linked, "help"])).toContain("séance daemon");
+    expect(await run([linked, "help"])).toContain("usage: seance");
     expect(await run([process.execPath, mainPath, "link"])).toContain("already linked");
     expect(await run([linked, "unlink"])).toContain(`removed ${linked}`);
     expect(await run([process.execPath, mainPath, "unlink"])).toContain("nothing linked");
+  });
+
+  test("link replaces this checkout's link under the CLI's old name, seanced", async () => {
+    const legacy = join(bin, "seanced");
+    await symlink(await realpath(mainPath), legacy);
+    const out = await run([legacy, "link"]);
+    expect(out).toContain(`linked ${join(bin, "seance")}`);
+    expect(out).toContain(`removed ${legacy} (the CLI's old name)`);
+    expect(await lstat(legacy).catch(() => null)).toBeNull();
   });
 });

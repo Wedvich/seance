@@ -832,7 +832,7 @@ async function handleAvailability(
 /**
  * `custodian`: round now, pause or resume this machine's custodian seat (docs/custodian.md C45, C47). The owner's act,
  * as `availability` is: only an app, on the relay leg, never the scheduler or the local socket (the shell has its own
- * verbs, `seanced custodian round | pause | resume`, which run the same code from files).
+ * verbs, `seance custodian round | pause | resume`, which run the same code from files).
  */
 async function handleCustodian(
   ctx: HandlerContext,

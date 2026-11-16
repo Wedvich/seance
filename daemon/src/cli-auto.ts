@@ -39,12 +39,12 @@ import {
 } from "./fleet.ts";
 import type { PskStore } from "./psk-store.ts";
 
-// `seanced spawn`: queue the spawn for the scheduler as an app-role
-// client, as `seanced mcp`'s `spawn_session` does — a sealed task `store-put` at
+// `seance spawn`: queue the spawn for the scheduler as an app-role
+// client, as `seance mcp`'s `spawn_session` does — a sealed task `store-put` at
 // `expect: 0`, so it queues with no leader up. A shell that can read the PSK
 // dials the relay itself; one that cannot (a credential-delivered box, where
 // only the service sees the key) asks the daemon's broker, which seals and
-// sends it. `seanced spawn --now` stays relay-free.
+// sends it. `seance spawn --now` stays relay-free.
 
 export interface AutoFleetOpts {
   /** Tests point these at stores that cannot exist. */
@@ -200,7 +200,7 @@ export async function spawnAuto(
 }
 
 /**
- * `seanced continue`: the same gates and enqueue as MCP's `continue_task` (`continueAuto`), under
+ * `seance continue`: the same gates and enqueue as MCP's `continue_task` (`continueAuto`), under
  * this shell's own origin. A continuation is a scheduler task or nothing, so there is no `--now`.
  */
 export async function continueTaskAuto(
@@ -234,7 +234,7 @@ export async function continueTaskAuto(
   }
 }
 
-/** `seanced start`: MCP's `start_task` (`startAuto`) from this shell, through its key or the daemon's broker. */
+/** `seance start`: MCP's `start_task` (`startAuto`) from this shell, through its key or the daemon's broker. */
 export async function startTaskAuto(
   args: StartCliArgs,
   fleet: Fleet,
@@ -259,7 +259,7 @@ export async function startTaskAuto(
   }
 }
 
-/** `seanced pass`: MCP's `pass_task` (`passAuto`) from this shell, through its key or the daemon's broker. */
+/** `seance pass`: MCP's `pass_task` (`passAuto`) from this shell, through its key or the daemon's broker. */
 export async function passTaskAuto(
   args: PassCliArgs,
   fleet: Fleet,
@@ -284,7 +284,7 @@ export async function passTaskAuto(
   }
 }
 
-/** `seanced amend`: MCP's `amend_task` (`amendAuto`) from this shell, through its key or the daemon's broker. */
+/** `seance amend`: MCP's `amend_task` (`amendAuto`) from this shell, through its key or the daemon's broker. */
 export async function amendTaskAuto(
   draft: AmendDraft,
   fleet: Fleet,
@@ -321,7 +321,7 @@ export async function cmdAmendAuto(draft: AmendDraft): Promise<void> {
   process.exit(0);
 }
 
-/** `seanced close` / `seanced open`: always through the relay as app-role (`setMachineOpen`), so a keyless box refuses. */
+/** `seance close` / `seance open`: always through the relay as app-role (`setMachineOpen`), so a keyless box refuses. */
 export async function availabilityViaFleet(
   machine: string | null,
   open: boolean,
@@ -450,6 +450,6 @@ export async function cmdSpawnAuto(args: SpawnCliArgs): Promise<void> {
     process.exit(1);
   }
   console.log(outcome.text);
-  // As `seanced mcp` exits explicitly: a socket stuck closing must not hold the shell.
+  // As `seance mcp` exits explicitly: a socket stuck closing must not hold the shell.
   process.exit(0);
 }

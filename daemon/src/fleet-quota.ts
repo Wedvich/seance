@@ -22,7 +22,7 @@ import type { StoreLeg } from "./queue-store.ts";
  * This daemon's writes into the fleet quota record (DESIGN.md, Scheduler,
  * "Fleet quota record"): read, open, fold in its own newer readings, put at
  * the version read. Runs only inside `startDaemon` — it logs through
- * `log.ts`, which nothing reachable from `seanced mcp` may call — and never
+ * `log.ts`, which nothing reachable from `seance mcp` may call — and never
  * logs a key's `env` or `ct`.
  */
 

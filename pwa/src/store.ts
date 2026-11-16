@@ -1421,7 +1421,7 @@ export class Store {
       const instruction = reported ? " (with the instruction to report, which is added)" : "";
       const files = attaching ? " beside attached files" : "";
       return refused(
-        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${bound}${files}. Shorten it, or use \`seanced spawn --now\` on the machine.`,
+        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${bound}${files}. Shorten it, or use \`seance spawn --now\` on the machine.`,
       );
     }
     // Only ids: an alias or email is display text and never goes in a record.

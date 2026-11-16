@@ -9,7 +9,7 @@ import { custodianRoundsPath } from "./paths.ts";
 import { custodianSeatOf, pidAlive, readRuntime, readState } from "./state.ts";
 
 /**
- * `seanced custodian status | log | round | pause [--for <dur>] | resume` (docs/custodian.md C43, C45, C47; DESIGN.md,
+ * `seance custodian status | log | round | pause [--for <dur>] | resume` (docs/custodian.md C43, C45, C47; DESIGN.md,
  * "The custodian's status and the Machines row"): the owner's, typed at this machine's shell. Never a frame, a
  * local-socket op or an app op, and `main.ts` loads it on demand, outside `custodian-cli.ts`'s import closure — this
  * one logs and audits, which the round's verbs must never reach. Every verb works from files, never the socket, so
@@ -19,7 +19,7 @@ import { custodianSeatOf, pidAlive, readRuntime, readState } from "./state.ts";
  * from untrusted pane text, and an escape sequence in it would otherwise reach the owner's terminal.
  */
 
-const USAGE = "usage: seanced custodian status | log | round | pause [--for <n>m|h|d] | resume";
+const USAGE = "usage: seance custodian status | log | round | pause [--for <n>m|h|d] | resume";
 
 const MINUTE_MS = 60_000;
 const MIN_PAUSE_MS = MINUTE_MS;
@@ -77,7 +77,7 @@ async function configOf(): Promise<Config | null> {
 }
 
 const pauseLine = (read: Awaited<ReturnType<typeof readControl>>, now: number): string => {
-  if (read.unreadable) return "yes (custodian/state.json is unreadable: `seanced custodian resume` rewrites it)";
+  if (read.unreadable) return "yes (custodian/state.json is unreadable: `seance custodian resume` rewrites it)";
   if (!pausedAt(read, now) || read.pause === null) return "no";
   return read.pause.until === null ? "until resume" : `until ${time(read.pause.until)}`;
 };
@@ -130,7 +130,7 @@ function lastLine(entry: RoundEntry): string {
 async function logRounds(): Promise<void> {
   const entries = await readRounds(custodianRoundsPath()).catch(() => null);
   if (entries === null) {
-    console.error("seanced custodian: the round log could not be read");
+    console.error("seance custodian: the round log could not be read");
     process.exitCode = 1;
     return;
   }
@@ -182,10 +182,10 @@ export async function requestOwnerRound(): Promise<void> {
         const runtime = await readRuntime();
         if (runtime === null || !pidAlive(runtime.pid)) {
           console.error(
-            "seanced custodian: the daemon is not running; the request runs when it next ticks, if still fresh",
+            "seance custodian: the daemon is not running; the request runs when it next ticks, if still fresh",
           );
         } else if (view === null) {
-          console.error("seanced custodian: the daemon has not reported a seat; it may not honour the request");
+          console.error("seance custodian: the daemon has not reported a seat; it may not honour the request");
         }
         await requestRound(now);
       },
@@ -194,13 +194,13 @@ export async function requestOwnerRound(): Promise<void> {
   );
   if (decided.outcome === "too_soon") {
     console.error(
-      `seanced custodian: a round started or ended at ${time(decided.latest)}; one can be requested after ${time(decided.after)}; nothing requested`,
+      `seance custodian: a round started or ended at ${time(decided.latest)}; one can be requested after ${time(decided.after)}; nothing requested`,
     );
     process.exitCode = 1;
     return;
   }
   if (decided.outcome !== "requested") {
-    console.error(`seanced custodian: ${ROUND_REFUSALS[decided.outcome]}; nothing requested`);
+    console.error(`seance custodian: ${ROUND_REFUSALS[decided.outcome]}; nothing requested`);
     process.exitCode = 1;
     return;
   }
@@ -223,7 +223,7 @@ async function pause(args: readonly string[]): Promise<void> {
     const given = flag === "--for" ? args.length === 2 : args.length === 1;
     const ms = value === undefined || !given ? null : parseDuration(value);
     if (ms === null) {
-      console.error("seanced custodian: --for takes <n>m, <n>h or <n>d, from 1m to 30d");
+      console.error("seance custodian: --for takes <n>m, <n>h or <n>d, from 1m to 30d");
       usage();
       return;
     }

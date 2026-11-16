@@ -48,7 +48,7 @@ const REAL: CustodianCheckDeps = {
 };
 
 /**
- * `seanced doctor`'s custodian section, for a machine whose config carries `custodian` (docs/custodian.md): why a
+ * `seance doctor`'s custodian section, for a machine whose config carries `custodian` (docs/custodian.md): why a
  * round would not start here, or could not close what it finds. Read-only — it never creates a round dir, which only a
  * round about to run does. The probes are the seat's own: the sandbox, the sandbox mode the containment was drilled in,
  * the toolchain the round's `seanced` needs under the masks, then each exclave's round dir and the session-events and
@@ -110,14 +110,14 @@ export async function custodianChecks(o: {
   for (const label of await deps.sessionEventsMissing()) {
     checks.push({
       level: "warn",
-      message: `${label}: the session-events mod is not installed or enabled — the custodian can never close its sessions (unobserved); run \`seanced mod install\``,
+      message: `${label}: the session-events mod is not installed or enabled — the custodian can never close its sessions (unobserved); run \`seance mod install\``,
     });
   }
   // `nudge` delivers through the mod's listener; without one it answers `no_listener` (C26).
   for (const label of await deps.inboxMissing()) {
     checks.push({
       level: "warn",
-      message: `${label}: the inbox mod is not installed or enabled — the custodian can never nudge its sessions (no_listener); run \`seanced mod install\``,
+      message: `${label}: the inbox mod is not installed or enabled — the custodian can never nudge its sessions (no_listener); run \`seance mod install\``,
     });
   }
   return checks;

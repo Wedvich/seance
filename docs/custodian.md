@@ -65,7 +65,7 @@ refused Read per path, none read).
 ## Open details (build time)
 
 - **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
-  closed (C24); `seanced doctor` warns about it, and about an exclave without the `inbox` mod, whose
+  closed (C24); `seance doctor` warns about it, and about an exclave without the `inbox` mod, whose
   sessions a nudge answers `no_listener`. The retained state is per process, so a session already at rest
   when the daemon restarts is `unobserved` too until its next frame; `sessions` says when retention began
   (`retainedSince`), which is how the round can tell, though not why per pane.

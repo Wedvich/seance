@@ -72,7 +72,7 @@ async function ensureNow(configPath: string, repoPath: string, memoKey: string):
  * Whether Claude Code would start in `dir` without its trust dialog: `projects[<path>].hasTrustDialogAccepted` for the
  * dir's own entry or an ancestor's (the custodian spec's verified rule). Read-only, silent and false on anything
  * unreadable: the custodian's round dir is never pre-trusted by the daemon, because `.claude.json` races every
- * running session's own rewrite of it (DESIGN.md, "Exclaves"); the owner trusts it once, which `seanced doctor`
+ * running session's own rewrite of it (DESIGN.md, "Exclaves"); the owner trusts it once, which `seance doctor`
  * says. Never logs: nothing the seat reads from there reaches a log.
  */
 export async function isDirTrusted(dir: string, configFile: string): Promise<boolean> {

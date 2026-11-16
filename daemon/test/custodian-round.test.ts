@@ -285,7 +285,7 @@ describe("a round, with the stubs for claude", () => {
     expect(fence.sandbox.network.allowedDomains).toEqual([]);
     if (platform === "darwin") expect(fence.sandbox.network.allowUnixSockets).toEqual([socketDir]);
     else expect(fence.sandbox.network.allowAllUnixSockets).toBe(true);
-    expect(fence.permissions.allow).toEqual(["Bash(seanced custodian *)"]);
+    expect(fence.permissions.allow).toEqual(["Bash(seance custodian *)"]);
     for (const pair of [
       ["--setting-sources", "project"],
       ["--permission-mode", "dontAsk"],
@@ -748,24 +748,24 @@ const ROUND_IDLE_SCRIPT = "exec sleep 600";
 const roundVerbsScript = (out: string): string => `
 out=${shq(out)}
 mkdir -p "$out"
-command -v seanced > "$out/which"
+command -v seance > "$out/which"
 env > "$out/env.txt"
 until [ -f "$out/go" ]; do sleep 0.1; done
 { read -r a; read -r b; read -r self; } < "$out/go"
 run() { name=$1; shift; "$@" > "$out/$name.json" 2> "$out/$name.err"; echo $? > "$out/$name.rc"; }
-run sessions seanced custodian sessions
-run captureA seanced custodian capture "$a"
-run captureSelf seanced custodian capture "$self"
-run prA seanced custodian pr "$a"
-run prB seanced custodian pr "$b"
-run closeA seanced custodian close "$a"
-run closeB seanced custodian close "$b"
-run closeSelf seanced custodian close "$self"
-run flagSelf seanced custodian flag "$self" look
-run interruptSelf seanced custodian interrupt "$self"
-printf 'carry on' | run nudgeSelf seanced custodian nudge "$self"
-printf '## standing\\nkeep checking\\n## nonsense\\nnope\\n## other\\nnope\\n' | run notes seanced custodian notes
-printf 'closed one, kept one' | run done seanced custodian done
+run sessions seance custodian sessions
+run captureA seance custodian capture "$a"
+run captureSelf seance custodian capture "$self"
+run prA seance custodian pr "$a"
+run prB seance custodian pr "$b"
+run closeA seance custodian close "$a"
+run closeB seance custodian close "$b"
+run closeSelf seance custodian close "$self"
+run flagSelf seance custodian flag "$self" look
+run interruptSelf seance custodian interrupt "$self"
+printf 'carry on' | run nudgeSelf seance custodian nudge "$self"
+printf '## standing\\nkeep checking\\n## nonsense\\nnope\\n## other\\nnope\\n' | run notes seance custodian notes
+printf 'closed one, kept one' | run done seance custodian done
 echo finished > "$out/finished"
 exec sleep 600
 `;
@@ -873,7 +873,7 @@ describe("the verbs, over the round's own socket, from the round's own pane", ()
       await r.seat.start();
       await r.seat.tick();
       const roundPane = await onlyRound();
-      const shim = join(r.saved.record.round?.tmpDir ?? "", "bin", "seanced");
+      const shim = join(r.saved.record.round?.tmpDir ?? "", "bin", "seance");
       await mkdir(out, { recursive: true });
 
       // From this process, which is no pane at all.
@@ -936,7 +936,7 @@ describe("the verbs, over the round's own socket, from the round's own pane", ()
     }
   }, 60_000);
 
-  test("a round's own seanced runs sessions, capture, pr, close, notes and done; the seat then ends it healthy", async () => {
+  test("a round's own seance runs sessions, capture, pr, close, notes and done; the seat then ends it healthy", async () => {
     await mkdir(stateDir(), { recursive: true });
     const out = join(stateDir(), "verbs");
     process.env["SEANCE_CLAUDE_BIN"] = await scriptStub(base, "round-verbs", roundVerbsScript(out));
@@ -976,8 +976,8 @@ describe("the verbs, over the round's own socket, from the round's own pane", ()
       await rename(join(out, "go.tmp"), join(out, "go"));
       await pollUntil(() => tmpExists(join(out, "finished")), "the round's verbs to finish", 60_000);
 
-      // F1: the round's own seanced is the one on PATH, whatever the tmux server's PATH holds.
-      expect((await readFile(join(out, "which"), "utf8")).trim()).toBe(join(tmpDir, "bin", "seanced"));
+      // F1: the round's own seance is the one on PATH, whatever the tmux server's PATH holds.
+      expect((await readFile(join(out, "which"), "utf8")).trim()).toBe(join(tmpDir, "bin", "seance"));
 
       // The environment is built, not inherited.
       const env = await readFile(join(out, "env.txt"), "utf8");

@@ -53,7 +53,7 @@ export const AUDIT_LOG_MODE = 0o600;
 export const daemonSink: AuditSink = (line) => log.info(line);
 
 /**
- * `seanced spawn` is a separate process with no launchd redirect, so it appends
+ * `seance spawn` is a separate process with no launchd redirect, so it appends
  * to the log itself. Never throws: an unwritable log must not fail a spawn the
  * human asked for. Two independent writers is safe while nothing rotates the
  * file — a rename-and-recreate would leave the daemon on the old inode.
@@ -70,7 +70,7 @@ export const cliSink: AuditSink = async (line) => {
 
 /**
  * Names the state observed in production: a log the daemon's own user cannot
- * append to, so `seanced spawn` records nothing and the both-paths-audit
+ * append to, so `seance spawn` records nothing and the both-paths-audit
  * invariant holds only for `origin=relay`.
  */
 export function unwritableLogMessage(path: string, user: string): string {
@@ -129,12 +129,12 @@ export async function auditLogChecks(path: string = logPath()): Promise<readonly
   if ((info.mode & 0o777) !== AUDIT_LOG_MODE) {
     const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
     const exposure = `log is ${mode}, and it records repo paths and window titles`;
-    // `seanced restart` repairs the mode only on a file the daemon owns
+    // `seance restart` repairs the mode only on a file the daemon owns
     // (ensureAuditLog); on someone else's file the honest fix is the chown pair.
     checks.push({
       level: "warn",
       message: ownedByUs(info.uid)
-        ? `${exposure} — \`seanced restart\` tightens it to 0600`
+        ? `${exposure} — \`seance restart\` tightens it to 0600`
         : `${exposure} — owned by another user, so restart can't tighten it: ` +
           `sudo chown ${userInfo().username} ${path} && sudo chmod 600 ${path}`,
     });
@@ -441,8 +441,8 @@ export type EnqueueOutcome =
   | { readonly kind: "unanswered" };
 
 /**
- * Who enqueued, as both the line's origin and its client: `seanced mcp`, or
- * `seanced spawn` typed at this machine — the CLI's own origin, since
+ * Who enqueued, as both the line's origin and its client: `seance mcp`, or
+ * `seance spawn` typed at this machine — the CLI's own origin, since
  * `audit enqueue` already tells the act apart from its `audit spawn`.
  */
 export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
@@ -519,7 +519,7 @@ export function traitRefusalAudit(
 
 /**
  * Something on this box asked the daemon to reach *another* machine, or the
- * scheduler, for it over the op socket — a keyless `seanced mcp` or `seanced
+ * scheduler, for it over the op socket — a keyless `seance mcp` or `seance
  * spawn`. Its own origin, never `local`: a
  * `local` line means this box's tmux was touched, and a brokered spawn touches
  * someone else's. The target daemon audits the spawn itself as `origin=relay`.
@@ -635,7 +635,7 @@ export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
   };
 }
 
-/** What triggered a self-update check: a fleet announce, this daemon's own register, or `seanced update`. */
+/** What triggered a self-update check: a fleet announce, this daemon's own register, or `seance update`. */
 export type UpdateOrigin = "announce" | "register" | "cli";
 
 export interface UpdateAudit {
@@ -823,7 +823,7 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
 }
 
 /**
- * The owner's acts on the custodian (`custodian-owner.ts`): `seanced custodian pause | resume | round` under the `cli`
+ * The owner's acts on the custodian (`custodian-owner.ts`): `seance custodian pause | resume | round` under the `cli`
  * origin like every command typed at this machine, and the `custodian` app op under `relay`. `status` and `log` are
  * reads and write nothing. No text from a file or a payload reaches a line: only the pause's end, and a fixed outcome.
  */

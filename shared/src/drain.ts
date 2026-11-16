@@ -5,9 +5,9 @@ import type { DrainRefusal, SessionEntry, Task } from "./types.ts";
 
 /**
  * What a closed machine's drain has done and what it is stuck on (docs/drain.md; DESIGN.md, "Closing
- * a machine"): the one rule the PWA, MCP and `seanced close --wait` share, computed from a queue
+ * a machine"): the one rule the PWA, MCP and `seance close --wait` share, computed from a queue
  * reply's tasks and the machine's `sessions` reply — the leader exposes nothing beyond the stamp on the
- * task record. Imports nothing that logs, since `seanced mcp` reaches it.
+ * task record. Imports nothing that logs, since `seance mcp` reaches it.
  */
 
 /**
@@ -157,7 +157,7 @@ export function leadsQueue(machine: Pick<Machine, "deviceId">, scheduler: Schedu
 }
 
 /**
- * The close's leader note, shared by the close sheet, `seanced close` and `set_machine_open`. No client can
+ * The close's leader note, shared by the close sheet, `seance close` and `set_machine_open`. No client can
  * see whether another nominee could take over (the relay keeps the signed roles and its allowlist), so it
  * claims neither way; and it is about the box going down while it leads, not about the drain.
  */

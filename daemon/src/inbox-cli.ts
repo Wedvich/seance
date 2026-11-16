@@ -2,7 +2,7 @@ import { INBOX_FRAME_KIND, MESSAGE_FRAME_VERSION } from "./message-frame.ts";
 import { socketPath } from "./paths.ts";
 
 /**
- * `seanced inbox`: the inbox mod's listener child (docs/messaging.md, DESIGN.md "Session messages"). It dials the
+ * `seance inbox`: the inbox mod's listener child (docs/messaging.md, DESIGN.md "Session messages"). It dials the
  * local daemon, sends one `inbox` frame and copies everything the daemon writes to stdout, which the mod reads
  * piece by piece (a piece may hold a partial line; the mod reassembles). It holds the connection for the
  * session's life: the mod ending kills this process, and the connection closing drops the daemon's binding.

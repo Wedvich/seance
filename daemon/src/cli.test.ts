@@ -25,7 +25,7 @@ describe("parseReapArgs", () => {
 
   test("a missing or nonsense age, or an unknown flag, is a usage error rather than a default", () => {
     for (const argv of [["--min-age-days"], ["--min-age-days", "soon"], ["--min-age-days", "-1"], ["--force"]]) {
-      expect(() => parseReapArgs(argv)).toThrow("usage: seanced reap");
+      expect(() => parseReapArgs(argv)).toThrow("usage: seance reap");
     }
   });
 });
@@ -39,7 +39,7 @@ describe("parseDespawnArgs", () => {
 
   test("no id, two ids, or an unknown flag is a usage error, not a guess", () => {
     for (const argv of [[], ["%1", "%2"], ["%1", "-f"], ["--force"]]) {
-      expect(() => parseDespawnArgs(argv)).toThrow("usage: seanced despawn");
+      expect(() => parseDespawnArgs(argv)).toThrow("usage: seance despawn");
     }
   });
 });
@@ -54,7 +54,7 @@ describe("parseContinueArgs", () => {
 
   test("no id, a dangling flag, or an unknown flag is a usage error", () => {
     for (const argv of [[], ["-p", "x"], ["t-1", "-p"], ["t-1", "--now"]]) {
-      expect(() => parseContinueArgs(argv)).toThrow("usage: seanced continue");
+      expect(() => parseContinueArgs(argv)).toThrow("usage: seance continue");
     }
   });
 });
@@ -63,7 +63,7 @@ describe("parseStartArgs", () => {
   test("takes exactly one task id", () => {
     expect(parseStartArgs(["t-1"])).toEqual({ taskId: "t-1" });
     for (const argv of [[], ["t-1", "t-2"], ["--now"]]) {
-      expect(() => parseStartArgs(argv)).toThrow("usage: seanced start");
+      expect(() => parseStartArgs(argv)).toThrow("usage: seance start");
     }
   });
 });
@@ -97,8 +97,8 @@ describe("parseSpawnArgs", () => {
   });
 
   test("--auto is gone: the generic usage error, like any unknown flag", () => {
-    expect(() => parseSpawnArgs(["--auto", "seance"])).toThrow(/^usage: seanced spawn/u);
-    expect(() => parseSpawnArgs(["seance", "-p", "do it", "--auto"])).toThrow(/^usage: seanced spawn/u);
+    expect(() => parseSpawnArgs(["--auto", "seance"])).toThrow(/^usage: seance spawn/u);
+    expect(() => parseSpawnArgs(["seance", "-p", "do it", "--auto"])).toThrow(/^usage: seance spawn/u);
     // `-p` takes the next word as given, so a prompt that reads like a flag stays a prompt.
     expect(parseSpawnArgs(["seance", "-p", "--auto"])).toEqual({ repo: "seance", here: false, prompt: "--auto" });
   });
@@ -266,7 +266,7 @@ describe("install --system as a normal user", () => {
       // The refusal has to land before anything is written, and it has to say what
       // to run — the whole point of folding the runbook into the CLI.
       await expect(cmdInstall(["--system"])).rejects.toThrow(
-        /sudo --preserve-env=PATH "\$\(command -v seanced\)" install --system/u,
+        /sudo --preserve-env=PATH "\$\(command -v seance\)" install --system/u,
       );
     },
   );
@@ -296,7 +296,7 @@ describe("plistContent", () => {
       "",
     );
     expect(old).not.toContain("ExitTimeOut");
-    expect(exitTimeoutCheck(old)).toMatchObject({ level: "warn", message: expect.stringContaining("seanced install") });
+    expect(exitTimeoutCheck(old)).toMatchObject({ level: "warn", message: expect.stringContaining("seance install") });
   });
 
   test("escapes XML-hostile characters in paths", () => {
@@ -362,7 +362,7 @@ describe("parseAmendArgs", () => {
 
   test("nothing to amend, no id, an unknown flag or a flag missing its value is a usage error", () => {
     for (const argv of [[], ["t-1"], ["--replace"], ["t-1", "--nope", "x"], ["t-1", "--title"], ["t-1", "-r"]]) {
-      expect(() => parseAmendArgs(argv)).toThrow(/^usage: seanced amend/u);
+      expect(() => parseAmendArgs(argv)).toThrow(/^usage: seance amend/u);
     }
   });
 });
@@ -374,9 +374,9 @@ describe("parseAvailabilityArgs", () => {
     expect(parseAvailabilityArgs(["Thad"], "open")).toEqual({ machine: "Thad", ...none });
     for (const argv of [["a", "b"], ["--nope"]]) {
       expect(() => parseAvailabilityArgs(argv, "close")).toThrow(
-        "usage: seanced close [<machine>] [--drain] [--now] [--wait]",
+        "usage: seance close [<machine>] [--drain] [--now] [--wait]",
       );
-      expect(() => parseAvailabilityArgs(argv, "open")).toThrow("usage: seanced open [<machine>]");
+      expect(() => parseAvailabilityArgs(argv, "open")).toThrow("usage: seance open [<machine>]");
     }
   });
 
@@ -385,8 +385,8 @@ describe("parseAvailabilityArgs", () => {
     expect(parseAvailabilityArgs(["--wait"], "close")).toEqual({ machine: null, ...waits });
     expect(parseAvailabilityArgs(["Thad", "--wait"], "close")).toEqual({ machine: "Thad", ...waits });
     expect(parseAvailabilityArgs(["--wait", "Thad"], "close")).toEqual({ machine: "Thad", ...waits });
-    expect(() => parseAvailabilityArgs(["--wait"], "open")).toThrow("usage: seanced open [<machine>]");
-    expect(() => parseAvailabilityArgs(["--wait", "-x"], "close")).toThrow("usage: seanced close");
+    expect(() => parseAvailabilityArgs(["--wait"], "open")).toThrow("usage: seance open [<machine>]");
+    expect(() => parseAvailabilityArgs(["--wait", "-x"], "close")).toThrow("usage: seance close");
   });
 
   test("close takes --now, which implies --drain, alone or with a machine and --wait; open refuses it", () => {
@@ -397,7 +397,7 @@ describe("parseAvailabilityArgs", () => {
       now: true,
       drain: true,
     });
-    expect(() => parseAvailabilityArgs(["--now"], "open")).toThrow("usage: seanced open [<machine>]");
+    expect(() => parseAvailabilityArgs(["--now"], "open")).toThrow("usage: seance open [<machine>]");
   });
 
   test("close takes --drain; open refuses it", () => {
@@ -407,7 +407,7 @@ describe("parseAvailabilityArgs", () => {
       now: false,
       drain: true,
     });
-    expect(() => parseAvailabilityArgs(["--drain"], "open")).toThrow("usage: seanced open [<machine>]");
+    expect(() => parseAvailabilityArgs(["--drain"], "open")).toThrow("usage: seance open [<machine>]");
   });
 });
 
@@ -415,7 +415,7 @@ describe("parsePassArgs", () => {
   test("takes exactly one task id", () => {
     expect(parsePassArgs(["t-1"])).toEqual({ taskId: "t-1" });
     for (const argv of [[], ["t-1", "t-2"], ["--force"]]) {
-      expect(() => parsePassArgs(argv)).toThrow("usage: seanced pass");
+      expect(() => parsePassArgs(argv)).toThrow("usage: seance pass");
     }
   });
 });

@@ -1148,7 +1148,7 @@ export interface MachineInfo {
  * leader fails the task.
  * `drainPass`: as a leader, passes the work off a closed machine (`trigger: "drain"`) and writes
  * `Task.drained`; what a client checks of the verified leader before showing a drain's per-task
- * counts or offering `seanced close --wait`.
+ * counts or offering `seance close --wait`.
  * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (drain step A) and honours
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
  * `softClose`: as a daemon, honours `availability`'s `soft`, keeps `closed.drainAt` and reports `MachineStatus.dr`; as a
@@ -1905,7 +1905,7 @@ export type SpawnResponse =
 /**
  * Ends one session: claude is asked to exit, and its pane is killed if it
  * hasn't within a few seconds. The window only — a worktree and its branch are
- * left for `seanced reap`.
+ * left for `seance reap`.
  */
 export interface DespawnRequest {
   /** `SessionEntry.id` from a session list — the daemon accepts nothing else as a target. */

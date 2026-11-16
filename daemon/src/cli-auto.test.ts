@@ -34,7 +34,7 @@ import type { Config } from "./config.ts";
 import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
 
 const ORIGIN = "github.com/m/seance";
-const NOW_HINT = "`seanced spawn --now` spawns on this machine without the relay, the key or the daemon.";
+const NOW_HINT = "`seance spawn --now` spawns on this machine without the relay, the key or the daemon.";
 const LEADING = { kind: "ready", deviceId: "device-1", term: 3 } as const;
 
 function scheduledRelay(scheduler: SchedulerAvailability = LEADING): ReturnType<typeof fakeRelay> {
@@ -152,7 +152,7 @@ describe("spawnAuto", () => {
     expect(fake.creates).toHaveLength(1);
     expect(text).toContain("No scheduler is leading right now");
     // The one time --now is worth naming beside a queued task, with the double run it risks.
-    expect(text).toContain("`seanced spawn --now` now would start a second session");
+    expect(text).toContain("`seance spawn --now` now would start a second session");
   });
 
   test("an unverified nominee is not a leaderless fleet: no --now advice, which would double-run on a healthy one", async () => {
@@ -364,8 +364,8 @@ describe("autoFleet", () => {
       expect(outcome.text).toStartWith("spawn: not queued — this shell could not read the PSK");
       expect(outcome.text).toContain("not service-delivered, so it does not broker");
       expect(outcome.text).toContain("this process has to read the PSK itself");
-      expect(outcome.text).toContain("seanced doctor");
-      expect(outcome.text).not.toContain("seanced mcp");
+      expect(outcome.text).toContain("seance doctor");
+      expect(outcome.text).not.toContain("seance mcp");
       expect(outcome.text).not.toContain("update");
       expect(outcome.text).toEndWith(NOW_HINT);
     } finally {
@@ -795,7 +795,7 @@ describe("start", () => {
     // The task is queued: a failed exit would invite a retry that queues it twice.
     expect(ok).toBe(true);
     expect(text).toContain("not started: it was not ready to start within");
-    expect(text).toContain(`\`seanced start ${fake.creates[0]?.id}\` tries again`);
+    expect(text).toContain(`\`seance start ${fake.creates[0]?.id}\` tries again`);
     expect(fake.requests.map((r) => r.op)).toEqual(["queue", "queue"]);
   });
 
@@ -813,7 +813,7 @@ describe("start", () => {
     }
   });
 
-  test("seanced start sends run-now once, through the daemon's broker for a shell that cannot read the key", async () => {
+  test("seance start sends run-now once, through the daemon's broker for a shell that cannot read the key", async () => {
     const frames: Record<string, unknown>[] = [];
     const double = await startBrokerDouble((raw, id) => {
       if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
@@ -834,7 +834,7 @@ describe("start", () => {
     }
   });
 
-  test("seanced start refuses a malformed id before anything is sent, and words a refusal", async () => {
+  test("seance start refuses a malformed id before anything is sent, and words a refusal", async () => {
     const fake = fakeRelay(machines(), () => ({ ok: false, code: "unplaceable", message: "held" }));
     fake.setState({ scheduler: LEADING });
     const lazy = new LazyRelay({ create: () => fake });
@@ -875,7 +875,7 @@ describe("pass", () => {
     successor: null,
   };
 
-  test("seanced pass reads the queue, sends pass once, and names the successor", async () => {
+  test("seance pass reads the queue, sends pass once, and names the successor", async () => {
     const fake = fakeRelay(machines(), (op) => {
       if (op === "queue") return { tasks: [running], at: 6_000 };
       if (op === "pass") return passed;
@@ -950,7 +950,7 @@ describe("pass", () => {
     }
   });
 
-  test("seanced pass sends pass once, through the daemon's broker for a shell that cannot read the key", async () => {
+  test("seance pass sends pass once, through the daemon's broker for a shell that cannot read the key", async () => {
     const frames: Record<string, unknown>[] = [];
     const double = await startBrokerDouble((raw, id) => {
       if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
@@ -975,7 +975,7 @@ describe("pass", () => {
   });
 });
 
-describe("seanced close / open", () => {
+describe("seance close / open", () => {
   const self = machine({ capabilities: ["close", "drain"] });
 
   test("no argument acts on this machine, by its own device id, over the relay", async () => {
@@ -1039,7 +1039,7 @@ describe("seanced close / open", () => {
         Promise.resolve("device-1"),
       );
       expect(outcome.ok).toBe(false);
-      expect(outcome.text).toContain("seanced update");
+      expect(outcome.text).toContain("seance update");
       expect(oldFake.requests).toEqual([]);
     } finally {
       oldLazy.stop();
@@ -1163,7 +1163,7 @@ describe("seanced close / open", () => {
   });
 });
 
-describe("seanced close --wait", () => {
+describe("seance close --wait", () => {
   const CL = 9_000;
   const closedBox = (fields: Partial<Machine> = {}): Machine =>
     machine({
@@ -1380,7 +1380,7 @@ describe("seanced close --wait", () => {
     const outcome = await wait(fake, 1, 30, false);
     expect(outcome.code).toBe(0);
     expect(outcome.printed).toEqual([
-      "MacBook Pro: waiting for its tasks to finish on their own; nothing is moved until you drain it (seanced close --drain), and a task idle at its prompt never finishes",
+      "MacBook Pro: waiting for its tasks to finish on their own; nothing is moved until you drain it (seance close --drain), and a task idle at its prompt never finishes",
       "MacBook Pro: running 1 · 1 idle at its prompt",
     ]);
   });
@@ -1399,7 +1399,7 @@ describe("seanced close --wait", () => {
     expect(outcome.code).toBe(0);
     expect(outcome.printed).toHaveLength(3);
     expect(outcome.printed[1]).toContain("nothing left is running");
-    expect(outcome.printed[1]).toContain("seanced close --drain");
+    expect(outcome.printed[1]).toContain("seance close --drain");
     expect(outcome.printed[2]).toBe("MacBook Pro: 1 idle at its prompt");
   });
 
