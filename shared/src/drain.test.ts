@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "./app-client.ts";
-import { drainStuckText, drainSummary, drainView } from "./drain.ts";
+import { drainStuckText, drainSummary, drainView, leaderCloseNote, leadsQueue } from "./drain.ts";
 import type { SessionEntry, Task, TaskSpec } from "./types.ts";
 
 const CL = 1_800_000_000_000;
@@ -148,5 +148,22 @@ describe("drainStuckText and drainSummary", () => {
     expect(drainSummary({ ...base, moving: [], stuck })).toBe("1 stuck");
     expect(drainSummary({ ...base, moving: [], stuck: [], empty: true })).toBe("empty");
     expect(drainSummary({ ...base, moving: [], stuck: [], empty: null })).toBe("sessions unknown");
+  });
+});
+
+describe("the close's leader note", () => {
+  const target = { deviceId: "dev-1" };
+
+  test("only the verified leader leads the queue: never an unverified nominee, no leader, or another machine", () => {
+    expect(leadsQueue(target, { kind: "ready", deviceId: "dev-1", term: 2 })).toBe(true);
+    expect(leadsQueue(target, { kind: "unverified", deviceId: "dev-1", term: 2 })).toBe(false);
+    expect(leadsQueue(target, { kind: "none" })).toBe(false);
+    expect(leadsQueue(target, { kind: "ready", deviceId: "dev-2", term: 2 })).toBe(false);
+  });
+
+  test("says the queue stops while it is down, and claims nothing about another machine", () => {
+    expect(leaderCloseNote("Thad")).toBe(
+      "Thad runs the queue: while it is down, the queue stops unless another machine can take over.",
+    );
   });
 });

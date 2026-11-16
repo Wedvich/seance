@@ -146,11 +146,15 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       custodian={state.custodian}
       onCustodian={(deviceId, request) => void store.custodianControl(deviceId, request)}
       closeSheet={(machine) =>
-        deriveCloseSheet(machine, {
-          passes: deriveDrainAvailability(state.relay),
-          tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
-          sessions: state.sessions,
-        })
+        deriveCloseSheet(
+          machine,
+          {
+            passes: deriveDrainAvailability(state.relay),
+            tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
+            sessions: state.sessions,
+          },
+          state.relay.scheduler,
+        )
       }
       machines={state.relay.machines}
       onReadDrain={(deviceId) => store.readDrain(deviceId)}

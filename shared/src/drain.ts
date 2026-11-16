@@ -1,4 +1,4 @@
-import type { Machine } from "./app-client.ts";
+import { schedulerRole, type Machine, type SchedulerAvailability } from "./app-client.ts";
 import { schedulerErrorText, sentence } from "./scheduler-text.ts";
 import { closedAt } from "./status-reader.ts";
 import type { DrainRefusal, SessionEntry, Task } from "./types.ts";
@@ -115,6 +115,23 @@ export function drainStuckText(stuck: DrainStuck): string {
     case "refused":
       return stuck.code === undefined ? "Refused" : sentence(schedulerErrorText(stuck.code));
   }
+}
+
+/**
+ * Whether `machine` is the verified leader (a `lead-proof` sealed `from` it for the pushed term), never a
+ * registry entry alone: closing it leaves it leading (docs/drain.md §6), so the queue goes down with it.
+ */
+export function leadsQueue(machine: Pick<Machine, "deviceId">, scheduler: SchedulerAvailability): boolean {
+  return schedulerRole(machine.deviceId, scheduler) === "leader";
+}
+
+/**
+ * The close's leader note, shared by the close sheet, `seanced close` and `set_machine_open`. No client can
+ * see whether another nominee could take over (the relay keeps the signed roles and its allowlist), so it
+ * claims neither way; and it is about the box going down while it leads, not about the drain.
+ */
+export function leaderCloseNote(name: string): string {
+  return `${name} runs the queue: while it is down, the queue stops unless another machine can take over.`;
 }
 
 /** One line for a row: "moving 3 · 1 stuck", "moving 1", "empty". */

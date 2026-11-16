@@ -147,6 +147,26 @@ describe("the drain row and the close sheet", () => {
     ]);
     expect(deriveCloseSheet(open, inputs({ tasks: null }))[1]).toContain("10 minutes");
   });
+
+  test("closing the verified leader ends with the leader note, whatever the drain reads; an unverified nominee or another leader gets none", () => {
+    const open = machine({ capabilities: [CAPABILITIES.close] });
+    const note = "mac runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const leads = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
+    expect(deriveCloseSheet(open, inputs({ passes: false }), leads)).toEqual([
+      "Closing mac stops new work landing on it.",
+      "Running work finishes where it is.",
+      note,
+    ]);
+    expect(deriveCloseSheet(open, inputs(), leads).at(-1)).toBe(note);
+    expect(deriveCloseSheet(open, inputs({ tasks: null }), leads).at(-1)).toBe(note);
+    for (const scheduler of [
+      { kind: "unverified", deviceId: "dev-1", term: 4 },
+      { kind: "ready", deviceId: "dev-2", term: 4 },
+      { kind: "none" },
+    ] as const) {
+      expect(deriveCloseSheet(open, inputs(), scheduler)).not.toContain(note);
+    }
+  });
 });
 
 describe("the close sheet for a drainAsk machine", () => {

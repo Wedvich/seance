@@ -8407,6 +8407,19 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
   The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
   `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
   row, `--wait` and `list_machines`' `drain` (below); item 3 adds `now` and the ask's wording.
+- **A closed leader keeps leading** (docs/drain.md §6). The drain's passes need a leader, and moving the term
+  mid-drain only adds a takeover; it stops leading when it leaves. So closing the leader warns that the queue
+  goes down with the box: the close sheet ends with, and `seanced close` and `set_machine_open` append on a line
+  of its own to any close that stands (fresh or already closed; never a reopen), `leaderCloseNote` ("<name> runs
+  the queue: while it is down, the queue stops unless another machine can take over"), one text in
+  `shared/src/drain.ts`. It is about the box going down while it leads, not about the drain, so it holds whatever
+  a close starts. "Leads" is `leadsQueue`: the verified leader only (`schedulerRole` `leader`, a `lead-proof`
+  sealed `from` the nominee for the pushed term), never a registry entry, since a wrong "leads" would be a lie
+  about leadership. The note never says whether another machine can take over: the registry push names only the
+  one nominee, the relay keeps the signed `roles` (every daemon claims `scheduler`) and its `SCHEDULER_LEADERS`
+  list, so no client can see a standby. _Rejected:_ counting connected machines as standbys (every one claims the
+  role, so it would hide the warning on a fleet with no other allowlisted id — the wrong direction), and a relay
+  push of the standby count (a relay and wire change for one sentence; kept as the way to sharpen it).
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
   sealed and replay-guarded, answered only for an app, and audited.
 
@@ -8488,9 +8501,21 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   (it fails their `parseSucceeds`), as for `"quota"`; an older leader nominee holds such a record
   unreadable and never places it, and a rolled-back leader neither reads `Task.drained` nor drains at all. A new client against an older leader shows item 1's
   behaviour (no `drainPass`). Deploy order: daemons, then PWA/CLI.
-- **Deferred.** docs/drain.md's §6 (a closed leader keeps leading; the sheet's warning about the only
-  nominee) and §12's time-from-close-to-empty measure are not built; the pass's own `audit pass …
-  trigger=drain` line is the one measure.
+- **Time to empty** (docs/drain.md §12). The closed machine's own daemon logs one line, `drain: empty
+  cl=<cl> after_ms=<ms> peak=<n>` (`grep 'drain: empty'` in its log), the first time its live panes read empty
+  while it is closed at `cl` (`daemon/src/drain-empty.ts`). The panes are the status loop's own sessions read
+  (`watchedSessions`), the list the `sessions` op answers and `drainView` reads `empty` from, so it costs no read
+  of its own and is as fine as that beat (`STATUS_INTERVAL_MS`, 30 s, plus the refresh a close asks for), a beat
+  that starts only once the daemon has registered, so one that cannot reach the relay logs nothing until it can (`after_ms`
+  then runs to that point); `cl` is read before and after the list and counts only if unchanged (a reopen
+  meanwhile makes it unobserved), and a failed read never counts as empty. `after_ms` is the daemon's clock less
+  `cl` (the same clock), `peak` the most panes a read saw since this `cl` was first seen. Memory only, once per
+  `cl` per process: a reopen forgets it, a later close is watched afresh, and a restart while closed may log the
+  same `cl` again (after the downtime), which a reader folds by `cl`. A box already empty at its close logs
+  `peak=0`. Counts only what the daemon knows itself: moved and stuck need the leader's queue, which a closed
+  daemon does not hold (a read per beat would be new traffic for a log line), and stay readable from the
+  pass's `audit pass … trigger=drain` lines and the daemon's `audit drain` lines. No task id, no text. Not the
+  clients that call `drainView`: none runs for most drains, and `seanced mcp` never calls `log.ts`.
 - **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
   the stamp is written only by the leader through the one task sealer, never from a frame.
 

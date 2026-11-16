@@ -47,6 +47,7 @@ import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
+import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
 import { startCapabilities, type CustodianHost } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -497,6 +498,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
   // A `now` landing before the wiring is replayed there, since `start()` asks without it.
   const drainAsk = createLateDrainAsk();
+  // §12's time to empty, fed by the status loop's own sessions read below.
+  const drainEmpty = createDrainEmptyWatch({ now });
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
   // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
   let setting: Promise<unknown> = Promise.resolve();
@@ -623,7 +626,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     {
       config,
       registered: () => registered,
-      sessions: () => handlerCtx.backend.sessions(state.repos),
+      sessions: watchedSessions(
+        () => handlerCtx.backend.sessions(state.repos),
+        () => closedOf(state),
+        drainEmpty,
+      ),
       now,
       httpFetch,
       draining: () => endedTasks.draining,
