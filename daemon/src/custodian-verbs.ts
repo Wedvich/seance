@@ -282,6 +282,28 @@ const REFUSAL_LINES_PER_MIN = 20;
 /** Unbound senders remembered for the once-a-minute collapse. */
 const REFUSAL_PIDS_KEPT = 64;
 const SESSIONS_CONCURRENCY = 4;
+/** `capture`'s cap: the round decides on the screen's bottom, and five captures stay under Claude Code's ~30 KB persist. */
+export const CAPTURE_MAX_LINES = 60;
+export const CAPTURE_MAX_BYTES = 4_096;
+
+/**
+ * The bottom of a screen: trailing blank lines dropped, then the last lines that fit both caps, cut at a line boundary
+ * (so a multi-byte character is never split). A last line alone over the byte cap is dropped too: `text` is then empty.
+ */
+export function bottomOfScreen(screen: string): { readonly text: string; readonly truncated: boolean } {
+  const lines = screen.split("\n");
+  while (lines.length > 0 && (lines.at(-1) ?? "").trim() === "") lines.pop();
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let at = lines.length - 1; at >= 0 && kept.length < CAPTURE_MAX_LINES; at -= 1) {
+    const line = lines[at] ?? "";
+    const cost = Buffer.byteLength(line, "utf8") + (kept.length > 0 ? 1 : 0);
+    if (bytes + cost > CAPTURE_MAX_BYTES) break;
+    bytes += cost;
+    kept.unshift(line);
+  }
+  return { text: kept.join("\n"), truncated: kept.length < lines.length };
+}
 
 const minutesSince = (now: number, since: number | null): number | null =>
   since === null ? null : Math.max(0, Math.floor((now - since) / MINUTE_MS));
@@ -615,7 +637,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       if (typeof info === "string") return { ok: false, code: info };
       const text = await captureText(pane);
       if (text === null) return { ok: false, code: "gone" };
-      return { ok: true, verb: "capture", pane, text };
+      return { ok: true, verb: "capture", pane, ...bottomOfScreen(text) };
     } catch (err) {
       // Never the error's text: it may hold pane output.
       deps.warn(`custodian: capture of ${pane} failed (${err instanceof Error ? err.name : "error"})`);

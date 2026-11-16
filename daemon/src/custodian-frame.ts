@@ -181,7 +181,15 @@ export type CustodianReply =
       readonly outcome: "exited" | "killed" | "harvested";
       readonly worktree: { readonly removed: true; readonly how: string } | { readonly kept: KeptWhy } | null;
     }
-  | { readonly ok: true; readonly verb: "capture"; readonly pane: string; readonly text: string }
+  | {
+      readonly ok: true;
+      readonly verb: "capture";
+      readonly pane: string;
+      /** The screen's bottom (`bottomOfScreen`). */
+      readonly text: string;
+      /** Whether lines above `text` were cut. */
+      readonly truncated: boolean;
+    }
   | ({
       readonly ok: true;
       readonly verb: "pr";
