@@ -15,7 +15,7 @@ import {
 
 /**
  * What a scheduler answer means to whoever asked, worded once for every app-role
- * surface — the PWA, `seanced mcp`, any later client — so they cannot drift
+ * surface — the PWA, `seance mcp`, any later client — so they cannot drift
  * apart. Each line is a lowercase clause; a surface that shows it alone makes
  * it a sentence (`sentence`), and adds its own next step around it.
  */
@@ -49,7 +49,7 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   needs_input: "the task is waiting for you; answer it or cancel it first",
   here: "the task runs in place, so it has no branch of its own to pass on",
   offline: "the machine running the task is not connected; nothing changed",
-  successor_unsupported: "the leader or the task's machine predates passing to a successor (needs seanced update)",
+  successor_unsupported: "the leader or the task's machine predates passing to a successor (needs seance update)",
   account_unknown: "the task's account is unknown, so a successor cannot say whose work it continues",
   pr_unreadable: "the scheduler could not read the task's pull request; nothing was pushed",
   pr_not_open: "the task's pull request is already merged or closed; there is nothing to pass on",
@@ -89,7 +89,7 @@ const STORE_ERROR_TEXT: Record<StoreErrorCode, string> = {
   store_full: "the queue is full; the scheduler prunes finished tasks as it runs — try again later",
 };
 
-/** A relay store refusal of an enqueue, worded once for the PWA and `seanced mcp`. */
+/** A relay store refusal of an enqueue, worded once for the PWA and `seance mcp`. */
 export function storeErrorText(code: string): string {
   const known = STORE_ERROR_CODES.find((c) => c === code);
   return known === undefined
@@ -145,11 +145,11 @@ export function reasonText(reason: Reason): string {
     case "predecessor_account":
       return "the account whose usage ran out is not where the work goes on";
     case "continue_unsupported":
-      return "its daemon can't continue a session yet (needs seanced update)";
+      return "its daemon can't continue a session yet (needs seance update)";
     case "attachments_unsupported":
-      return "its daemon can't fetch attachments yet (needs seanced update)";
+      return "its daemon can't fetch attachments yet (needs seance update)";
     case "base_unsupported":
-      return "its daemon can't stack on another task's branch yet (needs seanced update)";
+      return "its daemon can't stack on another task's branch yet (needs seance update)";
     case "auth_missing":
       return "not signed in";
     case "auth_expired":

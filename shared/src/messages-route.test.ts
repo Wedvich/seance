@@ -250,7 +250,7 @@ describe("receiptNote", () => {
     expect(receiptNote({ ...base, outcome: "ended" })).toContain("no live session");
     expect(receiptNote({ ...base, outcome: "ended", reason: "nolistener" })).toContain("no inbox listener");
     expect(receiptNote({ ...base, outcome: "offline" })).toContain("offline");
-    expect(receiptNote({ ...base, outcome: "unsupported" })).toContain("seanced update");
+    expect(receiptNote({ ...base, outcome: "unsupported" })).toContain("seance update");
     expect(receiptNote({ ...base, outcome: "unknown" })).toContain("no such task");
     expect(receiptNote({ ...base, outcome: "sent" })).toContain("waiting for its session's inbox listener");
     for (const outcome of ["delivered", "sent", "held", "ended", "unknown", "unsupported", "offline"] as const) {

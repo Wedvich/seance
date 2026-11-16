@@ -82,7 +82,7 @@ export async function recordServedSource(path: string, read: () => Promise<Sourc
 
 /**
  * Fetch, fast-forward the default branch, `bun install --frozen-lockfile`, and on
- * `ok` restart the service the way `seanced restart` restarts a system unit's
+ * `ok` restart the service the way `seance restart` restarts a system unit's
  * daemon: SIGTERM its MainPID, as the same user, for `Restart=always` to relaunch
  * on the new code. The unit files are never rewritten here (they are root's); a
  * changed definition is reported and applied by re-running `install --system`. The

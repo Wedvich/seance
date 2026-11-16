@@ -28,7 +28,7 @@ export interface RelayHandle {
 }
 
 /**
- * A third app-role client, exactly as `seanced mcp` is: same `/app?t=<token>`
+ * A third app-role client, exactly as `seance mcp` is: same `/app?t=<token>`
  * upgrade, same envelope crypto, same correlation. No relay or daemon change.
  * Beyond `spawn` and `rescan` it makes one read, the `account:` listing that
  * names accounts by their aliases (lib/accounts.ts), and one write, `auto`'s

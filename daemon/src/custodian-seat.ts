@@ -45,7 +45,7 @@ export function sandboxDrilled(platform: "darwin" | "linux", arch: string = proc
   return platform === "darwin" || vsockFilter(arch) !== null;
 }
 
-/** The one text the seat's warning and `seanced doctor` give for a host in an undrilled sandbox mode. */
+/** The one text the seat's warning and `seance doctor` give for a host in an undrilled sandbox mode. */
 export const SANDBOX_UNDRILLED =
   "every Linux round runs under a vsock filter, which has no table for this CPU (x64 and arm64 only) — no rounds on this host";
 
@@ -88,7 +88,7 @@ export class LaunchRefused extends Error {
 /**
  * C14 and C45: some tracked pane has stood `idle` since a turn's end for `everyMs`; the last round ended at least that
  * long ago; none is running; the daemon is not draining for a restart; the owner has not paused the seat. The owner's
- * request (`seanced custodian round`, `requested`) skips the interval, the last round's age, the quiet condition and
+ * request (`seance custodian round`, `requested`) skips the interval, the last round's age, the quiet condition and
  * the pause, never a running round or a drain. A pane counts only when a built verb
  * could act on it, else it would keep a round due every `everyMinutes` that closes nothing (DESIGN.md records the
  * narrowing): C7's exclusions (a last state of `needs-input`, or a drain, hand-off or pass mark: `untouchable`), a
@@ -191,7 +191,7 @@ export type HostProblem =
   | "round dir holds settings, agents or a link";
 
 /**
- * Why a signed-in exclave's round dir cannot host a round, null when it can: the one rule the pick and `seanced
+ * Why a signed-in exclave's round dir cannot host a round, null when it can: the one rule the pick and `seance
  * doctor` share, so doctor never says an exclave can host while the seat skips it.
  */
 export async function hostProblem(
@@ -635,7 +635,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     else if (!unreadableWarned) {
       unreadableWarned = true;
       d.warn(
-        "custodian: custodian/state.json is unreadable; the seat is paused until it is fixed or `seanced custodian resume` rewrites it",
+        "custodian: custodian/state.json is unreadable; the seat is paused until it is fixed or `seance custodian resume` rewrites it",
       );
     }
     let request = await d.peekRoundRequest(now);

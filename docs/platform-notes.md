@@ -6,7 +6,7 @@ catch-up for machines installed before certain fixes.
 ## Linux
 
 On a fresh headless box the systemd user instance may not exist until linger is
-enabled. If `seanced install`'s preflight says so, run it once and re-run `install`:
+enabled. If `seance install`'s preflight says so, run it once and re-run `install`:
 
 ```sh
 sudo loginctl enable-linger <user>
@@ -59,25 +59,25 @@ older kernel may count a global OOM kill differently.
 
 Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
 a **system** unit so PID 1 can unseal and deliver the key (`LoadCredentialEncrypted=`
-— why in docs/psk.md). `seanced install --system` writes and enables it:
+— why in docs/psk.md). `seance install --system` writes and enables it:
 
 ```sh
-seanced uninstall                                   # if a user unit is installed
-sudo --preserve-env=PATH "$(command -v seanced)" install --system
-# or: sudo env PATH="$PATH" seanced install --system
+seance uninstall                                   # if a user unit is installed
+sudo --preserve-env=PATH "$(command -v seance)" install --system
+# or: sudo env PATH="$PATH" seance install --system
 ```
 
-Both halves of that prefix are load-bearing. `"$(command -v seanced)"` is the full path
+Both halves of that prefix are load-bearing. `"$(command -v seance)"` is the full path
 because sudo looks the command up in `secure_path` whatever `--preserve-env` says, and
-`secure_path` never holds `~/.local/bin`, so a bare `sudo seanced …` dies with
-`sudo: seanced: command not found`. `--preserve-env=PATH` then controls the PATH the command
+`secure_path` never holds `~/.local/bin`, so a bare `sudo seance …` dies with
+`sudo: seance: command not found`. `--preserve-env=PATH` then controls the PATH the command
 sees: everything the unit records is written out literally — a `User=` system unit
 inherits nothing from your shell — and under a plain `sudo` that PATH is `secure_path`,
 which holds no mise shim, no `~/.local/bin` and so neither bun (the `env bun` shebang
 needs it too) nor claude. `install --system` refuses rather than write a unit that
 starts and then fails every spawn. Where sudoers refuses `--preserve-env`, the
-`sudo env PATH="$PATH" seanced …` form gets the same result: sudo only has to find
-`env`, which `secure_path` holds, and `env` then finds seanced and bun on your PATH.
+`sudo env PATH="$PATH" seance …` form gets the same result: sudo only has to find
+`env`, which `secure_path` holds, and `env` then finds seance and bun on your PATH.
 
 A preserved PATH can still arrive holding root's paths. When a version manager's shim
 (mise, asdf) is first on it, the `env bun` shebang runs that shim as root, which resolves
@@ -127,7 +127,7 @@ What the user-unit flow still does that this doesn't:
 
 - The unit definition never self-rewrites — `selfRestart` under a system unit exits for
   `Restart=always` to relaunch it, and it cannot regenerate a root-owned file. So the
-  "definitions lag the code" catch-up below is `sudo --preserve-env=PATH "$(command -v seanced)" install --system` here, and
+  "definitions lag the code" catch-up below is `sudo --preserve-env=PATH "$(command -v seance)" install --system` here, and
   `doctor` reports the drift by comparing the installed unit against what this checkout
   would write. That replaces the manual `ExecStart=` re-check this section used to ask
   for.
@@ -135,7 +135,7 @@ What the user-unit flow still does that this doesn't:
   `doctor` says so instead of probing user scope. The sessions it spawns can still
   depend on the user manager: see "Sessions under the user manager" above.
 
-`seanced restart` works without root here, so `seanced update` (or `git pull && seanced restart`) is the same
+`seance restart` works without root here, so `seance update` (or `git pull && seance restart`) is the same
 update as on a user unit. It can't ask the system manager to restart the unit, so it
 reads the unit's `MainPID` (a read-only query anyone may make), SIGTERMs that process —
 it runs as you — and waits for `Restart=always` to relaunch it, about five seconds
@@ -144,15 +144,15 @@ so: a unit that isn't running (no process to signal), and a daemon installed wit
 `--user` for a different account (the signal is refused). Like the self-update, it
 can't apply a changed unit definition.
 
-`doctor` and `seanced status` both report the system unit correctly now: which scope owns
+`doctor` and `seance status` both report the system unit correctly now: which scope owns
 the daemon, whether it is active, the bun path resolved against the unit's _own_ recorded
-PATH, and the key as delivered. `sudo --preserve-env=PATH "$(command -v seanced)" uninstall --system` removes the unit,
+PATH, and the key as delivered. `sudo --preserve-env=PATH "$(command -v seance)" uninstall --system` removes the unit,
 leaving the sealed blob (a TPM blob can't be recreated from a backup) and the `seanced`
 name on PATH, which belongs to a user whose PATH root can't see.
 
 ### Pushing a task's branch (passing to a successor)
 
-`seanced pass` and the app's **Pass to successor** make the task's machine run `git push` of its
+`seance pass` and the app's **Pass to successor** make the task's machine run `git push` of its
 branch to `origin`. That push uses the operator's own git credentials (their git config and
 credential helper or ssh agent, non-interactive: `GIT_TERMINAL_PROMPT=0`), the same ones the daemon
 already uses to fetch; séance holds no extra credential. On a Linux service the unit must be able to
@@ -195,7 +195,7 @@ databases, the identity and the sealed blob.
 ## WSL
 
 `systemd=true` under `[boot]` in `/etc/wsl.conf` is a prerequisite, not a tweak:
-`seanced install` needs a systemd user instance. Flipping it takes a
+`seance install` needs a systemd user instance. Flipping it takes a
 `wsl.exe --shutdown`, which kills every session on the box — so do it before anything
 else.
 
@@ -212,7 +212,7 @@ limitation as a launchd agent, which is also per-login.
 `StandardOutput=append:` is opened by the manager before it drops to `User=`, so under a
 **system** unit root creates the log and the daemon's own user is left unable to append
 to it. That breaks half the audit trail without breaking the daemon: the daemon keeps
-writing through its redirect, while `seanced spawn` — a separate process with no
+writing through its redirect, while `seance spawn` — a separate process with no
 redirect — fails its append, prints one line to stderr and spawns anyway, unrecorded.
 
 `install --system` pre-creates and chowns the log for exactly this reason, and the daemon
@@ -220,7 +220,7 @@ now re-checks it on every start: it creates the file 0600 if it is missing and t
 the mode if it is loose, in place — never renaming or rotating, which would leave the
 daemon's redirect writing to the old inode while the CLI appended to a new one. What an
 unprivileged daemon cannot do is take back a file root owns, so there it warns instead,
-and `seanced doctor` fails the check naming the fix:
+and `seance doctor` fails the check naming the fix:
 
 ```sh
 sudo chown <user> ~/.local/state/seance/seanced.log
@@ -245,16 +245,16 @@ Claude session writes.
 
 An update restarts the daemon from new code, but the service definition already on
 disk is not rewritten in step: launchd caches job definitions, so the plist changes
-only when you run `seanced install`, and systemd's unit is rewritten by the update's
+only when you run `seance install`, and systemd's unit is rewritten by the update's
 own restart — one update cycle behind the code that generates it. A systemd **system**
 unit is never rewritten at all, since the daemon lacks the privilege: `doctor` reports
-the drift, and `sudo --preserve-env=PATH "$(command -v seanced)" install --system` clears it — rewriting the file _and_
+the drift, and `sudo --preserve-env=PATH "$(command -v seance)" install --system` clears it — rewriting the file _and_
 restarting the unit, since `enable --now` leaves an already-running one on its old
 definition.
 
 On macOS that includes the plist's `ExitTimeOut` (30 s, added 2026-11-11). A plist written
 earlier sets none, so launchd's 5 s default SIGKILLs the daemon partway through its
-15 s shutdown drain. `doctor` warns until `seanced install` rewrites it. That reloads the
+15 s shutdown drain. `doctor` warns until `seance install` rewrites it. That reloads the
 agent, so run it when no task launch is in flight.
 
 ## One-time catch-up for pre-2026-08-04 installs
@@ -269,5 +269,5 @@ bun daemon/src/main.ts mcp install    # re-record the MCP command
 bun daemon/src/main.ts install        # rewrite the plist/unit and reload it
 ```
 
-`seanced doctor` flags a machine that still needs it. Once every machine you own is
+`seance doctor` flags a machine that still needs it. Once every machine you own is
 clean, this section can go.

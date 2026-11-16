@@ -1,4 +1,4 @@
-import { COMMANDS, CUSTODIAN_OWNER_VERBS } from "./commands.ts";
+import { CLI_NAME, COMMANDS, CUSTODIAN_OWNER_VERBS, LEGACY_CLI_NAME } from "./commands.ts";
 
 /**
  * The custodian round's settings, generated (docs/custodian.md, "The fence"; DESIGN.md, "The custodian's seat"). Pure:
@@ -22,7 +22,7 @@ const PLAIN_DENIED = [
   "docker",
   "podman",
   "ssh",
-  // The round has no tmux socket and no network, so neither can work; a read goes through `seanced custodian capture`
+  // The round has no tmux socket and no network, so neither can work; a read goes through `seance custodian capture`
   // and `pr`. Denied whole so a cheap model does not spend its turns on them.
   "tmux",
   "gh",
@@ -51,12 +51,20 @@ function fourForms(program: string, subcommand: string): readonly string[] {
   ];
 }
 
+function cliDenied(cli: string): readonly string[] {
+  return [`Bash(${cli})`, `Bash(${cli} custodian notes --clear)`, `Bash(${cli} custodian notes --clear *)`].concat(
+    COMMANDS.filter((name) => name !== "custodian").map((name) => `Bash(${cli} ${name}*)`),
+    CUSTODIAN_OWNER_VERBS.flatMap((verb) => [`Bash(${cli} custodian ${verb})`, `Bash(${cli} custodian ${verb} *)`]),
+  );
+}
+
 /**
- * The deny list. The `seanced` entries come from the CLI's own command table (`commands.ts`), every command but
- * `custodian`, so a command added later is denied by default; `custodian-fence.test.ts` asserts the coverage.
- * Deny beats allow, so `Bash(seanced *)` would refuse `seanced custodian` too; the owner's verbs
+ * The deny list. The CLI's entries come from its own command table (`commands.ts`), every command but `custodian`, so
+ * a command added later is denied by default; `custodian-fence.test.ts` asserts the coverage. They are generated for
+ * `seance` and for its old name `seanced` too, which a link made before the rename may still put on a PATH.
+ * Deny beats allow, so `Bash(seance *)` would refuse `seance custodian` too; the owner's verbs
  * (`CUSTODIAN_OWNER_VERBS`) and `notes --clear` are denied under it by generated entries, since the allow covers
- * `seanced custodian *`.
+ * `seance custodian *`.
  *
  * A mistake guard for a cheap model, never a boundary. What keeps the owner's verbs from a round is its sandbox: it
  * neither reads nor writes `stateDir()` (bar its own round dir) and reaches no tmux socket, so a `bash -c` around them
@@ -67,11 +75,7 @@ function fourForms(program: string, subcommand: string): readonly string[] {
 export const DENY: readonly string[] = [
   ...PLAIN_DENIED.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]),
   ...GIT_DENIED.flatMap((subcommand) => fourForms("git", subcommand)),
-  "Bash(seanced)",
-  ...COMMANDS.filter((name) => name !== "custodian").map((name) => `Bash(seanced ${name}*)`),
-  ...CUSTODIAN_OWNER_VERBS.flatMap((verb) => [`Bash(seanced custodian ${verb})`, `Bash(seanced custodian ${verb} *)`]),
-  "Bash(seanced custodian notes --clear)",
-  "Bash(seanced custodian notes --clear *)",
+  ...[CLI_NAME, LEGACY_CLI_NAME].flatMap((cli) => cliDenied(cli)),
 ];
 
 /** A path the Read tool is denied: a file, or a directory with everything under it. */
@@ -140,7 +144,7 @@ export function custodianFence(input: FenceInput): CustodianFence {
   return {
     permissions: {
       defaultMode: "dontAsk",
-      allow: ["Bash(seanced custodian *)"],
+      allow: ["Bash(seance custodian *)"],
       deny: [...DENY, ...input.readDenies.map((entry) => readRule(entry.path, entry.dir))],
     },
     sandbox: {

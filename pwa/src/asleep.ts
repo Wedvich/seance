@@ -1,7 +1,7 @@
 import { sleepingMachine, type Machine, type Task } from "@seance/shared";
 
 // Leaf module: view.ts and decision-view.ts both read it, and decision-view imports view.
-// `sleepingMachine` itself is shared: `seanced mcp` marks the same tasks `away`.
+// `sleepingMachine` itself is shared: `seance mcp` marks the same tasks `away`.
 export { sleepingMachine };
 
 /** True when the task's machine is asleep: its row moves to Asleep and reads differently on the Queue screen. */

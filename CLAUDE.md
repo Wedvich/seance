@@ -9,7 +9,7 @@ envelope crypto + the app-role RelayClient), `scheduler/` (the scheduler as a pu
 task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `archivist/` (`seance-archivist`, the fleet's optional
 history service — DESIGN.md, "Archivist"; it imports daemon modules by path, never copies them), `e2e/` (full-stack test suite, no shipped code).
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
-`seanced mod install` (DESIGN.md, "Claude Code mods").
+`seance mod install` (DESIGN.md, "Claude Code mods").
 
 Read the docs before changing behavior — this file deliberately doesn't repeat them:
 
@@ -42,12 +42,12 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   scheduler work.
 - **docs/drain.md** — spec for closing a machine to new scheduled work and draining it. Item 1
   (close, reopen, `MachineStatus.cl`, the `closed` filter and `machine_closed` gate, the PWA switch,
-  `seanced close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
-  machine"; the leader's outside pass (item 2: `trigger: "drain"`, `Task.drained`, `drainView`, `seanced close --wait`) is built too, in DESIGN.md, "The drain's outside pass", and so is the session ask (item 3: `CAPABILITIES.drainAsk`, `now`, the
+  `seance close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
+  machine"; the leader's outside pass (item 2: `trigger: "drain"`, `Task.drained`, `drainView`, `seance close --wait`) is built too, in DESIGN.md, "The drain's outside pass", and so is the session ask (item 3: `CAPABILITIES.drainAsk`, `now`, the
   `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". §6's close warning (a closed leader keeps leading) is in
   "Closing a machine" and §12's time-to-empty line in "The drain's outside pass", and so is the soft close by default
   (N5: `soft`, `closed.drainAt`, `MachineStatus.dr`, `drainStart`, `CAPABILITIES.softClose`, and the clients' surfaces —
-  the PWA's soft Close, Drain and Drain now, `seanced close --drain`, MCP `drain` — in the three DESIGN.md sections
+  the PWA's soft Close, Drain and Drain now, `seance close --drain`, MCP `drain` — in the three DESIGN.md sections
   above); what is left in the file is §6's "Later" (re-register without the lead role once empty) and §12's list of
   measures. Read it before scheduler routing or shutdown work.
 - **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
@@ -71,7 +71,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   ("The custodian's status and the Machines row"). The custodian is one
   seat per machine whose daemon starts a fresh, fenced Claude session per round to close finished sessions
   (removing a worktree when nothing would be lost), nudge and interrupt stuck ones and flag the rest, through
-  `seanced custodian` verbs the daemon checks, served only on the round's own socket. Read it, and those DESIGN.md
+  `seance custodian` verbs the daemon checks, served only on the round's own socket. Read it, and those DESIGN.md
   sections, before touching despawn, reap's merged check, a pane's tracked state, or anything that reads a live
   session's screen.
 - **docs/agents.md** — analysis, nothing decided: what spawning agents other than Claude Code
@@ -194,7 +194,7 @@ green:
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
   requests the daemon forwards to other machines, or makes of the scheduler (enqueue, queue, cancel,
-  run-now, account list), for a keyless `seanced mcp`, `seanced spawn` or `seanced start`, `schedule` for
+  run-now, account list), for a keyless `seance mcp`, `seance spawn` or `seance start`, `schedule` for
   the daemon's reap timer, `probe` for the daemon's trait probes, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
@@ -203,7 +203,7 @@ green:
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
   `leader` for the scheduler loop dispatching to its own machine in
-  process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
+  process and admitting a task, `mcp` for `seance mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
   anything typed at this machine's shell, its `spawn` enqueue line included — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
@@ -289,7 +289,7 @@ green:
   permission, never grant one), re-checking the pane, its task, `cl`, its last frame and that its input box shows
   exactly the prompt before Enter, audited `origin=drain` with the task id and outcome, never the text; a
   `session-pass` carries `drain` only while its machine is closed, and the leader writes `trigger: "drain"` for it only
-  while that machine's status carries `cl`, and a pass is offered, by the PWA, `seanced pass` and MCP `pass_task`, only through `passOffer` (`shared/src/successor.ts`) to a verified leader and a task machine that advertise `CAPABILITIES.successor`, and is sent once and never retried, and a session's own pass (`pass_to_successor`) is offered only to a verified leader advertising `CAPABILITIES.successorSelf` (a 2a leader would drop its `session-pass` after the push) and checks the record's length before any push, and the leader acts on a `session-pass` only when it is sealed `from` the machine the task is placed on, never logging its `record` (the successor's prompt) or the branch, and sends `pass-close` only after the successor's commit write, and a daemon sends no pass for a caller whose connection has closed (an interrupted call: checked before and after the push) and marks a pane for one close only (a pass outranks a hand-off), and a `branch-state` is never accepted from an app, nor a `session-message` (from a daemon only), and a `custodian-event` (`flag`, `unflag`, `failing`: daemon to leader, sealed, no capability and no sentinel) writes
+  while that machine's status carries `cl`, and a pass is offered, by the PWA, `seance pass` and MCP `pass_task`, only through `passOffer` (`shared/src/successor.ts`) to a verified leader and a task machine that advertise `CAPABILITIES.successor`, and is sent once and never retried, and a session's own pass (`pass_to_successor`) is offered only to a verified leader advertising `CAPABILITIES.successorSelf` (a 2a leader would drop its `session-pass` after the push) and checks the record's length before any push, and the leader acts on a `session-pass` only when it is sealed `from` the machine the task is placed on, never logging its `record` (the successor's prompt) or the branch, and sends `pass-close` only after the successor's commit write, and a daemon sends no pass for a caller whose connection has closed (an interrupted call: checked before and after the push) and marks a pane for one close only (a pass outranks a hand-off), and a `branch-state` is never accepted from an app, nor a `session-message` (from a daemon only), and a `custodian-event` (`flag`, `unflag`, `failing`: daemon to leader, sealed, no capability and no sentinel) writes
   `Task.flag` only when the task's `assignment.deviceId` is the machine that sealed it, in any task state (a finish keeps
   the flag, a move back to `ready` drops it), through the one task sealer, a repeat a no-op and a changed note keeping `at`;
   the leader never acts on one sealed `from: "app"`, never logs, audits or pushes the note, and a `failing` event only
@@ -327,7 +327,7 @@ green:
 - **Closing a machine is the owner's sealed act** (DESIGN.md, "Closing a machine"): the daemon answers
   `availability` only when sealed `from: "app"` on the relay leg, parsed by `parseAvailabilityRequest`,
   audited without a payload, and neither `LOCAL_OPS` nor `BROKER_OPS` carries it (a keyless box
-  refuses `seanced close` and points to the PWA). A `closed` it cannot read in `state.json` loads as
+  refuses `seance close` and points to the PWA). A `closed` it cannot read in `state.json` loads as
   closed — in `loadOrInitState` only, `readState` stays log-free — `MachineStatus.cl` is never trimmed
   by `fitStatus`, the gate runs after `relaunchRefusal` and before any fetch or ledger write, and
   `SpawnRequest.routesClosed` is accepted only as `true`: a closed daemon answers `machine_closed` only
@@ -353,7 +353,7 @@ green:
   code; thresholds, the model and on/off stay in `config.json` (C46), never the op's.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
   `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
-  `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not
+  `seance mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
   allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change, not a
   tweak (DESIGN.md's "Local op socket" records why `despawn` got in). On a daemon whose key is
@@ -374,7 +374,7 @@ green:
   one connection whose pid came back null. Its five acts past ingest are poking the bound
   exclave's `/usage` refresh (`usage-refresh.ts`), which spawns only on a stale reading, with
   fixed argv and an env built from the scan — no frame field reaches either — and a `done`
-  report, which only `report_task_done` sends (`seanced session-event` drops a `done` unsent):
+  report, which only `report_task_done` sends (`seance session-event` drops a `done` unsent):
   the daemon notes it in the launch ledger and forwards it once, both for the pane's own task
   only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
   no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
@@ -382,7 +382,7 @@ green:
   `interrupted` mark in the launch ledger, only on an `ended` or `done` frame (proof the session ran;
   never when ingest is stopped), bound to the pane like the `done` report (including on a
   host with no peer pid) and never to an id from the frame — and a hand-off, which only
-  `hand_off_task` sends (`seanced session-event` drops one unsent), carries no state, and is taken
+  `hand_off_task` sends (`seance session-event` drops one unsent), carries no state, and is taken
   only for the pane's own task when its launch ledger holds a launch and a PR URL of it — one its
   session reported, or, for a continuation, the one that ledger noted on it at launch from the launch
   it continues (`continuedPr`, from any launch but one the scheduler cancelled: a despawn sealed from the scheduler naming
@@ -396,7 +396,7 @@ green:
   `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
   `idle` carrying `turnEnded` (its turn's end, never a respawn's idle), closes it through the graceful despawn after re-reading that it still carries that task,
   audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names, and a pass, which only
-  `pass_to_successor` sends (`seanced session-event` drops one unsent), carries no state and a `record`
+  `pass_to_successor` sends (`seance session-event` drops one unsent), carries no state and a `record`
   bounded by `SUCCESSOR_RECORD_MAX` (prompt text, never logged, never used to bind, route or close
   anything), and is taken only for the pane's own task when its launch ledger holds a worktree launch of it
   (`untasked`, `unrecorded`, `here` otherwise): the daemon pushes that worktree's branch through
@@ -428,10 +428,10 @@ green:
   depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text.
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
-  Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
+  Nothing reachable from `seance mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - The local socket's fourth and fifth frame kinds are `message` (`send_message`,
-  `daemon/src/send-message.ts`) and `inbox` (the `inbox` mod's `seanced inbox` child,
+  `daemon/src/send-message.ts`) and `inbox` (the `inbox` mod's `seance inbox` child,
   `daemon/src/messages.ts`; DESIGN.md "Session messages"). Both are bound to a pane only by the
   kernel-reported peer pid: refused `unbound` where the host names no peer (`peerPidSupported`; an `inbox`
   listener there is told `unsupported`, not `unbound`, since no retry can bind) or the pid came back null, never
@@ -447,7 +447,7 @@ green:
   way into a pane's inbox, `Messages.deliverAsCustodian` (a custodian `nudge`, DESIGN.md "Session messages"): it binds
   no peer (the `custodian` frame was bound to the round's pane) and has no rate bucket (the verb's counts bound it),
   but it addresses only a live pane carrying a task the ledger holds, and only the pid and task the verb counted under.
-  Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
+  Nothing reachable from `seance mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
   **A session with no task is reached only as a reply, by the id of a message it sent** (DESIGN.md, "Session messages",
@@ -476,7 +476,7 @@ green:
   **A message to a task not deliverable on its machine goes through the leader, which keeps nothing**
   (DESIGN.md, "Session messages", "Cross-machine"). A `message` frame carries `route` only as `"ask"` or
   `"send"`: `ask` is answered `remote` (in a rate bucket of its own, same limits, so a loop of asks is bounded
-  and a routed message is one count in each bucket) and `seanced mcp` sends `send` only after it found the
+  and a routed message is one count in each bucket) and `seance mcp` sends `send` only after it found the
   **verified** leader advertising `CAPABILITIES.messageRoute` (`messageRouteGate`), never on the daemon's own
   word. That gate is the client's: the daemon routes any `send` a bound pane makes, and what binds the message is
   the leader's admit rule below, never an assumption that the sender was gated. A frame with no `route` is
@@ -524,7 +524,7 @@ green:
   the turn ended (`TOUCH_SLACK_MS`; only where a live session's turn end was observed, not for a dead or exit-prompt
   pane), locked in git (bar Claude's own lock whose process is gone) or with a pane in
   it (`custodian-worktree.ts`). `notes` is stored only through `pruneNotes` (sections by `standing`, a live task id
-  or a live pane, once each) within `NOTES_MAX`, and `seanced custodian notes --clear` is the owner's shell's act,
+  or a live pane, once each) within `NOTES_MAX`, and `seance custodian notes --clear` is the owner's shell's act,
   never a frame. `flag` takes a reason from the fixed `FLAG_REASONS` (the daemon itself also sets `dirty` and
   `unpushed` when a close keeps a worktree) and an optional note of at most `FLAG_NOTE_MAX`
   characters, a printable-text rule applied before anything is stored; it acts only on a session of séance's own that is
@@ -550,13 +550,13 @@ green:
   counts are the daemon's (C30): in `custodian/sessions.json` beside the flags, keyed by task id (or pane id when
   untasked) and bound to the session's pid, written before the act, dropped when the session ends, kept across a
   restart, never set by a frame and never sent to the leader. `done` takes a summary of at most `SUMMARY_MAX` that goes only into `rounds.jsonl`. Each round's
-  `seanced` is its own `<tmp>/bin/seanced`, first on its `PATH`. Nothing a pane, the notes or the summary held is
+  `seance` is its own `<tmp>/bin/seance`, first on its `PATH`. Nothing a pane, the notes or the summary held is
   logged or audited (the `custodian` origin's lines are `op=close`, `op=worktree`, `op=flag`, `op=nudge` and
   `op=interrupt` with ids, outcomes and reasons, never a note or a nudge's text), and nothing `custodian-cli.ts` reaches may call `log.ts`: its stdout is the round's data channel
   (`daemon/test/message-layering.test.ts`; `capture` and `pr` write no line at all). A new verb, or any other act, is a
   threat-model change.
 - **The custodian's owner verbs are the shell's acts, never a frame** (`custodian-owner-cli.ts`; DESIGN.md, "The
-  custodian's status and the Machines row"): `seanced custodian status | log | round | pause | resume` are dispatched
+  custodian's status and the Machines row"): `seance custodian status | log | round | pause | resume` are dispatched
   from `main.ts` by `import()`, outside `custodian-cli.ts`'s import closure (this module logs, audits `origin=cli`,
   and that closure must never reach `log.ts`), work from files and never the socket, and are denied to a round by
   generated fence entries (a mistake guard, not a boundary: the round's sandbox masks the `custodian/` dir and the tmux
@@ -575,7 +575,7 @@ green:
   `despawnRound` closes it (a pane id and nothing else, no option a wire frame can set), and it starts only
   while the daemon is not draining. A `custodian` config key lives only in the machine's own `config.json`.
   Its fence (`custodian-fence.ts`) is generated: the deny list comes from constants and the one `COMMANDS`
-  table, so a new `seanced` command is denied to a round by default, and it is for a cheap model's mistakes,
+  table, so a new `seance` command is denied to a round by default (under the CLI's old name `seanced` too), and it is for a cheap model's mistakes,
   never a boundary. What bounds an injected round is its sandbox plus the daemon's verbs behind the one socket it
   reaches (docs/custodian.md item 4b: drilled on macOS (Seatbelt, 2026-11-14) and on Linux in both bwrap modes under the vsock filter (`custodian-seccomp.ts`: an outer `bwrap --seccomp` around every Linux round, refusing `AF_VSOCK`, `io_uring_setup` and other ABIs, without which a round reached the Windows host from WSL2 and the host kernel's vsock loopback from an LXC container; strict mode on WSL2 2026-11-14, the weaker nested mode on LXC 2026-11-15), no hole found, so "contained" is claimed for those modes only; Linux on a CPU the filter has no table for is refused, and any change to the masks, the fence, the built environment or the round socket needs a re-drill before "contained" is said again): `denyRead` masks
   every path socket and every secret (Linux inverts the tree, macOS lists `allowUnixSockets` as the round socket's
@@ -600,7 +600,7 @@ green:
   test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at
   `src/lib/`; platform APIs (`LocalStorage`, preferences) reach the logic as injected seams. The rule
   is enforced by `raycast/src/lib/layering.test.ts`, not just remembered.
-- The Raycast extension is a third app-role relay client, exactly as `seanced mcp` is — no relay or
+- The Raycast extension is a third app-role relay client, exactly as `seance mcp` is — no relay or
   daemon change. Its credentials come only from the local daemon's config plus the macOS keychain;
   Raycast preferences hold defaults, never secrets. `raycast/src/lib/credentials.ts` reimplements
   what `daemon/src/config.ts` and `keychain.ts` do in Bun, so its test imports _both_ and asserts

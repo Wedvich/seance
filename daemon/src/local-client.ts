@@ -9,7 +9,7 @@ import { socketPath } from "./paths.ts";
  * that needs a pending map here would be inventing a problem.
  *
  * Nothing in this module logs. `log.ts` writes to stdout and the caller this
- * exists for — `seanced mcp` — carries JSON-RPC frames there.
+ * exists for — `seance mcp` — carries JSON-RPC frames there.
  */
 
 /** Same cap as the server; a reply that runs past it is not one to parse. */

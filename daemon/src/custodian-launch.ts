@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { CLI_NAME } from "./commands.ts";
 import type { CustodianConfig } from "./config.ts";
 import { roundSeed, NOTES_MAX } from "./custodian-agent.ts";
 import { custodianFence, procSysReadOnly, type ReadDeny } from "./custodian-fence.ts";
@@ -358,7 +359,7 @@ export function dedupeNested(paths: readonly string[]): string[] {
 }
 
 /**
- * What the round's bun and `seanced` need to run inside the mask: bun's own dirs (as found and as resolved) and the
+ * What the round's bun and `seance` need to run inside the mask: bun's own dirs (as found and as resolved) and the
  * parts of the checkout the CLI's import closure loads (`daemon/`, `shared/`, `node_modules/` and the configs bun
  * reads). Never the whole checkout: `relay/.dev.vars` holds the relay's bearer token.
  */
@@ -446,7 +447,7 @@ export function sandboxMasks(o: MaskInputs): string[] {
 }
 
 /**
- * Why the round's `seanced` would not run under the mask, or would undo it, null when it is safe to start (decision 7:
+ * Why the round's `seance` would not run under the mask, or would undo it, null when it is safe to start (decision 7:
  * fail closed, audited as `toolchain`). Refused:
  * - a `main.ts` outside the parts of the checkout `allowRead` re-adds (`toolchainAllow`), which holds only when it is
  *   `<checkout>/daemon/src/main.ts`; an unreadable `main.ts` is not a clean failure — bun execs the unreadable script
@@ -480,7 +481,7 @@ function expectedTmuxDir(): string {
 }
 
 /**
- * `toolchainProblem` against the masks this machine's rounds would get, for the seat's start and `seanced doctor`
+ * `toolchainProblem` against the masks this machine's rounds would get, for the seat's start and `seance doctor`
  * (before any round, so the tmux dir is the expected one; `launchRound` re-checks with the real one). Paths are
  * realpath'd as the launch does, so both read the same list.
  */
@@ -574,12 +575,12 @@ export function roundReadDenies(o: {
 }
 
 /**
- * The round's `seanced` shim. The `-r` guard is load-bearing: bun execs an unreadable executable script (`main.ts` is
+ * The round's `seance` shim. The `-r` guard is load-bearing: bun execs an unreadable executable script (`main.ts` is
  * mode 755 with a `#!/usr/bin/env bun` shebang) and the result is an unbounded fork storm (macOS spike Q7: 66
  * processes in 3 s), so a main the sandbox cannot read must stop here.
  */
-export function seancedShim(bun: string, main: string): string {
-  return `#!/bin/sh\n[ -r ${shq(main)} ] || { echo ${shq(`seanced: ${main} is not readable in this sandbox`)} >&2; exit 2; }\nexec ${shq(bun)} ${shq(main)} "$@"\n`;
+export function seanceShim(bun: string, main: string): string {
+  return `#!/bin/sh\n[ -r ${shq(main)} ] || { echo ${shq(`seance: ${main} is not readable in this sandbox`)} >&2; exit 2; }\nexec ${shq(bun)} ${shq(main)} "$@"\n`;
 }
 
 /**
@@ -807,14 +808,14 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
       writeFile(seedPath, roundSeed(o.notes), { mode: 0o600 }),
       ...(filter === null || seccompPath === undefined ? [] : [writeFile(seccompPath, filter, { mode: 0o600 })]),
     ]);
-    // The fence allows `Bash(seanced custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
-    // `seanced` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
+    // The fence allows `Bash(seance custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
+    // `seance` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
     // on PATH, running this process's main. Like the fence, it is not writable from the round's sandbox. Bun by its
     // resolved path: bwrap binds an allow entry at its realpath, so a symlinked dir on the way (mise's
     // `installs/bun/latest`) does not exist inside, and the shim dies with the round (no keg to outlive).
     const binDir = join(tmpDir, "bin");
     await mkdir(binDir, { mode: 0o700 });
-    await writeFile(join(binDir, "seanced"), seancedShim(toolchain.bunReal, toolchain.main), { mode: 0o700 });
+    await writeFile(join(binDir, CLI_NAME), seanceShim(toolchain.bunReal, toolchain.main), { mode: 0o700 });
     const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
     // A file, not a string for the owner's `default-shell` to parse: the agents JSON holds apostrophes, and any quoting
     // of it that survives two shells differs between them. Like the fence, it is not writable from the round's sandbox.

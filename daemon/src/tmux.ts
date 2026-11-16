@@ -79,7 +79,7 @@ export const TASK_OPTION = "@seance-task";
 export const EXIT_OPTION_PREFIX = "@seance-exit-";
 
 /**
- * Server-wide user option, `<prefix><taskId>`, a process without the ledger (`seanced despawn`) sets
+ * Server-wide user option, `<prefix><taskId>`, a process without the ledger (`seance despawn`) sets
  * before it closes a task's pane, so the close is Séance's own and never `vanished`. Harvest notes it
  * as `closedHere` and unsets it (`exit-status.ts`). Same trust as `EXIT_OPTION_PREFIX`: any same-uid
  * process can set one, so the id is revalidated and the value ignored.

@@ -161,7 +161,7 @@ export interface SessionBackend {
       readonly leaveDeadTask?: boolean;
     },
   ) => Promise<DespawnResult>;
-  /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
+  /** Backend-specific preflight for `seance doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
   /**
    * Whatever a started session is showing right now, for the one case the

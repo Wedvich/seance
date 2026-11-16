@@ -21,7 +21,7 @@ import { askGithub, type GhAnswer, type GhFailure } from "./gh.ts";
  * batched GraphQL read per poll, through the operator's own `gh`, of every PR
  * (`taskPrs`) of every task `wantsPrReading` names. Runs only on the leader (`leader.ts` starts it
  * after takeover and stops it with the term) and is never reachable from
- * `seanced mcp`, whose stdout is its JSON-RPC channel — hence `log` is passed
+ * `seance mcp`, whose stdout is its JSON-RPC channel — hence `log` is passed
  * in, and this module imports no `log.ts`.
  *
  * The merge read is one query and the blocked-state read (head, required checks, merge state,

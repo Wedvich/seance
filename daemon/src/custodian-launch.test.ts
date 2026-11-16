@@ -27,7 +27,7 @@ import {
   roundSandboxPaths,
   roundScript,
   sandboxMasks,
-  seancedShim,
+  seanceShim,
   toolchainProblem,
   type RoundToolchain,
 } from "./custodian-launch.ts";
@@ -286,7 +286,7 @@ describe("toolchainProblem", () => {
   });
 });
 
-describe("seancedShim", () => {
+describe("seanceShim", () => {
   const readable = process.getuid?.() !== 0;
 
   test.skipIf(!readable)("an unreadable main stops at the guard: exit 2, and bun never runs", async () => {
@@ -296,8 +296,8 @@ describe("seancedShim", () => {
     await writeFile(main, "");
     await chmod(main, 0o000);
     const bun = await scriptStub(stubs, "fake-bun-guard", `echo ran > ${JSON.stringify(marker)}`);
-    const shim = join(dir, "seanced");
-    await writeFile(shim, seancedShim(bun, main), { mode: 0o700 });
+    const shim = join(dir, "seance");
+    await writeFile(shim, seanceShim(bun, main), { mode: 0o700 });
     const run = Bun.spawn([shim, "custodian", "done"], { stdout: "pipe", stderr: "pipe" });
     expect(await run.exited).toBe(2);
     expect(await Bun.file(marker).exists()).toBe(false);
@@ -309,8 +309,8 @@ describe("seancedShim", () => {
     const main = join(dir, "main.ts");
     await writeFile(main, "");
     const bun = await scriptStub(stubs, "fake-bun-args", `printf '%s\\n' "$@"`);
-    const shim = join(dir, "seanced");
-    await writeFile(shim, seancedShim(bun, main), { mode: 0o700 });
+    const shim = join(dir, "seance");
+    await writeFile(shim, seanceShim(bun, main), { mode: 0o700 });
     const run = Bun.spawn([shim, "custodian", "a b", "$HOME"], { stdout: "pipe", stderr: "pipe" });
     expect(await run.exited).toBe(0);
     expect((await new Response(run.stdout).text()).split("\n")).toEqual([main, "custodian", "a b", "$HOME", ""]);

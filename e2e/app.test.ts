@@ -222,7 +222,7 @@ describe("daemon ↔ relay ↔ app", () => {
   });
 
   // The PWA no longer sends `spawn` (every PWA spawn is a task), but the daemon still answers it for
-  // older apps, older MCP clients and `seanced spawn --now`: these two keep that op honest.
+  // older apps, older MCP clients and `seance spawn --now`: these two keep that op honest.
   test("the spawn op: worktree mode lands a reply and a real tmux window", async () => {
     const app = startApp(stack);
     let window: string | null = null;
@@ -289,7 +289,7 @@ describe("daemon ↔ relay ↔ app", () => {
     try {
       await app.waitForApp((s) => typeof s.sessions[stack.deviceId] === "object", "sessions answered");
 
-      // Straight down the transport, bypassing the Store: what a `seanced spawn`
+      // Straight down the transport, bypassing the Store: what a `seance spawn`
       // at the machine, or another device's session, looks like from here.
       const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
         repo: "myrepo",

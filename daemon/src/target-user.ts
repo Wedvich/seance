@@ -27,7 +27,7 @@ const NEVER_ROOT = "the daemon must never run as root";
  * invoking shell. PATH is still preserved: the `env bun` shebang and the binaries the
  * unit records resolve through it.
  */
-export const SUDO_SEANCED = 'sudo --preserve-env=PATH "$(command -v seanced)"';
+export const SUDO_SEANCE = 'sudo --preserve-env=PATH "$(command -v seance)"';
 
 const SEANCED_SUDO_NOTE =
   "(full path, because sudo searches secure_path for the command; --preserve-env, because secure_path " +
@@ -41,7 +41,7 @@ const SEANCED_SUDO_NOTE =
 export function requireRoot(
   uid: number | undefined,
   action: string,
-  sudo: string = SUDO_SEANCED,
+  sudo: string = SUDO_SEANCE,
   note: string = SEANCED_SUDO_NOTE,
 ): void {
   if (uid === 0) return;
@@ -215,13 +215,13 @@ export function missingBinariesMessage(
       problem +
       `It leaves out ${dropped.join(", ")}, which the unit's user can't reach — a version manager's shim (mise, ` +
       "asdf) run under sudo resolves for root and puts root's own install dir first. Name your own with --path: " +
-      `\`${SUDO_SEANCED} install --system --path "<dir holding your bun>:$PATH"\` (recorded PATH was: ${pathEnv})`
+      `\`${SUDO_SEANCE} install --system --path "<dir holding your bun>:$PATH"\` (recorded PATH was: ${pathEnv})`
     );
   }
   return (
     problem +
-    `sudo replaces PATH with secure_path; re-run as \`${SUDO_SEANCED} install --system\`, ` +
-    `or, where sudoers refuses --preserve-env, \`sudo env PATH="$PATH" seanced install --system\` (recorded PATH was: ${pathEnv})`
+    `sudo replaces PATH with secure_path; re-run as \`${SUDO_SEANCE} install --system\`, ` +
+    `or, where sudoers refuses --preserve-env, \`sudo env PATH="$PATH" seance install --system\` (recorded PATH was: ${pathEnv})`
   );
 }
 
@@ -229,7 +229,7 @@ export function missingBinariesMessage(
  * `mkdir -p` where every component it has to create belongs to the target user.
  * Chowning the leaf alone leaves a root-owned `~/.local` behind on a fresh
  * account — and the user could then never create `~/.local/bin` beside it, which
- * is the dir `seanced link` prefers. The leaf is chowned either way: an install
+ * is the dir `seance link` prefers. The leaf is chowned either way: an install
  * over a directory someone else owns is the case this is fixing.
  */
 export async function mkdirAsTarget(dir: string, user: TargetUser): Promise<void> {

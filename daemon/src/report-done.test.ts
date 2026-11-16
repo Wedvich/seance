@@ -41,7 +41,7 @@ describe("reportDone", () => {
     const wording = {
       untasked: "this session runs no scheduler task",
       unbound: "not in a tmux pane",
-      invalid: "predates done reports; run `seanced update`",
+      invalid: "predates done reports; run `seance update`",
       unsupported: "runs no session-event ingest",
       unrecorded: "holds no launch of this session's task",
       unwritten: "sent to the scheduler, but this machine's daemon could not save the report",
@@ -55,7 +55,7 @@ describe("reportDone", () => {
         expect(result.ok).toBe(false);
         expect(result.text).toContain(text);
         // Only a daemon that predates the frame has anything to update.
-        expect(result.text.includes("seanced update")).toBe(code === "invalid");
+        expect(result.text.includes("seance update")).toBe(code === "invalid");
       } finally {
         fake.stop();
       }
@@ -109,7 +109,7 @@ describe("handOff", () => {
         const result = await handOff({ path: fake.path, pane: "%1" });
         expect(result.ok).toBe(false);
         expect(result.text).toEndWith("keep watching the PR yourself");
-        expect(result.text.includes("seanced update")).toBe(code === "invalid");
+        expect(result.text.includes("seance update")).toBe(code === "invalid");
       } finally {
         fake.stop();
       }
@@ -152,7 +152,7 @@ describe("passToSuccessor", () => {
     const wording = {
       untasked: "nothing to pass",
       unbound: "not in a tmux pane",
-      invalid: "predates passing; restart seanced (`seanced update`)",
+      invalid: "predates passing; restart seanced (`seance update`)",
       unsupported: "runs no session-event ingest",
       unrecorded: "holds no launch of this session's task",
       stopping: "daemon is stopping",

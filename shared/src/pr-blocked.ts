@@ -7,7 +7,7 @@ import type { PrBlockedReason, PrStatus, Task } from "./types.ts";
  * head has no required check never reads `unarmed`; `BLOCKED` never does either, since something
  * else (a review, a missing check) is holding it. One rule for the scheduler (the alert), the PWA
  * (the chip and Continue) and MCP, so they cannot drift. Imports nothing that logs, since
- * `seanced mcp` reaches it.
+ * `seance mcp` reaches it.
  */
 export function prBlocked(pr: PrStatus | undefined): PrBlockedReason | null {
   if (pr === undefined || pr.state !== "open") return null;

@@ -299,7 +299,7 @@ const PASS_REFUSALS: Record<Exclude<PassResult, { readonly ok: true }>["code"], 
   offline: schedulerError("offline", "the machine running the task is not connected"),
   successor_unsupported: schedulerError(
     "successor_unsupported",
-    "the leader or the task's machine predates passing to a successor (needs seanced update)",
+    "the leader or the task's machine predates passing to a successor (needs seance update)",
   ),
   account_unknown: schedulerError(
     "account_unknown",

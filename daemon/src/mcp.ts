@@ -137,7 +137,7 @@ export interface LocalMachine {
   readonly platform: string;
   /**
    * Re-read per call, not snapshotted: the daemon rewrites state.json on every
-   * rescan and `seanced mcp` outlives many of them. Its one user is the
+   * rescan and `seance mcp` outlives many of them. Its one user is the
    * list_machines fallback, which lists this machine's repos when the relay is
    * unreachable; a snapshot would miss a repo cloned since startup, or every repo
    * if the first scan hadn't landed.
@@ -279,7 +279,7 @@ async function accountAliases(lease: FleetLease, accountIds: readonly string[]):
     } catch (err) {
       // A bug, not a lost listing: the label still never fails, but the cache rethrows it on
       // purpose. stderr, never `log.ts`: stdout is the JSON-RPC channel.
-      if (!(err instanceof RequestFailure)) console.error("seanced mcp: account listing failed:", err);
+      if (!(err instanceof RequestFailure)) console.error("seance mcp: account listing failed:", err);
       return null;
     }
   })();
@@ -478,14 +478,14 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   const why = `the relay is unreachable (${failureText("connect", err)})`;
   return reachable
     ? `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay); get_sessions and despawn_session still work here, but spawn_session queues through the relay, so nothing can be spawned until it is back`
-    : `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay), and its daemon is not listening either, so no op on this machine works until seanced is running (\`seanced status\`)`;
+    : `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay), and its daemon is not listening either, so no op on this machine works until seanced is running (\`seance status\`)`;
 }
 
 /** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
 function localFailureText(op: string, err: unknown): string {
   const detail = err instanceof Error ? err.message : String(err);
   if (err instanceof LocalUnavailable) {
-    return `${op} failed: ${detail} — is seanced running? try \`seanced status\``;
+    return `${op} failed: ${detail} — is seanced running? try \`seance status\``;
   }
   return `${op} failed: ${detail}`;
 }
@@ -547,7 +547,7 @@ export function messageRouteGate(fleet: Fleet): RouteGate {
         ok: false,
         text:
           availability.kind === "ready"
-            ? `the scheduler's leader cannot route ${need === "reply" ? "replies" : "messages"} yet — its daemon needs \`seanced update\`; nothing was sent`
+            ? `the scheduler's leader cannot route ${need === "reply" ? "replies" : "messages"} yet — its daemon needs \`seance update\`; nothing was sent`
             : "no verified scheduler is leading, so a message to another machine cannot be routed — try again once one leads; nothing was sent",
       };
     } finally {
@@ -802,7 +802,7 @@ const REQUIRES_FIELD = z
   );
 
 const REPORTED_GATE =
-  "spawn refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seanced update`";
+  "spawn refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seance update`";
 const REPORTED_UNKNOWN =
   "spawn refused: no verified scheduler is leading, so it cannot be confirmed to take until: reported / after: done — try again once one leads (list_machines shows it)";
 
@@ -998,7 +998,7 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
  * state, where every target is remote by definition.
  *
  * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): this process
- * records its own spawn enqueue in the audit log, as `seanced spawn` does —
+ * records its own spawn enqueue in the audit log, as `seance spawn` does —
  * never on stdout, the JSON-RPC channel. When the daemon's broker makes the
  * enqueue for a keyless process, the daemon adds its own `origin=local-broker`
  * line beside it.
@@ -1754,7 +1754,7 @@ export function buildMcpServer(
           return errorResult(
             `${PASS_SELF_TOOL} refused: ${
               lease.scheduler.availability().kind === "ready"
-                ? "the scheduler's leader cannot take a session's pass yet — its daemon needs `seanced update`"
+                ? "the scheduler's leader cannot take a session's pass yet — its daemon needs `seance update`"
                 : "no verified scheduler is leading, so it cannot be confirmed to take a pass — try again once one leads"
             }. Nothing was pushed.`,
           );
@@ -1967,7 +1967,7 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
 }
 
 /**
- * The fleet as `seanced mcp` reaches it. The PSK is resolved on first remote
+ * The fleet as `seance mcp` reaches it. The PSK is resolved on first remote
  * use, not at startup, because local ops need no key at all; when this process
  * can read none — the key exists only as a credential systemd delivers to the
  * daemon's unit — remote ops go through the daemon's broker instead, and the
@@ -1989,7 +1989,7 @@ function mcpFleet(config: Config): Fleet {
   });
 }
 
-/** `seanced mcp` — serve MCP over stdio until the client hangs up. */
+/** `seance mcp` — serve MCP over stdio until the client hangs up. */
 export async function runMcpServer(): Promise<void> {
   const config = await loadConfig();
   const local = await localMachine(config);
@@ -2035,15 +2035,15 @@ export async function mcpScriptCheck(recorded: string | null, label: string, cur
   if (real === expected) return null;
   return {
     level: "warn",
-    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seanced mcp install\` repoints it`,
+    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seance mcp install\` repoints it`,
   };
 }
 
-/** Whether each exclave's Claude Code knows about `seanced mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
+/** Whether each exclave's Claude Code knows about `seance mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
 export async function mcpChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null) {
-    return [{ level: "warn", message: "claude not on PATH — `seanced mcp install` needs Claude Code" }];
+    return [{ level: "warn", message: "claude not on PATH — `seance mcp install` needs Claude Code" }];
   }
   const { present } = await userScopeTargets();
   const perTarget = await Promise.all(
@@ -2053,7 +2053,7 @@ export async function mcpChecks(): Promise<readonly Check[]> {
         return [
           {
             level: "warn",
-            message: `MCP server not registered with Claude Code in ${target.label} — run \`seanced mcp install\``,
+            message: `MCP server not registered with Claude Code in ${target.label} — run \`seance mcp install\``,
           },
         ];
       }
@@ -2062,7 +2062,7 @@ export async function mcpChecks(): Promise<readonly Check[]> {
       // this checkout's main.ts in Claude's config, and nothing rewrites that entry
       // on its own.
       const findings = await Promise.all([
-        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seanced mcp install"),
+        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seance mcp install"),
         mcpScriptCheck(mcpScriptPath(result.stdout), target.label),
       ]);
       return [registered].concat(findings.filter((check) => check !== null));

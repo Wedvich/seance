@@ -15,7 +15,7 @@ import { join } from "node:path";
  * other apps' processes, so its count says nothing about this one.
  *
  * Nothing here throws or logs: an unreadable file is no verdict, and harvest
- * runs in the daemon only, never under `seanced mcp`.
+ * runs in the daemon only, never under `seance mcp`.
  */
 
 /** A pane's cgroup `oom_kill` count when its session was last seen alive, and which pane that was. */

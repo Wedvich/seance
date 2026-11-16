@@ -21,11 +21,11 @@ import {
 import { socketPath } from "./paths.ts";
 
 /**
- * `seanced mcp`'s `send_message`: one `message` frame on the local socket, which the daemon binds to the sender's
+ * `seance mcp`'s `send_message`: one `message` frame on the local socket, which the daemon binds to the sender's
  * pane by the kernel's peer pid (the MCP server is a child of the session's `claude`, itself in the pane), exactly
  * as `report_task_done` is. The text crosses on the socket, never in argv.
  *
- * Imports nothing that logs: this runs inside `seanced mcp`, whose stdout is the JSON-RPC channel, and the text is
+ * Imports nothing that logs: this runs inside `seance mcp`, whose stdout is the JSON-RPC channel, and the text is
  * prompt text. That is why the frame and its reply codes live in `message-frame.ts`.
  */
 
@@ -64,7 +64,7 @@ const REFUSED_REPLY = {
     `no message ${id} reached this session in the last hour, or the session that sent it is gone; reply by task id if it had one`,
   ended: (id) => `the session that sent message ${id} is gone, so nothing was sent`,
   invalid: () =>
-    "this machine's daemon could not read the reply; it may predate replies by message id (`seanced update`), and nothing was sent",
+    "this machine's daemon could not read the reply; it may predate replies by message id (`seance update`), and nothing was sent",
   held: (id) =>
     `the session that sent message ${id} is not reachable yet; nothing was kept — send again in a little while`,
   remote: (id) =>
@@ -81,7 +81,7 @@ const REFUSED = {
     `the message is too long: at most ${MESSAGE_MAX} bytes, and a request at most ${MESSAGE_PUSH_MAX} bytes`,
   rate_limited: () =>
     `too many messages: ${MESSAGE_RATE.perMinute} a minute and ${MESSAGE_RATE.perHour} an hour per task`,
-  invalid: () => "this machine's daemon could not read the message; it may predate send_message (`seanced update`)",
+  invalid: () => "this machine's daemon could not read the message; it may predate send_message (`seance update`)",
   unsupported: () => "this machine's daemon runs no message delivery",
   internal: () => "this machine's daemon hit an error handling the message (see its log); nothing was sent",
   stopping: () => "this machine's daemon is stopping, so nothing was sent",
@@ -93,7 +93,7 @@ const REFUSED = {
 } as const satisfies Record<MessageReplyCode, (to: string) => string>;
 
 const NO_LISTENER = (who: string): string =>
-  `${who}'s session has no inbox listener: its Claude account lacks the inbox mod (\`seanced mod install\` on that machine) or the session started before it was installed`;
+  `${who}'s session has no inbox listener: its Claude account lacks the inbox mod (\`seance mod install\` on that machine) or the session started before it was installed`;
 
 const TOO_LONG_ROUTE = `too long to send to another machine: at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped`;
 
@@ -109,7 +109,7 @@ const ROUTED = (who: string, id: string, receipt: boolean): string =>
 
 /** The daemon answered a frame sent without `route` after the first, with `route`, was rejected: it cannot route. */
 const PREDATES_ROUTING = (to: string): string =>
-  `task ${to} is not deliverable on this machine, and this machine's daemon predates cross-machine messages (\`seanced update\`); nothing was sent`;
+  `task ${to} is not deliverable on this machine, and this machine's daemon predates cross-machine messages (\`seance update\`); nothing was sent`;
 
 function parseReply(raw: unknown): MessageReply | null {
   if (!isRecord(raw)) return null;
@@ -189,7 +189,7 @@ export async function sendMessage(
         return {
           failed: {
             ok: false,
-            text: "this machine's daemon closed the connection without answering; it may predate send_message (`seanced update`), and the message was not delivered",
+            text: "this machine's daemon closed the connection without answering; it may predate send_message (`seance update`), and the message was not delivered",
           },
         };
       }

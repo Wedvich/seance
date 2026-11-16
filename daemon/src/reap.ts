@@ -71,7 +71,7 @@ export interface ReapOptions {
   readonly harvest?: () => Promise<void>;
   /**
    * The daemon's `EndedTasks.closing`, awaited before reap closes a task pane: closed unnoted, the pane
-   * would read as `vanished` (`exit-status.ts`). Absent (the CLI's `seanced reap`), reap leaves every
+   * would read as `vanished` (`exit-status.ts`). Absent (the CLI's `seance reap`), reap leaves every
    * dead task pane alone, since only the daemon can note that it closed one.
    */
   readonly closing?: (taskId: string) => Promise<unknown>;
@@ -287,7 +287,7 @@ export interface ReapReport {
   readonly minAgeDays: number;
   readonly repos: readonly RepoReport[];
   readonly closedPanes: readonly (PaneNote & { readonly why: "dead" | "exit-prompt" })[];
-  /** Séance windows left open, each with the id `seanced despawn` takes. */
+  /** Séance windows left open, each with the id `seance despawn` takes. */
   readonly openPanes: readonly (PaneNote & { readonly state: PaneState })[];
   readonly monitors: {
     readonly stopped: readonly StoppedMonitor[];
@@ -990,7 +990,7 @@ export function formatReport(report: ReapReport): readonly string[] {
       row(closed, `${pane.paneId} "${pane.window}"   ${pane.why === "dead" ? "dead" : "answered Keep worktree"}`),
     ),
     ...report.openPanes.map((pane) =>
-      row(PANE_LABELS[pane.state], `${pane.paneId} "${pane.window}"   — seanced despawn ${pane.paneId}`),
+      row(PANE_LABELS[pane.state], `${pane.paneId} "${pane.window}"   — seance despawn ${pane.paneId}`),
     ),
   ];
   if (paneRows.length > 0) lines.push("sessions", ...paneRows);

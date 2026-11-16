@@ -1,4 +1,4 @@
-// Apart from `messages.ts` so `seanced mcp` (`send-message.ts`) and `seanced inbox` (`inbox-cli.ts`) load only these
+// Apart from `messages.ts` so `seance mcp` (`send-message.ts`) and `seance inbox` (`inbox-cli.ts`) load only these
 // and not the daemon's side (tmux, the launch ledger, the FFI parent walk), and neither reaches `log.ts`: one is
 // the MCP server's JSON-RPC channel, the other the inbox mod's data channel.
 import { isMessageId, isRecord, isTaskId, LISTENER_GRACE_MS, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
@@ -8,10 +8,10 @@ export const MESSAGE_FRAME_VERSION = 1;
 // In `shared` (a receipt's note words it too); re-exported for the daemon's modules that already import it from here.
 export { LISTENER_GRACE_MS };
 
-/** A session's message to another task on this machine, sent by `seanced mcp`'s `send_message`. */
+/** A session's message to another task on this machine, sent by `seance mcp`'s `send_message`. */
 export const MESSAGE_FRAME_KIND = "message";
 
-/** The inbox mod's listener, `seanced inbox`: the first frame that hands text out. */
+/** The inbox mod's listener, `seance inbox`: the first frame that hands text out. */
 export const INBOX_FRAME_KIND = "inbox";
 
 export const MESSAGE_REPLY_CODES = [
@@ -22,7 +22,7 @@ export const MESSAGE_REPLY_CODES = [
   /** This daemon runs no message delivery. */
   "unsupported",
   "stopping",
-  /** A bug in the daemon's handling of the frame: not an old daemon, so `seanced update` would not help. */
+  /** A bug in the daemon's handling of the frame: not an old daemon, so `seance update` would not help. */
   "internal",
   /** No task this machine launched carries that id. */
   "unknown",

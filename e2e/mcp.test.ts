@@ -254,7 +254,7 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       expect(before.error).toBe(false);
       expect(Array.isArray(JSON.parse(before.text))).toBe(true);
 
-      // Stands in for a `seanced mcp` that predates spawns-as-tasks: the broker's `request` action still
+      // Stands in for a `seance mcp` that predates spawns-as-tasks: the broker's `request` action still
       // carries `spawn`, which is what keeps such a process working until its Claude session restarts.
       const lease = await brokerFleet().open();
       try {

@@ -26,7 +26,7 @@ const stdinExamples = (prompt: string): string[] =>
         .filter((line) => line !== "")
         .join("\n"),
     )
-    .filter((example) => example.includes("| seanced custodian "));
+    .filter((example) => example.includes("| seance custodian "));
 
 /**
  * macOS's `/bin/bash` 3.2 makes a here-document's temp file in `/var/tmp`, `/tmp`, `/usr/tmp` or the cwd, never
@@ -35,10 +35,10 @@ const stdinExamples = (prompt: string): string[] =>
  * the round can write; there the run shows only that the example delivers its text.
  */
 const NO_WRITES = "(version 1)(allow default)(deny file-write*)";
-const SEANCED_STUB = 'seanced() { printf "%s\\n" "$*"; cat; }';
+const SEANCE_STUB = 'seance() { printf "%s\\n" "$*"; cat; }';
 
 async function underNoWrites(example: string): Promise<{ readonly code: number; readonly out: string }> {
-  const script = `${SEANCED_STUB}\n${example}`;
+  const script = `${SEANCE_STUB}\n${example}`;
   const argv =
     process.platform === "darwin"
       ? ["sandbox-exec", "-p", NO_WRITES, "/bin/bash", "-c", script]
@@ -65,7 +65,7 @@ describe("the committed agent definition", () => {
     const prompt = isRecord(custodian) && typeof custodian["prompt"] === "string" ? custodian["prompt"] : "";
     expect(prompt).not.toContain("<<");
     const examples = stdinExamples(prompt);
-    expect(examples.map((example) => /\| seanced custodian (\w+)/u.exec(example)?.[1]).toSorted()).toEqual([
+    expect(examples.map((example) => /\| seance custodian (\w+)/u.exec(example)?.[1]).toSorted()).toEqual([
       "done",
       "notes",
       "nudge",
@@ -78,7 +78,7 @@ describe("the committed agent definition", () => {
     }
     if (process.platform === "darwin") {
       // The control: under the same profile a heredoc fails, so the passes above are not the profile letting writes by.
-      expect((await underNoWrites("seanced custodian done <<'EOF'\nx\nEOF")).code).not.toBe(0);
+      expect((await underNoWrites("seance custodian done <<'EOF'\nx\nEOF")).code).not.toBe(0);
     }
   });
 });

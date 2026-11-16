@@ -3,7 +3,7 @@
 **Status: build order items 1 (Close), 2 (the leader's outside pass and the report) and 3 (the session ask)
 are built** and recorded in DESIGN.md, "Closing a machine", "The drain's outside pass" and "The drain's session
 ask", as are §6's close warning, §12's time-to-empty line and the soft close by default (N5: the wire, daemon and
-leader, and the PWA's, `seanced close`'s and MCP's surfaces). This file keeps the index of names, the decisions the
+leader, and the PWA's, `seance close`'s and MCP's surfaces). This file keeps the index of names, the decisions the
 owner made, §11, §12's list of measures (every one now read from a line that exists), and what is not built: §6's
 "Later". Drafted 2026-11-13. Like docs/leaving.md, it is the working record until the code lands; each part folded
 into DESIGN.md as it was built, and its text here went.
@@ -29,7 +29,7 @@ actually goes, and the two are complementary (§11).
 | Successor trigger                | `succeeds.trigger: "drain"` (the leader's outside pass, and a session's own pass marked `drain` from a closed machine)                                                                                                |
 | Capabilities                     | `close` (daemon), `drain` (leader routes), `drainPass` (leader passes), `drainAsk` (daemon asks and honours `now`), `softClose` (daemon honours `soft` and reports `dr`; leader drains from `drainStart`) — all built |
 | Audit origin (typed prompt)      | `drain`                                                                                                                                                                                                               |
-| CLI                              | `seanced close [<machine>] [--drain] [--now] [--wait]` (soft unless `--drain`; `--now` implies it), `seanced open [<machine>]`                                                                                        |
+| CLI                              | `seance close [<machine>] [--drain] [--now] [--wait]` (soft unless `--drain`; `--now` implies it), `seance open [<machine>]`                                                                                          |
 | MCP                              | `set_machine_open { machine, open, drain?, now? }` (`drain` and `now` `true` only; `now` implies `drain`)                                                                                                             |
 | PWA                              | "Open for work" switch in the machine's menu; the close sheet's Close (soft), "Close and drain" and "Drain now"; "Drain" and "Drain now" in a closed machine's drain row and menu                                     |
 
@@ -70,9 +70,9 @@ One line each; the text is in DESIGN.md.
 - **§4 The drain: ask, then pass, then report.** Step A (the session ask, with its two spikes): "The drain's
   session ask". Steps B and C (the outside pass, the report): "The drain's outside pass".
 - **§5 Progress, and "empty":** `drainView` in `shared/src/drain.ts`, "The drain's outside pass".
-- **§6 Leadership** (a closed leader keeps leading; the close sheet's, `seanced close`'s and
+- **§6 Leadership** (a closed leader keeps leading; the close sheet's, `seance close`'s and
   `set_machine_open`'s warning, a soft close's included): "Closing a machine". Its "Later" stays below.
-- **§8 Surfaces:** PWA switch, close sheet, drain row, `seanced close`/`open`, MCP `set_machine_open` and
+- **§8 Surfaces:** PWA switch, close sheet, drain row, `seance close`/`open`, MCP `set_machine_open` and
   `list_machines`' `drain`: "Closing a machine", "The drain's outside pass" and "The drain's session ask" (`now`,
   "Drain now", the ask's wording). Raycast: none (spawn-only).
 - **§9 Threat model:** the invariants list ("Closing is the owner's act", "The drain's session ask is constant
@@ -80,7 +80,7 @@ One line each; the text is in DESIGN.md.
 - **§12's time from close to empty:** "The drain's outside pass" (the daemon's `drain: empty` line).
 - **§13 Soft close by default (N5):** the wire, daemon and leader in "Closing a machine" (state, `soft`, `dr`, skew
   and the daemon-rollback hazard), "The drain's outside pass" (`drainStart`) and "The drain's session ask" (the ask
-  keyed off the drain's start); the client offer and its gate, the PWA's sheet, row and menu, `seanced close
+  keyed off the drain's start); the client offer and its gate, the PWA's sheet, row and menu, `seance close
   --drain` and MCP `drain` in "Closing a machine" (Capabilities, Surfaces); `drainView`'s soft state and its idle
   source in "The drain's outside pass"; Drain now's bound in "The drain's session ask".
 - **Build order:** items 1 to 3 are built, in that order, each in its own PR; the soft close after them, in two.

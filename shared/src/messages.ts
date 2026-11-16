@@ -85,7 +85,7 @@ export function receiptNote(r: {
     case "unknown":
       return `${head} was not delivered: the scheduler holds no such task.`;
     case "unsupported":
-      return `${head} was not delivered: the target machine's daemon cannot receive messages (it needs \`seanced update\`).`;
+      return `${head} was not delivered: the target machine's daemon cannot receive messages (it needs \`seance update\`).`;
     case "offline":
       return `${head} was not delivered: the target machine is offline or did not answer; if it did land, a retry may duplicate it.`;
   }

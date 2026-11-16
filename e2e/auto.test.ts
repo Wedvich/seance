@@ -750,7 +750,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 90_000);
 
-  // `seanced spawn` in a shell with no key: `autoFleet` finds none and takes the
+  // `seance spawn` in a shell with no key: `autoFleet` finds none and takes the
   // broker. The alias is another client's write, resolved by the CLI from the broker's
   // accounts read, so the stored record carries the accountId and the CLI's client.
   test("a keyless CLI spawn resolves an account alias through the broker and records the pin", async () => {
@@ -826,7 +826,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   }, 90_000);
 
   // M4 PR 2's exit: the PWA's spawn is a task. With both pickers on auto it is the unpinned
-  // task `seanced spawn` writes; a machine pick is a pin, so it lands where the owner said.
+  // task `seance spawn` writes; a machine pick is a pin, so it lands where the owner said.
   test("the PWA's default spawn is an unpinned task of the PWA's, placed by the scheduler", async () => {
     const app = startApp(stack, { prompt: "queue me" });
     let window: string | null = null;
@@ -1138,7 +1138,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
-  // docs/scheduler.md M4, CLI spawn: `seanced spawn` enqueues as an app
+  // docs/scheduler.md M4, CLI spawn: `seance spawn` enqueues as an app
   // does, so it lands with no leader up and runs once one leads. Driven through
   // `autoFleet` (the config's PSK, its `/daemon` URL turned `/app`) and `spawnAuto`
   // over a real app socket — `cmdSpawnAuto` adds only the process exit.
@@ -1205,9 +1205,9 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
-  // The spec's "a plain `seanced spawn` lands as a task": the real CLI, as a subprocess, with the
+  // The spec's "a plain `seance spawn` lands as a task": the real CLI, as a subprocess, with the
   // suite's config (key included) and a state dir of its own, so its audit lines are its alone.
-  test("a plain seanced spawn from a shell lands as a task, recorded as the CLI's", async () => {
+  test("a plain seance spawn from a shell lands as a task, recorded as the CLI's", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-e2e-cli-"));
     const configDir = join(dir, "config");
     const stateDir = join(dir, "state");

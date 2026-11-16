@@ -115,7 +115,7 @@ Working name **orchestrator**. Proposed shape, each line a decision to take:
   already shows up in the account's reading; the question is whether placement should also reserve
   for it.
 - **Its own audit origin** (`orchestrator`), per the threat model's rule that a new surface never
-  reuses one. Its enqueues are otherwise an app-role client's, as `seanced mcp`'s are.
+  reuses one. Its enqueues are otherwise an app-role client's, as `seance mcp`'s are.
 - **A fence on what it may queue unattended**: repos it may name, a cap on tasks in flight and per
   day, the autonomy level its tasks get. Today any session with Séance's MCP can queue without
   limit; a session told to find work by itself is where that stops being acceptable.

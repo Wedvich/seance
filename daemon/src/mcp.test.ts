@@ -177,7 +177,7 @@ describe("mcpScriptCheck", () => {
     expect(check?.message).toContain("(pengefix2)");
     expect(check?.message).toContain(other);
     expect(check?.message).toContain(main);
-    expect(check?.message).toContain("`seanced mcp install` repoints it");
+    expect(check?.message).toContain("`seance mcp install` repoints it");
   });
 
   test("no parsable script is no finding", async () => {
@@ -538,7 +538,7 @@ describe("the local short circuit", () => {
     // The remediation is attached here, not baked into the thrown message, so it
     // reads the same for a socket that closed mid-request as for one never there.
     expect(toolText(result)).toContain("no daemon listening at /run/seanced.sock (ENOENT)");
-    expect(toolText(result)).toContain("is seanced running? try `seanced status`");
+    expect(toolText(result)).toContain("is seanced running? try `seance status`");
     expect(fake.requests).toHaveLength(0);
     lazy.stop();
   });
@@ -662,7 +662,7 @@ describe("the local short circuit", () => {
     expect(listed.note).toContain("no daemon listening");
     expect(listed.note).toContain("fail too");
     // The advice already names the fix; the note must not say it twice.
-    expect(listed.note.split("seanced status").length).toBe(2);
+    expect(listed.note.split("seance status").length).toBe(2);
   });
 
   test("list_machines takes the broker's word on the local daemon rather than probing it again", async () => {
@@ -837,7 +837,7 @@ describe("set_machine_open", () => {
       fake.setState({ scheduler: LEADS });
       const refused = await call(fake, { machine: "homelab", open: false, now: true });
       expect(refused.error).toBe(true);
-      expect(refused.text).toBe("homelab cannot drain now yet — its daemon needs `seanced update`");
+      expect(refused.text).toBe("homelab cannot drain now yet — its daemon needs `seance update`");
       expect(fake.requests).toEqual([]);
       const plain = await call(fake, { machine: "homelab", open: false });
       expect(plain.text).toBe("homelab is closed to new work; running work finishes where it is");
@@ -965,7 +965,7 @@ describe("set_machine_open", () => {
     fake.setState({ scheduler: LEADS });
     const { text, error } = await call(fake, { machine: "homelab", open: false });
     expect(error).toBe(true);
-    expect(text).toContain("needs `seanced update`");
+    expect(text).toContain("needs `seance update`");
     expect(fake.requests).toEqual([]);
   });
 
@@ -1249,7 +1249,7 @@ describe("spawn_session on auto", () => {
       ]);
       expect(text).toContain("get_queue shows where it lands and why");
       expect(text).not.toContain("No scheduler is leading");
-      // Nothing reachable from `seanced mcp` writes to stdout: it is the JSON-RPC channel.
+      // Nothing reachable from `seance mcp` writes to stdout: it is the JSON-RPC channel.
       expect(stdout).not.toHaveBeenCalled();
     } finally {
       stdout.mockRestore();
@@ -1937,7 +1937,7 @@ describe("resolvePlacement", () => {
     const old = [machine({ deviceId: "device-old", name: "Old" })];
     expect(await resolvePlacement(old, listed().accounts, { machine: "Old" })).toEqual({
       error:
-        "pin.machine: Old (device-old) reports no exclaves, so the scheduler cannot place there — its daemon needs `seanced update`",
+        "pin.machine: Old (device-old) reports no exclaves, so the scheduler cannot place there — its daemon needs `seance update`",
     });
     expect(await refused({ machine: "nope" })).toBe(
       'pin.machine: no machine named "nope" — known machines: Thad, WSL, Mac',
@@ -3276,7 +3276,7 @@ describe("send_message", () => {
       const result = await gate([machine({ ...leader }), machine({ ...box })], true);
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.text).toContain("`seanced update`");
+        expect(result.text).toContain("`seance update`");
         expect(result.text).toContain("nothing was sent");
       }
     });
@@ -3287,7 +3287,7 @@ describe("send_message", () => {
       expect(routeOnly.ok).toBe(false);
       if (!routeOnly.ok) {
         expect(routeOnly.text).toContain("route replies");
-        expect(routeOnly.text).toContain("`seanced update`");
+        expect(routeOnly.text).toContain("`seance update`");
       }
       const both = [
         machine({ ...leader, capabilities: [CAPABILITIES.messageRoute, CAPABILITIES.messageReply] }),
@@ -3480,7 +3480,7 @@ describe("start_task", () => {
 
   test("a leader without runNow, or none, is refused with nothing sent", async () => {
     const old = await callStart(() => ({ task: reserved }), startingMachines(false));
-    expect(old).toMatchObject({ error: true, text: expect.stringContaining("its daemon needs `seanced update`") });
+    expect(old).toMatchObject({ error: true, text: expect.stringContaining("its daemon needs `seance update`") });
     expect(old.fake.requests).toEqual([]);
   });
 
@@ -3594,7 +3594,7 @@ describe("pass_task", () => {
       [
         "a leader that predates it",
         { machines: passingMachines({ leader: false }) },
-        "its daemon needs `seanced update`",
+        "its daemon needs `seance update`",
       ],
       ["a box that predates it", { machines: passingMachines({ box: false }) }, "can't push for a successor yet"],
       ["a task waiting on a person", { tasks: [{ ...passing, state: "needs-input" }] }, "waiting for you"],
@@ -4243,7 +4243,7 @@ describe("pass_to_successor", () => {
   test("a leader that predates it, or none leading, refuses before the daemon pushes anything", async () => {
     const old = await callSelf({ machines: leaderMachines(false) });
     expect([old.error, old.passed]).toEqual([true, []]);
-    expect(old.text).toContain("needs `seanced update`");
+    expect(old.text).toContain("needs `seance update`");
     expect(old.text).toContain("Nothing was pushed");
     const none = await callSelf({ leading: false });
     expect([none.error, none.passed]).toEqual([true, []]);

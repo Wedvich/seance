@@ -107,7 +107,7 @@ describe("reasonText", () => {
 
   test("a continuation says why a candidate is not the one it resumes on", () => {
     expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
-    expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");
+    expect(reasonText({ code: "continue_unsupported" })).toContain("seance update");
   });
 
   test("a missing trait names it; an unhealthy one says its probe fails", () => {
@@ -117,7 +117,7 @@ describe("reasonText", () => {
 
   test("a machine whose daemon can't fetch attachments says it needs an update", () => {
     expect(reasonText({ code: "attachments_unsupported" })).toBe(
-      "its daemon can't fetch attachments yet (needs seanced update)",
+      "its daemon can't fetch attachments yet (needs seance update)",
     );
   });
 });

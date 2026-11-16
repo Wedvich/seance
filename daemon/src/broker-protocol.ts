@@ -18,9 +18,9 @@ import {
 import { CONNECT_TIMEOUT_MS } from "./app-relay.ts";
 
 /**
- * The fleet broker's frames on the local op socket: what a keyless `seanced mcp`
+ * The fleet broker's frames on the local op socket: what a keyless `seance mcp`
  * sends the daemon to reach *other* machines, and what comes back. Shared by
- * both ends, so nothing here logs — the client end runs inside `seanced mcp`,
+ * both ends, so nothing here logs — the client end runs inside `seance mcp`,
  * whose stdout is JSON-RPC.
  *
  * Deliberately not a `Plain` and not an `OpName`. A broker frame names an
@@ -45,8 +45,8 @@ export function isBrokerOp(value: unknown): value is BrokerOp {
 
 /**
  * The scheduler ops a peer may ask the daemon to make as an app: what `auto`,
- * `queue_batch`, `get_queue`, `cancel_task`, `start_task`, `pass_task`, `amend_task`, `seanced spawn`,
- * `seanced start`, `seanced pass` and `seanced amend` need, and the account read that resolves an alias.
+ * `queue_batch`, `get_queue`, `cancel_task`, `start_task`, `pass_task`, `amend_task`, `seance spawn`,
+ * `seance start`, `seance pass` and `seance amend` need, and the account read that resolves an alias.
  * `mark-done`, `pause`, `resume`, `discard`, `route-preview` and every `account:` write stay off the list.
  */
 export const BROKER_SCHEDULER_OPS = ["enqueue", "queue", "cancel", "run-now", "pass", "amend", "accounts"] as const;

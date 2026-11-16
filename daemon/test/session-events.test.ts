@@ -350,7 +350,7 @@ describe("remote sessions", () => {
   });
 });
 
-describe("`seanced session-event` and a done report (#21)", () => {
+describe("`seance session-event` and a done report (#21)", () => {
   /** The CLI run outside any pane, as the mod's hook runs it; it exits once the daemon has answered or it gave up. */
   async function runCli(input: object): Promise<void> {
     const proc = Bun.spawn([process.execPath, MAIN, "session-event"], {
@@ -381,7 +381,7 @@ describe("`seanced session-event` and a done report (#21)", () => {
 });
 
 describe("activity", () => {
-  test("a report through `seanced session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
+  test("a report through `seance session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
     const input = join(base, "legacy.json");
     // What a session started before the mod dropped its rate-limit tap still sends.
     await writeFile(input, JSON.stringify({ rateLimits: [{ kind: "five_hour", percentUsed: 42.4 }] }));

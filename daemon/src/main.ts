@@ -5,7 +5,7 @@
 // those runs — 47 ms against 11. `inbox` is the second: the inbox mod starts one per session and it lives for the
 // session's life, so loading the MCP SDK and zod into every session's listener would be pure cost. `custodian` is the
 // third: the round runs its verbs many times a turn. Every other command imports what it needs once picked.
-import { CUSTODIAN_OWNER_VERBS, USAGE, type CommandName } from "./commands.ts";
+import { commandHelp, CUSTODIAN_OWNER_VERBS, isCommandName, USAGE, type CommandName } from "./commands.ts";
 import { cmdCustodian } from "./custodian-cli.ts";
 import { cmdInbox } from "./inbox-cli.ts";
 import { cmdSessionEvent } from "./session-event-cli.ts";
@@ -54,7 +54,7 @@ type Cli = typeof import("./cli.ts");
 
 /** Typed against `COMMANDS`: a command with no entry here, or one that is not a command, does not compile. */
 const RUN: Record<
-  Exclude<CommandName, "session-event" | "inbox" | "custodian" | "help">,
+  Exclude<CommandName, "session-event" | "inbox" | "custodian" | "completion" | "help">,
   (cli: Cli, rest: readonly string[]) => Promise<void>
 > = {
   init: (cli) => cli.cmdInit(),
@@ -118,11 +118,16 @@ try {
     case undefined:
       await runForeground();
       break;
+    case "completion":
+      await (await import("./completion.ts")).cmdCompletion(rest);
+      break;
     case "help":
     case "--help":
-    case "-h":
-      console.log(USAGE);
+    case "-h": {
+      const [topic] = rest;
+      console.log(topic !== undefined && isCommandName(topic) ? commandHelp(topic) : USAGE);
       break;
+    }
     default:
       await runCommand(command, rest);
   }

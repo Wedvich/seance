@@ -36,7 +36,7 @@ describe("failureText", () => {
     ).toBe('the relay refused to deliver the request (code "rejected")');
   });
 
-  // The mapping lives in shared/ so this surface and `seanced mcp` explain a
+  // The mapping lives in shared/ so this surface and `seance mcp` explain a
   // reason identically; this pins the wrapper to it.
   test("is the shared mapping verbatim for a RequestFailure", () => {
     const failure = new RequestFailure("offline", "x");

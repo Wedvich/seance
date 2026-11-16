@@ -326,7 +326,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
           "cli",
         );
         expect(refused.ok).toBe(false);
-        expect(refused.text).toContain("needs `seanced update`");
+        expect(refused.text).toContain("needs `seance update`");
         expect(amendCalls).not.toHaveBeenCalled();
         expect((await stack.queue().get(id))?.body?.spec.title).toBe("older");
 

@@ -14,7 +14,7 @@ import type { SeatRecord } from "./seat-record.ts";
 
 /**
  * The owner's acts on the custodian, one implementation for both surfaces (docs/custodian.md C45; DESIGN.md, "The
- * custodian's status and the Machines row"): `seanced custodian round | pause | resume` at the shell
+ * custodian's status and the Machines row"): `seance custodian round | pause | resume` at the shell
  * (`custodian-owner-cli.ts`) and the `custodian` app op (`handlers.ts`, wired in `run.ts`). The caller supplies what
  * differs: where the seat record comes from, whether a seat is configured, and the audit's origin. Log-free,
  * like `custodian-control.ts`: each caller says what it says in its own channel.
