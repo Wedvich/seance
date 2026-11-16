@@ -10000,6 +10000,14 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   pushes no history entry. Pinned under the pill from its rect on open, since CSS anchor
   positioning is not in every browser the app runs in. Rejected: a bottom tab bar, which
   would spend a phone's height on three destinations visited far less than the form.
+- **A relative time shows its timestamp on hover.** "6m ago" and "resets in 2h" stay coarse on
+  the page; a mouse resting on one opens a small styled tip with the full timestamp in Norwegian form (24-hour, viewer's zone), to
+  the second (`tooltip.ts`), not the browser's `title`. View models keep the instant beside the
+  words (`Timed` lines in `timed.ts`) so the component has it to show. One shared
+  `popover="manual"` node in the top layer, so no card clips it and an open menu stays open;
+  pinned from the anchor's rect like the menu. Mouse only: a touch has no hover, and its tap
+  belongs to the row. Not covered: the verdict headline (it cross-fades as a string), the
+  machine picker's rows, and the PR chip, whose reading is already its `title`.
 - **Settings is one screen, reached from the header's relay pill** (on a phone, through its menu). It absorbed
   what used to be a bottom-sheet drawer plus a separate Relay & keys screen:
   credentials, connection status and theme in one place. The drawer's

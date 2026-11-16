@@ -16,7 +16,8 @@ import {
 } from "@seance/shared";
 import { sleepingMachine } from "./asleep.ts";
 import type { PreviewState } from "./state.ts";
-import { failedBody, formatSeen } from "./view.ts";
+import { timed, type Timed } from "./timed.ts";
+import { failedBody, seen } from "./view.ts";
 
 /**
  * A decision record as sentences: "chose X because …, rejected Y because …"
@@ -32,7 +33,7 @@ export interface DecisionLine {
   readonly outcome: "chosen" | "scored" | "rejected";
   readonly why: string;
   /** The account reading the candidate was judged on, worded as the account cards word it. */
-  readonly quota: string | null;
+  readonly quota: Timed | null;
 }
 
 export interface DecisionSummary {
@@ -86,13 +87,13 @@ function quotaText(
   decision: Decision,
   machines: readonly Machine[],
   now: number,
-): string | null {
+): Timed | null {
   if (quota === undefined) return null;
   const observer = machines.find((m) => m.deviceId === quota.observer);
   const named = observer?.name ?? decision.candidates.find((c) => c.deviceId === quota.observer)?.machine;
-  const at = formatSeen(quota.observedAt * 1000, now);
-  if (named === undefined) return `quota: ${quota.source} · ${at}`;
-  return `quota: ${quota.source} · ${at} on ${observer?.connected === false ? `${named}, asleep` : named}`;
+  const at = seen(quota.observedAt * 1000, now);
+  if (named === undefined) return timed`quota: ${quota.source} · ${at}`;
+  return timed`quota: ${quota.source} · ${at} on ${observer?.connected === false ? `${named}, asleep` : named}`;
 }
 
 /**
@@ -273,13 +274,18 @@ function inputSentence(task: Task): string {
 }
 
 /** What became of a queued task, in one line: the verdict's headline. */
-export function taskHeadline(task: Task, machines: readonly Machine[], now: number): string {
+export function taskHeadline(task: Task, machines: readonly Machine[], now: number): Timed {
+  const headline = headlineOf(task, machines, now);
+  return typeof headline === "string" ? [headline] : headline;
+}
+
+function headlineOf(task: Task, machines: readonly Machine[], now: number): string | Timed {
   const at = task.assignment ?? task.reservation;
   const listed = at === undefined ? undefined : machines.find((m) => m.deviceId === at.deviceId);
   const machine = at === undefined ? undefined : (listed?.name ?? at.deviceId);
   const place = at === undefined ? "" : ` on ${machine ?? ""} · ${at.exclave}`;
   const asleep = sleepingMachine(task, machines);
-  const slept = asleep === undefined ? "" : ` — its machine went to sleep ${formatSeen(lastHeardAt(asleep), now)}`;
+  const slept = asleep === undefined ? timed`` : timed` — its machine went to sleep ${seen(lastHeardAt(asleep), now)}`;
   switch (task.state) {
     case "queued":
       return "Queued — waiting for the scheduler.";
@@ -288,18 +294,18 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "ready":
       return "Queued — waiting for a machine.";
     case "reserved":
-      return asleep === undefined ? `Starting${place}…` : `Starting${place}${slept}.`;
+      return asleep === undefined ? `Starting${place}…` : timed`Starting${place}${slept}.`;
     case "running":
-      return `It's running${place}${slept}.`;
+      return timed`It's running${place}${slept}.`;
     case "needs-input":
-      return `${inputSentence(task)}${place}${slept}.`;
+      return timed`${inputSentence(task)}${place}${slept}.`;
     case "lost":
       // The leader's `lost` is the sleep itself; "Lost" stays for a machine back or gone.
-      if (asleep !== undefined) return `Asleep${place}${slept}.`;
+      if (asleep !== undefined) return timed`Asleep${place}${slept}.`;
       if (listed !== undefined) return `Lost${place} — its machine is back but hasn't answered for it yet.`;
       return task.absentSince === undefined
         ? `Lost${place} — its machine stopped answering.`
-        : `Lost${place} — its machine went away ${formatSeen(task.absentSince, now)}.`;
+        : timed`Lost${place} — its machine went away ${seen(task.absentSince, now)}.`;
     case "awaiting-merge":
       // Under `until: "reported"` the merge settles nothing: only the session's own report does.
       if (task.merged === true) return `Merged${place} — waiting for its session to report it done.`;

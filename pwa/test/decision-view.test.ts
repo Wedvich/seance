@@ -15,13 +15,17 @@ import {
   queuedBody,
   requiresLine,
   startNowItem,
-  taskHeadline,
+  taskHeadline as timedHeadline,
   waitingText,
 } from "../src/decision-view.ts";
 import { machineAsleep } from "../src/asleep.ts";
+import { plain as lineText } from "../src/timed.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
+
+// The sentence is what these tests are about; the instants a line keeps are asserted where a line is compared whole.
+const taskHeadline = (...args: Parameters<typeof timedHeadline>): string => lineText(timedHeadline(...args));
 
 function machine(deviceId: string, name: string, connected = true): Machine {
   return { deviceId, name, platform: "darwin", repos: [], scannedAt: 1, lastSeen: NOW, connected };
@@ -67,7 +71,7 @@ describe("describeDecision", () => {
       where: "Mac · default",
       outcome: "chosen",
       why: "lowest score — score 1.50 (account 0.25 · load 40% · queue 1)",
-      quota: "quota: session · 3m ago on Mac",
+      quota: ["quota: session · ", { text: "3m ago", at: NOW - 3 * 60_000 }, " on Mac"],
     });
   });
 
@@ -81,7 +85,7 @@ describe("describeDecision", () => {
         outcome: "scored",
         why: "scored higher, score 2.75 (account 0.25 · load 40% · queue 1) against 1.50",
         // An asleep observer is named as such, as on the account card.
-        quota: "quota: session · 2h ago on WSL, asleep",
+        quota: ["quota: session · ", { text: "2h ago", at: NOW - 2 * 3_600_000 }, " on WSL, asleep"],
       },
       {
         id: "lxc/work",

@@ -19,6 +19,7 @@ import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } fr
 import { RelaySettings } from "./relay-dot.tsx";
 import { Sheet, SheetItem, TileButton, useSheetExit } from "./sheet.tsx";
 import { Toast } from "./toast.tsx";
+import { Time, TimedText } from "./timed.tsx";
 
 /** The Older section's acts, all the store's (`OlderStore`). */
 export interface OlderActions {
@@ -211,7 +212,9 @@ export function QueueScreen(props: {
           <div key={hold.key} className="banner card">
             <span className="banner-rule" />
             <span className="banner-text">
-              <span className="banner-body">{hold.text}</span>
+              <span className="banner-body">
+                <TimedText line={hold.text} />
+              </span>
             </span>
             <button
               type="button"
@@ -506,7 +509,7 @@ function QueueCard(props: {
             )}
           </h3>
           <p className="fleet-meta">
-            {row.headline} · {row.age}
+            <TimedText line={row.headline} /> · <Time moment={row.age} />
             {row.autonomy !== null && (
               <span className="fleet-badge queue-autonomy" title={`Autonomy: ${row.autonomy}`}>
                 {row.autonomy}
@@ -575,7 +578,11 @@ function QueueCard(props: {
       )}
       {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
       {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
-      {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
+      {row.body !== null && (
+        <p className="fleet-card-body">
+          <TimedText line={row.body} />
+        </p>
+      )}
       {(row.pr !== null || inline !== null || row.answer !== null) && (
         <div className="queue-actions">
           {row.pr !== null && (

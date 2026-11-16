@@ -3677,3 +3677,67 @@
 .after-when .seg {
   width: 100%;
 }
+
+/* ---- timestamp tooltip (tooltip.ts): the instant behind a relative time ---- */
+
+/* A hover target, not a link: no underline until the pointer is on it. */
+.reltime {
+  border-radius: 3px;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 3px;
+  transition:
+    color 0.14s ease,
+    text-decoration-color 0.14s ease;
+}
+
+@media (hover: hover) {
+  .reltime:hover {
+    color: var(--fg);
+    text-decoration-color: currentColor;
+  }
+}
+
+/* Top-layer popover; `left` and `top` are set from the anchor on open.
+   base.css's reduced-motion rule clamps the transitions to an instant. */
+.tip {
+  --tip-slide: 3px;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--sur2);
+  color: var(--fg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(var(--tip-slide));
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease,
+    overlay 0.12s allow-discrete,
+    display 0.12s allow-discrete;
+}
+
+.tip[data-side="below"] {
+  --tip-slide: -3px;
+}
+
+.tip:popover-open {
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .tip:popover-open {
+    opacity: 0;
+    transform: translateY(var(--tip-slide));
+  }
+}

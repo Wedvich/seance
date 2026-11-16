@@ -46,6 +46,7 @@ import {
 import { needsAttention } from "./asleep.ts";
 import { formatBytes, typeLabel, type PickedFile } from "./attachments.ts";
 import { taskTitle } from "./task-title.ts";
+import type { Moment } from "./timed.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -317,6 +318,11 @@ export function formatSeen(lastSeen: number, now: number): string {
   if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m ago`;
   if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h ago`;
   return `${Math.floor(elapsed / DAY)}d ago`;
+}
+
+/** `formatSeen` with its instant kept, for a line that shows the timestamp on hover. */
+export function seen(at: number, now: number): Moment {
+  return { text: formatSeen(at, now), at };
 }
 
 function sessionCount(state: AppState, deviceId: string): number | null {
