@@ -33,6 +33,7 @@ import { identityOfState, readState } from "../daemon/src/state.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import { connectApp, connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
 import { deriveQueue } from "../pwa/src/queue-view.ts";
+import { plain as lineText } from "../pwa/src/timed.ts";
 import { describeVerdict } from "../pwa/src/verdict-view.ts";
 import { deriveView, type AppState } from "../pwa/src/view.ts";
 import {
@@ -1025,7 +1026,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const row = deriveQueue(withQueue, Date.now())
         .sections.flatMap((section) => section.rows)
         .find((r) => r.id === task.id);
-      expect(row?.body).toContain("Waiting: FullBox");
+      expect(lineText(row?.body ?? [])).toContain("Waiting: FullBox");
       expect(row?.body).not.toContain("pinned machine");
     } finally {
       if (taskId !== null) await cancelTask(app.client, taskId);

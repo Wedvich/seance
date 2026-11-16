@@ -25,18 +25,12 @@ describe("timed", () => {
 });
 
 describe("formatStamp", () => {
-  test("names the day and runs to the second", () => {
-    const format = new Intl.DateTimeFormat("en-US", {
-      timeZone: "UTC",
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-    expect(formatStamp(AT, format).replaceAll(/\s/gu, " ")).toBe("Tue, Oct 6, 2026 at 3:44:26 PM");
+  // Shape only: the words and separators are the runtime's ICU data, which differs between machines.
+  test("is a 24-hour clock to the second, whatever the runtime's locale", () => {
+    const stamp = formatStamp(AT);
+    expect(stamp).toContain("2026");
+    expect(stamp).toMatch(/\b\d{2}:44:26$/u);
+    expect(stamp).not.toMatch(/AM|PM/iu);
   });
 });
 
