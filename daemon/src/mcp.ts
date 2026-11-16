@@ -723,7 +723,7 @@ const AFTER_WHEN = z
   .enum(DEP_AFTER)
   .default("opened")
   .describe(
-    '"opened": the task has a PR and its branch is pushed (stacked work, the default). "merged": its branch merged. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
+    '"opened" (the default): the task has a PR and its branch is pushed. A worktree task\'s first "opened" entry is what it stacks on: its worktree starts from that task\'s pushed branch, not the default branch, so it builds on that work before it merges (from the default branch instead if that PR merged first, or if the task finished with nothing pushed). "merged": its branch merged, and the worktree starts from the default branch, which then holds the work: the choice for work that should not build on an unmerged branch. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
   );
 
 const LINEAR_FIELD = z
@@ -930,6 +930,7 @@ function describeTask(
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
+    ...(task.stack === undefined ? {} : { stackedOn: { task: task.stack.task, base: task.stack.on } }),
     ...(spec.succeeds === undefined ? {} : { succeeds: spec.succeeds.task }),
     ...(task.successor === undefined ? {} : { passedTo: task.successor }),
     // The same offer the app's menu follows; `pass_task` still re-checks the leader.
@@ -1093,7 +1094,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); a task that ran stacked carries \`stackedOn\` — the task whose work its worktree started from (after any pass, the successor holding it) and \`base\`: \`branch\` (that task's pushed branch), \`merged\` (the default branch, since that task's PR had merged) or \`nothing\` (the default branch, since that task finished with nothing pushed); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1308,7 +1309,7 @@ export function buildMcpServer(
           .max(TASK_SPEC_LIMITS.deps)
           .optional()
           .describe(
-            "Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents",
+            'Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents. With when "opened" (the default), a worktree task is stacked: it starts from the first such task\'s pushed branch (get_queue\'s stackedOn says what it started from); use when "merged" for work that should start from the default branch',
           ),
         until: UNTIL_FIELD,
         linear: LINEAR_FIELD,
@@ -1439,7 +1440,9 @@ export function buildMcpServer(
                 )
                 .max(TASK_SPEC_LIMITS.deps)
                 .optional()
-                .describe("Each entry names exactly one of task and ref"),
+                .describe(
+                  'Each entry names exactly one of task and ref. As spawn_session\'s after: with when "opened" (the default) a worktree member stacks on the first such task\'s pushed branch; when "merged" starts it from the default branch',
+                ),
               until: UNTIL_FIELD,
               linear: LINEAR_FIELD,
               pin: PIN_FIELD,

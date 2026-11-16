@@ -1230,6 +1230,39 @@ describe("passing a running task to a successor", () => {
     expect(rowOf([old], "old", CAN)?.passedTo?.text).toBe("Passed to task next");
   });
 
+  test("a stacked task names what its worktree started from", () => {
+    const placed = { deviceId: "d", exclave: "main", clone: "seance" };
+    const pred = task("pred", {
+      state: "awaiting-merge",
+      spec: { repo: ORIGIN, mode: "worktree", title: "Base work" },
+    });
+    const deps = [{ task: "pred", after: "opened" as const }];
+    const stacked = (on: "branch" | "merged" | "nothing", id = "pred") =>
+      task("next", {
+        state: "running",
+        assignment: placed,
+        spec: { repo: ORIGIN, mode: "worktree", deps },
+        stack: { task: id, on },
+      });
+    expect(rowOf([pred, stacked("branch")], "next", CAN)?.stackedOn).toEqual({
+      text: "Stacked on Base work",
+      reveal: null,
+    });
+    expect(rowOf([pred, stacked("merged")], "next", CAN)?.stackedOn?.text).toBe(
+      "Started from the default branch: Base work had merged",
+    );
+    expect(rowOf([pred, stacked("nothing")], "next", CAN)?.stackedOn?.text).toBe(
+      "Started from the default branch: Base work left nothing to stack on",
+    );
+    // The holder after a pass, which the queue may no longer show: its short id.
+    expect(rowOf([stacked("branch", "successor-of-pred")], "next", CAN)?.stackedOn?.text).toBe(
+      "Stacked on task successo",
+    );
+    // Not yet dispatched: the leader has written no stack, and the deps line says what it waits on.
+    const waiting = task("next", { state: "blocked", spec: { repo: ORIGIN, mode: "worktree", deps } });
+    expect(rowOf([pred, waiting], "next", CAN)?.stackedOn).toBeNull();
+  });
+
   test("a successor of a quota pass says its predecessor's usage ran out", () => {
     const old = task("old", {
       state: "superseded",

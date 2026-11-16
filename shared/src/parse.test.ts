@@ -11,6 +11,7 @@ import {
   parseFleetQuotaRecord,
   parseContinuedBy,
   parseDrainedStamp,
+  parseTaskStack,
   parsePrAlertStamp,
   parseQuotaExhaustedStamp,
   parsePushAlert,
@@ -1151,6 +1152,27 @@ describe("tasks and their records", () => {
       expect(parseTask({ ...bare, flag: bad })).toEqual(bare);
       expect(parseTaskFlag(bad)).toBeNull();
     }
+  });
+
+  test("a stack survives a parse; a malformed one, or one on a task not yet dispatched, is dropped", () => {
+    const bare: Task = { ...task, state: "running" };
+    for (const on of ["branch", "merged", "nothing"] as const) {
+      const stacked: Task = { ...bare, stack: { task: "t-0", on } };
+      expect(parseTask(stacked)).toEqual(stacked);
+    }
+    for (const bad of [
+      { task: "t-0", on: "default" },
+      { task: "a/b", on: "branch" },
+      { task: "t-0" },
+      { task: "t-0", on: "branch", branch: "worktree-x" },
+      "t-0",
+      null,
+    ]) {
+      expect(parseTask({ ...bare, stack: bad })).toEqual(bare);
+      expect(parseTaskStack(bad)).toBeNull();
+    }
+    const ready: Task = { ...task, state: "ready" };
+    expect(parseTask({ ...ready, stack: { task: "t-0", on: "branch" } })).toEqual(ready);
   });
 
   test("a progress field that is not exactly its shape nulls the task", () => {

@@ -67,7 +67,7 @@ import {
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable, unprunable } from "./prune.ts";
-import { stackOf } from "./stack.ts";
+import { stackOf, stackRecord } from "./stack.ts";
 import { drainDue, stampDrain, stampDrainRefusal } from "./drain-trigger.ts";
 import { quotaDue, spillAlerted, stampQuota } from "./quota-trigger.ts";
 import { accountOfPlacement, accountResetAt, exhaustion, route, type Decision, type Exhaustion } from "./route.ts";
@@ -2303,7 +2303,9 @@ export class Scheduler {
       ? this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota())
       : null;
     // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
-    await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
+    await this.#update(task.id, (current) =>
+      holds(current, at) ? verdict(current, at, reply, stackRecord(stack)) : null,
+    );
     if (spill === null) return;
     // Its own write, not part of the verdict: that one declines when a session event moved the task
     // first, which is the usual order (the reply waits for the pane's title, a hook need not).

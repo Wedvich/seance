@@ -8,6 +8,7 @@ import {
   type SessionState,
   type TaskFailureCode,
   type TaskProgress,
+  type TaskStack,
 } from "@seance/shared";
 import { ended, progressed, reportedPr } from "./done.ts";
 import { UNDELIVERED, UNREACHABLE, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
@@ -425,11 +426,13 @@ const BASE_NOT_FOUND = "the branch of the task it stacks on is not on origin (de
  * answer, or a transport error that may have come after the spawn ran → stay
  * reserved until the TTL check reads `sessions`.
  */
-export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Task | null {
+export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply, stack?: TaskStack): Task | null {
   if (reply.ok) {
     // Path alone is ambiguous: every `here` session in a clone shares it.
     const pane = reply.sessions.find((s) => s.path === reply.path && s.window === reply.window)?.id;
-    return advance(task, "running", { assignment: assignmentOf(at, { window: reply.window, id: pane }) });
+    const assignment = assignmentOf(at, { window: reply.window, id: pane });
+    // Only an `ok` started from this dispatch's base: `task_running` confirms an earlier spawn, which may not have.
+    return advance(task, "running", { assignment, ...(stack === undefined ? {} : { stack }) });
   }
   if (reply.code === "task_running") {
     return advance(task, "running", { assignment: assignmentOf(at, { id: "id" in reply ? reply.id : undefined }) });

@@ -28,6 +28,7 @@ import {
   CUSTODIAN_STATES,
   DECISION_MAX_CANDIDATES,
   DRAIN_REFUSALS,
+  STACK_BASES,
   DEP_AFTER,
   DONE_SIGNALS,
   EXIT_STATUS_MAX,
@@ -139,6 +140,7 @@ import {
   type FlagReason,
   type TaskFlag,
   type DrainedStamp,
+  type TaskStack,
   type PrAlertStamp,
   type QuotaExhaustedStamp,
   type PrStatus,
@@ -1727,6 +1729,14 @@ export function parseQuotaExhaustedStamp(value: unknown): QuotaExhaustedStamp | 
 }
 
 /** The stamp of the leader's last drain pass, built field by field; null when malformed. */
+/** `Task.stack`, exact keys: display-only, so its caller drops a bad one and keeps the task. */
+export function parseTaskStack(value: unknown): TaskStack | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "task" || key === "on")) return null;
+  const { task, on } = value;
+  const known = STACK_BASES.find((b) => b === on);
+  return isTaskId(task) && known !== undefined ? { task, on: known } : null;
+}
+
 export function parseDrainedStamp(value: unknown): DrainedStamp | null {
   const keys = new Set(["at", "tried", "refused", "held"]);
   if (!isRecord(value) || !Object.keys(value).every((key) => keys.has(key))) return null;
@@ -1831,6 +1841,9 @@ export function parseTask(value: unknown): Task | null {
   const idleRelease = known === "running" ? parseIdleRelease(value["idleRelease"]) : null;
   // Dropped, never fatal, like `prAlert`: display-only.
   const flag = value["flag"] === undefined ? null : parseTaskFlag(value["flag"]);
+  // Dropped, never fatal, like `flag`: display-only, and a record without it reads as an older leader's.
+  const stack =
+    value["stack"] === undefined || known === "queued" || known === "ready" ? null : parseTaskStack(value["stack"]);
   const { remoteSession, inputReason, inputTool } = value;
   const waiting = known === "needs-input" || known === "lost";
   return {
@@ -1855,6 +1868,7 @@ export function parseTask(value: unknown): Task | null {
     ...(continuedBy === null ? {} : { continuedBy }),
     ...(idleRelease === null ? {} : { idleRelease }),
     ...(flag === null ? {} : { flag }),
+    ...(stack === null ? {} : { stack }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in

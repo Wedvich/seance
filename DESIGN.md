@@ -3603,6 +3603,17 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     the predecessor's merge and the leader's reading of it is the one benign cause, and starting without the
     predecessor's work silently is what the code exists to refuse; re-queueing the task once the merge reads
     is the owner's call.
+  - _The record (`Task.stack`, 2026-11-16):_ the verdict that moves a dispatch's `ok` to `running` writes
+    `stack: { task, on }` — `task` the predecessor `stackOf` read (the holder after a pass chain, not always
+    the dep the author named), `on` one of `branch`, `merged` (it started from the default branch since that
+    PR merged) or `nothing` (the `noBase` spawn) — and nothing for a task with no stacking predecessor. Only
+    on `ok`: `task_running` confirms an earlier spawn, whose base this dispatch's read need not be. `advance`
+    drops it on a return to `ready`, since the next dispatch reads the base afresh; it stays through finishing
+    and into the archive. No branch name: the predecessor's record holds it, and a copy would outlive the
+    archivist's strip of `branch`. Display-only, so it needs no dep sentinel: `parseTask` drops a malformed
+    one (or one on a `queued` or `ready` record) and keeps the task, and an older leader's rewrite drops it,
+    which costs the line, never the task. Clients: the Queue card's line (PWA, "Queue screen") and MCP
+    `get_queue`'s `stackedOn` ("MCP server", `spawn_session`).
   - _Not built:_ a restack when the predecessor's branch moves in review (docs/scheduler.md, "Stacked
     rebases"), and lineage or a richer handoff preamble (predecessor title, PR URL) from the leader: the
     daemon's preamble names the base branch, and the PR is the handoff (#5).
@@ -10464,7 +10475,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   relay's queue until one does." `get_queue` is the
   `queue` op, read-only, each task with its placement and its decision's line, and now the
   `holds` in force and, per task, `escalated` and `doneBy`, and `away`/`idle` for a task that holds no slot
-  (Scheduler, "Routing caps"). Behaviour
+  (Scheduler, "Routing caps"), and `stackedOn: { task, base }` for a task that ran stacked (`Task.stack`;
+  Scheduler, "Stacking": `base` is `branch`, `merged` or `nothing`). `after`'s `when` description (both
+  `spawn_session`'s and each `queue_batch` member's) says that `opened`, the default, stacks a worktree task
+  on its first such dep's pushed branch, and that `merged` is the choice for work that should start from the
+  default branch (2026-11-16). Behaviour
   follows the PWA wherever the PWA already decides: a field over `TASK_REQUEST_LIMITS`
   is refused before the relay is dialled, worded as the PWA words it — an enqueue never reaches
   the leader, and `createTask` would refuse the same task locally as `invalid_request` — except
@@ -13317,7 +13332,11 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   the PR chip in its last archived state with no checks icon. A passed-on card says "Passed to …"
   (its `successor`) and a successor "Carries on …" with the live card's trigger suffix (its
   `succeeds.task` and `trigger`; the archived `succeeds.account` placeholder is never read), the
-  other task titled from the live queue or the Older rows read, else its short id. The line
+  other task titled from the live queue or the Older rows read, else its short id. A task that ran
+  stacked (`Task.stack`; Scheduler, "Stacking") reads "Stacked on …", or "Started from the default branch:
+  … had merged" / "… left nothing to stack on", titled the same way, on live and archived cards alike
+  (`stackedOnLine`, `pwa/src/queue-view.ts`); a task not yet dispatched has no stack, and its "After …" line
+  says what it waits on. The line
   reveals the other card on tap when it is an Older row shown or a live task, opening a collapsed
   Asleep section first; live cards keep these lines as plain text, since their view cannot see
   the Older rows. Its machine is the registry's

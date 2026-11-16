@@ -3170,6 +3170,25 @@ export const DRAIN_REFUSALS = [
 export type DrainRefusal = (typeof DRAIN_REFUSALS)[number];
 
 /**
+ * `Task.stack`'s `on` (M4, stacking; DESIGN.md, Scheduler, "Stacking"): `branch`, its worktree started from
+ * the predecessor's pushed branch; `merged`, that predecessor's PR had merged, so it started from the default
+ * branch, which holds the work; `nothing`, that predecessor finished with no PR or pushed branch, so it
+ * started from the default branch without it (the spawn's `noBase`).
+ */
+export const STACK_BASES = ["branch", "merged", "nothing"] as const;
+export type StackBase = (typeof STACK_BASES)[number];
+
+/**
+ * `Task.stack`: what its confirmed dispatch started its worktree from. `task`: its stacking predecessor,
+ * the task holding the work after any pass chain, not always the dep the author named. No branch name: the
+ * predecessor's record holds it, and a copy here would outlive the archivist's strip of `branch`.
+ */
+export interface TaskStack {
+  readonly task: string;
+  readonly on: StackBase;
+}
+
+/**
  * `Task.drained`: the leader's write-ahead record of its drain pass. `at`: the machine's `cl` the attempt
  * was for (a stamp for an older close never suppresses a new one). `tried`: the leader's clock (ms) of
  * the last attempt, what the retry waits `drainRetryMs` from. `refused`: that attempt's refusal, what
@@ -3340,6 +3359,13 @@ export interface Task {
    * attempt's refusal, what clients show as stuck. Dropped, never fatal, when malformed, and on finishing.
    */
   readonly drained?: DrainedStamp;
+  /**
+   * What its worktree started from (`TaskStack`), written by the leader with the `running` its spawn's `ok`
+   * confirmed, only for a task with a stacking predecessor, and dropped on a return to `ready` (the next
+   * dispatch reads it afresh). Display-only: no reader routes, settles or binds by it. Dropped, never fatal,
+   * when malformed, and by an older reader's parser.
+   */
+  readonly stack?: TaskStack;
   /** The newest landed continuation of an `awaiting-merge` task's chain, the leader's pointer (`ContinuedBy`). */
   readonly continuedBy?: ContinuedBy;
   /**
