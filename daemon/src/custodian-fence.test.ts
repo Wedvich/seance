@@ -176,7 +176,7 @@ describe("custodianFence", () => {
     }
   });
 
-  test("the shared shape: one denied write dir, dontAsk, Read narrowed to the round dir, the verbs allowed", () => {
+  test("the shared shape: one denied write dir, dontAsk, only the verbs allowed", () => {
     for (const platform of ["darwin", "linux"] as const) {
       const fence = custodianFence({ ...base, platform, weakerNested: false });
       expect(fence.sandbox.filesystem).toEqual({
@@ -185,7 +185,7 @@ describe("custodianFence", () => {
         allowRead: base.allowRead,
       });
       expect(fence.permissions.defaultMode).toBe("dontAsk");
-      expect(fence.permissions.allow).toEqual([`Read(/${base.roundDir}/**)`, "Bash(seanced custodian *)"]);
+      expect(fence.permissions.allow).toEqual(["Bash(seanced custodian *)"]);
       expect(fence.sandbox).toMatchObject({
         enabled: true,
         failIfUnavailable: true,

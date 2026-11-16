@@ -285,7 +285,7 @@ describe("a round, with the stubs for claude", () => {
     expect(fence.sandbox.network.allowedDomains).toEqual([]);
     if (platform === "darwin") expect(fence.sandbox.network.allowUnixSockets).toEqual([socketDir]);
     else expect(fence.sandbox.network.allowAllUnixSockets).toBe(true);
-    expect(fence.permissions.allow).toEqual([`Read(/${roundDir}/**)`, "Bash(seanced custodian *)"]);
+    expect(fence.permissions.allow).toEqual(["Bash(seanced custodian *)"]);
     for (const pair of [
       ["--setting-sources", "project"],
       ["--permission-mode", "dontAsk"],

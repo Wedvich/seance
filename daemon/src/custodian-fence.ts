@@ -128,8 +128,9 @@ export interface CustodianFence {
 const readRule = (path: string, dir: boolean): string => `Read(/${path}${dir ? "/**" : ""})`;
 
 /**
- * The `--settings` JSON. The Read tool runs outside the sandbox, so `allow` narrows it to the round's own directory
- * (under `dontAsk` anything not allowed is refused) and `deny` names the known secrets behind that. Unix sockets differ
+ * The `--settings` JSON. The round has no Read tool and `allow` names only the verbs (under `dontAsk` anything not
+ * allowed is refused); `deny` still names the known secrets for the Read tool, which runs outside the sandbox, in case
+ * Claude Code auto-allows a read or a later change brings the tool back. Unix sockets differ
  * by platform: macOS lists the round socket's directory alone, so no other path socket connects; on Linux
  * `allowUnixSockets` is ignored (seccomp cannot filter by path) and `allowAllUnixSockets` stays, because the masks
  * hide every path socket but the round's own — and it drops bubblewrap's `--disable-userns`, so it fails where
@@ -139,7 +140,7 @@ export function custodianFence(input: FenceInput): CustodianFence {
   return {
     permissions: {
       defaultMode: "dontAsk",
-      allow: [readRule(input.roundDir, true), "Bash(seanced custodian *)"],
+      allow: ["Bash(seanced custodian *)"],
       deny: [...DENY, ...input.readDenies.map((entry) => readRule(entry.path, entry.dir))],
     },
     sandbox: {

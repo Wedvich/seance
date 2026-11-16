@@ -22,11 +22,12 @@ const KEYS = ["name", "description", "tools"];
 const AGENT_NAME = "custodian";
 
 /**
- * C20 rules out Edit, Write, web and MCP tools: the definition names exactly these, and an agent file that asks for
+ * C20 rules out Edit, Write, Read, web and MCP tools: the definition names exactly Bash (Read went: its persisted
+ * tool output sits under a denied path, and every read goes through a verb), and an agent file that asks for
  * more is refused rather than launched. Whether `--agents` takes `tools` as an array is Claude Code's behaviour,
  * re-checked by the dev check.
  */
-const TOOLS = ["Bash", "Read"];
+const TOOLS = ["Bash"];
 
 /** Parses the agent file's text into the `--agents` JSON string; throws on anything it does not expect. */
 export function parseAgent(text: string): string {
