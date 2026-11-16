@@ -10106,7 +10106,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
-  filter and score read quota exactly as the cards do. Charts follow the split — the History switch in
+  filter and score read quota exactly as the cards do. Charts follow the split — the Show history switch in
   a card's ⋯ menu (it leaves the menu open, so it can be flipped back, and the menu holds through
   the layout shift a chart opening or closing causes, then re-pins to its trigger; a machine card with no
   chart to offer has no menu) on a machine asks
@@ -12956,8 +12956,10 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   **No new capability bit:** `CAPABILITIES.custodian` now also means the op is answered. No daemon ever advertised it
   without the op: rounds were held (no bit advertised) on every build before custodian 4b, which already carried the
   op. The `held` refusal those builds answered stays in `CUSTODIAN_ERROR_CODES` for a PWA reading an older daemon.
-- **The card's menu (C45, C47).** Offered only for a connected machine advertising `custodian` (`custodianControls`):
-  Round now (disabled while a round runs), then Pause for 1 hour and Pause until resumed, or Resume while a pause holds
+- **The card's menu (C45, C47).** Offered only for a connected machine advertising `custodian` (`custodianControls`),
+  as a group under a "Custodian" heading, below the card's switches (a switch is worded as the state it turns on, a
+  command as a verb):
+  Run round now (disabled while a round runs), then Pause for 1 hour and Pause until resumed, or Resume while a pause holds
   (`s` is `paused`, or `p`). A pause or resume shows as asked until the next `cu` agrees, as the open switch does
   (`DeviceCustodian`, held up to 20 s); a round request shows `Round requested`. A refusal shows on the card as fixed
   text by its code, never the daemon's message. Thresholds, the model and on/off stay in the machine's `config.json`

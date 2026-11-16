@@ -3454,6 +3454,19 @@
   background: var(--line);
 }
 
+/* Same gap as `.menu`, so grouped items sit as ungrouped ones do. */
+.menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* `.label` type, inset to the items' own padding. */
+.menu-heading {
+  padding: 8px 12px 4px;
+  font-size: 0.6875rem;
+}
+
 /* `.toggle` scaled to a menu row. Off is `--switch-off`, not `--line`: on the menu's surface a
    `--line` track all but disappears. */
 .menu-switch {

@@ -24,7 +24,7 @@ import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@
 import type { Timed } from "../timed.ts";
 import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
-import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
+import { Menu, MenuDivider, MenuGroup, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
 import { Sheet } from "./sheet.tsx";
@@ -296,20 +296,21 @@ function MachineCardView(props: {
                   onClick={() => onDrain(act)}
                 />
               ))}
-              {card.custodianControls && (
-                <>
-                  {card.openSwitch !== null && <MenuDivider />}
-                  <CustodianItems
-                    paused={custodianState.paused}
-                    running={custodianState.running}
-                    sending={custodianState.sending}
-                    onCustodian={onCustodian}
-                  />
-                </>
-              )}
-              {(card.openSwitch !== null || card.custodianControls) && offersHistory && <MenuDivider />}
               {offersHistory && (
                 <HistoryItem history={history} onShow={() => onShowHistory(target)} onHide={onHideHistory} />
+              )}
+              {card.custodianControls && (
+                <>
+                  {(card.openSwitch !== null || offersHistory) && <MenuDivider />}
+                  <MenuGroup label="Custodian">
+                    <CustodianItems
+                      paused={custodianState.paused}
+                      running={custodianState.running}
+                      sending={custodianState.sending}
+                      onCustodian={onCustodian}
+                    />
+                  </MenuGroup>
+                </>
               )}
             </Menu>
           </>
@@ -503,7 +504,7 @@ function AccountCardView(props: {
   );
 }
 
-/** Round now, then pause (for an hour or until resumed) or resume, by what the seat reports or was last asked. */
+/** Run a round now, then pause (for an hour or until resumed) or resume, by what the seat reports or was last asked. */
 function CustodianItems(props: {
   paused: boolean;
   running: boolean;
@@ -515,7 +516,7 @@ function CustodianItems(props: {
   return (
     <>
       <MenuItem
-        label="Round now"
+        label="Run round now"
         icon={<RoundIcon />}
         disabled={sending || running}
         {...(running ? { sub: "A round is running" } : {})}
@@ -532,7 +533,7 @@ function CustodianItems(props: {
         <>
           <MenuItem
             label="Pause for 1 hour"
-            icon={<PauseIcon />}
+            icon={<TimerIcon />}
             disabled={sending}
             onClick={() => onCustodian({ act: "pause", minutes: 60 })}
           />
@@ -553,7 +554,7 @@ function HistoryItem(props: { history: HistoryView | null; onShow: () => void; o
   const { history, onShow, onHide } = props;
   return (
     <MenuSwitchItem
-      label="History"
+      label="Show history"
       icon={<HistoryIcon />}
       checked={history !== null}
       onToggle={history === null ? onShow : onHide}
@@ -783,6 +784,16 @@ function PauseIcon(): JSX.Element {
     <StrokeIcon size={18}>
       <path d="M9 6v12" />
       <path d="M15 6v12" />
+    </StrokeIcon>
+  );
+}
+
+/** A clock, for the pause that ends on its own. */
+function TimerIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z" />
+      <path d="M12 8v4l2.5 2.5" />
     </StrokeIcon>
   );
 }
