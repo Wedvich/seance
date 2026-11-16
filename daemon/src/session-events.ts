@@ -407,6 +407,7 @@ export class EndedTasks {
               path: site.worktree,
               ...(site.session === undefined ? {} : { session: site.session }),
               ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
+              ...(site.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
             },
             launches.prUrl,
             landed?.server,
@@ -718,6 +719,7 @@ export class EndedTasks {
         readonly handedOff?: true;
         readonly continuedPr?: string;
         readonly branch?: string;
+        readonly stackedOn?: string;
       }
     | { readonly refused: string } {
     const site = this.worktree(taskId);
@@ -746,6 +748,8 @@ export class EndedTasks {
       ...(pr === undefined ? {} : { continuedPr: pr }),
       // Branch-state's last read of the live worktree: what a reaped worktree is re-added from.
       ...(note.branch === undefined ? {} : { branch: note.branch }),
+      // A continuation of a stacked task runs in the same worktree, on the same base.
+      ...(note.stackedOn === undefined ? {} : { stackedOn: note.stackedOn }),
     };
   }
 

@@ -30,6 +30,7 @@ import {
   isRecord,
   isAutonomyLevel,
   httpsUrl,
+  isBranchName,
   isTaskId,
   parseAttachmentManifest,
   parseDeliverMessageRequest,
@@ -172,6 +173,7 @@ export interface TaskLaunches {
         readonly handedOff?: true;
         readonly continuedPr?: string;
         readonly branch?: string;
+        readonly stackedOn?: string;
       }
     | { readonly refused: string };
   /**
@@ -217,10 +219,12 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (withAutonomy({ autonomy, plan }) === null) return false;
   // Bounded, not just typed: it is written to the pane and echoed into every session list.
   if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
-  // Fail closed until stacking lands: a spawn that silently started from the default branch
-  // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
-  // holds the name to `isBranchName` instead.
-  if (obj["baseBranch"] !== undefined) return false;
+  // Held to git's `check-ref-format` rules, and only beside worktree mode: dropped, or beside a mode
+  // that makes no worktree, the session would silently start from the default branch — the hazard
+  // the `baseBranch` capability exists for. Who may send it is `baseBranchRefusal`'s.
+  if (obj["baseBranch"] !== undefined && (!isBranchName(obj["baseBranch"]) || obj["mode"] !== "worktree")) return false;
+  // Only ever `true`, and it says the opposite of a base: both at once says two things, neither wins.
+  if (obj["noBase"] !== undefined && (obj["noBase"] !== true || obj["baseBranch"] !== undefined)) return false;
   // Malformed is never dropped: a session must not start without the files it was given. A
   // continuation carries none — it finds its directories by worktree.
   if (
@@ -370,6 +374,18 @@ function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | unde
   return undefined;
 }
 
+/**
+ * Who may start a session from another branch: the scheduler's own task spawn, the gate attachments and an
+ * inherited PR have. Refused, never dropped: dropped, the session would start from the default branch.
+ */
+function baseBranchRefusal(request: SpawnRequest, scheduler: boolean): SpawnRefusal | null {
+  if (request.baseBranch === undefined) return null;
+  if (!scheduler || request.client !== SCHEDULER_CLIENT || request.taskId === undefined) {
+    return { ok: false, code: "launch_error", message: "only the scheduler starts a task from another branch" };
+  }
+  return null;
+}
+
 function notContinuable(message: string): SpawnRefusal {
   return { ok: false, code: "not_continuable", message };
 }
@@ -460,6 +476,7 @@ async function continuationSite(
     ...(site.handedOff === true ? { handedOff: true as const } : {}),
     ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
     ...(site.branch === undefined ? {} : { branch: site.branch }),
+    ...(site.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
   };
 }
 
@@ -484,7 +501,7 @@ async function handleSpawn(
       return refusal;
     }
   }
-  const gate = attachmentsRefusal(ctx, payload, scheduler);
+  const gate = attachmentsRefusal(ctx, payload, scheduler) ?? baseBranchRefusal(payload, scheduler);
   if (gate !== null) {
     await audit.failed(gate.code);
     return gate;
@@ -566,6 +583,7 @@ async function handleSpawn(
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     // A continuation watches the worktree it resumed, under its new task id.
     const continuedPr = continuation?.continuedPr ?? inherited;
+    const stackedOn = continuation?.stackedOn ?? outcome.stackedOn;
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
     await settle?.(true, {
       ...(entry === undefined
@@ -576,6 +594,7 @@ async function handleSpawn(
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
               ...(continuedPr === undefined ? {} : { continuedPr }),
+              ...(stackedOn === undefined ? {} : { stackedOn }),
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),

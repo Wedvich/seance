@@ -1866,18 +1866,26 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   the scheduler alone: a request sealed `from: "scheduler"`, or the leader's
   in-process call (Local op socket, "Session events"; `progress`, Scheduler,
   "Branch state"). The one live pull — session state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, autonomy?, client?, taskId?, baseBranch? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, autonomy?, client?, taskId?, baseBranch?, noBase? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
   rides only on `task_running`: the `SessionEntry.id` already running the
   request's `taskId` (Daemon, "Task ids"). Advertised as `"taskId"` in
   `capabilities`, since an old daemon ignores the field and spawns a duplicate.
-  `baseBranch` (M4, stacking; in the schema, not acted on yet) is the branch a stacked
-  worktree starts from, refused `base_not_found` when origin has no such branch. It is
+  `baseBranch` (M4, stacking; the daemon acts on it since 2026-11-15, Daemon, "Stacked
+  worktrees"; no leader sends it yet) is the branch a stacked worktree starts from, refused
+  `base_not_found` when a fetch of it from origin does not land. It is
   held to `isBranchName` (`shared/src/parse.ts`: `git check-ref-format` on
   `refs/heads/<b>`, no leading `-`, not `HEAD`) at every hop: the daemon's
-  `isSpawnRequest` rejects a spawn carrying any `baseBranch` today (fail closed: starting from the default branch silently is the hazard the capability exists for; stacking lifts the refusal), and the leader is to check the predecessor's
+  `isSpawnRequest` rejects one that fails it, or one beside any mode but `worktree` (fail
+  closed: dropped, the session would start from the default branch, the hazard the
+  capability exists for), and the leader is to check the predecessor's
   `Task.branch` before sending it (stacking), since a task record's branch is only
-  length-checked. Advertised as
+  length-checked. The daemon takes it only on a spawn sealed `from` the scheduler with
+  `client: "scheduler"` and a `taskId` (or the leader's in-process dispatch), the gate
+  attachments have; any other sender is refused `launch_error` before anything is recorded,
+  never dropped. `noBase` (only `true`, never beside `baseBranch`, else malformed) says the
+  task would have stacked on a predecessor that left nothing to stack on (#4): a plain
+  worktree spawn whose preamble says so; it changes no git act. Both advertised as
   `"baseBranch"`, and required: an old daemon drops the field and starts from the
   default branch. The
   verdict embeds a refreshed session list so the PWA updates without a
@@ -4656,7 +4664,9 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   keeps a tip only while it held own work). A session that pushes work and then
   `git reset --hard origin/main`, or reverts it, is thus still judged on the pushed commit, never
   on a main it merely points at; a fast-forward merge still reads merged, since the unchanged tip
-  is then an ancestor. The own-work answer is memoized per task on tip and default sha. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
+  is then an ancestor. A stacked task (`TaskNote.stackedOn`, Daemon, "Stacked worktrees") forks
+  at its start instead while its tip grows from it, and holds no own work at or behind it: its
+  predecessor's commits are not its work; one rebased off its start forks from the default. The own-work answer is memoized per task on tip and default sha. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
   `refs/remotes/origin/<b>` from an earlier attempt from reading as pushed. And (2) **pushed
   evidence**: merged needs the branch seen pushed, or a recorded PR URL, which proves a push even
   when push, merge and prune all happened while the daemon was down. The same evidence is the
@@ -5090,7 +5100,7 @@ export interface AttachmentRef {
   `SpawnRequest.attachments?: readonly AttachmentRef[]` share one parser,
   `parseAttachmentManifest` (`shared/src/parse.ts`): `parseTaskSpec` uses it, and so does the
   daemon's `isSpawnRequest` from task 5. Until then `isSpawnRequest` refuses any
-  `attachments` as malformed, as it refuses `baseBranch` until stacking lands: a daemon of
+  `attachments` as malformed, as it refused `baseBranch` until stacking's daemon half (2026-11-15): a daemon of
   tasks 2–4 must not launch a session without the files it was sent. Its rules:
   - Absent means none, and an empty array is refused.
   - 1 to `files` entries, ids unique within the manifest.
@@ -6160,8 +6170,9 @@ of this section built.
   the clone's `origin/HEAD` (`readDefaultBranch`), never the wire, and goes to
   git as one argv element. None on disk → no fetch: claude forces its own
   when the tracking ref is missing. Parallel spawns into one clone share one
-  in-flight fetch per common dir, since two racing for the ref lock would
-  make the loser report a failure for a fetch that landed. **Fail-open**: a
+  in-flight fetch per common dir and branch, since two racing for the ref lock would
+  make the loser report a failure for a fetch that landed (keyed by branch too since
+  stacking: a stacked base shares no fetch with the default, "Stacked worktrees" below). **Fail-open**: a
   timeout or error never fails the spawn (unlike the old `fetch_failed`). The
   spawn proceeds on the refs on disk and `note` says the fetch failed and how
   old the last one is — the only place that staleness surfaces. `here` mode
@@ -6210,7 +6221,66 @@ of this section built.
   behaviour claude already has, and still rejected); keeping the fetch for
   freshness alone (a second fetch on every spawn to narrow a 24h window claude
   manages itself — reversed 2026-10-17: it is not a second fetch, and the
-  window is what left spawns a day behind).
+  window is what left spawns a day behind). **One exception since 2026-11-15**: a stacked
+  spawn (`baseBranch`) names a base claude has no flag for, so the daemon makes that
+  worktree itself ("Stacked worktrees", next). An unstacked worktree spawn is as above.
+- **Stacked worktrees** (built 2026-11-15, M4 stacking's daemon half; docs/scheduler.md,
+  decisions #3, #4, #5, #15). A worktree spawn carrying `baseBranch` (`spawn.ts`
+  `spawnUntracked`, `addStackedWorktree`) starts from that branch on origin, the
+  predecessor's, instead of `origin/<default>`:
+  - _Fetch, fail-closed._ `fetchBase` (`base-fetch.ts`) runs `git fetch origin
+    +refs/heads/<b>:refs/remotes/origin/<b>` through `networkGit` on the default's terms
+    (5s, process group, shared in flight per common dir **and branch**), then reads
+    `refs/remotes/origin/<b>` with `show-ref --verify` (the exact ref: no revision syntax, no
+    tag or local branch of the name). Unlike the default's fetch it does not fail open: a
+    fetch that does not land, origin lacking the branch included, is `base_not_found` with the
+    reason in the message, and nothing is made or recorded (the handler retracts the
+    write-ahead entry). The ref on disk may be a branch deleted on origin since, or a tip from
+    before the predecessor's last push, and stacking on either silently is the hazard. One
+    code for both, a network failure included: the leader decides what a refusal means (next
+    task); no stderr is parsed. The default branch is not fetched for a stacked spawn.
+  - _The worktree._ `git worktree add --no-track -b worktree-<name> <path> --end-of-options
+    <sha>` at `<clone>/.claude/worktrees/<name>`, the layout claude makes, so reap, branch-state,
+    the custodian and a continuation read it as any task's. `<sha>` is the tip just read, not
+    the ref: a fetch landing meanwhile cannot move what is checked out from what is noted, and
+    nothing after `--end-of-options` is revision syntax. `-b`, never claude's `-B`: an existing
+    branch of the name is someone's and is never reset. The name is chosen inside the lock, so
+    two spawns of one slug never share one. Through `hardenedGit`, under reap's lock and the
+    re-add queue (`serialReadd`), as a continuation's re-add, refusing a clone whose repo-local
+    config `repoConfigRefusal` refuses (a checkout runs the filters it names). Checked after:
+    HEAD at `<sha>` on `refs/heads/worktree-<name>`, path canonical under the clone; else, or
+    when the add fails, the half-made tree and its branch (`update-ref -d` at `<sha>`) are
+    removed and the spawn is `launch_error`. A launch that fails after the worktree exists
+    leaves it, as claude's own add does; reap's rules apply.
+  - _`--worktree` stays._ Decision #3's spike, Claude Code 2.1.325 on macOS, 2026-11-15: a
+    worktree made first with that command, then `claude --worktree <name>` from the clone
+    (interactive in a private tmux server, and `-p`) ran in it as it stood: cwd the worktree,
+    `worktree-<name>` still at the base tip, no second add, claude's own lock taken. So the
+    argv, launch dir and trust entry are an unstacked worktree spawn's, and the owner's
+    fallback (plain `claude` inside the made worktree, as a continuation) was not needed.
+  - _The seed._ The worktree preamble plus: the task is stacked on `` `<b>` ``, starts from
+    `origin/<b>`, and its handoff is the predecessor's PR (`gh pr view <b>`; #5, no transcript
+    path); its PR goes `gh pr create --base <b>`, never against the default branch (the repo
+    squash-merges, so that PR would carry `<b>`'s commits and could merge them unreviewed); and
+    once `<b>`'s PR merges, the rebase onto the default branch and the retarget are the
+    session's (or the owner's) to do by hand — the known gap. `<b>` reaches the seed file only,
+    never the shell string, and passed `isBranchName`.
+  - _The ledger._ `TaskNote.stackedOn`, the `<sha>` (`SpawnOutcome.stackedOn`), internal and
+    never in `TaskProgress`: branch-state counts nothing at or behind it as own work (Scheduler,
+    "Branch state"), so a fresh stacked worktree, pushed as it is, reads neither pushed nor
+    merged when its predecessor squash-merges. A continuation of the task notes the same start
+    from this ledger. Reap needs nothing: it keeps a worktree by its own rules, and a stacked one
+    with no work of its own loses nothing.
+  - _Nothing to stack on._ `noBase: true` (#4: a predecessor `done` with no PR or pushed branch)
+    is an unstacked worktree spawn from `origin/<default>` with one constant preamble line saying
+    the predecessor left nothing to stack on. No gate: it names nothing git acts on.
+  - _Audit._ `baseBranch=true` (or `noBase=true`) on the request line, never the name, as
+    push-branch audits no branch.
+  - _Rejected:_ the ref after `--end-of-options` rather than the sha (#15's wording; the sha
+    is the same commit, read once, with no window between read and checkout); `-B` (claude's,
+    which would reset a branch of the name); failing open to the ref on disk (above); dropping
+    a non-scheduler `baseBranch` as an inherited PR is dropped (dropped, the session starts from
+    the default branch); a new spawn error code for that refusal (no client sends it).
 - **No `--permission-mode` flag by default** (revised from `/spawn`'s `auto`).
   Passing one unconditionally would override the machine's own `settings.json`
   default, so a box configured for `bypassPermissions` still got prompted for
@@ -8107,7 +8177,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   it is the safe outcome); a separate ledger note field (the same concept as `continuedPr`, and one
   that an older daemon still reads on rollback). Automatic continue of the old session (it cannot cross accounts); a new `mode` for the
   successor; the daemon-leg create; a failure code or `done` for the old task; stacking or `baseBranch`
-  for the successor (no daemon implements `baseBranch` yet, so the successor resets its own branch
+  for the successor (no daemon implemented `baseBranch` then, so the successor resets its own branch
   to the pushed one); moving a task that waits on a person; attachments carried over (listed under
   docs/scheduler.md's Later). Not changed: no relay store rule, and Raycast, which is spawn-only and
   reads no task states.

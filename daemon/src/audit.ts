@@ -192,6 +192,9 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
       // Presence only: the URL names a private repo, and the log is plaintext at rest.
       const inheritedNote = request.inheritedPr === undefined ? "" : "inheritedPr=true ";
+      // Presence only, as push-branch audits no branch: a name is a slug of a prompt more often than not.
+      const baseNote =
+        request.baseBranch !== undefined ? "baseBranch=true " : request.noBase === true ? "noBase=true " : "";
       // Counts only: names are treated as prompt text, and ids and hashes say nothing an operator needs.
       const files = request.attachments;
       const attachmentsNote =
@@ -206,6 +209,7 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
           taskNote +
           continuesNote +
           inheritedNote +
+          baseNote +
           attachmentsNote +
           promptNote,
       );

@@ -639,6 +639,47 @@ describe("branch-state emitter", () => {
     stopAll(w);
   });
 
+  describe("a stacked task (`stackedOn`)", () => {
+    /** Pushes `pred` as a predecessor's work, then launches `taskId` on a worktree at its tip, as a stacked spawn makes one. */
+    async function launchStacked(w: World, taskId: string, name: string): Promise<{ path: string; startedAt: string }> {
+      await w.fixture.pushBranch("pred");
+      const startedAt = await git(w.fixture.repoPath, "rev-parse", "refs/remotes/origin/pred");
+      const path = join(w.fixture.repoPath, ".claude", "worktrees", name);
+      await git(w.fixture.repoPath, "worktree", "add", "-q", "--no-track", "-b", `worktree-${name}`, path, startedAt);
+      await w.ledger.record(taskId);
+      await w.ledger.note(taskId, { repo: w.repo.path, path, stackedOn: startedAt });
+      return { path, startedAt };
+    }
+
+    test("its predecessor's commits are no work of its own: pushed as they are, nothing is pushed or merged", async () => {
+      const w = await world();
+      const { path } = await launchStacked(w, "t1", "x");
+      const emitter = start(w);
+      await emitter.check();
+      await git(path, "push", "-q", "origin", "worktree-x");
+      await w.ledger.note("t1", { prUrl: "https://github.com/org/myrepo/pull/2" });
+      await squashMergeOnOrigin(w, "pred");
+      await emitter.check();
+      await emitter.check();
+      expect(w.states.every((s) => !s.pushed && !s.merged)).toBe(true);
+      expect(w.ledger.notes()[0]).not.toHaveProperty("ahead");
+      expect(w.ledger.notes()[0]).not.toHaveProperty("merged");
+      stopAll(w);
+    });
+
+    test("a commit of its own on top is work: pushed, judged on its own tip", async () => {
+      const w = await world();
+      const { path } = await launchStacked(w, "t1", "x");
+      const emitter = start(w);
+      await emitter.check();
+      await w.fixture.pushBranch("worktree-x", { from: path, file: "own.txt" });
+      await emitter.check();
+      expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+      expect(w.ledger.notes()[0]).toMatchObject({ tip: await git(path, "rev-parse", "HEAD"), ahead: true });
+      stopAll(w);
+    });
+  });
+
   test("a revert of the only change is no work: the pre-revert commit stays the one judged, and is not merged", async () => {
     const w = await world();
     const path = await launch(w, "t1", "x");

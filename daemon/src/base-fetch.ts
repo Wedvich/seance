@@ -16,9 +16,11 @@ const FETCH_TIMEOUT_MS = 5_000;
 type FetchResult = { readonly ok: true } | { readonly ok: false; readonly detail: string; readonly before: number };
 
 /**
- * Fetches in flight per common dir. Parallel spawns into one clone share a
- * fetch rather than racing for `refs/remotes/origin/<b>.lock` — the loser of
- * that race would report a failure for a fetch that in fact landed.
+ * Fetches in flight per common dir and branch. Parallel spawns into one clone share a
+ * fetch of one branch rather than racing for `refs/remotes/origin/<b>.lock` — the loser of
+ * that race would report a failure for a fetch that in fact landed. Keyed by branch too: a
+ * stacked spawn's base (`fetchBase`) is not the default, and sharing the default's fetch
+ * would leave its own ref unfetched.
  */
 const inFlight = new Map<string, Promise<FetchResult>>();
 
@@ -31,13 +33,15 @@ const inFlight = new Map<string, Promise<FetchResult>>();
  * `networkGit` refuses a repo whose own config would run a command, and keeps ssh from prompting a foreground
  * `seanced run`'s terminal, as reap's fetch does.
  */
-function fetchDefault(
+function fetchBranch(
   repoPath: string,
   commonDir: string,
   branch: string,
   terminal: TerminalProbe | undefined,
 ): Promise<FetchResult> {
-  const running = inFlight.get(commonDir);
+  // NUL never occurs in a path or a ref name, so no two pairs share a key.
+  const key = `${commonDir}\0${branch}`;
+  const running = inFlight.get(key);
   if (running !== undefined) return running;
   const run = (async (): Promise<FetchResult> => {
     const before = await lastFetchedAt(commonDir);
@@ -50,8 +54,8 @@ function fetchDefault(
     );
     if ("refused" in result) return { ok: false, detail: refusalDetail(result), before };
     return result.exitCode === 0 ? { ok: true } : { ok: false, detail: execFailure(result), before };
-  })().finally(() => inFlight.delete(commonDir));
-  inFlight.set(commonDir, run);
+  })().finally(() => inFlight.delete(key));
+  inFlight.set(key, run);
   return run;
 }
 
@@ -111,7 +115,7 @@ export async function freshenBase(
       if (current.exitCode !== 0 || current.stdout.trim() !== `refs/heads/${branch}`) return undefined;
     }
 
-    const fetched = await fetchDefault(repo.path, commonDir, branch, terminal);
+    const fetched = await fetchBranch(repo.path, commonDir, branch, terminal);
     const fetchNote = fetched.ok ? undefined : lastFetchedNote(branch, fetched.detail, fetched.before);
     if (mode === "worktree") return fetchNote;
 
@@ -126,4 +130,27 @@ export async function freshenBase(
   } catch {
     return undefined;
   }
+}
+
+/** A stacked base on origin as this fetch left it: the commit `refs/remotes/origin/<b>` names, or why there is none. */
+export type BaseTip = { readonly ok: true; readonly sha: string } | { readonly ok: false; readonly message: string };
+
+/**
+ * Fetches a stacked spawn's base, `branch` (already `isBranchName`'s), and reads the commit origin's tip of it
+ * names (DESIGN.md, "Stacked worktrees"). Fail-closed, unlike `freshenBase`: a fetch that does not land is a
+ * refusal, never a spawn on the ref on disk, which may be a branch deleted on origin since or a tip from before
+ * the predecessor's last push — stacking on either silently is the hazard `baseBranch` exists to avoid. The
+ * ref is read exactly (`show-ref --verify`): no revision syntax, no tag or local branch of the name standing in.
+ */
+export async function fetchBase(repo: RepoEntry, branch: string, terminal?: TerminalProbe): Promise<BaseTip> {
+  const commonDir = await resolveCommonDir(repo.path).catch(() => null);
+  if (commonDir === null) return { ok: false, message: `${repo.name} is not a git repository` };
+  const fetched = await fetchBranch(repo.path, commonDir, branch, terminal);
+  if (!fetched.ok) return { ok: false, message: `could not fetch origin/${branch} (${fetched.detail})` };
+  const tip = await hardenedGit(repo.path, ["show-ref", "--verify", "-s", `refs/remotes/origin/${branch}`], 5_000);
+  const sha = tip.stdout.trim();
+  if (tip.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/u.test(sha)) {
+    return { ok: false, message: `origin/${branch} did not resolve after its fetch` };
+  }
+  return { ok: true, sha };
 }

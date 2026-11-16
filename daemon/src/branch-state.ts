@@ -107,19 +107,50 @@ async function rewritten(repoPath: string, branch: string, tip: string): Promise
   return result.exitCode === 0 && result.stdout.split("\n").includes(tip);
 }
 
+async function forkFrom(repoPath: string, tip: string, base: string): Promise<string | null> {
+  const fork = await hardenedGit(repoPath, ["merge-base", tip, base]);
+  const sha = fork.stdout.trim();
+  return fork.exitCode !== 0 || sha === "" ? null : sha;
+}
+
+/** A stacked task's fork: its start while it grows from it, `false` (no own work) at or behind it, else the default's. */
+async function stackedFork(
+  repoPath: string,
+  tip: string,
+  base: string,
+  stackedOn: string,
+): Promise<string | false | null> {
+  const grows = await isAncestor(repoPath, stackedOn, tip);
+  if (grows === null) return null;
+  if (grows) return stackedOn;
+  const behind = await isAncestor(repoPath, tip, stackedOn);
+  if (behind === null) return null;
+  return behind ? false : forkFrom(repoPath, tip, base);
+}
+
 /**
  * Own work: a tip the default branch does not already contain, whose tree differs from the one it forked at.
  * An empty commit or a revert of the branch's only change has no net change, and `classifyTip` reads it as
  * an empty "squash" of the default. Null when git could not answer: callers treat it as no work (the safe
  * direction) but it is not a judgement, and is never memoized.
  */
-async function holdsOwnWork(repoPath: string, tip: string, base: string): Promise<boolean | null> {
+async function holdsOwnWork(
+  repoPath: string,
+  tip: string,
+  base: string,
+  stackedOn: string | undefined,
+): Promise<boolean | null> {
   const ancestor = await isAncestor(repoPath, tip, base);
   if (ancestor === null) return null;
   if (ancestor) return false;
-  const fork = await hardenedGit(repoPath, ["merge-base", tip, base]);
-  const forkSha = fork.stdout.trim();
-  if (fork.exitCode !== 0 || forkSha === "") return null;
+  // A stacked task started at its predecessor's tip (`TaskNote.stackedOn`): what it holds up to there is the
+  // predecessor's work, so its fork is that commit while it still grows from it. One rebased off it (onto the
+  // default, once the predecessor merged) forks from the default as any task does; one reset behind it holds
+  // only the predecessor's.
+  const forkSha =
+    stackedOn === undefined ? await forkFrom(repoPath, tip, base) : await stackedFork(repoPath, tip, base, stackedOn);
+  if (forkSha === null) return null;
+  if (forkSha === false) return false;
   const trees = await hardenedGit(repoPath, ["rev-parse", `${tip}^{tree}`, `${forkSha}^{tree}`]);
   if (trees.exitCode !== 0) return null;
   const [tipTree, forkTree] = trees.stdout.split("\n");
@@ -287,11 +318,17 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     if (failures === 1) log.warn(`branch state: fetch failed in ${repo.name} (${outcome.brief})`);
   };
 
-  const ownsWork = async (repoPath: string, taskId: string, tip: string, baseSha: string): Promise<boolean | null> => {
+  const ownsWork = async (
+    repoPath: string,
+    taskId: string,
+    tip: string,
+    baseSha: string,
+    stackedOn: string | undefined,
+  ): Promise<boolean | null> => {
     const key = `${tip} ${baseSha}`;
     const known = ownWork.get(taskId);
     if (known?.key === key) return known.own;
-    const own = await holdsOwnWork(repoPath, tip, baseSha);
+    const own = await holdsOwnWork(repoPath, tip, baseSha, stackedOn);
     if (own !== null) ownWork.set(taskId, { key, own });
     return own;
   };
@@ -333,7 +370,8 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     // Own work (`holdsOwnWork`) gates both pushed and merged: a fresh branch is an ancestor of the default and an
     // empty "squash", as is a pushed empty commit, and it may reuse the name of a stale remote ref from an earlier
     // attempt. `ahead` is sticky once seen.
-    const own = ctx.base === null ? null : await ownsWork(ctx.repo.path, note.taskId, tip, ctx.base.sha);
+    const own =
+      ctx.base === null ? null : await ownsWork(ctx.repo.path, note.taskId, tip, ctx.base.sha, note.stackedOn);
     // A failed read is no work for the verdicts, exactly as before, but not a judgement.
     const liveAhead = own === true;
     const ahead = note.ahead === true || liveAhead;

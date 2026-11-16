@@ -128,9 +128,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   `TaskProgress.exit`, acted on by `failed` from exit status (M4 below, **Done**; DESIGN.md
   _Daemon_, "Exit status").
 - **`SpawnRequest.baseBranch?`**, `base_not_found` and the `"baseBranch"` capability are in the
-  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`). Still to build (Stacking, below): the
-  base fetched before launch as the default branch is (`base-fetch.ts`), so a stacked task never
-  starts from a stale `origin/<b>`, and how the worktree gets made.
+  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`), and the daemon acts on them (2026-11-15:
+  DESIGN.md _Daemon_, "Stacked worktrees"). Still to build (Stacking, below): the leader's half.
 - **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` and
   `push-unsubscribe` included. `enqueue` stays a `store-put`, never a leader op.
 
@@ -706,6 +705,19 @@ of M4 has landed.
     shell string.
   - _Decided (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
     knows it, so the PR is the handoff.
+  - _Daemon half built_ (2026-11-15; DESIGN.md _Daemon_, "Stacked worktrees", which is now the
+    record of it). `isSpawnRequest` takes `baseBranch` only as `isBranchName` passes it and only
+    beside `mode: "worktree"`, and the handler only from the scheduler's own task spawn (else
+    `launch_error`, never dropped); `fetchBase` fetches `+refs/heads/<b>:refs/remotes/origin/<b>`
+    keyed by common dir and branch, fail-closed (`base_not_found`, nothing left behind); the daemon
+    adds the worktree at the fetched tip's sha after `--end-of-options`, `-b worktree-<name>`, under
+    reap's lock; #3's spike showed `claude --worktree <name>` (2.1.325) reuses it, so the flag stays;
+    the seed names the base, `gh pr view <b>` as the handoff, `gh pr create --base <b>` and the
+    manual rebase once `<b>` merges; the launch ledger notes `stackedOn`, which branch-state uses so a
+    predecessor's commits are not the dependent's own work; `CAPABILITIES.baseBranch` is advertised.
+    Left, the leader: choose the base per #4, hold it to `isBranchName`, send it only to a machine
+    advertising the capability, decide what `base_not_found` does to the task, and the "nothing to
+    stack on" case (the daemon takes `noBase: true` for it).
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
   #13 lapse with it; **Done** 2026-10-20 (PR #249), recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
   `claude --safe-mode --no-session-persistence --output-format json -p /usage` with the exclave's config dir, and Claude
