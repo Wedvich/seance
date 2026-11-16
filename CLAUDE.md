@@ -44,8 +44,8 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   (close, reopen, `MachineStatus.cl`, the `closed` filter and `machine_closed` gate, the PWA switch,
   `seanced close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
   machine"; the leader's outside pass (item 2: `trigger: "drain"`, `Task.drained`, `drainView`, `seanced close --wait`) is built too, in DESIGN.md, "The drain's outside pass", and so is the session ask (item 3: `CAPABILITIES.drainAsk`, `now`, the
-  `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". What is left in the file is §6's sheet warning and
-  §12's time-to-empty measure. Read it before scheduler routing or shutdown work.
+  `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". What is left in the file is §6's sheet warning,
+  §12's time-to-empty measure and §13, the soft close by default (decided, not built). Read it before scheduler routing or shutdown work.
 - **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
