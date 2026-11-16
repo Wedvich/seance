@@ -18,8 +18,8 @@ a heredoc or a here-string: this shell cannot create the temporary file either o
 fails before it runs.
 
 Run one `seanced custodian` command per Bash call. Never wrap one in a loop, `$(...)`, `;` or `&&` chains, or a pipe
-other than the `printf '%s\n' ... |` above, and never pipe it into `tail` or `head`: this session refuses such
-commands, so the round stalls.
+other than the `printf '%s\n' ... |` above (never into `tail` or `head`): this session may refuse or stall on such
+commands.
 
 1. Run `seanced custodian sessions`. It prints JSON: for each pane its facts and `close`, the answer
    a close would get right now (`ok`, or the refusal), `flag`, the reason of the flag the session
@@ -27,7 +27,7 @@ commands, so the round stalls.
    fails, report the error with `done` (step 7) and stop.
 2. Look at a pane with `seanced custodian capture <pane>`, one pane per call. It prints the bottom of the visible screen
    as text (the last lines, where the final report, a draft or a dialog shows), with `truncated` true when lines
-   above were cut. For each pane it lists as `ours` whose `close`
+   above were cut (normal: judge from the bottom you get, never capture again to see more). For each pane it lists as `ours` whose `close`
    is `ok`, decide which one case applies:
    - `dead`: `seanced custodian close <pane>`.
    - finished (it gave its final report, asks nothing, and waits on nothing it is still responsible

@@ -505,6 +505,25 @@ describe("capture", () => {
     expect(result.text.split("\n")).toHaveLength(Math.floor((CAPTURE_MAX_BYTES + 1) / 201));
   });
 
+  test("a last line alone over the byte cap keeps its tail, cut at a character", () => {
+    const result = bottomOfScreen(`${"x".repeat(50)}\n${"\u2500".repeat(2000)}`);
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(CAPTURE_MAX_BYTES);
+    expect(result.text).toMatch(/^\u2500+$/);
+    expect(bottomOfScreen("\u2500".repeat(2000)).truncated).toBe(true);
+  });
+
+  test("an all-blank screen is empty and not truncated", () => {
+    expect(bottomOfScreen("  \n\n \n")).toEqual({ text: "", truncated: false });
+  });
+
+  test("the line cap drops the lines above and trailing blanks are never counted", () => {
+    const lines = Array.from({ length: CAPTURE_MAX_LINES + 5 }, (_, n) => `l${n}`);
+    const result = bottomOfScreen(`${lines.join("\n")}\n\n\n`);
+    expect(result.truncated).toBe(true);
+    expect(result.text.split("\n")).toEqual(lines.slice(-CAPTURE_MAX_LINES));
+  });
+
   test("a session of ours: the visible screen as text, counted, never audited or logged", async () => {
     const r = rig();
     r.state.screen = "the pane's text";
