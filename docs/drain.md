@@ -2,9 +2,10 @@
 
 **Status: build order items 1 (Close), 2 (the leader's outside pass and the report) and 3 (the session ask)
 are built** and recorded in DESIGN.md, "Closing a machine", "The drain's outside pass" and "The drain's session
-ask", as are §6's close warning and §12's time-to-empty line. This file keeps the index of names, the decisions
+ask", as are §6's close warning, §12's time-to-empty line and §13's wire, daemon and leader part (the soft close
+on the wire, `closed.drainAt`, `dr`, `drainStart`, `softClose`). This file keeps the index of names, the decisions
 the owner made, §11, §12's list of measures (every one now read from a line that exists), and what is not built:
-§6's "Later" and §13, the soft close (decided 2026-11-16, not built). Drafted 2026-11-13. Like
+§6's "Later" and §13's surfaces (the clients still send the plain, draining close). Drafted 2026-11-13. Like
 docs/leaving.md, it is the working record until the code lands; each part folded into DESIGN.md as it was built,
 and its text here went.
 
@@ -13,25 +14,25 @@ actually goes, and the two are complementary (§11).
 
 ## Names
 
-| Concept                          | Name                                                                                                                             |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| The machine's state              | **open** / **closed** (closed = takes no new scheduled work)                                                                     |
-| Setting it                       | **close**, **reopen**                                                                                                            |
-| Closing without draining (§13)   | **soft close**: the default close; nothing running is asked, interrupted or passed until the owner drains                        |
-| Starting the drain later (§13)   | **Drain** (ask, then pass, after the grace) and **Drain now** (no grace), on a closed machine                                    |
-| Drain start (§13)                | `MachineStatus.dr` (unix ms the drain began; only beside `cl`), `closed.drainAt` in `state.json`                                 |
-| Soft close on the wire (§13)     | `availability { open: false, soft: true }`; capability `softClose` (daemon honours it and reports `dr`; leader drains from `dr`) |
-| Moving the work off a closed box | **drain** (the act); a task moved by it is **drained**                                                                           |
-| Status key                       | `MachineStatus.cl` (unix ms the machine was closed)                                                                              |
-| Route reason                     | `closed`                                                                                                                         |
-| Daemon refusal of a spawn        | `machine_closed` (`SPAWN_ERROR_CODES`)                                                                                           |
-| App → daemon request op          | `availability` (payload `{ open: boolean; now?: true }`)                                                                         |
-| Successor trigger                | `succeeds.trigger: "drain"` (the leader's outside pass, and a session's own pass marked `drain` from a closed machine)           |
-| Capabilities                     | `close` (daemon), `drain` (leader routes), `drainPass` (leader passes), `drainAsk` (daemon asks and honours `now`) — all built   |
-| Audit origin (typed prompt)      | `drain`                                                                                                                          |
-| CLI                              | `seanced close [<machine>] [--now] [--wait]`, `seanced open [<machine>]`                                                         |
-| MCP                              | `set_machine_open { machine, open, now? }`                                                                                       |
-| PWA                              | "Open for work" switch in the machine's menu; "Drain now" on the close sheet                                                     |
+| Concept                          | Name                                                                                                                                                                                                                  |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The machine's state              | **open** / **closed** (closed = takes no new scheduled work)                                                                                                                                                          |
+| Setting it                       | **close**, **reopen**                                                                                                                                                                                                 |
+| Closing without draining (§13)   | **soft close**: `soft` on the wire (built); the default close once the clients send it (§13's surfaces); nothing running is asked, interrupted or passed until the owner drains                                       |
+| Starting the drain later (§13)   | **Drain** (ask, then pass, after the grace) and **Drain now** (no grace), on a closed machine: a plain or `now` `availability` close, built; the buttons are not                                                      |
+| Drain start                      | `MachineStatus.dr` (unix ms the drain began; only beside `cl`), `closed.drainAt` in `state.json`, `drainStart` (`shared/src/status-reader.ts`)                                                                        |
+| Soft close on the wire           | `availability { open: false, soft: true }`; capability `softClose` (daemon honours it and reports `dr`; leader drains from `drainStart`)                                                                              |
+| Moving the work off a closed box | **drain** (the act); a task moved by it is **drained**                                                                                                                                                                |
+| Status key                       | `MachineStatus.cl` (unix ms the machine was closed)                                                                                                                                                                   |
+| Route reason                     | `closed`                                                                                                                                                                                                              |
+| Daemon refusal of a spawn        | `machine_closed` (`SPAWN_ERROR_CODES`)                                                                                                                                                                                |
+| App → daemon request op          | `availability` (payload `{ open: boolean; now?: true; soft?: true }`)                                                                                                                                                 |
+| Successor trigger                | `succeeds.trigger: "drain"` (the leader's outside pass, and a session's own pass marked `drain` from a closed machine)                                                                                                |
+| Capabilities                     | `close` (daemon), `drain` (leader routes), `drainPass` (leader passes), `drainAsk` (daemon asks and honours `now`), `softClose` (daemon honours `soft` and reports `dr`; leader drains from `drainStart`) — all built |
+| Audit origin (typed prompt)      | `drain`                                                                                                                                                                                                               |
+| CLI                              | `seanced close [<machine>] [--now] [--wait]`, `seanced open [<machine>]`                                                                                                                                              |
+| MCP                              | `set_machine_open { machine, open, now? }`                                                                                                                                                                            |
+| PWA                              | "Open for work" switch in the machine's menu; "Drain now" on the close sheet                                                                                                                                          |
 
 Not "unavailable": offline and asleep machines already read as unavailable, and closed is a choice, not a
 condition. Not "draining" for the state: `drn` is the restart's launch gate (DESIGN.md, "Restart waits for task
@@ -78,6 +79,9 @@ One line each; the text is in DESIGN.md.
 - **§9 Threat model:** the invariants list ("Closing is the owner's act", "The drain's session ask is constant
   keys…") and `CLAUDE.md`.
 - **§12's time from close to empty:** "The drain's outside pass" (the daemon's `drain: empty` line).
+- **§13 (1), the wire, daemon and leader of the soft close:** "Closing a machine" (state, `soft`, `dr`, skew and
+  the daemon-rollback hazard), "The drain's outside pass" (`drainStart`) and "The drain's session ask" (the ask keyed
+  off the drain's start).
 - **Build order:** items 1 to 3 are built, in that order, each in its own PR.
 
 ## Left
@@ -89,36 +93,14 @@ running through the outage.
 
 ### 13. Soft close by default (N5)
 
-**Wire.** `availability { open: false, soft: true }` closes without draining. `soft` is accepted only as `true`
-(any other value is dropped, as `now` is) and never persisted. The plain `{ open: false }` keeps today's meaning,
-close and drain, so an older client that sends it still gets the behaviour its wording describes; a new client
-sends `soft` for the default close and leaves it off for **Drain**. On a machine already closed: `{ open: false }`
-starts the drain (if not started), `now` starts it with no grace, and `soft` on a machine already draining
-changes nothing (a drain is stopped only by reopening). `soft` beside `now` is `invalid_request`. The audit line
-gains ` soft=true` only when it was set, so existing lines stay byte-identical.
-
-**State.** `state.json`'s `closed` becomes `{ at, drainAt? }`; `drainAt` is set once per close and survives
-restarts like `at`. A `drainAt` `loadOrInitState` cannot read loads as not draining, with a warning: unlike
-`closed` (which fails closed so a damaged file never reopens a box), failing toward a drain would interrupt and
-move work on a damaged file, and the owner can press Drain. Reopen clears both.
-
-**Status.** `MachineStatus.dr` is `drainAt` in unix ms, sent only beside `cl` and, like `cl`, never trimmed by
-`fitStatus` (a trimmed `dr` would stop a drain the owner started). A set `dr` asks for a fresh status
-(`StatusLoop.refresh`).
-
-**Who starts on what.** The daemon's session ask starts at `drainAt`, not at the close; its deadline is
-`drainAt + DRAIN_INTERRUPT_MS` (`now`: the request time). The leader's outside pass reads the drain's start
-through one predicate, `drainStart(machine)`: `dr` when present; else `cl` for a machine that does not advertise
-`softClose` (an older daemon's close always drained); else none, and nothing is passed. `drainWaitMs` counts the
-grace from that start. A `session-pass` from a soft-closed machine is still marked `drain` (the session chose to
-pass, and the machine is closed); only the ask and the outside pass wait for `dr`.
-
-**Capability and skew.** `CAPABILITIES.softClose` on both: a daemon that honours `soft` and reports `dr`, and a
-leader that drains from `drainStart`. A client offers the soft close only to a target advertising `softClose`
-under a verified leader advertising it; otherwise it offers today's close, worded as today (an older daemon
-would drop `soft` and drain; an older leader would pass on `cl` alone). A leader change to an older version
-after a soft close drains that machine on `cl` after its grace: accepted, it is the old behaviour and the
-version floor makes it rare, and the PWA's drain row shows the passes as they happen.
+**Client offer and skew.** A client offers the soft close only to a target advertising `softClose` under a
+verified leader advertising it; otherwise it offers today's close, worded as today (an older daemon would drop
+`soft` and drain; an older leader would pass on `cl` alone). A leader change to an older version after a soft
+close drains that machine on `cl` after its grace: accepted, it is the old behaviour and the version floor makes
+it rare, and the PWA's drain row shows the passes as they happen. Built and recorded: the wire, `closed.drainAt`,
+`dr`, `drainStart`, the ask and the pass keyed off the drain's start and `CAPABILITIES.softClose` (DESIGN.md,
+"Closing a machine", including the daemon-rollback hazard, "The drain's outside pass", "The drain's session
+ask"). Until the surfaces below land, every client sends the plain close and reads every `cl` as a drain.
 
 **Surfaces.**
 
@@ -134,13 +116,8 @@ version floor makes it rare, and the PWA's drain row shows the passes as they ha
   likewise, `drain` and `now` `true` only.
 - §6's warning applies to a soft close too: the box keeps leading while closed.
 
-**Threat model.** No new power: `soft` only withholds the ask and the pass a close used to start. The op stays
-the owner's sealed act (CLAUDE.md, "Closing a machine"), whose invariants gain: `soft` is `true` only and never
-persisted, `MachineStatus.dr` is never trimmed, and the leader drains a machine only from `drainStart`.
-
-**Build.** Two PRs. (1) The wire, daemon and leader: `soft`, `closed.drainAt`, `dr`, `drainStart`, the ask
-keyed off the drain's start, `CAPABILITIES.softClose`, DESIGN.md and CLAUDE.md. (2) The surfaces: the PWA's
-sheet, drain row and menu, `seanced close --drain`, MCP `drain`, `drainView`'s soft state.
+**Build.** The wire, daemon and leader are built (item 1 of this section). What is left is (2), the surfaces above:
+the PWA's sheet, drain row and menu, `seanced close --drain`, MCP `drain`, `drainView`'s soft state.
 
 ## Kept here
 
@@ -153,8 +130,8 @@ independent: a closed machine that restarts still closes its gate for the restar
 
 ### 12. Measures
 
-From audit and leader logs, with no new storage: drains per week (`availability` request lines with
-`open=false`); tasks moved per drain by step (`trigger=drain` pass lines, with the self path told apart by the
+From audit and leader logs, with no new storage: drains per week (`availability` lines with `outcome=closed`
+without `soft=true`, plus `outcome=drain_started`); tasks moved per drain by step (`trigger=drain` pass lines, with the self path told apart by the
 daemon's `origin=successor` push and the ask by its `audit drain` lines); stuck items by reason; time from close
 to empty (the closed daemon's `drain: empty cl=… after_ms=… peak=…` line, `grep 'drain: empty'` in its log; one
 per `cl` per process, so fold repeats by `cl`: DESIGN.md, "The drain's outside pass").
