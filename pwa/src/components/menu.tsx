@@ -293,6 +293,19 @@ export function MenuDivider(): JSX.Element {
   return <div className="menu-divider" role="separator" />;
 }
 
+/** A labelled run of items that act on one thing. The heading is no item, so roving focus skips it. */
+export function MenuGroup(props: { label: string; children: ComponentChildren }): JSX.Element {
+  const headingId = useId();
+  return (
+    <div className="menu-group" role="group" aria-labelledby={headingId}>
+      <div id={headingId} className="menu-heading label">
+        {props.label}
+      </div>
+      {props.children}
+    </div>
+  );
+}
+
 /** A setting the menu shows and flips in place: it stays open, so the item can be flipped back. */
 export function MenuSwitchItem(props: {
   label: string;
