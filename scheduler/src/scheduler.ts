@@ -32,6 +32,7 @@ import {
   type SuccessorTrigger,
   type Target,
   closedAt,
+  drainStart,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -1982,7 +1983,7 @@ export class Scheduler {
 
   /**
    * The drain's outside pass (docs/drain.md §4 step B; DESIGN.md, "Closing a machine"): each machine whose
-   * status carries `cl` has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
+   * whose drain has started (`drainStart`) has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
    * has gone by (`drainDue`). Not gated on placement: the successor waits `ready` when no machine can take
    * it, which is what routing's `closed` filter says. Detached (`#drainPasses`), like the quota trigger's
    * passes. Named so it never reads as `drain()`, the test quiescence helper.
@@ -1995,7 +1996,7 @@ export class Scheduler {
       .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id));
     for (const machine of this.#fleet.machines()) {
       const cl = closedAt(machine);
-      if (cl === null || this.#drainPasses.has(machine.deviceId)) continue;
+      if (cl === null || drainStart(machine) === null || this.#drainPasses.has(machine.deviceId)) continue;
       const task = running.find(
         (t) =>
           drainDue(t, machine, now, config) &&

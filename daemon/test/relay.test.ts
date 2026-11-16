@@ -830,6 +830,7 @@ describe("daemon ↔ relay integration", () => {
         "close",
         "drain",
         "drainPass",
+        "softClose",
         "messageRoute",
         "messages",
         "messageReply",

@@ -1,4 +1,4 @@
-import { CAPABILITIES, closedAt, type DrainRefusal, type Machine } from "@seance/shared";
+import { CAPABILITIES, closedAt, drainStart, type DrainRefusal, type Machine } from "@seance/shared";
 import type { SchedulerConfig } from "./config.ts";
 import type { Task } from "./task.ts";
 
@@ -6,11 +6,12 @@ import type { Task } from "./task.ts";
  * The drain's outside pass dedupe and clock (docs/drain.md §4 step B; DESIGN.md, "Closing a machine"):
  * pure, so the leader only does the I/O. A stamp on the task (`Task.drained`) says which close an
  * attempt was for and when, so one close costs one attempt per `drainRetryMs`, across terms. Named
- * so it never reads as `Scheduler.drain()`, the test quiescence helper.
+ * so it never reads as `Scheduler.drain()`, the test quiescence helper. The stamp is keyed on `cl`, not the drain's
+ * start: a close has one drain (`closed.drainAt` is set once per close), and `drainView` compares `drained.at` to `cl`.
  */
 
 /**
- * How long after `cl` the leader leaves a machine's sessions to pass themselves. The one predicate:
+ * How long after the drain's start (`drainStart`) the leader leaves a machine's sessions to pass themselves. The one predicate:
  * "wait or pass now" is decided here and nowhere else.
  */
 export function drainWaitMs(_machine: Machine, config: SchedulerConfig): number {
@@ -28,7 +29,8 @@ export function drainDue(task: Task, machine: Machine, now: number, config: Sche
   if (task.assignment?.deviceId !== machine.deviceId) return false;
   if (task.state !== "running" && task.state !== "needs-input") return false;
   if (task.spec.mode === "here" || task.successor !== undefined) return false;
-  if (now < cl + drainWaitMs(machine, config)) return false;
+  const start = drainStart(machine);
+  if (start === null || now < start + drainWaitMs(machine, config)) return false;
   const stamp = task.drained;
   if (stamp === undefined || stamp.at !== cl) return true;
   return stamp.held !== true && now - stamp.tried >= config.drainRetryMs;

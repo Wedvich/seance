@@ -129,6 +129,19 @@ describe("availability audit lines", () => {
     ]);
   });
 
+  test("soft=true is appended after now, only when set", async () => {
+    const out: string[] = [];
+    const audit = availabilityAudit("relay", (line) => void out.push(line));
+    await audit(false, "closed", undefined, true);
+    await audit(true, "reopened", false, true);
+    await audit(false, "unchanged", false, false);
+    expect(out).toEqual([
+      "audit availability origin=relay open=false outcome=closed soft=true",
+      "audit availability origin=relay open=true outcome=reopened soft=true",
+      "audit availability origin=relay open=false outcome=unchanged",
+    ]);
+  });
+
   test("now=true is appended only when it was set, so every other line is byte-identical", async () => {
     const out: string[] = [];
     const audit = availabilityAudit("relay", (line) => void out.push(line));

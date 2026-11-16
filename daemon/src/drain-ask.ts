@@ -9,12 +9,12 @@ import { capturePane, tmux } from "./tmux.ts";
 
 /**
  * The drain's session ask (DESIGN.md, "The drain's session ask"; docs/drain.md is the spec's remainder): while
- * this machine is closed, the daemon types one constant prompt into each tasked session's pane so the session
+ * this machine is draining (a close that is not soft, or a later drain request), the daemon types one constant prompt into each tasked session's pane so the session
  * commits and passes itself (`pass_to_successor`), which the outside pass cannot do for a dirty tree.
  *
  * Invariant (CLAUDE.md): the only keys that ever go in are `DRAIN_PROMPT` (`send-keys -l`), Enter, the graceful
  * despawn's Escape and its Ctrl+C, never a field of any frame. Only into a live pane whose launch ledger holds a
- * worktree launch of its task (`askable`), only while closed, the text only after that pane's `idle` carrying
+ * worktree launch of its task (`askable`), only while draining, the text only after that pane's `idle` carrying
  * `turnEnded` and never while its last frame is `needs-input` (the drain can deny a permission, never grant one).
  * Enter goes in only after every re-check, the screen's own input box among them. Never a second Ctrl+C, which
  * exits Claude Code; never an Escape in the draft clear (two quick Escapes open its Rewind menu). One audit line
@@ -32,7 +32,7 @@ export const DRAIN_PROMPT =
   "record of where you stand and what comes next, including any question you were waiting on the person to " +
   "answer, and end your turn. Do not start anything new.";
 
-/** How long a turn may run after the close before it is interrupted. */
+/** How long a turn may run after the drain's start before it is interrupted. */
 export const DRAIN_INTERRUPT_MS = 300_000;
 /** How long an interrupted pane gets to reach a turn-ended idle before it is skipped (step B covers it). */
 export const DRAIN_SKIP_MS = 30_000;
@@ -199,8 +199,8 @@ export async function drainInputShows(pane: string): Promise<boolean> {
 }
 
 export interface DrainAskDeps {
-  /** This machine's `cl`, or null while open. */
-  readonly closed: () => number | null;
+  /** This machine's close and drain start while it drains (`drainingOf`); null while open or soft-closed. */
+  readonly draining: () => { readonly cl: number; readonly drainAt: number } | null;
   readonly panes: () => Promise<readonly BoundPane[]>;
   /** `EndedTasks.askable`: a worktree launch in the ledger, not reported done, not being closed. */
   readonly askable: (taskId: string) => boolean;
@@ -229,8 +229,8 @@ export interface DrainAsk {
     reason: NeedsInputReason | undefined,
     closing: boolean,
   ) => void;
-  /** This machine was closed at `cl` (or `now` was asked of an already-closed one): enumerate and ask. */
-  readonly closed: (cl: number, now: boolean) => Promise<void>;
+  /** This machine's drain at `cl` started, or `now` was asked of a draining one: enumerate and ask. */
+  readonly drain: (cl: number, now: boolean) => Promise<void>;
   /** Reopened: every pending ask and timer is dropped; a prompt already typed stays typed. */
   readonly reopened: () => void;
   /**
@@ -239,7 +239,7 @@ export interface DrainAsk {
    * the custodian's again. Read-only, for the custodian's `untouchable` (C7).
    */
   readonly holds: (pane: string) => boolean;
-  /** A daemon that starts closed asks again; one ask per pane per process per `cl`. */
+  /** A daemon that starts draining asks again; one ask per pane per process per `cl`. */
   readonly start: () => void;
   readonly stop: () => void;
 }
@@ -312,7 +312,7 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
   };
 
   const current = (pane: string, entry: Entry): boolean =>
-    !stopped && entries.get(pane) === entry && deps.closed() === entry.cl;
+    !stopped && entries.get(pane) === entry && deps.draining()?.cl === entry.cl;
 
   const armSkip = (pane: string, entry: Entry): void => {
     entry.cancelSkip = after(skipMs, () => {
@@ -477,13 +477,15 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     else if (questionNow(pane)) void interrupt(pane, entry);
   };
 
-  const closed = async (cl: number, now_: boolean): Promise<void> => {
+  const drain = async (cl: number, now_: boolean): Promise<void> => {
     if (stopped) return;
+    const d = deps.draining();
+    if (d === null || d.cl !== cl) return;
     if (currentCl !== cl) {
       clearEntries();
       asked.clear();
       currentCl = cl;
-      deadlineAt = cl + interruptMs;
+      deadlineAt = d.drainAt + interruptMs;
     }
     if (now_) deadlineAt = now();
     let panes: readonly BoundPane[];
@@ -494,7 +496,7 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       return;
     }
     // A reopen, a newer close or a stop may have come in while the panes were read.
-    if (stopped || deps.closed() !== cl || currentCl !== cl) return;
+    if (stopped || deps.draining()?.cl !== cl || currentCl !== cl) return;
     for (const pane of panes) {
       const taskId = pane.taskId;
       if (pane.dead || taskId === null || !PANE_ID.test(pane.id)) continue;
@@ -545,7 +547,7 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       if (idleNow(pane)) void type(pane, entry);
       else maybeInterrupt(pane, entry);
     },
-    closed,
+    drain,
     holds: (pane): boolean => entries.has(pane),
     reopened: (): void => {
       clearEntries();
@@ -555,8 +557,8 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       deadlineAt = null;
     },
     start: (): void => {
-      const cl = deps.closed();
-      if (cl !== null) void closed(cl, false);
+      const d = deps.draining();
+      if (d !== null) void drain(d.cl, false);
     },
     stop: (): void => {
       stopped = true;
@@ -572,9 +574,9 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
  * and replayed once the ask is wired.
  */
 export interface LateDrainAsk {
-  readonly closed: (cl: number, now: boolean) => void;
+  readonly drain: (cl: number, now: boolean) => void;
   readonly reopened: () => void;
-  /** `ask` is undefined where none is wired; `cl` is the machine's close at this moment. */
+  /** `ask` is undefined where none is wired; `cl` is the draining close at this moment, null when not draining. */
   readonly wire: (ask: DrainAsk | undefined, cl: number | null) => void;
 }
 
@@ -582,9 +584,9 @@ export function createLateDrainAsk(): LateDrainAsk {
   let ask: DrainAsk | undefined;
   let nowPending = false;
   return {
-    closed: (cl, now): void => {
+    drain: (cl, now): void => {
       if (ask === undefined) nowPending ||= now;
-      else void ask.closed(cl, now);
+      else void ask.drain(cl, now);
     },
     reopened: (): void => {
       nowPending = false;
@@ -594,7 +596,7 @@ export function createLateDrainAsk(): LateDrainAsk {
       ask = wired;
       const replay = nowPending;
       nowPending = false;
-      if (replay && cl !== null) void wired?.closed(cl, true);
+      if (replay && cl !== null) void wired?.drain(cl, true);
     },
   };
 }
