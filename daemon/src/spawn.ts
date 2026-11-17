@@ -7,6 +7,7 @@ import {
   DEFAULT_MODEL,
   isTaskId,
   STANDING_INSTRUCTION,
+  WORKTREE_AND_BRANCH_GONE,
   type RepoEntry,
   type SpawnRequest,
 } from "@seance/shared";
@@ -721,7 +722,7 @@ async function readdLocked(repo: RepoEntry, path: string, branch: string): Promi
   if (kept.exitCode !== 0 || tip === "") {
     throw new SpawnFailure(
       "not_continuable",
-      `its worktree ${path} and its branch are both gone (merged and swept by reap, or deleted)`,
+      `its worktree ${path} ${WORKTREE_AND_BRANCH_GONE} (merged and swept by reap, or deleted)`,
     );
   }
   // A directory removed by hand stays registered, which `worktree add` refuses and which keeps the branch "in use".

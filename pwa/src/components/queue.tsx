@@ -664,18 +664,7 @@ function QueueCard(props: {
           {row.flag.note !== null && <>: {row.flag.note}</>}
         </p>
       )}
-      {continuing !== null && (
-        <p className="fleet-card-body">
-          <button
-            type="button"
-            className="queue-reveal"
-            aria-label={`${continuing.text}, show in queue`}
-            onClick={() => props.onReveal(continuing.id)}
-          >
-            {continuing.text}
-          </button>
-        </p>
-      )}
+      {continuing !== null && <Lineage line={continuing} onReveal={props.onReveal} />}
       {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
       {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
       {row.body !== null && (

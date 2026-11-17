@@ -4,9 +4,11 @@ import {
   continuationSpec,
   continuationUnderway,
   continueOffer,
+  goneContinuation,
   newestLanded,
   offeredSpec,
   waitingContinuation,
+  WORKTREE_AND_BRANCH_GONE,
   type OfferContext,
 } from "./continue-task.ts";
 import { blockedBrief } from "./pr-blocked.ts";
@@ -231,6 +233,28 @@ describe("continueOffer, once", () => {
     expect(continueOffer(old, able, [old, continuation("running", {}, "t-other")]).ok).toBe(true);
   });
 
+  test("one refused because the worktree and branch are both gone withholds it for good, naming itself", () => {
+    const message = `its worktree /r/.claude/worktrees/x ${WORKTREE_AND_BRANCH_GONE} (merged and swept by reap, or deleted)`;
+    const gone = continuation("failed", { failure: { code: "not_continuable", message } }, "t-old", "t-gone");
+    const offer = continueOffer(old, able, [old, gone]);
+    expect(offer).toEqual({
+      ok: false,
+      reason:
+        "task t-gone could not continue it: its worktree and its branch are both gone, so nothing is left to resume",
+    });
+    expect(goneContinuation(old, [old, gone])).toBe(gone);
+    // A refusal that can clear (a lock, an open session) still re-offers; so does the same words under another code.
+    const locked = continuation("failed", { failure: { code: "not_continuable", message: "its worktree is locked" } });
+    const otherCode = continuation("failed", { failure: { code: "continue_expired", message } });
+    for (const y of [locked, otherCode]) {
+      expect(goneContinuation(old, [old, y])).toBeUndefined();
+      expect(continueOffer(old, able, [old, y]).ok).toBe(true);
+    }
+    // Another task's gone continuation says nothing of this one's session.
+    const elsewhere = continuation("failed", { failure: { code: "not_continuable", message } }, "t-other");
+    expect(continueOffer(old, able, [old, elsewhere]).ok).toBe(true);
+  });
+
   test("along a chain the newest landed task holds the offer", () => {
     const y = continuation("failed", { failure: { code: "session_failed", message: "m" }, assignment }, "t-old", "t-y");
     const z = continuation("running", {}, "t-y", "t-z");
@@ -405,6 +429,30 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
       ["the leader lacks it", stuck(), handoffable, [], { now: 2, leaderHandoff: false }],
       ["the machine lacks continueHandoff", stuck(), able, [], context],
       ["a continuation waits in the list", stuck(), handoffable, [continuationOf("t-c", "queued")], context],
+      [
+        "a continuation was refused as gone",
+        stuck(),
+        handoffable,
+        [
+          {
+            ...continuationOf("t-c", "failed"),
+            failure: { code: "not_continuable", message: `its worktree /p ${WORKTREE_AND_BRANCH_GONE}` },
+          },
+        ],
+        context,
+      ],
+      [
+        "a continuation of the pointer's session was refused as gone",
+        stuck({ continuedBy: { task: "t-c1", createdAt: 2 } }),
+        handoffable,
+        [
+          {
+            ...continuationOf("t-c2", "failed", "t-c1"),
+            failure: { code: "not_continuable", message: `its worktree /p ${WORKTREE_AND_BRANCH_GONE}` },
+          },
+        ],
+        context,
+      ],
       [
         "the pointer says live",
         stuck({ continuedBy: { task: "t-c", createdAt: 2, live: true } }),

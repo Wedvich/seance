@@ -2621,6 +2621,7 @@ describe("M4 shapes", () => {
       { code: "trait_absent", trait: "atlas" },
       { code: "trait_unhealthy", trait: "atlas" },
       { code: "continue_elsewhere" },
+      { code: "continue_clone_gone" },
       { code: "continue_unsupported" },
       { code: "attachments_unsupported" },
     ];

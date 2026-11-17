@@ -6,6 +6,7 @@ import {
   TASK_PHASES,
   TASK_SPEC_LIMITS,
   continueOffer,
+  goneContinuation,
   knownAccounts,
   passOffer,
   taskPrBlock,
@@ -150,8 +151,12 @@ export interface QueueRow {
   readonly passedTo: LineageLine | null;
   /** What its worktree started from, by the leader's `Task.stack`, one line; null until a stacked dispatch ran. */
   readonly stackedOn: LineageLine | null;
-  /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
-  readonly continuing: { readonly id: string; readonly text: string } | null;
+  /**
+   * A continuation of it still in the queue, one line naming it and revealing its row on tap; else, when one was
+   * refused because the worktree and branch are gone, one line saying so (no reveal: that card may sit in Older);
+   * null for any other task.
+   */
+  readonly continuing: LineageLine | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
   readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
@@ -501,7 +506,11 @@ function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"
   // A task whose continuation landed (`continuedBy`) is continued by whatever waits on that link, not on itself.
   const link = task.continuedBy === undefined ? undefined : tasks.find((other) => other.id === task.continuedBy?.task);
   const waiting = waitingContinuation(link ?? task, tasks);
-  return waiting === undefined ? null : { id: waiting.id, text: `Continuing as ${taskTitle(waiting)} · waiting` };
+  if (waiting !== undefined) return { text: `Continuing as ${taskTitle(waiting)} · waiting`, reveal: waiting.id };
+  // Why Continue is gone from this card; the daemon's refusal, with the path, is on the refused one's.
+  return goneContinuation(task, tasks) === undefined
+    ? null
+    : { text: "Can't continue: its worktree and its branch are gone", reveal: null };
 }
 
 function batchLine(task: Task): string | null {

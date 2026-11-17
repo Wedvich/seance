@@ -2939,6 +2939,11 @@ export type Reason =
   /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
   | { readonly code: "continue_elsewhere" }
   /**
+   * A continue task's target (machine, exclave) no longer lists the clone the session ran in (its name, with the
+   * task's origin). Only on the target: everywhere else is `continue_elsewhere`.
+   */
+  | { readonly code: "continue_clone_gone" }
+  /**
    * The task passes on work from this exclave's account (`succeeds.account`, the automatic
    * trigger's only): that account ran out, so it is not where the work goes on. A manual or
    * session pass never has it: the quota filter already rejects a full account.

@@ -190,7 +190,10 @@ function judge(
   if (at !== undefined && exclave.id !== at.exclave && !rejected.some((r) => r.code === "continue_elsewhere")) {
     rejected.push({ code: "continue_elsewhere" });
   }
-  if (clone === undefined) rejected.push({ code: "repo_absent" });
+  // Elsewhere already says why; `repo_absent` there would read as this machine lacking a clone it may well have.
+  const elsewhere = rejected.some((r) => r.code === "continue_elsewhere");
+  if (clone === undefined && !elsewhere)
+    rejected.push({ code: at === undefined ? "repo_absent" : "continue_clone_gone" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
   rejected.push(...traitFilter(task, machine, exclave, index, pass.now));

@@ -32,7 +32,7 @@ import {
   RESCAN_IDLE,
   type QueueState,
 } from "../src/state.ts";
-import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText } from "@seance/shared";
+import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText, WORKTREE_AND_BRANCH_GONE } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -1051,8 +1051,8 @@ describe("continuing a failed task", () => {
     });
     for (const held of ["queued", "blocked", "ready"] as const) {
       expect(rowOf([failed, { ...waiting, state: held }], "f", CAN)?.continuing, held).toEqual({
-        id: "c",
         text: "Continuing as Fix the thing again · waiting",
+        reveal: "c",
       });
     }
     expect(rowOf([failed, waiting], "c", CAN)?.continuing).toBeNull();
@@ -1071,6 +1071,20 @@ describe("continuing a failed task", () => {
     expect(rowOf([failed, taker, waiting], "f", CAN)?.continuing).toBeNull();
     // Past QUEUE_MAX_TASKS the continuation isn't listed: nothing to name, and the offer stands.
     expect(rowOf([failed], "f", CAN)?.continuing).toBeNull();
+  });
+
+  test("a continuation refused because the worktree and branch are gone withdraws it for good, and says so", () => {
+    const gone = continuation({
+      state: "failed",
+      failure: {
+        code: "not_continuable",
+        message: `its worktree /r/.claude/worktrees/x ${WORKTREE_AND_BRANCH_GONE} (merged and swept by reap, or deleted)`,
+      },
+    });
+    const row = rowOf([failed, gone], "f", CAN);
+    expect(row?.canContinue).toBe(false);
+    // No reveal: a failed card may sit in Older, where a tap would scroll to nothing.
+    expect(row?.continuing).toEqual({ text: "Can't continue: its worktree and its branch are gone", reveal: null });
   });
 
   test("a cancelled task with an assignment is continuable only on a machine advertising continueCancelled", () => {
@@ -1144,7 +1158,20 @@ describe("continuing an awaiting-merge task whose PR is blocked", () => {
     )
       .sections.flatMap((section) => section.rows)
       .find((r) => r.id === "w");
-    expect(row?.continuing).toEqual({ id: "c2", text: "Continuing as Unblock PR #7 · waiting" });
+    expect(row?.continuing).toEqual({ text: "Continuing as Unblock PR #7 · waiting", reveal: "c2" });
+  });
+
+  test("Unblock is withdrawn once a continuation of the session it would resume was refused as gone", () => {
+    const gone = task("c1", {
+      state: "failed",
+      failure: { code: "not_continuable", message: `its worktree /p ${WORKTREE_AND_BRANCH_GONE}` },
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "w", at: placedAt } },
+    });
+    const row = deriveQueue(state(ok([blocked, gone]), {}, { machines: [machine({ capabilities: HANDOFF })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((r) => r.id === "w");
+    expect(row).toMatchObject({ canContinue: false, inlinePrimary: false });
+    expect(row?.continuing?.text).toBe("Can't continue: its worktree and its branch are gone");
   });
 
   test("a failed task's Continue stays the quiet one", () => {
