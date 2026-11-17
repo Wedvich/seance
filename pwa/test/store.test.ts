@@ -270,6 +270,76 @@ describe("layers and history", () => {
     expect(fake.index()).toBe(0);
   });
 
+  test("Queue and Machines share one entry over the form: a switch replaces it, and back lands on the form", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openQueue();
+    store.openMachines();
+    store.openQueue();
+    store.openMachines();
+    expect(fake.entries()).toMatchObject([null, { depth: 1 }]);
+    expect(store.getState()).toMatchObject({ queue: false, machines: true });
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, machines: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("Settings over a screen closes first, and a screen opened over Settings takes its entry", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openSettings();
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: false });
+    expect(fake.index()).toBe(1);
+
+    store.openSettings();
+    store.openQueue();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, settings: false });
+    expect(fake.index()).toBe(1);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, settings: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a switch closes the dialog over the screen it leaves and gives back that dialog's entry", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.openQueue();
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, accounts: { renaming: null } });
+    fake.settle(store);
+    expect(fake.index()).toBe(1);
+    expect(store.getState().queue).toBe(true);
+  });
+
+  test("back from a Queue opened over a verdict returns to it; the menu's Prompt lands on the form", async () => {
+    fake = fakeHistory();
+    const { store } = await followedAndListed(new ScriptedClient());
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().queue).toBe(false);
+    expect(store.getState().verdict).not.toBeNull();
+
+    store.openQueue();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, verdict: null });
+    expect(fake.index()).toBe(0);
+  });
+
   test("a chart closed before its answer stays closed", async () => {
     fake = fakeHistory();
     const store = new Store(idleClient());

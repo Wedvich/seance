@@ -140,6 +140,43 @@ function layerEntry(state: unknown): LayerEntry | null {
   };
 }
 
+/** Every open layer holds one history entry, so this is also how deep the current entry should be. */
+function openLayers(state: AppState): number {
+  const { sheet, settings, machines, queue, verdict, accounts, older } = state;
+  return (
+    (sheet === null ? 0 : 1) +
+    (older.sheet === null ? 0 : 1) +
+    (settings ? 1 : 0) +
+    (machines ? 1 : 0) +
+    (queue ? 1 : 0) +
+    (verdict === null ? 0 : 1) +
+    (accounts.renaming === null ? 0 : 1)
+  );
+}
+
+/** The patch closing the top layer, null with none open. Closing the Queue also closes Older's list (the caller's). */
+function closeTop(state: AppState): Partial<AppState> | null {
+  // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
+  if (state.accounts.renaming !== null) return { accounts: { ...state.accounts, renaming: null, notice: null } };
+  const { sheet } = state;
+  if (sheet !== null) {
+    // Cleared on the way out, not on the next open: a failure that landed while
+    // another layer was up would otherwise be reset before it was ever shown.
+    const rescan = sheet === "machine" && state.rescan.kind === "failed" ? RESCAN_IDLE : state.rescan;
+    return { sheet: null, rescan };
+  }
+  // Opened over the Queue screen, so it closes first.
+  if (state.older.sheet !== null) return { older: { ...state.older, sheet: null } };
+  // The modal over every screen: opening Queue or Machines closes it, so it is never under one.
+  if (state.settings) return { settings: false };
+  if (state.machines) return { machines: false, history: null };
+  // Opened over a verdict, never under one, so it closes first.
+  // A notification's focus never listed (the task was pruned) must not scroll some later visit.
+  if (state.queue) return { queue: false, queueNotice: null, focusedTask: null };
+  if (state.verdict !== null) return { verdict: null };
+  return null;
+}
+
 const HISTORY_UNREADABLE = "Couldn't read the machine's answer. Update seanced and the app to matching versions.";
 
 const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
@@ -816,22 +853,20 @@ export class Store {
     if (wide) void this.refreshQueue();
   }
 
-  /** The phone's Machines screen, from the header menu: one entry, popped by back. */
+  /** The phone's Machines screen, from the header menu or a link (`#openScreen`). */
   openMachines(): void {
-    if (!this.#state.machines) this.#pushLayer();
-    this.#patch({ machines: true });
+    this.#openScreen("machines");
     this.#refreshClosedSessions();
   }
 
-  /** The Queue screen is a layer like settings: one entry, popped by back. */
+  /** The phone's Queue screen, from the header menu, a verdict or a link (`#openScreen`). */
   openQueue(): void {
     // Already a column beside the form: a layer there would be an invisible back stop.
     if (this.#state.wide) {
       void this.refreshQueue();
       return;
     }
-    if (!this.#state.queue) this.#pushLayer();
-    this.#patch({ queue: true });
+    this.#openScreen("queue");
     void this.refreshQueue();
   }
 
@@ -1029,16 +1064,7 @@ export class Store {
   }
 
   #openLayers(): number {
-    const { sheet, settings, machines, queue, verdict, accounts, older } = this.#state;
-    return (
-      (sheet === null ? 0 : 1) +
-      (older.sheet === null ? 0 : 1) +
-      (settings ? 1 : 0) +
-      (machines ? 1 : 0) +
-      (queue ? 1 : 0) +
-      (verdict === null ? 0 : 1) +
-      (accounts.renaming === null ? 0 : 1)
-    );
+    return openLayers(this.#state);
   }
 
   /** Before the patch that opens the layer, so the depth counts it. */
@@ -1069,41 +1095,46 @@ export class Store {
   }
 
   #closeTopLayer(): void {
-    // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
-    if (this.#state.accounts.renaming !== null) {
-      this.#patch({ accounts: { ...this.#state.accounts, renaming: null, notice: null } });
+    const patch = closeTop(this.#state);
+    if (patch === null) return;
+    this.#patch(patch);
+    if (patch.queue === false) this.#older.close();
+  }
+
+  /**
+   * Queue and Machines are the phone's peers of the prompt screen: one entry over its flow (the verdict
+   * included) between them, never one stacked on the other. Whatever sits over that flow — the other
+   * screen, Settings, a sheet, a dialog — closes in one patch, so the switch is one screen change, and
+   * the lowest of their entries is kept for the target; back from either lands on Prompt.
+   */
+  #openScreen(screen: "queue" | "machines"): void {
+    const opened: Partial<AppState> = screen === "queue" ? { queue: true } : { machines: true };
+    const base = this.#state.verdict === null ? 0 : 1;
+    const over = this.#openLayers() - base;
+    if (over === 0) {
+      this.#pushLayer();
+      this.#patch(opened);
       return;
     }
-    const sheet = this.#state.sheet;
-    if (sheet !== null) {
-      // Cleared on the way out, not on the next open: a failure that landed while
-      // another layer was up would otherwise be reset before it was ever shown.
-      const rescan = sheet === "machine" && this.#state.rescan.kind === "failed" ? RESCAN_IDLE : this.#state.rescan;
-      this.#patch({ sheet: null, rescan });
-      return;
+    let next = this.#state;
+    let patch: Partial<AppState> = {};
+    // The target is the lowest layer over the flow, so closing from the top never reaches it while others remain.
+    while (openLayers(next) - base > (next[screen] ? 1 : 0)) {
+      const step = closeTop(next);
+      if (step === null) break;
+      next = { ...next, ...step };
+      patch = { ...patch, ...step };
     }
-    // Opened over the Queue screen, so it closes first.
-    if (this.#state.older.sheet !== null) {
-      this.#patch({ older: { ...this.#state.older, sheet: null } });
-      return;
-    }
-    // Above settings, so it closes first.
-    if (this.#state.machines) {
-      this.#patch({ machines: false, history: null });
-      return;
-    }
-    if (this.#state.settings) {
-      this.#patch({ settings: false });
-      return;
-    }
-    // Opened over a verdict, never under one, so it closes first.
-    if (this.#state.queue) {
-      // A notification's focus never listed (the task was pruned) must not scroll some later visit.
-      this.#patch({ queue: false, queueNotice: null, focusedTask: null });
-      this.#older.close();
-      return;
-    }
-    if (this.#state.verdict !== null) this.#patch({ verdict: null });
+    const queueClosed = this.#state.queue && screen !== "queue";
+    this.#patch({ ...patch, ...opened });
+    if (queueClosed) this.#older.close();
+    if (over > 1) history.go(-(over - 1));
+  }
+
+  /** The menu's Prompt: everything over the form closes, a verdict too, so it lands where "Back to prompt" does. */
+  showPrompt(): void {
+    const open = this.#openLayers();
+    if (open > 0) history.go(-open);
   }
 
   /** Toggles the Queue screen's Older section; opening it reads the archive's first page. */
