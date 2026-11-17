@@ -123,7 +123,7 @@ export interface MachineCard {
   readonly drainActions: readonly DrainAction[];
   /** A closed machine's drain under a `drainPass` leader: null otherwise, and while the queue is unread. */
   readonly drain: DrainRow | null;
-  /** The custodian seat's row: null unless the machine advertises `custodian`. */
+  /** The custodian seat's row: null unless the machine is connected and advertises `custodian`. */
   readonly custodian: CustodianRow | null;
   /**
    * Round now, pause and resume in the card's menu (the `custodian` op): only for a connected machine advertising
@@ -583,7 +583,8 @@ function machineCard(
       canClose && canDrain && leader.softCloses && machine.capabilities?.includes(CAPABILITIES.softClose) === true,
     drainActions: drainActions(machine, canClose && canDrain, now),
     drain: drainRow(machine, drains),
-    custodian: custodianRow(machine, status, now),
+    // Asleep, the seat reports nothing a reader can act on: the row would only ever say `no report yet`.
+    custodian: machine.connected ? custodianRow(machine, status, now) : null,
     custodianControls: machine.connected && machine.capabilities?.includes(CAPABILITIES.custodian) === true,
   };
 }

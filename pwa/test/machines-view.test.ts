@@ -1146,6 +1146,15 @@ describe("the custodian row", () => {
     });
   });
 
+  test("no row for an asleep machine, even one whose last status carried a cu", () => {
+    const asleep = machine({
+      capabilities: [CAPABILITIES.custodian],
+      connected: false,
+      status: { at: S - 5, scan: 1, cu: { s: "idle", e: S - 600 } },
+    });
+    expect(rowOf(asleep)).toBeNull();
+  });
+
   test("idle with a last round: its age and counts", () => {
     expect(rowOf(seated({ s: "idle", e: S - 600, n: [3, 1, 2] }))).toEqual({
       state: "idle",

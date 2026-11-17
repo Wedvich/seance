@@ -266,7 +266,7 @@ function MachineCardView(props: {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
-            <span className={card.connected ? "dot dot-ok" : "dot"} aria-hidden="true" />
+            <span className={card.connected ? "dot dot-ok" : "dot dot-off"} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
             {card.role !== null && (
               <span className={card.role === "leader" ? "fleet-badge" : "fleet-badge fleet-badge-unverified"}>
@@ -383,9 +383,11 @@ function MachineCardView(props: {
               <span className="exclave-account" title={row.account}>
                 {row.account}
               </span>
-              <span className="exclave-sessions">
-                {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
-              </span>
+              {card.connected && (
+                <span className="exclave-sessions">
+                  {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
+                </span>
+              )}
               {row.auth !== null && (
                 <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
               )}
@@ -412,7 +414,7 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
-            <span className={card.online ? "dot dot-ok" : "dot"} aria-hidden="true" />
+            <span className={card.online ? "dot dot-ok" : "dot dot-off"} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
           </div>
           <p className="fleet-meta">

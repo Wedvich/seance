@@ -115,6 +115,13 @@
   background: var(--ok);
 }
 
+/* Offline: hollow like the relay's unreachable ring, so absence reads by shape and not only by a grey fill. */
+.dot-off {
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid var(--fg2);
+}
+
 .dot-err {
   background: var(--err);
 }
