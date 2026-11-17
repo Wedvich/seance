@@ -3,7 +3,6 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { platformFsmonitor, type FsmonitorSeams } from "../src/fsmonitor.ts";
-import { pollUntil } from "./fixtures.ts";
 
 /**
  * The real `ps` + `lsof` listing, against a stand-in rather than git's daemon,
@@ -25,18 +24,24 @@ describe.skipIf(seams === null || Bun.which("lsof") === null)("fsmonitor listing
     await mkdir(root);
     await mkdir(join(base, "bin"));
     const script = join(base, "bin", "git");
+    // `ready` once fd 4 is open, then stdout to /dev/null so no `sleep` holds the pipe.
     await writeFile(
       script,
-      '#!/bin/sh\n[ "$1" = warm ] && exit 0\nexec 4<"$STANDIN_ROOT"\nwhile :; do sleep 1; done\n',
+      '#!/bin/sh\n[ "$1" = warm ] && exit 0\nexec 4<"$STANDIN_ROOT"\necho ready\nexec >/dev/null\nwhile :; do sleep 1; done\n',
     );
     await chmod(script, 0o755);
-    // macOS scans a never-executed file on first exec, queued machine-wide behind other shards' (CLAUDE.md, Testing): pay it here, outside the poll's window.
+    // macOS scans a never-executed file on first exec, queued machine-wide behind other shards' (CLAUDE.md, Testing): pay it here, outside the test.
     await Bun.spawn([script, "warm"], { stdout: "ignore", stderr: "ignore" }).exited;
-    standIn = Bun.spawn([script, "fsmonitor--daemon", "run", "--detach", "--ipc-threads=8"], {
+    const child = Bun.spawn([script, "fsmonitor--daemon", "run", "--detach", "--ipc-threads=8"], {
       env: { ...process.env, STANDIN_ROOT: root },
-      stdout: "ignore",
+      stdout: "pipe",
       stderr: "ignore",
     });
+    // A `ps` landing inside the stand-in's exec already reads its argv but an RSS of 0, and lsof, later
+    // in the same listing, then finds fd 4: list only once it runs, never while it starts.
+    standIn = child;
+    const said = await new Response(child.stdout).text();
+    if (said.trim() !== "ready") throw new Error(`the stand-in never came up: ${JSON.stringify(said)}`);
   });
 
   afterAll(async () => {
@@ -47,11 +52,7 @@ describe.skipIf(seams === null || Bun.which("lsof") === null)("fsmonitor listing
   test("finds the stand-in by its command, maps it by fd 4, and signals it", async () => {
     const pid = standIn?.pid ?? -1;
     const real = await realpath(root);
-    let found: { pid: number; rssKb: number; worktree: string | null } | undefined;
-    await pollUntil(async () => {
-      found = (await seams?.list())?.find((daemon) => daemon.pid === pid);
-      return found?.worktree !== undefined && found.worktree !== null;
-    }, "the stand-in listed with its fd 4");
+    const found = (await seams?.list())?.find((daemon) => daemon.pid === pid);
     expect(found?.worktree === null ? null : await realpath(found?.worktree ?? "")).toBe(real);
     expect(found?.rssKb).toBeGreaterThan(0);
 
