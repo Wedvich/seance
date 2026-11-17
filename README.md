@@ -764,7 +764,7 @@ seance spawn --account work --not here seance -p "rerun the slow suite"
 seance spawn --requires atlas seance -p "regenerate the atlas index"
 #   runs only where an exclave declares the trait atlas (repeat --requires for more, up to four)
 seance spawn --in 2h seance -p "run the slow suite"
-#   not placed before 2 hours from now (--at 21:30 or an ISO date-time with an offset instead; one of the two; Start now skips the wait)
+#   not placed before 2 hours from now (--at 21:30 or --at 2026-11-18T21:30, local time unless it ends in Z or an offset, instead; one of the two; Start now skips the wait)
 seance spawn --autonomy steer seance -p "plan the queue rewrite"
 #   starts in plan mode and waits for approval; auto decides reversible choices itself
 seance spawn --now seance -t "flaky test" -p "fix the flaky spawn test"

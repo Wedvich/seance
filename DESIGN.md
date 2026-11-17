@@ -1990,7 +1990,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   machine refused; the task is unchanged), as `cancel` is.
 - `run-now { taskId }` (`TaskRef`) → `{ task }`, the task as reserved: `Scheduler.runNow`
   (2026-10-27; Scheduler, "Routing caps"). Routes one `ready` task at once with neither
-  concurrency cap applied, and reserves and dispatches it as a pass would. Refused
+  concurrency cap applied and ignoring a not-before time ("Not before"), and reserves and dispatches it as a pass would. Refused
   `task_not_found`, `finished`, `dispatching` (`reserved`, or its spawn still out), `not_waiting`
   (not `ready`: waiting on admission or deps, or placed), `unplaceable` (another reason holds it
   from every candidate — nothing is written, and the held decision stays the pass's), and
@@ -2010,7 +2010,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   term ended answers `internal_error`, a transport code, so MCP adds "may have landed anyway". Only to a
   leader advertising `CAPABILITIES.successor`; an older one answers an unknown op `invalid_request`,
   so every client checks the capability first.
-- `amend { taskId, prompt?: { mode: "append" | "replace", text }, basis?, title?, model?, effort? }`
+- `amend { taskId, prompt?: { mode: "append" | "replace", text }, basis?, title?, model?, effort?, notBefore?: number | null }`
   (`AmendRequest`) → `{ task }` (`TaskResponse`), the task as amended (built 2026-11-12; Scheduler,
   "Amending a waiting task"). In `SCHEDULER_OPS`, 10 s timeout (one serialized write). `basis` comes
   exactly with `prompt`: SHA-256 hex of the prompt the client read. A null `title`/`model`/`effort`
@@ -2962,7 +2962,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   An enqueue is no request — an app's create is a store write the relay answers — so the
   leader's record of one is its admission, the first write after the version-1 create:
   `audit queue origin=leader op=admit task=<task> client=<client> createdAt=<ms>
-  state=ready|blocked|failed avoid=<n> requires=<n> pin=<0|1>` (counts only, never a name, 2026-11-12), `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
+  state=ready|blocked|failed avoid=<n> requires=<n> pin=<0|1> notBefore=<0|1>` (counts only, never a name, 2026-11-12; `notBefore` a flag, never the time), `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
   MCP's `mcp`; absent from older clients), never the prompt (added 2026-10-18, M3 review S5).
 
 - **`queue-changed` tells apps to re-read** (M3 item 6). Every write the term makes to a
@@ -3556,7 +3556,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     the peer reads its own daemon's registry entry and, absent `CAPABILITIES.traits`, refuses with "this
     machine's daemon is older than this seanced: restart or update it (seance update)", ahead of the
     unknown-trait check, so the answer is not "no machine declares" for a fleet the old broker never
-    saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1>`), a refusal writes
+    saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1> notBefore=<0|1>`), a refusal writes
     `audit enqueue origin=<surface> client=<surface> refused=<unknown_trait|unreachable_trait>
     requires=<n> unknown=<n>|missing=<n>[ split=1]`, `split=1` when every trait is on some place the task
     could go but none has them all; never a name.
@@ -3728,7 +3728,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   **Run now lifts the cap for one task** (2026-10-27; "both caps" until the account cap went,
   2026-11-17). The `run-now` op (`Scheduler.runNow`)
   routes a `ready` task with `RouteInput.runNow`, which leaves out
-  `cap_reached` and the whole-queue `paused` and nothing else: an account's pause, the quota line and
+  `cap_reached`, the whole-queue `paused` and a not-before time, and nothing else: an account's pause, the quota line and
   spill, disk, pins, skills and every machine filter still hold it, and then it is refused
   `unplaceable` with nothing written. The queue stays paused: the next pass places nothing else.
   The fail-closed stand-in for an unreadable `queue:pause` ("Pause" below; `RouteInput.pauseUnread`)
@@ -3751,7 +3751,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   race. Rejected: a lasting flag on the task record (`spec.uncapped`), which would survive a
   takeover but needs the record schema widened and an older leader made to refuse it, for a tap
   that a person can repeat. Deferred: also lifting the quota line, for spending credits on purpose.
-  The Spawn screen's **Start now** is the same op, not a new one: it creates the task as Queue
+  The Spawn screen's **Start now** (hidden while a not-before time is chosen) is the same op, not a new one: it creates the task as Queue
   does, then sends `run-now` once a read shows it `ready` — sent with the create it would race
   admission and be refused `not_waiting`. `dispatching` (a pass is placing it) and `finished`
   (a cancel or an end got there first) need no note; `not_waiting` says the leader still holds
@@ -3953,7 +3953,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   Holding it `queued` would have met `ADMIT_MAX_AGE_MS` for a time past 29 days. Its dependents wait
   on it as on any unfinished task. `continue_expired` and `pin_expired` run from
   `max(createdAt, notBefore)` (`expiry.ts`), or a continuation deferred five days would fail before it
-  could start. **`run-now` ignores it**, as it ignores the cap and the pause, one-shot: nothing is
+  could start. The clocks no longer sit below the ledger's age for such a task: a continuation deferred past
+  about 7 days reaches its daemon after the ledger evicted the continued launch and fails at dispatch, not
+  at `continue_expired` (accepted: no maximum horizon, owner). A deferred task is an ordinary record
+  meanwhile, so it counts toward `MAX_TASKS` and `QUEUE_MAX_TASKS` like any unfinished task. **`run-now` ignores it**, as it ignores the cap and the pause, one-shot: nothing is
   written, so a takeover between the route and the write leaves the task waiting for its time. A
   successor (any trigger) and a continuation never inherit it (a continuation may carry its own).
   **No sentinel, no `CAPABILITIES` entry, no horizon** (owner): every daemon updates together, and a
@@ -3961,14 +3964,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `seance update` right after merge, before using the PWA control). Amendable while waiting (see
   "Amending a waiting task"). The audit lines carry `notBefore=0|1`, never the time. The PWA shows
   `until Wed 18 Nov, 21:30` (the viewer's zone, off the leader's clock by the queue's skew) in the
-  row's headline and body and the verdict, in place of what a decision says: a deferred task is not
+  row's headline and body and the verdict, in place of what a decision says (a `blocked` task keeps its "Waiting on" headline and takes the time in its body): a deferred task is not
   routed, so a decision on it is stale, and Start now's label then names no machine. The form's
   choice is transient (kept as a kind, resolved at the press), hides the Start now split (the two
   contradict) and asks no route preview. Surfaces: MCP `not_before` (ISO 8601 with an offset) on
   `spawn_session`, `queue_batch` and `continue_task`, and on `amend_task` (or `null`); CLI `--at` and
   `--in` on `spawn` and `continue`, and on `amend` with `--not-before none` to clear. Raycast: none.
   The archivist keeps it on the task row (a time is neither a prompt nor an account id).
-- **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
+- **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first (one still before its
+  `notBefore` is skipped unrouted: "Not before") and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory
   (`lastDecision`), so the store sees one write per transition and none per tick. **The
@@ -4414,15 +4418,17 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   there, untracked — nothing resurrects it or despawns it (`sessionChange`, `branchChange` and
   `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
   A third arm (2026-10-27): a `ready` task with `spec.continues` more than `continueExpiryMs` (4 days,
-  docs/scheduler.md Settled defaults 19) past `createdAt` fails `continue_expired`, so an unplaceable
+  docs/scheduler.md Settled defaults 19) past `createdAt` (or past its `notBefore`, if later: "Not before") fails `continue_expired`, so an unplaceable
   continuation no longer waits for a hand cancel (a continuation expires pinned or not). Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
   in the leader and leadership moves. It stays below the launch ledger's age, since past it the target
-  daemon would refuse anyway, so failing earlier is never premature. The message names the target
+  daemon would refuse anyway, so failing earlier is never premature — for a task with no `notBefore`; a
+  continuation deferred past about 7 days reaches its daemon after the ledger evicted the continued launch
+  and fails at dispatch instead ("Not before", accepted). The message names the target
   machine's rejection reasons from the leader's last in-memory decision for the task (`lastDecision`,
   else the persisted one), or "its machine never took it"; a queue pause or other fleet-wide hold does not
   stop the clock. Dependents fail `dependency_failed` in the same pass. No alert and no audit line: nothing spawns or despawns, and the record is the trace.
   A fourth arm (2026-10-27): a pinned `ready` task (`pin.deviceId` or `pin.account`, no `continues`) more
-  than `pinExpiryMs` (30 days, docs/scheduler.md Settled defaults 21) past `createdAt` fails `pin_expired`.
+  than `pinExpiryMs` (30 days, docs/scheduler.md Settled defaults 21) past `createdAt` (or its `notBefore`, if later) fails `pin_expired`.
   A pin's target never goes stale the way a continuation's ledger note does, but a machine retired or
   re-keyed, or an account signed out for good, otherwise leaves it `ready` forever: never pruned, counted
   toward `MAX_TASKS`, and ranked with the unfinished ahead of every finished task in the 20-task `queue`
@@ -7896,8 +7902,9 @@ fields carry over), under the same gates.
   - _A `ready` continuation that is never placed_ (the target re-keyed, the clone gone, a daemon rolled
     back; reasons `continue_elsewhere`, `continue_clone_gone` or `continue_unsupported`) no longer waits for a hand
     cancel: past `SchedulerConfig.continueExpiryMs` (4 days, fixed in `DEFAULT_CONFIG`, below the ledger's
-    age, docs/scheduler.md Settled defaults 19) since `createdAt` it fails `continue_expired` (Scheduler,
-    "Expiry"). Meanwhile it withholds the old task's offer, and cancelling it (unplaced) releases it. The old task may then be offered again, while its machine still holds its launch (the ledger
+    age, docs/scheduler.md Settled defaults 19) since `createdAt`, or since its `notBefore` if later, it fails
+    `continue_expired` (Scheduler, "Expiry"; a continuation deferred past the ledger's age fails at dispatch
+    instead, "Not before"). Meanwhile it withholds the old task's offer, and cancelling it (unplaced) releases it. The old task may then be offered again, while its machine still holds its launch (the ledger
     ages from the old launch, so a continuation made over 3 days after it may find it already evicted; the
     config-relation test guards only a continuation made soon after the old launch). Existing stuck continuations fail in the first pass of a
     new leader, which is the clean-up, and visible.
@@ -8461,7 +8468,7 @@ model and effort), and is audited as `fields=notBefore`, never the time ("Not be
   it means "may have landed".
 - **Sentinels.** The amended record is written through the one task sealer like every leader write, so
   `pin.exclave: ""` and the attachments, requires and successor dep sentinels are emitted again for
-  their fields. `amendSpec` touches the four fields and keeps every other one as it was.
+  their fields. `amendSpec` touches the five fields (`notBefore` is the fifth, with no `basis`) and keeps every other one as it was.
 - **Capability.** `CAPABILITIES.amend`; MCP and the CLI offer amend only to a verified leader
   advertising it, and the broker's gate refuses for a ready leader without it. An older leader answers
   the unknown op `invalid_request`. `OP_TIMEOUT_MS.amend` is 10 s, under the relay's reply window, so
@@ -8478,8 +8485,9 @@ model and effort), and is audited as `fields=notBefore`, never the time ("Not be
   unchanged), and what runs is still decided at dispatch by the leader. The keyless broker peer gains
   it too ("Fleet broker").
 - **Surfaces.** MCP `amend_task` (`append` by default, `replacePrompt` to replace; `title`, `model` and
-  `effort`, null to clear). `seance amend <task-id> [text…] [--replace] [--title t] [--model m]
-  [--effort e]` (`--title ""` and `default` clear). Raycast is spawn-only and unchanged. **No PWA
+  `effort`, null to clear; `not_before`, ISO 8601 with an offset, null to clear). `seance amend <task-id> [text…] [--replace] [--title t] [--model m]
+  [--effort e] [--at <time> | --in <duration> | --not-before none]` (`--title ""` and `default` clear; a repeated `--at` or `--in`
+  is a usage error, and the success line names the resolved time with its zone). Raycast is spawn-only and unchanged. **No PWA
   surface in V1 (owner, 2026-11-12):** amending is an orchestration act, done from a Claude planning
   or orchestration session that queued the stack and learns what later sessions need, so MCP and the
   CLI are where it is asked for. A Queue-screen editor is deferred until it is wanted.
@@ -10845,6 +10853,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   routing it through the relay like any other target, which is simpler to
   describe and pays Cloudflare's latency for a process on the same box. A spawn for this
   machine gets no such shortcut: it is a queued task, so it needs the key or the broker.
+- **`not_before` on `spawn_session`, `queue_batch` and `continue_task`** (2026-11-17, "Not before"): ISO 8601 with an offset (the model resolves a relative request itself), refused when malformed, in the past, or beside `start` (the two contradict); the answer carries the resolved time with its zone, and `get_queue` shows it as UTC ISO 8601 and leaves out the decision of a task still waiting for it.
 - **`spawn_session` enqueues, and `get_queue`** (added 2026-10-17 as `machine: "auto"`; every spawn
   since 2026-10-25, M4). `machine` is an optional pin: absent or `"auto"` (any case) pins nothing,
   anything else is resolved like `pin.machine` and stored as `pin.deviceId`; giving both a machine
@@ -10961,7 +10970,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
   binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
   does, or the call stops at a permission prompt.
-- **`continue_task { taskId, prompt? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
+- **`continue_task { taskId, prompt?, not_before? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
   a continuation of a `session_failed` or cancelled (after placement) task, the newest in a chain: the session's conversation is resumed in its worktree, on
   the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
   the task (an id it does not list is "not in the leader's list (pruned, or past the N most relevant)"),
@@ -10995,10 +11004,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   carried it, are the record, as `start_task`'s are. `get_queue` marks `passable`, `passedTo` and
   `succeeds`. Its description says it ends the task's session and pushes its branch, is refused on a
   dirty tree, and is not for the calling session's own task.
-- **`amend_task { taskId, append?, replacePrompt?, title?, model?, effort? }`** (built 2026-11-12;
+- **`amend_task { taskId, append?, replacePrompt?, title?, model?, effort?, not_before? }`** (built 2026-11-12;
   Scheduler, "Amending a waiting task"). Changes a task still waiting in the queue. `append` adds text
   after a blank line; `replacePrompt` replaces the prompt; both together are refused before anything
-  is sent. A null `title`, `model` or `effort` clears it. Gated on `leaderAdvertises(lease,
+  is sent. A null `title`, `model`, `effort` or `not_before` clears it. Gated on `leaderAdvertises(lease,
   CAPABILITIES.amend)`, then `lease.scheduler.amend` (`sendAmend` on the direct path, the broker's
   `amend` when keyless), which names the `basis` from a store read. It sends once; a lost answer says
   it may have landed, since a second append would add the text twice. On success it names the fields
@@ -11239,7 +11248,7 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
 
 ### CLI spawn (`daemon/src/cli-auto.ts`) — queued by default 2026-10-25, scheduler M4
 
-`seance spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
+`seance spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]... [--at <HH:MM|date-time> | --in <duration>]
 <repo> [--here] [-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
 MCP's `spawn_session` (`cli-auto.ts` is only the CLI's wiring; its name is historical): the clone name resolves to its
 origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
@@ -11285,7 +11294,7 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
 - _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
   a direct spawn is not bound by it. MCP has no such escape.
-- _`seance continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a session"):
+- _`seance continue <task-id> [--prompt <text>] [--at <time> | --in <duration>]`_ (2026-10-26, Daemon, "Continuing a session"):
   `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does for a failed or cancelled task, the newest in a chain (leader gate, `queue()` lookup,
   `continueOffer`, `offeredSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
   `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
@@ -11985,7 +11994,7 @@ app-role relay client with the key it imported at start.
   says this box's tmux was touched, and a brokered spawn touches someone else's. A
   scheduler frame logs `action=scheduler op="enqueue|queue|cancel|run-now|pass|amend|accounts"` with the task id
   and, for an enqueue, `claimed_client` (and `continues=<old id>` on a continue spec); `fleet` logs `action=fleet`. An enqueue also writes
-  `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" createdAt=<ms> queued`
+  `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" [notBefore=1] createdAt=<ms> queued`
   (or `queued landedEarlier=true`, `refused code="…"`, `unanswered`), one per try the relay
   answered or lost, because the surface's own `audit enqueue origin=mcp|cli` line records the
   surface's view and only the daemon saw the store answer. The transport is not a surface:
@@ -12071,11 +12080,11 @@ app-role relay client with the key it imported at start.
   `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them
   in the broker — any app can write those fields anyway, and the record's `PIN_SENTINEL`
   already keeps an older leader from misreading a pin.
-- **`batch`, `deps`, `linear` and `until` pass through, on purpose.** They are the spec's own
+- **`batch`, `deps`, `linear`, `until` and `notBefore` pass through, on purpose.** They are the spec's own
   authoring fields, bounded by `parseTaskSpec` like the rest, and any app-role client can already
   set every one of them on a task it creates. Filtering them would make the broker a second
   authority on what a task may say, drifting from the leader's, and buy nothing: it grants a
-  keyless local process nothing a keyed one could not already do.
+  keyless local process nothing a keyed one could not already do. `notBefore` is one of them, on an enqueue and on an `amend` draft (`parseAmendDraft`).
 - **Account names resolve in the client.** The broker serves the account listing, and the client
   runs the same `resolvePlacement`, so there is one implementation. The daemon keeps one
   `AccountCache` per app-role client, so every keyless process on the box together stays under
