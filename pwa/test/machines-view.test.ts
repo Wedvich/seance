@@ -1155,11 +1155,11 @@ describe("the custodian row", () => {
     expect(rowOf(asleep)).toBeNull();
   });
 
-  test("idle with a last round: its age and counts", () => {
+  test("idle with a last round: its age, kept with its instant for the hover, and counts", () => {
     expect(rowOf(seated({ s: "idle", e: S - 600, n: [3, 1, 2] }))).toEqual({
       state: "idle",
       paused: false,
-      ended: "last round ended 10m ago",
+      ended: ["last round ended ", { text: "10m ago", at: (S - 600) * 1000 }],
       counts: "closed 3 · nudged 1 · flagged 2",
       link: null,
       warn: false,
@@ -1167,7 +1167,7 @@ describe("the custodian row", () => {
   });
 
   test("no round yet when e is absent; zero parts are dropped but closed, and closed 0 alone reads as nothing closed", () => {
-    expect(rowOf(seated({ s: "idle" }))).toMatchObject({ ended: "no round yet", counts: null });
+    expect(rowOf(seated({ s: "idle" }))).toMatchObject({ ended: ["no round yet"], counts: null });
     expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 0, 0] }))?.counts).toBe("nothing closed");
     expect(rowOf(seated({ s: "idle", e: S - 60, n: [4, 0, 0] }))?.counts).toBe("closed 4");
     expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 2, 0] }))?.counts).toBe("closed 0 · nudged 2");

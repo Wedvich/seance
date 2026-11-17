@@ -1024,7 +1024,9 @@ function CustodianLine({ row, paused }: { readonly row: CustodianRow; readonly p
       {row.ended !== null && (
         <>
           {" "}
-          <span>· {row.ended}</span>
+          <span>
+            · <TimedText line={row.ended} />
+          </span>
         </>
       )}
       {row.counts !== null && (
