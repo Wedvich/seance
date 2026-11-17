@@ -757,6 +757,78 @@ describe("despawn_session", () => {
   });
 });
 
+describe("set_account_open", () => {
+  const WORK = "org-1:acct-work";
+  const HOST = machine({
+    exclaves: [
+      { id: "work", accountId: WORK, email: "me@work.example", extraUsageEnabled: null, authOk: true, skills: [] },
+    ],
+  });
+  const LEADS = { kind: "ready", deviceId: "device-1", term: 3 } as const;
+
+  async function call(fake: FakeRelay, args: Record<string, unknown>): Promise<{ text: string; error: boolean }> {
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, fakeLocal());
+    const result = await client.callTool({ name: "set_account_open", arguments: args });
+    lazy.stop();
+    return { text: toolText(result), error: result.isError === true };
+  }
+
+  test("a close pauses that account until resumed, by alias; a reopen resumes it, by email", async () => {
+    const fake = fakeRelay([HOST], (op, payload) =>
+      op === "pause" ? { holds: [{ ...(isRecord(payload) ? payload : {}), at: 1 }] } : { holds: [] },
+    );
+    fake.setState({ scheduler: LEADS });
+    fake.accounts = [{ version: 1, accountId: WORK, alias: "work" }];
+    const closed = await call(fake, { account: "work", open: false });
+    expect(closed.error).toBe(false);
+    expect(closed.text).toStartWith(`work (${WORK}) is closed to new scheduled work`);
+    expect(closed.text).toContain("running sessions keep going");
+    const opened = await call(fake, { account: "ME@work.example", open: true });
+    expect(opened.text).toBe(`work (${WORK}) is open for work`);
+    expect(fake.requests.map(({ deviceId, op, payload }) => ({ deviceId, op, payload }))).toEqual([
+      { deviceId: SCHEDULER_ID, op: "pause", payload: { until: "resume", account: WORK } },
+      { deviceId: SCHEDULER_ID, op: "resume", payload: { account: WORK } },
+    ]);
+  });
+
+  test("an account no machine reports, no leader, or a refusal is an error, and the first two send nothing", async () => {
+    const fake = fakeRelay([HOST], () => ({ ok: false, code: "conflict", message: "kept changing" }));
+    expect((await call(fake, { account: "nobody", open: false })).text).toContain('no account "nobody"');
+    const leaderless = await call(fake, { account: WORK, open: false });
+    expect(leaderless.error).toBe(true);
+    expect(fake.requests).toEqual([]);
+    fake.setState({ scheduler: LEADS });
+    const refused = await call(fake, { account: WORK, open: false });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toStartWith("close failed (conflict)");
+  });
+
+  test("a keyless box (the broker) refuses, points to the PWA, and sends nothing", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "fleet"
+        ? brokerOk(id, { machines: [HOST], scheduler: LEADS })
+        : brokerFail(id, "unsupported", "not in this double"),
+    );
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        broker: brokerFleet({ path: double.path }, () => Promise.resolve("device-1")),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const result = await client.callTool({ name: "set_account_open", arguments: { account: WORK, open: false } });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("PWA");
+      expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
+    } finally {
+      await double.stop();
+    }
+  });
+});
+
 describe("set_machine_open", () => {
   const LEADER = machine({ capabilities: ["drain"] });
   const TARGET = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close"] });

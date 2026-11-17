@@ -970,21 +970,41 @@ export class SchedulerStore {
     return failure.reason === "timeout" || failure.reason === "dropped" ? `${text} ${REFRESH_HINT}` : text;
   }
 
-  pauseQueue(): Promise<void> {
-    return this.#setHolds(() => this.#client.pause({ until: "resume" }));
+  async pauseQueue(): Promise<void> {
+    await this.#setHolds(() => this.#client.pause({ until: "resume" }), true);
   }
 
-  resumeQueue(account?: string): Promise<void> {
-    return this.#setHolds(() => this.#client.resume(account === undefined ? {} : { account }));
+  async resumeQueue(account?: string): Promise<void> {
+    await this.#setHolds(() => this.#client.resume(account === undefined ? {} : { account }), true);
   }
 
+  /**
+   * The account card's "Open for work" switch. Closing is an account hold until resumed, which the leader applies to
+   * placements only (running sessions are never touched); opening lifts the account's hold, a reset hold included.
+   * A failure stays on that card, not the Queue screen's notice, which a phone showing Machines does not show.
+   */
+  async setAccountOpen(accountId: string, open: boolean): Promise<void> {
+    if (this.#state.pausing) return;
+    this.#patch({ accountOpen: { kind: "sending", accountId, open } });
+    const notice = await this.#setHolds(
+      () =>
+        open
+          ? this.#client.resume({ account: accountId })
+          : this.#client.pause({ until: "resume", account: accountId }),
+      false,
+    );
+    this.#patch({ accountOpen: notice === null ? null : { kind: "failed", accountId, text: notice } });
+  }
+
+  /** One pause or resume at a time; answers its refusal or failure as a sentence, null once the holds landed. */
   async #setHolds(
     send: () => Promise<
       { readonly holds: readonly PauseHold[] } | { readonly ok: false; readonly code: string } | null
     >,
-  ): Promise<void> {
-    if (this.#state.pausing) return;
-    this.#patch({ pausing: true, queueNotice: null });
+    queueNotice: boolean,
+  ): Promise<string | null> {
+    if (this.#state.pausing) return null;
+    this.#patch({ pausing: true, ...(queueNotice ? { queueNotice: null } : {}) });
     let notice: string | null = null;
     try {
       const reply = await send();
@@ -999,7 +1019,8 @@ export class SchedulerStore {
     } catch (err) {
       notice = this.#actionFailure(err);
     }
-    this.#patch({ pausing: false, queueNotice: notice });
+    this.#patch({ pausing: false, ...(queueNotice ? { queueNotice: notice } : {}) });
+    return notice;
   }
 
   /**

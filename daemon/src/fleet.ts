@@ -17,6 +17,9 @@ import {
   type Task,
   type TaskCreated,
   type PassReply,
+  type PauseReply,
+  type PauseRequest,
+  type ResumeRequest,
   type TaskReply,
 } from "@seance/shared";
 import { accountCaches } from "./account-cache.ts";
@@ -89,6 +92,14 @@ export interface SchedulerLeg {
    * where a pin's resolution asks again. Through the broker a label read is always null.
    */
   readonly accounts: (options?: { readonly label?: boolean }) => Promise<readonly AccountRecord[] | null>;
+  /**
+   * `pause` and `resume`, which the broker does not carry (`BROKER_OPS` is not widened for them, as for
+   * `availability`): present only on a leg with a key of its own, so a keyless box has no way to send one.
+   */
+  readonly holds?: {
+    readonly pause: (request: PauseRequest) => Promise<PauseReply | null>;
+    readonly resume: (request: ResumeRequest) => Promise<PauseReply | null>;
+  };
 }
 
 /** One tool call's view of the fleet: the registry it resolves names against, and the way to send. */
@@ -139,6 +150,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
           pass: (taskId) => client.pass(taskId),
           amend: (draft) => sendAmend(client, draft),
           accounts: (options) => cacheOf(client).read({ hold: options?.label === true }),
+          holds: { pause: (request) => client.pause(request), resume: (request) => client.resume(request) },
         },
         release: (): void => relay.release(),
       };

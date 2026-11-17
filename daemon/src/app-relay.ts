@@ -9,6 +9,9 @@ import {
   type QueueReply,
   type QueueRequest,
   type PassReply,
+  type PauseReply,
+  type PauseRequest,
+  type ResumeRequest,
   type AmendRequest,
   type TaskLookup,
   type TaskReply,
@@ -51,6 +54,9 @@ export interface AppRelay {
   /** As `RelayClient.getTask`: the store read `sendAmend` names an amendment's `basis` from. */
   readonly getTask: (taskId: string) => Promise<TaskLookup | StoreRefusal | null>;
   readonly amend: (request: AmendRequest) => Promise<TaskReply | null>;
+  /** An account's hold: `seance mcp`'s `set_account_open` and `seance close|open --account`. */
+  readonly pause: (request: PauseRequest) => Promise<PauseReply | null>;
+  readonly resume: (request: ResumeRequest) => Promise<PauseReply | null>;
   /** As `RelayClient.listAccounts`: throws `unsupported` on a client built without an account key. */
   readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
   readonly onStoreChanged: (listener: (key: string, version: number) => void) => () => void;

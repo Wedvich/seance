@@ -3243,6 +3243,42 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toContain("taking over");
   });
 
+  test("an account's switch pauses or resumes that account, its failure on the card, not the queue's notice", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const paused: unknown[] = [];
+    const resumed: unknown[] = [];
+    let release = (): void => {};
+    client.onPause = async (request) => {
+      paused.push(request);
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { holds: [{ account: "acct", until: "resume", at: 5 }] };
+    };
+    const closing = store.setAccountOpen("acct", false);
+    expect(store.getState().accountOpen).toEqual({ kind: "sending", accountId: "acct", open: false });
+    // One ask at a time: a second flip while the first is out sends nothing.
+    await store.setAccountOpen("acct", true);
+    release();
+    await closing;
+    expect(paused).toEqual([{ until: "resume", account: "acct" }]);
+    expect(store.getState()).toMatchObject({
+      accountOpen: null,
+      pausing: false,
+      queueView: { holds: [{ account: "acct", until: "resume" }] },
+    });
+
+    client.onResume = async (request) => {
+      resumed.push(request);
+      return { ok: false, code: "not_ready", message: "taking over" };
+    };
+    await store.setAccountOpen("acct", true);
+    expect(resumed).toEqual([{ account: "acct" }]);
+    expect(store.getState().accountOpen).toMatchObject({ kind: "failed", accountId: "acct" });
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
   test("a hold changing asks the preview again: at once for our own, after the quiet for a read's", async () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ decision: DECISION });

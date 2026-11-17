@@ -3,6 +3,7 @@ import {
   cmdInstall,
   parseAmendArgs,
   parseContinueArgs,
+  parseAccountArg,
   parseAvailabilityArgs,
   parsePassArgs,
   parseStartArgs,
@@ -363,6 +364,23 @@ describe("parseAmendArgs", () => {
   test("nothing to amend, no id, an unknown flag or a flag missing its value is a usage error", () => {
     for (const argv of [[], ["t-1"], ["--replace"], ["t-1", "--nope", "x"], ["t-1", "--title"], ["t-1", "-r"]]) {
       expect(() => parseAmendArgs(argv)).toThrow(/^usage: seance amend/u);
+    }
+  });
+});
+
+describe("parseAccountArg", () => {
+  test("names the account after --account, null without it; the account form takes nothing else", () => {
+    expect(parseAccountArg(["--account", "work"], "close")).toBe("work");
+    expect(parseAccountArg(["--account", "me@work.example"], "open")).toBe("me@work.example");
+    expect(parseAccountArg(["Thad", "--now"], "close")).toBeNull();
+    for (const argv of [
+      ["--account"],
+      ["--account", "--now"],
+      ["Thad", "--account", "work"],
+      ["--account", "work", "--wait"],
+    ]) {
+      expect(() => parseAccountArg(argv, "close")).toThrow("usage: seance close");
+      expect(() => parseAccountArg(argv, "open")).toThrow("usage: seance open");
     }
   });
 });

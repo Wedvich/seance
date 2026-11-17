@@ -10,6 +10,7 @@ import {
   type Machine,
   type MachineStatus,
   type MetricsSeries,
+  type PauseHold,
   type SchedulerAvailability,
   type SessionEntry,
   type Task,
@@ -71,6 +72,44 @@ describe("the Open for work switch", () => {
     const closed = machine({ capabilities: [CAPABILITIES.close], status: closedStatus });
     expect(cardOf(closed, NO_LEADER)).toMatchObject({ closed: true, openSwitch: "off" });
     expect(cardOf(closed, ready, [{ ...leader, capabilities: [] }])).toMatchObject({ closed: true, openSwitch: "off" });
+  });
+});
+
+describe("an account's Open for work switch", () => {
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "dev-1", term: 1 };
+  const accountOf = (holds: readonly PauseHold[] | null, scheduler: SchedulerAvailability = ready, relayOpen = true) =>
+    deriveMachines([machine()], NOW, scheduler, {}, [], undefined, relayOpen, undefined, holds).accounts[0];
+
+  test("offered only with the holds read, the relay open and a verified leader", () => {
+    expect(accountOf([])).toMatchObject({ openSwitch: "on", hold: null });
+    expect(accountOf(null)?.openSwitch).toBeNull();
+    expect(accountOf([], NO_LEADER)?.openSwitch).toBeNull();
+    expect(accountOf([], { kind: "unverified", deviceId: "dev-1", term: 1 })?.openSwitch).toBeNull();
+    expect(accountOf([], ready, false)?.openSwitch).toBeNull();
+  });
+
+  test("off under the account's own hold, worded; another account's hold or the queue's leaves it on", () => {
+    const closed = accountOf([{ account: ACCOUNT, until: "resume", at: NOW - 5 * 60_000 }]);
+    expect(closed?.openSwitch).toBe("off");
+    expect(plain(closed?.hold ?? [])).toBe("Closed to new work 5m ago. Running sessions keep going.");
+    // Unknown holds still say why it is closed, with no switch to flip.
+    expect(plain(accountOf([{ account: ACCOUNT, until: "resume", at: NOW }], NO_LEADER)?.hold ?? [])).toStartWith(
+      "Closed to new work",
+    );
+    expect(
+      accountOf([
+        { until: "resume", at: NOW },
+        { account: "org-2:other", until: "resume", at: NOW },
+      ]),
+    ).toMatchObject({ openSwitch: "on", hold: null });
+  });
+
+  test("a reset hold reads closed until its resumeAt, then lifted, as the leader judges it", () => {
+    const reset = (resumeAt: number) => accountOf([{ account: ACCOUNT, until: "reset", at: NOW - 1000, resumeAt }]);
+    const held = reset(NOW + 3 * 3_600_000);
+    expect(held?.openSwitch).toBe("off");
+    expect(plain(held?.hold ?? [])).toBe("Closed to new work until its quota resets (in 3h)");
+    expect(reset(NOW - 1)).toMatchObject({ openSwitch: "on", hold: null });
   });
 });
 

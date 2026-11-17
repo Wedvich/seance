@@ -1,5 +1,5 @@
 import { CAPABILITIES, withAutonomy, type AmendDraft } from "@seance/shared";
-import { setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
+import { setAccountOpen, setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
@@ -360,6 +360,30 @@ export async function availabilityViaFleet(
   } finally {
     lease.release();
   }
+}
+
+/** `seance close|open --account`: over the relay as app-role (`setAccountOpen`), so a keyless box refuses. */
+export async function accountAvailabilityViaFleet(account: string, open: boolean, fleet: Fleet): Promise<AutoEnqueued> {
+  let lease: FleetLease;
+  try {
+    lease = await fleet.open();
+  } catch (err) {
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(`${open ? "open" : "close"}: not sent — ${why}`);
+  }
+  try {
+    return await setAccountOpen({ ref: account, open, lease });
+  } finally {
+    lease.release();
+  }
+}
+
+export async function cmdAccountAvailabilityAuto(account: string, open: boolean): Promise<void> {
+  const config = await loadConfig();
+  const built = await autoFleet(config);
+  const outcome = await accountAvailabilityViaFleet(account, open, built.fleet).finally(() => built.fleet.stop());
+  (outcome.ok ? console.log : console.error)(outcome.text);
+  process.exit(outcome.ok ? 0 : 1);
 }
 
 const NO_WAIT_TEXT =

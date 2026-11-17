@@ -155,6 +155,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       archiveCharts(state.relay.archivist, state.accounts.nameable),
       state.relay.status === "open",
       drainInputs(),
+      state.queueView?.kind === "ok" ? state.queueView.holds : null,
     );
     return {
       heading: (
@@ -180,6 +181,9 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           machines={state.relay.machines}
           onReadDrain={(deviceId) => store.readDrain(deviceId)}
           onSetOpen={(deviceId, open, close) => void store.setMachineOpen(deviceId, open, close)}
+          accountOpen={state.accountOpen}
+          pausing={state.pausing}
+          onSetAccountOpen={(accountId, open) => void store.setAccountOpen(accountId, open)}
           onShowHistory={(target, range) => void store.showHistory(target, range)}
           onHideHistory={() => store.hideHistory()}
           onOpenRename={(accountId) => store.openAccountRename(accountId)}

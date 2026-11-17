@@ -39,6 +39,7 @@ import {
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type AccountOpenAsk,
   type StartNowRefusal,
   type TaskAction,
   type Verdict,
@@ -286,6 +287,8 @@ export interface AppState {
   readonly startNowRefusal: StartNowRefusal | null;
   /** A pause or resume in flight. */
   readonly pausing: boolean;
+  /** The Machines screen's account switch: its ask in flight, or its last failure. */
+  readonly accountOpen: AccountOpenAsk;
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
   readonly accounts: AccountsState;

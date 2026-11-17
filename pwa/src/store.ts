@@ -378,6 +378,7 @@ export class Store {
       queueNotice: null,
       startNowRefusal: null,
       pausing: false,
+      accountOpen: null,
       discarding: false,
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, renaming: null, notice: null },
       archiveStatus: null,
@@ -932,6 +933,11 @@ export class Store {
 
   resumeQueue(account?: string): Promise<void> {
     return this.#queue.resumeQueue(account);
+  }
+
+  /** See `SchedulerStore.setAccountOpen`. */
+  setAccountOpen(accountId: string, open: boolean): Promise<void> {
+    return this.#queue.setAccountOpen(accountId, open);
   }
 
   discardUnreadable(): Promise<void> {

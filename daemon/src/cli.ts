@@ -17,6 +17,7 @@ import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./
 import { createBackend } from "./backend-default.ts";
 import {
   cmdAmendAuto,
+  cmdAccountAvailabilityAuto,
   cmdAvailabilityAuto,
   cmdContinueAuto,
   cmdPassAuto,
@@ -382,16 +383,33 @@ export function parseAvailabilityArgs(
 }
 
 /**
+ * Exported for tests. `close --account <account>` and `open --account <account>`: the account named, null without the
+ * flag. The account form takes nothing else, since a machine word or a drain flag would mean the other command.
+ */
+export function parseAccountArg(argv: readonly string[], verb: "close" | "open"): string | null {
+  if (!argv.includes("--account")) return null;
+  const [flag, account, ...rest] = argv;
+  if (flag !== "--account" || account === undefined || account.startsWith("-") || rest.length > 0) {
+    throw new Error(usageLine(verb));
+  }
+  return account;
+}
+
+/**
  * Closes a machine to new scheduled work (default: this one): soft where it and the leader support it (running tasks
  * finish where they are), `--drain` to pass them on, `--wait` to block until it is empty. Over the relay (`cli-auto.ts`).
  */
 export async function cmdClose(argv: readonly string[]): Promise<void> {
+  const account = parseAccountArg(argv, "close");
+  if (account !== null) return cmdAccountAvailabilityAuto(account, false);
   const { machine, wait, now, drain } = parseAvailabilityArgs(argv, "close");
   return cmdAvailabilityAuto(machine, false, now, wait, drain);
 }
 
-/** Reopens a closed machine. */
+/** Reopens a closed machine, or with `--account` a closed account. */
 export async function cmdOpen(argv: readonly string[]): Promise<void> {
+  const account = parseAccountArg(argv, "open");
+  if (account !== null) return cmdAccountAvailabilityAuto(account, true);
   return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false, false);
 }
 

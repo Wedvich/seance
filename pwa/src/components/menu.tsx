@@ -319,18 +319,28 @@ export function MenuSwitchItem(props: {
   onToggle: () => void;
   /** This flip opens a dialog over the menu, so the menu closes instead of staying open beneath it. */
   closesMenu?: boolean;
+  /** Reachable but inert, as `MenuItem`'s: `aria-disabled`, so roving focus still lands on it. */
+  disabled?: boolean;
 }): JSX.Element {
   const { checked } = props;
+  const disabled = props.disabled === true;
   const holdOpen = useContext(HoldMenuOpen);
   const close = useContext(CloseMenu);
   const toggle = (event: Event): void => {
-    if (!inOpenMenu(event)) return;
+    if (!inOpenMenu(event) || disabled) return;
     if (props.closesMenu === true) close();
     else holdOpen();
     props.onToggle();
   };
   return (
-    <button type="button" className="menu-item" role="menuitemcheckbox" aria-checked={checked} onClick={toggle}>
+    <button
+      type="button"
+      className="menu-item"
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      aria-disabled={disabled ? "true" : undefined}
+      onClick={toggle}
+    >
       {props.icon !== undefined && <span className="menu-icon">{props.icon}</span>}
       <span className="menu-text">{props.label}</span>
       <span className={checked ? "menu-switch menu-switch-on" : "menu-switch"} aria-hidden="true">

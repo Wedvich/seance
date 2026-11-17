@@ -13,6 +13,7 @@ import type {
 } from "../machines-view.ts";
 import { custodianMenu } from "../machines-view.ts";
 import {
+  type AccountOpenAsk,
   type AccountsState,
   type AvailabilityState,
   type CustodianControlState,
@@ -82,6 +83,12 @@ export function MachinesScreen(props: {
    * buttons, and Drain / Drain now on a closed machine). The confirm sheets are this screen's.
    */
   onSetOpen: (deviceId: string, open: boolean, close?: CloseKind) => void;
+  /** The account switch's ask in flight or its last failure (`AppState.accountOpen`). */
+  accountOpen: AccountOpenAsk;
+  /** A pause or resume is out: the store takes one at a time, the queue's own included. */
+  pausing: boolean;
+  /** Closes an account to new scheduled work (false) or reopens it (true): no confirm, since nothing running is touched. */
+  onSetAccountOpen: (accountId: string, open: boolean) => void;
   /** The registry, which the confirm sheets' words are derived from (`closeSheet`, `drainSheet`). */
   machines: readonly Machine[];
   /** The close sheet's lines for a machine (`deriveCloseSheet`); `soft` when its Close stops new work only. */
@@ -108,6 +115,9 @@ export function MachinesScreen(props: {
     custodian,
     onCustodian,
     onSetOpen,
+    accountOpen,
+    pausing,
+    onSetAccountOpen,
     machines,
     closeSheet,
     drainSheet,
@@ -173,6 +183,9 @@ export function MachinesScreen(props: {
             key={account.accountId}
             account={account}
             nameable={accounts.nameable}
+            ask={accountOpen?.accountId === account.accountId ? accountOpen : null}
+            pausing={pausing}
+            onToggleOpen={(open) => onSetAccountOpen(account.accountId, open)}
             onRename={() => onOpenRename(account.accountId)}
             history={
               history?.target.kind === "account" && history.target.accountId === account.accountId ? history : null
@@ -439,14 +452,22 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
 function AccountCardView(props: {
   account: AccountCard;
   nameable: boolean;
+  /** This account's switch ask, if the last one was for it. */
+  ask: AccountOpenAsk;
+  pausing: boolean;
+  onToggleOpen: (open: boolean) => void;
   history: HistoryView | null;
   ranges: readonly HistoryRange[];
   onRename: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { account, nameable, history, ranges, onRename, onShowHistory, onHideHistory } = props;
+  const { account, nameable, ask, pausing, onToggleOpen, history, ranges, onRename, onShowHistory, onHideHistory } =
+    props;
   const menu = useMenu();
+  // The asked state shows while the request is out, so the switch does not bounce back before the holds land.
+  const switchOn = ask?.kind === "sending" ? ask.open : account.openSwitch === "on";
+  const closed = ask?.kind === "sending" ? !ask.open : account.openSwitch === "off";
   const { historyFrom } = account;
   // Pinned to the host it was opened against: without the archive a range change
   // re-asks that one, and a host gone since leaves the chart to say so rather than switch hosts.
@@ -460,11 +481,23 @@ function AccountCardView(props: {
     <section className="fleet-card card">
       <div className="fleet-card-head">
         <div className="fleet-card-title">
-          <h2 className="fleet-name">{account.title}</h2>
+          <div className="fleet-name-row">
+            <h2 className="fleet-name">{account.title}</h2>
+            {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
+          </div>
           <p className="fleet-meta">{account.detail}</p>
         </div>
         <MoreTrigger menu={menu} label={`More actions for ${account.title}`} />
         <Menu menu={menu} label={`Actions for ${account.title}`}>
+          {account.openSwitch !== null && (
+            <MenuSwitchItem
+              label="Open for work"
+              icon={<WorkIcon />}
+              checked={switchOn}
+              disabled={pausing}
+              onToggle={() => onToggleOpen(!switchOn)}
+            />
+          )}
           <MenuItem
             label="Rename"
             icon={<PencilIcon />}
@@ -490,6 +523,16 @@ function AccountCardView(props: {
             <Bar key={bar.label} gauge={bar} note={bar.note} />
           ))}
         </div>
+      )}
+      {ask?.kind === "failed" && (
+        <p className="fleet-note fleet-warn" role="alert">
+          {ask.text}
+        </p>
+      )}
+      {account.hold !== null && ask?.kind !== "sending" && (
+        <p className="fleet-note">
+          <TimedText line={account.hold} />
+        </p>
       )}
       <p className="fleet-note">
         <TimedText line={account.observed} />
