@@ -184,6 +184,82 @@ test("parent parsing survives a comm with spaces and parens", () => {
   );
 });
 
+describe("idle notes (the settings Stop hook)", () => {
+  const panes: readonly BoundPane[] = [
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home" },
+  ];
+
+  function setup() {
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    const notes = (): unknown[] =>
+      forwarded.map(({ state, background, stopError }) => ({ state, background, stopError }));
+    return { events, send, notes };
+  }
+
+  test("a note stands alone: never beside a state, a hand-off or a pass, each malformed field dropped alone", () => {
+    expect(parseSessionEventFrame(frame({ stop: { background: { shell: 2 } }, pane: "%1" }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      stop: { background: { shell: 2 } },
+      pane: "%1",
+    });
+    expect(parseSessionEventFrame(frame({ stop: { background: { shell: 0 }, stopError: "rate_limit" } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      stop: { stopError: "rate_limit" },
+    });
+    expect(parseSessionEventFrame(frame({ stop: {}, state: "idle" }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ stop: {}, handoff: true }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ stop: "busy" }))).toBeNull();
+  });
+
+  test("a note waits for the turn's idle and rides it; one landing after the idle re-sends that idle", async () => {
+    const { events, send, notes } = setup();
+    try {
+      await send("%2", { state: "busy" });
+      expect(await send("%2", { stop: { background: { shell: 1, wakeup: 1 } } })).toEqual({ ok: true });
+      await send("%2", { state: "idle", turnEnded: true });
+      expect(await send("%2", { stop: { stopError: "overloaded" } })).toEqual({ ok: true });
+      await pollUntil(() => notes().length === 3, "the busy, the noted idle and its re-send");
+      expect(notes()).toEqual([
+        { state: "busy", background: undefined, stopError: undefined },
+        { state: "idle", background: { shell: 1, wakeup: 1 }, stopError: undefined },
+        { state: "idle", background: undefined, stopError: "overloaded" },
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("the next busy clears the note; an untasked pane's note is taken and goes nowhere", async () => {
+    const { events, send, notes } = setup();
+    try {
+      await send("%2", { stop: { background: { agent: 3 } } });
+      await send("%2", { state: "busy" });
+      await send("%2", { state: "idle", turnEnded: true });
+      expect(await send("%1", { stop: { background: { shell: 1 } } })).toEqual({ ok: true });
+      await send("%1", { state: "idle", turnEnded: true });
+      await pollUntil(() => notes().length === 2, "the busy and the idle");
+      expect(notes()).toEqual([
+        { state: "busy", background: undefined, stopError: undefined },
+        { state: "idle", background: undefined, stopError: undefined },
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+});
+
 describe("EndedTasks", () => {
   test("ended and launched-but-not-carried tasks report; one a session carries never does", async () => {
     const ended = new EndedTasks(
@@ -1196,6 +1272,11 @@ describe("a session's hand-off", () => {
     });
     expect(parseSessionEventFrame(frame({ state: "busy", reason: "question" }))).toEqual({ ...base, state: "busy" });
     expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "elicitation" }))).toEqual({
+      ...base,
+      state: "needs-input",
+      reason: "elicitation",
+    });
+    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "mystery" }))).toEqual({
       ...base,
       state: "needs-input",
     });

@@ -2318,10 +2318,12 @@ export type SessionState = (typeof SESSION_STATES)[number];
  * mode's classifier asks do, so the leader alerts it without the 2-minute
  * debounce and the PWA shows it at once (DESIGN.md, "Session events").
  * `permission`: a permission prompt a person must answer, with the tool it is
- * for in `tool`. Both display on the PWA. A reader that does not know a value
+ * for in `tool`. `elicitation`: an MCP server's own question (Claude's settings
+ * `Elicitation` hook, `seance session-event --hook`), display-only like
+ * `permission`. All display on the PWA. A reader that does not know a value
  * drops it and keeps the event: an unknown reason costs only the wording.
  */
-export const NEEDS_INPUT_REASONS = ["question", "permission"] as const;
+export const NEEDS_INPUT_REASONS = ["question", "permission", "elicitation"] as const;
 
 export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
 
@@ -2330,6 +2332,52 @@ export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
  * only (`isToolName`), so no command text can ride in a tool name.
  */
 export const TOOL_NAME_MAX_LENGTH = 64;
+
+/**
+ * What a session left running when its turn ended (Claude's settings `Stop` hook: `background_tasks` by type, and
+ * `session_crons` as `wakeup`), so an idle session waiting on its own work (a CI watch) reads apart from one that is
+ * done. Counts only, never a command, description or prompt (DESIGN.md, "Session events", "Settings hooks").
+ * Display-only: no reader binds, routes, moves, releases or settles anything by it.
+ */
+export const BACKGROUND_KINDS = ["shell", "agent", "monitor", "workflow", "other", "wakeup"] as const;
+
+export type BackgroundKind = (typeof BACKGROUND_KINDS)[number];
+
+/** Each kind's count, 1 to `BACKGROUND_COUNT_MAX`; a kind with none is absent, and nothing running is `{}`. */
+export type BackgroundWork = Partial<Record<BackgroundKind, number>>;
+
+export const BACKGROUND_COUNT_MAX = 99;
+
+/**
+ * Why a turn ended on an API error (Claude's settings `StopFailure` hook), so an idle session that will not resume on
+ * its own says so. Claude's own error names; one this build does not know is `unknown`. Display-only.
+ */
+export const STOP_ERRORS = [
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "verification_required",
+  "billing_error",
+  "rate_limit",
+  "overloaded",
+  "invalid_request",
+  "model_not_found",
+  "server_error",
+  "max_output_tokens",
+  "cloud_credential_error",
+  "unknown",
+] as const;
+
+export type StopError = (typeof STOP_ERRORS)[number];
+
+/**
+ * What a session's last turn end left behind, beside an `idle`: its background work, or the API error that ended the
+ * turn. The daemon joins it to the idle from the settings hooks' `stop` note (`seance session-event --hook`).
+ */
+export interface IdleNote {
+  readonly background?: BackgroundWork;
+  readonly stopError?: StopError;
+}
 
 /**
  * Why the custodian flagged a session for its owner (docs/custodian.md, C29). `stuck` and `look` are
@@ -2387,6 +2435,12 @@ export interface SessionEvent {
    * session claimed it, kept only as `isToolName` passes it. Display-only.
    */
   readonly tool?: string;
+  /**
+   * Only beside `idle`: what the session's last turn end left running, or the error that ended it — the daemon's
+   * note from the settings hooks (`IdleNote`). Display-only; an older leader drops both.
+   */
+  readonly background?: BackgroundWork;
+  readonly stopError?: StopError;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
@@ -3942,6 +3996,12 @@ export interface PassRefusalRef {
 export interface IdleTaskRef {
   readonly taskId: string;
   readonly since: number;
+  /**
+   * Its session's latest idle note (`SessionEvent.background`/`stopError`). The leader's memory only: a new term has
+   * none until the session's next `idle`. Display-only.
+   */
+  readonly background?: BackgroundWork;
+  readonly stopError?: StopError;
 }
 
 /** `Task.idleRelease`: when the stay at the prompt began (leader's clock, ms), and the machine whose `idle` began it. */

@@ -261,12 +261,13 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     verbs: INSTALL_VERBS("the MCP server in Claude's config"),
   },
   mod: {
-    summary: "install this checkout's Claude Code mods (claude-mods/) into Claude",
+    summary: "install this checkout's Claude Code mods (claude-mods/) and séance's settings hooks into Claude",
     usage: "install | uninstall",
     verbs: INSTALL_VERBS("this checkout's Claude Code mods"),
   },
   "session-event": {
-    summary: "read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)",
+    summary:
+      "read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call, or with --hook Claude's settings hooks'; silent)",
     internal: true,
   },
   inbox: {

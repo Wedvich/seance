@@ -8,6 +8,7 @@ import {
   type DespawnRequest,
   type DespawnResponse,
   type Machine,
+  type IdleNote,
   type SessionState,
 } from "@seance/shared";
 import {
@@ -924,6 +925,23 @@ describe("a session idle past idleReleaseAfterMs", () => {
     await report("busy");
     expect(scheduler.idle()).toEqual([]);
     expect(idleChanges).toEqual([first.id, first.id]);
+  });
+
+  test("an idle's note rides the release, replaced by the next idle's, its clock kept; never on the record", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, first } = env;
+    const pane = scheduler.task(first.id)?.assignment?.pane ?? "";
+    const idleWith = (note?: IdleNote) =>
+      scheduler.onSession(first.id, "idle", { deviceId: "a", pane, ...(note === undefined ? {} : { note }) });
+    await idleWith({ background: { shell: 1, wakeup: 1 } });
+    await at(env, NOW + GRACE);
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW, background: { shell: 1, wakeup: 1 } }]);
+
+    await idleWith({ stopError: "overloaded" });
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW, stopError: "overloaded" }]);
+    await idleWith();
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW }]);
+    expect(JSON.stringify(scheduler.task(first.id))).not.toContain("overloaded");
   });
 
   test("a repeated idle keeps its deadline", async () => {

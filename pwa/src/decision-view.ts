@@ -255,6 +255,7 @@ export function heldByCapsAlone(candidate: Candidate): boolean {
  */
 function waitClause(task: Task): { readonly hedged: boolean; readonly text: string } {
   if (task.inputReason === "question") return { hedged: false, text: "asking a question" };
+  if (task.inputReason === "elicitation") return { hedged: false, text: "waiting for an answer to an MCP server" };
   if (task.inputReason !== "permission") return { hedged: false, text: "waiting for input" };
   const text =
     task.inputTool === undefined ? "waiting for permission" : `waiting for permission to use ${task.inputTool}`;

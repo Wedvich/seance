@@ -346,6 +346,9 @@ describe("taskHeadline", () => {
       const waiting = (fields: Partial<Task>): string =>
         taskHeadline(task({ state: "needs-input", assignment: at, ...fields }), machines, NOW);
       expect(waiting({ inputReason: "question" })).toBe("It's asking a question on Mac · default.");
+      expect(waiting({ inputReason: "elicitation" })).toBe(
+        "It's waiting for an answer to an MCP server on Mac · default.",
+      );
       expect(waiting({ inputReason: "permission", inputTool: "Bash" })).toBe(
         "It may be waiting for permission to use Bash on Mac · default.",
       );

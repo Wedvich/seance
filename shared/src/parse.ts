@@ -168,6 +168,12 @@ import {
   type UnreadableTaskRef,
   type IdleRelease,
   type IdleTaskRef,
+  type IdleNote,
+  type BackgroundWork,
+  type StopError,
+  BACKGROUND_COUNT_MAX,
+  BACKGROUND_KINDS,
+  STOP_ERRORS,
   type PassRefusalRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
@@ -997,6 +1003,35 @@ export function isToolName(value: unknown): value is string {
   return typeof value === "string" && TOOL_NAME.test(value);
 }
 
+export function isStopError(value: unknown): value is StopError {
+  return STOP_ERRORS.some((code) => code === value);
+}
+
+/**
+ * A session's background work, kind by kind: null unless every key is a known kind and every count an integer from 1
+ * to `BACKGROUND_COUNT_MAX` — counts only, so nothing else can ride in it.
+ */
+export function parseBackgroundWork(value: unknown): BackgroundWork | null {
+  if (!isRecord(value)) return null;
+  const work: Partial<Record<string, number>> = {};
+  for (const [key, count] of Object.entries(value)) {
+    if (!BACKGROUND_KINDS.some((kind) => kind === key)) return null;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > BACKGROUND_COUNT_MAX) return null;
+    work[key] = count;
+  }
+  return work;
+}
+
+/** An `IdleNote` read off `value`'s `background` and `stopError`, each dropped alone when malformed. */
+export function parseIdleNote(value: Record<string, unknown>): IdleNote {
+  const background = parseBackgroundWork(value["background"]);
+  const { stopError } = value;
+  return {
+    ...(background === null ? {} : { background }),
+    ...(isStopError(stopError) ? { stopError } : {}),
+  };
+}
+
 /**
  * The leader's check on a forwarded event. The sender is a PSK holder, so this
  * is skew and bug hygiene rather than a trust boundary — the daemon already
@@ -1007,7 +1042,8 @@ export function isToolName(value: unknown): value is string {
  * `needs-input`, and dropped otherwise, never the event: a newer daemon's
  * reason costs this leader only the debounce it would have waited anyway. A
  * `tool` is kept only beside `permission` and only as `isToolName` passes it,
- * dropped otherwise, never the event.
+ * dropped otherwise, never the event. So are `background` and `stopError`, kept
+ * only beside `idle` (`parseIdleNote`).
  */
 export function parseSessionEvent(value: unknown): SessionEvent | null {
   if (!isRecord(value)) return null;
@@ -1027,6 +1063,7 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
     ...(state === "needs-input" && reason === "permission" && isToolName(tool) ? { tool } : {}),
+    ...(state === "idle" ? parseIdleNote(value) : {}),
   };
 }
 
@@ -2704,7 +2741,7 @@ function parsePassRefusalRef(value: unknown): PassRefusalRef | null {
 
 function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
   if (!isRecord(value) || !isTaskId(value["taskId"]) || !isFiniteNumber(value["since"])) return null;
-  return { taskId: value["taskId"], since: value["since"] };
+  return { taskId: value["taskId"], since: value["since"], ...parseIdleNote(value) };
 }
 
 function parseUnreadableTaskRef(value: unknown): UnreadableTaskRef | null {

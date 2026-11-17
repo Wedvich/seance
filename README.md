@@ -414,6 +414,14 @@ minutes old, checking every minute and whenever a session there reports. It runs
 checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs no
 `seance link`. A session started outside tmux reports nothing.
 
+Beside the mods it writes a few **settings hooks** into each config directory's
+`settings.json` (`SessionStart`, `Stop`, `StopFailure`, `Elicitation`,
+`ElicitationResult`), running the same command with `--hook`. They fill gaps the mod can't
+see: a fresh session's idle, an MCP server asking you something, and what a turn left
+running when it ended. That last one lets the Queue screen say an idle task is "waiting on
+its background work (1 shell)", such as a CI watch, rather than just sitting at its prompt.
+Only séance's own entries are touched, and `seance mod uninstall` removes them.
+
 It also installs **inbox**, which delivers messages other Séance sessions send to
 this one (`send_message`: a note, a question or a request, addressed by task id, or an answer to something this
 session sent) and adds a

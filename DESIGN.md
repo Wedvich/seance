@@ -3794,9 +3794,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   fourteen draw on the caps — handled as a return from sleep is: nothing killed, nothing placed
   until the count falls under. The `queue` reply lists the releases and the Queue screen shows
   them under Idle ("The Queue screen"). (b) `idle` is not always quiet: a main loop whose background
-  subagent or background command is still working reads idle, as does a session restarted
-  mid-turn until its next turn event ("Where the states come from"), so long background work can
-  be released while it runs. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
+  subagent or background command is still working reads idle, so long background work can
+  be released while it runs. Since 2026-11-17 the Queue screen says so (the `Stop` note, Session
+  events, "Settings hooks"); the release itself is unchanged, since a CI watch costs nothing until
+  it wakes the session, and the wake is a `busy` that takes the slot back. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
   a working session released until its next event; `sessions` cannot see busy from idle, so
   nothing else corrects it. A `busy` sent while no leader runs is lost the same way, and that is
   the likeliest case, since it falls around a takeover: the new leader seeds the stamp the old one
@@ -9287,8 +9288,9 @@ decision is recorded here.
   as the machine stays closed), never counts, since no verb may
   touch it and it would otherwise keep a round due for ever. **So does every pane no built verb could act on**
   (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
-  gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (the mod's `session.start`,
-  raised on a reload, an install or a hooks-worker respawn, leaves a finished session so). `close` answers both
+  gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (a session
+  started, resumed or cleared and never prompted, from the settings `SessionStart` hook; until mod 0.6.0 the
+  mod's `session.start` also left a finished session so on a reload, an install or a hooks-worker respawn). `close` answers both
   `unobserved` (C24), and a round they kept due would run every `everyMinutes` to do nothing. So the due check has
   two terms (`actionable`, `custodian-seat.ts`): a pane idle since its turn ended for `everyMinutes`, and (custodian 8) a pane `busy` whose screen has stood still for `everyMinutes` **and that a verb could act on**
   (`CustodianVerbs.reach`, asked through `SeatDeps.busyReach` for only those panes): `nudge` on a session with a task
@@ -10498,7 +10500,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
   Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected); while the archivist is connected, Finished continues into a collapsed Older section read from the archive (Archivist, "The PWA's task history"). Idle holds the
   `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
-  action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
+  action's own reply wins), each saying "Idle at its prompt since … — its slot is free", or, when
+  its entry carries the turn's note (Session events, "Settings hooks"), "Idle, waiting on its
+  background work (1 shell, 2 scheduled wake-ups) since …" or "Stopped on an API error (rate limit)
+  since …", and the
   summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).
   Not in Needs you: nothing is owed to a session that finished its turn, and its slot is already free. A row shows the
   task's title (its own, else its session's window name, which tmux and claude.ai show too, else its prompt's first line cut to 80, else its repo), where it is and
@@ -12055,7 +12060,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), or `{v, kind, stop, pane?}` alone ("Settings hooks", below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -12079,11 +12084,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   mod 0.2.0). On Team/Enterprise orgs Claude Code 2.1.308's built-in
   `cc-plugin-sec-default` sits first on the classic chain and passes every classic event
   past the plugins a person installs, so the first mod's `classic.*` hooks never ran there.
-  Now: `session.start` is idle (not raised for `/clear` or a compaction, but also raised
-  on an enable, a hooks-worker respawn or a reload, so a restart mid-turn reads idle until
-  the next turn event; gating on a first start would take a `$.state` contract for a
-  report the next turn event corrects, and why only `turn.complete` marks an idle with
-  `turnEnded: true`, mod 0.3.0, the one thing a hand-off's close waits for, below); the main
+  Now: the main
   loop's `turn.start` and `turn.complete`
   (`agentId` unset — a subagent's turns say nothing about whether the main loop is at
   its prompt) clear and set `atPrompt`. A `tool.check` whose verdict beneath the mod is
@@ -12133,8 +12134,51 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   debounce, "Needs input"), so only a tool running past it alerts anyone; it costs two task-record writes per such call.
   Rejected: delaying the report (the fault is the late close, not the open) and reading
   `ToolUse`/`ToolProgress` renders (`isRunning` is true while asked too, and only a drawn
-  surface raises them). **Not covered**: an MCP server's elicitation, which
-  has no engine event (only the skipped `classic.Elicitation`).
+  surface raises them). **Not covered by the mod**: an MCP server's elicitation, which
+  has no engine event (only the skipped `classic.Elicitation`), a fresh session's first idle, and
+  what a turn left running; the settings hooks below report those.
+  Until mod 0.6.0 `session.start` reported idle too, but it is also raised on an enable, a
+  hooks-worker respawn or a reload, so a restart mid-turn read idle until the next turn event; it
+  now reports nothing, and a respawned module starts at `atPrompt: false`, which the next turn
+  event corrects. This is why only `turn.complete` marks an idle with `turnEnded: true` (mod 0.3.0,
+  the one thing a hand-off's close waits for, below).
+- **Settings hooks** (added 2026-11-17). A plugin's `classic.*` hooks are skipped (above), but
+  hooks in a Claude settings file still run, and a few carry what no engine event does. `seance mod
+  install` writes one command group per event in `SETTINGS_HOOK_EVENTS` (`session-event-frame.ts`)
+  into each config dir's `settings.json` (`settings-hooks.ts`), beside the mods, and `uninstall`
+  removes them, so every hook séance installs comes and goes with that one command. The command is
+  `bun '<checkout>/daemon/src/main.ts' session-event --hook`, bare `bun` as the mod runs it, for the
+  same reason; an entry naming any checkout's CLI counts as ours, so a moved clone's is replaced, not
+  doubled, and the person's own hooks in the file are never touched. A file that is not a JSON
+  object, or whose `hooks` is not one, is left alone and the install fails for that dir. Doctor warns
+  for a missing event or another checkout's command. `--hook` reads the hook's stdin through
+  `hookFrame` (`session-event-cli.ts`) and passes on only the state, counts and enum it maps to,
+  never a command, description or prompt, and prints nothing (a `Stop` hook's stdout is a decision
+  to Claude). Outside tmux it sends nothing, as the mod does. The events:
+  - `SessionStart` with source `startup`, `resume` or `clear` is `idle` without `turnEnded`: the
+    session at its prompt. `compact` is not one (it can fall mid-turn), and a hooks-worker respawn
+    raises no `SessionStart`, which is what it improves on over the mod's `session.start`.
+  - `Elicitation` is `needs-input` with `reason: "elicitation"` and `ElicitationResult` is `busy`:
+    an MCP server asks inside a tool call, which the mod reports nothing of.
+  - `Stop` and `StopFailure` are a **note**, never a state (`{v, kind, stop, pane?}` alone): Claude
+    runs them before the turn is over, and another `Stop` hook may continue it, so the turn's end
+    stays the mod's `turn.complete`. `Stop`'s note is `background`, the turn's background work
+    counted by `BACKGROUND_KINDS` (Claude's `background_tasks` by type, `subagent` as `agent`, any
+    unknown type `other`, and each of `session_crons` a `wakeup`), each count 1–99; `StopFailure`'s
+    is `stopError`, the API error that ended the turn, one of `STOP_ERRORS` or `unknown`. The daemon
+    keeps the latest note per tasked pane, in memory, and joins it to that pane's `idle` events
+    (`parseIdleNote` at ingest and at `parseSessionEvent`, each field dropped alone); one landing
+    after the idle re-sends that idle with it, and any other state drops it, so a note never
+    outlives its turn. The leader keeps it beside its idle clock (`#idleSince`), replaced by each
+    idle, never on the task record and never stamped, and the `queue` reply's idle entries
+    (`IdleTaskRef`) carry it for the Queue screen. Display-only: it binds, moves, settles and
+    releases nothing; the idle release counts the same with or without it ("A session idle at its
+    prompt past a grace holds no slot", limitation (b)). A same-uid process can make its own idle
+    task's row say it is waiting on background work.
+    Rejected: `PermissionRequest`, which fires only when the dialog shows (none in auto mode for an
+    allowed call) and gives no event when it is approved, so it cannot close what it opens; the
+    mod's `tool.check` already covers the open. Rejected: launching each session with `--settings`,
+    which covers only sessions séance spawns and is invisible to `seance mod uninstall`.
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
@@ -12443,7 +12487,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   and its id reaches the Machines row another way (custodian 5, "the live link").
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
-  `question` and `permission`, and `tool` rides beside `permission` only. Closed kinds plus a
+  `question`, `permission` and (2026-11-17, from the settings `Elicitation` hook) `elicitation`, an MCP
+  server's question, and `tool` rides beside `permission` only. `elicitation` is treated as `permission`
+  is (debounced, no early alert, no early drain Escape): it is display-only too. Closed kinds plus a
   bounded name and never the command or the verdict's message: a command line may carry secrets,
   and prompt text is never logged. `isToolName` (`[A-Za-z0-9_-]{1,64}`, the Claude API's own
   tool-name alphabet, so every real name passes) holds it at ingest, at `parseSessionEvent` and

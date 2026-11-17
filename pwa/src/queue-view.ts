@@ -20,6 +20,9 @@ import {
   type PrState,
   type Task,
   FLEET_LIMIT_MAX,
+  BACKGROUND_KINDS,
+  type BackgroundKind,
+  type IdleTaskRef,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
@@ -306,10 +309,35 @@ function startNowFor(task: Task): StartNowItem {
   return decisionStartNowItem(task.decision ?? null);
 }
 
-/** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
-function bodyOf(task: Task, machines: readonly Machine[], now: number, skew: number, idleSince?: number): Timed | null {
-  const line = bodyLine(task, machines, now, skew, idleSince);
+/** `idle`, its `since` on this device's clock, is set only for a task the leader released idle. */
+function bodyOf(task: Task, machines: readonly Machine[], now: number, skew: number, idle?: IdleTaskRef): Timed | null {
+  const line = bodyLine(task, machines, now, skew, idle);
   return typeof line === "string" ? [line] : line;
+}
+
+const BACKGROUND_NOUNS: Record<BackgroundKind, readonly [string, string]> = {
+  shell: ["shell", "shells"],
+  agent: ["subagent", "subagents"],
+  monitor: ["monitor", "monitors"],
+  workflow: ["workflow", "workflows"],
+  other: ["other task", "other tasks"],
+  wakeup: ["scheduled wake-up", "scheduled wake-ups"],
+};
+
+/**
+ * What an idle session's last turn end left behind, as the clause before "since": its own background work (a CI
+ * watch), the API error that ended the turn, or plain idle. Exported for tests.
+ */
+export function idleClause(idle: IdleTaskRef): string {
+  const work = BACKGROUND_KINDS.flatMap((kind) => {
+    const count = idle.background?.[kind];
+    if (count === undefined) return [];
+    const [one, many] = BACKGROUND_NOUNS[kind];
+    return [`${count} ${count === 1 ? one : many}`];
+  });
+  if (work.length > 0) return `Idle, waiting on its background work (${work.join(", ")})`;
+  if (idle.stopError !== undefined) return `Stopped on an API error (${idle.stopError.replaceAll("_", " ")})`;
+  return "Idle at its prompt";
 }
 
 function bodyLine(
@@ -317,7 +345,7 @@ function bodyLine(
   machines: readonly Machine[],
   now: number,
   skew: number,
-  idleSince?: number,
+  idle?: IdleTaskRef,
 ): string | Timed | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
@@ -341,7 +369,7 @@ function bodyLine(
       ? clause
       : timed`${clause} since ${seen(task.needsInputSince - skew, now)}`;
   }
-  if (idleSince !== undefined) return timed`Idle at its prompt since ${seen(idleSince, now)} — its slot is free`;
+  if (idle !== undefined) return timed`${idleClause(idle)} since ${seen(idle.since, now)} — its slot is free`;
   return null;
 }
 
@@ -525,10 +553,10 @@ function rowOf(
   skew: number,
   titles: ReadonlyMap<string, string>,
   tasks: readonly Task[],
-  idle: ReadonlyMap<string, number>,
+  idle: ReadonlyMap<string, IdleTaskRef>,
 ): QueueRow {
   const phase = TASK_PHASES[task.state];
-  const idleSince = idle.get(task.id);
+  const idleRef = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
   const canFollowUp = phase !== "finished";
   const context = { now: now + skew, leaderHandoff: deriveContinueHandoffAvailability(state.relay) };
@@ -544,7 +572,13 @@ function rowOf(
     id: task.id,
     title: taskTitle(task),
     headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
-    body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
+    body: bodyOf(
+      task,
+      state.relay.machines,
+      now,
+      skew,
+      idleRef === undefined ? undefined : { ...idleRef, since: idleRef.since - skew },
+    ),
     dot: dotOf(task),
     age: seen(task.createdAt, now),
     canCancel: actionable,
@@ -583,7 +617,7 @@ function asRunning(task: Task, leaderNow: number): Task {
 }
 
 /** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
-type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
+type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, IdleTaskRef>) => number | null;
 
 /**
  * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
@@ -645,7 +679,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
-  const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r.since]));
+  const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r]));
 
   const sections = SECTIONS.map(({ title, pick, oldestFirst }) => {
     const members = tasks
