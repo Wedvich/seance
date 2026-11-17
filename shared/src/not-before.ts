@@ -95,9 +95,7 @@ export function resolveNotBefore(
   if (input.in !== undefined) {
     const ms = parseDuration(input.in);
     if (ms === null) return { ok: false, error: `--in ${input.in}: expected a duration like 90m, 2h or 1d2h` };
-    return isNotBefore(now + ms)
-      ? { ok: true, at: now + ms }
-      : { ok: false, error: `--in ${input.in}: too far ahead` };
+    return isNotBefore(now + ms) ? { ok: true, at: now + ms } : { ok: false, error: `--in ${input.in}: too far ahead` };
   }
   if (input.at === undefined) return { ok: false, error: "no time given" };
   const clock = parseClockTime(input.at);
