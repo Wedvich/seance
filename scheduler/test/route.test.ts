@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
+import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine, type SchedulerLimits } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt, exhaustion } from "../src/route.ts";
 import { traitsHolding } from "../src/traits.ts";
-import { accountMax, attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
   return { id: "t", spec: spec(), state: "ready", createdAt: NOW, ...fields };
@@ -15,6 +15,7 @@ function decide(
     task?: Task;
     tasks?: readonly Task[];
     config?: Partial<SchedulerConfig>;
+    limits?: SchedulerLimits;
     released?: ReadonlySet<string>;
     attachments?: boolean;
   } = {},
@@ -25,6 +26,7 @@ function decide(
     tasks: fields.tasks ?? [],
     now: NOW,
     config: { ...DEFAULT_CONFIG, ...fields.config },
+    ...(fields.limits === undefined ? {} : { limits: fields.limits }),
     ...(fields.released === undefined ? {} : { released: fields.released }),
     ...(fields.attachments === undefined ? {} : { attachments: fields.attachments }),
   });
@@ -267,7 +269,7 @@ describe("filter", () => {
 
     test("a machine pin never lifts a limit: the pinned machine keeps its disk, quota and cap reasons, and the others only pin_mismatch", () => {
       const pinned = task({ spec: spec({ pin: { deviceId: "a" } }) });
-      const cases: [string, Machine, Partial<SchedulerConfig>, Task[], string][] = [
+      const cases: [string, Machine, SchedulerLimits, Task[], string][] = [
         ["disk_low", machine("a", { status: status({ free: 1023, quota: [obs(0)] }) }), {}, [], "disk_low"],
         [
           "quota_over_line",
@@ -276,10 +278,10 @@ describe("filter", () => {
           [],
           "quota_over_line",
         ],
-        ["cap_reached", machine("a"), { globalMax: 1 }, [held("x", "b")], "cap_reached"],
+        ["cap_reached", machine("a"), { fleet: 1 }, [held("x", "b")], "cap_reached"],
       ];
-      for (const [, held_a, config, tasks, code] of cases) {
-        const decision = decide([held_a, machine("b")], { task: pinned, tasks, config });
+      for (const [, held_a, limits, tasks, code] of cases) {
+        const decision = decide([held_a, machine("b")], { task: pinned, tasks, limits });
         const reasons = reasonsOf(decision);
         const onA = decision.candidates.find((c) => c.deviceId === "a");
         expect(onA === undefined ? [] : codes(onA)).toContain(code);
@@ -764,74 +766,50 @@ describe("filter", () => {
     });
   });
 
-  test("cap_reached: the global max counts every in-flight task, reserved included", () => {
+  test("cap_reached: the fleet limit counts every in-flight task, reserved included", () => {
     const tasks = [held("x", "b"), held("y", "b", "reserved"), task({ id: "z", state: "done" })];
-    const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2 } }));
+    const candidate = only(decide([machine("a")], { tasks, limits: { fleet: 2 } }));
     expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 2, max: 2 }]);
   });
 
-  describe("cap_reached scope account", () => {
-    test("rejects only the full account's candidates, counting reserved and needs-input tasks", () => {
-      const tasks = [held("x", "a", "reserved"), held("y", "a", "needs-input"), held("z", "a", "awaiting-merge")];
-      const decision = decide([twoAccounts()], { tasks, config: accountMax(2) });
-      const main = decision.candidates.find((c) => c.exclave === "main");
-      expect(main?.rejected).toEqual([{ code: "cap_reached", inFlight: 2, max: 2, scope: "account" }]);
-      expect(decision.chosen).toEqual({ deviceId: "a", exclave: "alt", clone: "app2" });
+  describe("with no limit set", () => {
+    test("nothing caps the fleet: a ninth task on one account places", () => {
+      const tasks = ["s", "t", "u", "v", "w", "x", "y", "z"].map((id) => held(id, "a"));
+      expect(only(decide([machine("a")], { tasks })).rejected).toEqual([]);
+      expect(only(decide([machine("a")], { tasks, limits: {} })).rejected).toEqual([]);
     });
 
-    test("a task on a machine gone from the registry has no account to count", () => {
-      const tasks = [held("x", "gone"), held("y", "gone")];
-      expect(only(decide([machine("a")], { tasks, config: accountMax(2) })).rejected).toEqual([]);
-    });
-
-    test("the seat sets it: a standard account holds two, a premium one four", () => {
-      const two = [held("x", "a"), held("y", "a")];
-      expect(only(decide([standardSeat(obs(0))], { tasks: two })).rejected).toEqual([
-        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
-      ]);
-      const premium = machine("a", {
-        exclaves: [exclave("main", "org:a", { seatTier: "team_tier_1" })],
-        status: status({ quota: [obs(0)] }),
-      });
-      expect(only(decide([premium], { tasks: two })).rejected).toEqual([]);
-      const four = [...two, held("z", "a"), held("w", "a")];
-      expect(only(decide([premium], { tasks: four })).rejected).toEqual([
-        { code: "cap_reached", inFlight: 4, max: 4, scope: "account" },
-      ]);
-    });
-
-    test("the global cap stays unscoped and sits beside the account's", () => {
+    test("an account is bounded by its quota line alone, never by a count", () => {
       const tasks = [held("x", "a"), held("y", "a")];
-      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2, ...accountMax(2) } }));
-      expect(candidate.rejected).toEqual([
-        { code: "cap_reached", inFlight: 2, max: 2 },
-        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
-      ]);
+      const decision = decide([twoAccounts()], { tasks, limits: { fleet: 3 } });
+      expect(decision.candidates.flatMap((c) => c.rejected)).toEqual([]);
     });
   });
 
+  test("a fleet limit of 0, an unreadable record's, holds every task and run-now alone passes it", () => {
+    const held0 = only(decide([machine("a")], { limits: { fleet: 0 } }));
+    expect(held0.rejected).toEqual([{ code: "cap_reached", inFlight: 0, max: 0 }]);
+    const forced = route({
+      task: task(),
+      machines: [machine("a")],
+      tasks: [],
+      now: NOW,
+      config: DEFAULT_CONFIG,
+      limits: { fleet: 0 },
+      uncapped: true,
+    });
+    expect(only(forced).rejected).toEqual([]);
+  });
+
   describe("a released task holds no slot", () => {
-    /** Machine `s`, asleep, signed in to `org:a` as `a` is. */
-    const asleep = machine("s", { connected: false, exclaves: [exclave("main", "org:a")] });
-    // The leader's to say why; here `s` is asleep, and these are its tasks.
+    // The leader's to say why; here machine `s` is asleep, and these are its tasks.
     const released = new Set(["x", "y"]);
 
-    test("in flight, reserved included, it leaves the global count; the rest still count", () => {
+    test("in flight, reserved included, it leaves the fleet count; the rest still count", () => {
       const tasks = [held("x", "s"), held("y", "s", "reserved"), held("z", "b")];
-      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 1 }, released }));
+      const candidate = only(decide([machine("a")], { tasks, limits: { fleet: 1 }, released }));
       expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
-      expect(only(decide([machine("a")], { tasks, config: { globalMax: 2 }, released })).rejected).toEqual([]);
-    });
-
-    test("it leaves its account's count, so another machine on the account gets the work", () => {
-      const tasks = [held("x", "s"), held("y", "s", "needs-input")];
-      const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
-      const holding = decide(fleet, { tasks, config: accountMax(2) });
-      expect(byExclave(holding, "main")?.rejected).toEqual([
-        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
-      ]);
-      const freed = decide(fleet, { tasks, config: accountMax(2), released });
-      expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
+      expect(only(decide([machine("a")], { tasks, limits: { fleet: 2 }, released })).rejected).toEqual([]);
     });
 
     test("an old record's batch bound is gone: the next member meets only what the caps define", () => {
@@ -853,7 +831,7 @@ describe("filter", () => {
           assignment: { deviceId: "s", exclave: "main", clone: "app" },
         });
         const next = member("n", 1, strategy);
-        const one = { task: next, tasks: [running], config: { globalMax: 1 } };
+        const one = { task: next, tasks: [running], limits: { fleet: 1 } };
         // Asleep past the grace, the first holds no slot and nothing else holds the next.
         expect(only(decide([machine("a")], { ...one, released })).rejected).toEqual([]);
         // Awake, it holds the global slot as any task does, and nothing batch-shaped.
@@ -1001,11 +979,10 @@ describe("filter", () => {
 
     test("in-flight tasks on a standard seat each count at its scaled estimate", () => {
       const standard = standardSeat(obs(0, { h: 20 }));
-      // 20% + 2 × 25% is under; one more in flight makes it 95%, and fills the seat's two slots.
+      // 20% + 2 × 25% is under; one more in flight makes it 95%. The line is the seat's only bound.
       expect(only(decide([standard], { tasks: [held("x", "a")] })).rejected).toEqual([]);
       expect(only(decide([standard], { tasks: [held("x", "a"), held("y", "a")] })).rejected).toEqual([
         { code: "quota_over_line", window: "5h", projectedPct: 95 },
-        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
       ]);
     });
   });

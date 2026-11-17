@@ -50,6 +50,9 @@ import {
   parseQueueChanged,
   parseQueueReply,
   parseQueueRequest,
+  parseSchedulerSettingsRecord,
+  parseSetLimitsReply,
+  parseSetLimitsRequest,
   parseRepoEntry,
   parseResumeRequest,
   parseCustodianEvent,
@@ -101,6 +104,7 @@ import {
   STATUS_MAX_AUTH_EXPIRED,
   STATUS_MAX_TRAIT_PAIRS,
   DECISION_MAX_CANDIDATES,
+  FLEET_LIMIT_MAX,
   MAX_PAUSE_HOLDS,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -1378,6 +1382,52 @@ describe("scheduler ops", () => {
     const holds: readonly PauseHold[] = [{ until: "resume", at: 1 }];
     expect(parseQueueReply({ tasks: [], at: 5, holds })).toEqual({ tasks: [], at: 5, holds });
     expect(parseQueueReply({ tasks: [], at: 5, holds: [{ until: "never", at: 1 }] })).toBeNull();
+  });
+
+  test("the limits record is strict: a limit this build cannot read is not read as none", () => {
+    expect(parseSchedulerSettingsRecord({ version: 1, limits: {} })).toEqual({ version: 1, limits: {} });
+    expect(parseSchedulerSettingsRecord({ version: 2, limits: { fleet: 8 }, more: 1 })).toEqual({
+      version: 2,
+      limits: { fleet: 8 },
+    });
+    // A limit a newer leader added: dropping it would lift it.
+    expect(parseSchedulerSettingsRecord({ version: 2, limits: { fleet: 8, machine: 2 } })).toBeNull();
+    expect(parseSchedulerSettingsRecord({ version: 1, limits: { fleet: FLEET_LIMIT_MAX } })).not.toBeNull();
+    for (const fleet of [0, -1, 1.5, "8", null, FLEET_LIMIT_MAX + 1]) {
+      expect(parseSchedulerSettingsRecord({ version: 1, limits: { fleet } })).toBeNull();
+    }
+    expect(parseSchedulerSettingsRecord({ version: 1 })).toBeNull();
+    expect(parseSchedulerSettingsRecord({ version: 0, limits: {} })).toBeNull();
+    expect(parseSchedulerSettingsRecord({ limits: {} })).toBeNull();
+  });
+
+  test("set-limits names a fleet limit or null for none; 0 is a pause's job and is refused", () => {
+    expect(parseSetLimitsRequest({ fleet: 4, extra: 1 })).toEqual({ fleet: 4 });
+    expect(parseSetLimitsRequest({ fleet: null })).toEqual({ fleet: null });
+    for (const fleet of [0, -1, 1.5, "4", FLEET_LIMIT_MAX + 1]) {
+      expect(parseSetLimitsRequest({ fleet })).toBeNull();
+    }
+    // No field is not "no limit": lifting one is said outright.
+    expect(parseSetLimitsRequest({})).toBeNull();
+    expect(parseSetLimitsRequest(null)).toBeNull();
+
+    expect(parseSetLimitsReply({ limits: { fleet: 4 } })).toEqual({ limits: { fleet: 4 } });
+    expect(parseSetLimitsReply({ limits: {} })).toEqual({ limits: {} });
+    expect(parseSetLimitsReply({ limits: { fleet: 0 } })).toBeNull();
+    expect(parseSetLimitsReply({})).toBeNull();
+    const refused = { ok: false, code: "conflict", message: "again" } as const;
+    expect(parseSetLimitsReply(refused)).toEqual(refused);
+  });
+
+  test("queue says when the limits cannot be read, and only as true", () => {
+    expect(parseQueueReply({ tasks: [], at: 5, limitsUnreadable: true })).toEqual({
+      tasks: [],
+      at: 5,
+      limitsUnreadable: true,
+    });
+    for (const bad of [false, 1, "true", null]) {
+      expect(parseQueueReply({ tasks: [], at: 5, limitsUnreadable: bad })).toEqual({ tasks: [], at: 5 });
+    }
   });
 
   test("queue carries the leader's cap; one that is not a positive integer is dropped, not the reply", () => {

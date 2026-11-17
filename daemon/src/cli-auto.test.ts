@@ -844,7 +844,7 @@ describe("start", () => {
       expect(fake.requests).toEqual([]);
       const held = await startTaskAuto({ taskId: "t-1" }, relayFleet(lazy));
       expect(held.ok).toBe(false);
-      expect(held.text).toStartWith("start refused (unplaceable): something besides the concurrency cap");
+      expect(held.text).toStartWith("start refused (unplaceable): something besides the concurrency limit");
       // Not a lost answer: nothing to check.
       expect(held.text).not.toContain("may have landed");
     } finally {

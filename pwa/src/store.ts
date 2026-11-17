@@ -379,6 +379,7 @@ export class Store {
       startNowRefusal: null,
       pausing: false,
       accountOpen: null,
+      limiting: false,
       discarding: false,
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, renaming: null, notice: null },
       archiveStatus: null,
@@ -929,6 +930,10 @@ export class Store {
 
   pauseQueue(): Promise<void> {
     return this.#queue.pauseQueue();
+  }
+
+  setFleetLimit(fleet: number | null): Promise<void> {
+    return this.#queue.setFleetLimit(fleet);
   }
 
   resumeQueue(account?: string): Promise<void> {

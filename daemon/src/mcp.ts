@@ -1188,7 +1188,7 @@ export function buildMcpServer(
     {
       title: "Start a queued scheduler task now",
       description:
-        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency cap — the app's Start now. Only the cap is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the cap like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
+        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency limit — the app's Start now. Only the limit is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the limit like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
       inputSchema: z.strictObject({ taskId: z.string().describe("The waiting task's id from get_queue") }),
       annotations: { readOnlyHint: false },
     },
@@ -1288,7 +1288,7 @@ export function buildMcpServer(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the in-flight caps, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. If this session is itself a scheduler task, opened no pull request and queued this one to carry its work on, call report_task_done once nothing of its own is left, or its task holds a slot until it exits. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the fleet limit when one is set, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. If this session is itself a scheduler task, opened no pull request and queued this one to carry its work on, call report_task_done once nothing of its own is left, or its task holds a slot until it exits. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.strictObject({
         machine: z
           .string()
@@ -1333,7 +1333,7 @@ export function buildMcpServer(
           .boolean()
           .optional()
           .describe(
-            "Start it now, past the fleet's concurrency cap, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only the cap is lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
+            "Start it now, past the fleet's concurrency limit, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only the limit is lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
           ),
       }),
       annotations: { readOnlyHint: false },
@@ -1419,7 +1419,7 @@ export function buildMcpServer(
     "queue_batch",
     {
       title: "Queue a batch of tasks",
-      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. As spawn_session's: a scheduler task's session that opened no pull request and queued these to carry its work on calls report_task_done once nothing of its own is left. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
+      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's concurrency limit (none unless the owner set one) allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. As spawn_session's: a scheduler task's session that opened no pull request and queued these to carry its work on calls report_task_done once nothing of its own is left. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
       inputSchema: z.strictObject({
         // Retired, still listed: strict refuses them anyway, but the handler says what replaced them.
         strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
@@ -1471,7 +1471,7 @@ export function buildMcpServer(
     async ({ strategy, max, autonomy, tasks }) => {
       if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
         return errorResult(
-          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
+          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is bounded by the fleet limit, when the owner set one",
         );
       }
       const batchId = crypto.randomUUID();

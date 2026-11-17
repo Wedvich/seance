@@ -320,7 +320,7 @@ export function availabilityAudit(
 
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
-  /** A `run-now` that reserved the task past the concurrency caps. */
+  /** A `run-now` that reserved the task past the concurrency limit. */
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */
@@ -350,6 +350,7 @@ export interface QueueAudit {
       | "amend"
       | "pause"
       | "resume"
+      | "set-limits"
       | "discard"
       | "push-subscribe"
       | "push-unsubscribe",
@@ -360,6 +361,8 @@ export interface QueueAudit {
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
   readonly held: (op: "pause" | "resume", id: string, account: string | undefined) => Promise<void>;
+  /** A `set-limits` answered with the limits now in force; `fleet` undefined is none. */
+  readonly limited: (id: string, fleet: number | undefined) => Promise<void>;
   /** A `push-subscribe` that is now held (added, or already was). Names no endpoint, host or key: the endpoint is the subscription's secret. */
   readonly subscribed: (id: string) => Promise<void>;
   /** A `push-unsubscribe` answered: the endpoint is no longer held (removed, or never was). Names no endpoint, as `subscribed`. */
@@ -398,6 +401,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
     },
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
+    limited: (id, fleet) => emit(`op=set-limits id=${quote(id)} fleet=${fleet ?? "none"} ok`),
     subscribed: (id) => emit(`op=push-subscribe id=${quote(id)} ok`),
     unsubscribed: (id) => emit(`op=push-unsubscribe id=${quote(id)} ok`),
     refused: (op, id, code, subject) =>

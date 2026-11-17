@@ -132,7 +132,7 @@ export interface SpawnCliArgs {
   readonly not?: readonly string[];
   /** Queued spawn only (refused with `--now`): traits the machine must declare, each given by one `--requires`; present only when given. */
   readonly requires?: readonly string[];
-  /** Queued spawn only (refused with `--now`): start it past the concurrency cap once admitted, as `seance start`; present only when given. */
+  /** Queued spawn only (refused with `--now`): start it past the concurrency limit once admitted, as `seance start`; present only when given. */
   readonly start?: true;
   /** The task's autonomy level, queued or `--now`; present only when given. */
   readonly autonomy?: AutonomyLevel;
@@ -233,7 +233,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   }
   if (now && start) {
     throw new Error(
-      `--now spawns here directly; --start starts a queued spawn past the scheduler's cap — give one\n${SPAWN_USAGE}`,
+      `--now spawns here directly; --start starts a queued spawn past the scheduler's limit — give one\n${SPAWN_USAGE}`,
     );
   }
   const prompt = promptParts.join(" ");
@@ -339,7 +339,7 @@ export function parseStartArgs(argv: readonly string[]): StartCliArgs {
   return { taskId };
 }
 
-/** Starts a queued task now, past the concurrency cap (`cli-auto.ts`) — the app's Start now. */
+/** Starts a queued task now, past the concurrency limit (`cli-auto.ts`) — the app's Start now. */
 export async function cmdStart(argv: readonly string[]): Promise<void> {
   return cmdStartAuto(parseStartArgs(argv));
 }

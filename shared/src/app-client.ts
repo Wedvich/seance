@@ -54,6 +54,8 @@ import {
   type RequestOp,
   type RescanResponse,
   type ResumeRequest,
+  type SetLimitsReply,
+  type SetLimitsRequest,
   type RoutePreviewReply,
   type RoutePreviewRequest,
   type SchedulerLeader,
@@ -91,6 +93,7 @@ import {
   parseQueueReply,
   parseRescanResponse,
   parseRoutePreviewReply,
+  parseSetLimitsReply,
   parseSettingsRecord,
   pushServiceVendor,
   parseStoreChanged,
@@ -2223,7 +2226,7 @@ export class RelayClient {
   }
 
   /**
-   * Places a `ready` task now, past the concurrency caps and nothing else; the
+   * Places a `ready` task now, past the concurrency limit and nothing else; the
    * reply is the task as reserved. Only to a leader advertising `CAPABILITIES.runNow`.
    */
   runNow(taskId: string): Promise<TaskReply | null> {
@@ -2257,6 +2260,14 @@ export class RelayClient {
 
   resume(request: ResumeRequest = {}): Promise<PauseReply | null> {
     return this.#schedule("resume", request, parsePauseReply);
+  }
+
+  /**
+   * Sets the fleet limit, or lifts it with null. Only to a verified leader advertising
+   * `CAPABILITIES.limits`: an older one answers an unknown op `invalid_request`.
+   */
+  setLimits(request: SetLimitsRequest): Promise<SetLimitsReply | null> {
+    return this.#schedule("set-limits", request, parseSetLimitsReply);
   }
 
   /**

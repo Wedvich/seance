@@ -532,6 +532,63 @@ describe("pause", () => {
   });
 });
 
+describe("limits", () => {
+  const limitsEnv = (payload: unknown, op: AtRestOp = AT_REST_OPS.schedulerSettings): Promise<Envelope> =>
+    sealAtRest(key, { to: SCHEDULER_ID, from: SCHEDULER_ID }, op, payload);
+
+  test("none at first; a put reads back under the term; a second create is a conflict", async () => {
+    await withRig(async ({ relay, store }) => {
+      expect(await store.getLimits()).toBeNull();
+      expect(await store.putLimits(0, { fleet: 4 })).toEqual({ ok: true, version: 1 });
+      expect(await store.getLimits()).toEqual({ version: 1, limits: { fleet: 4 } });
+      expect(await store.putLimits(0, {})).toEqual({ ok: false, code: "version_conflict" });
+      expect(await store.putLimits(1, {})).toEqual({ ok: true, version: 2 });
+      expect(await store.getLimits()).toEqual({ version: 2, limits: {} });
+      const puts = (await drain(relay)).filter((f) => f.t === "store-put");
+      expect(puts.map((f) => f.key)).toEqual(["settings:scheduler", "settings:scheduler", "settings:scheduler"]);
+      expect(puts.every((f) => f.term === 2)).toBe(true);
+    });
+  });
+
+  test("a record that is not this slot's reads with its reason", async () => {
+    await withRig(async ({ relay, store }) => {
+      const slot = "settings:scheduler";
+      // The pause's blob put in this slot: its shape is not what says which blob it is.
+      relay.plantRecord(slot, 1, await limitsEnv({ version: 1, limits: {} }, AT_REST_OPS.pauseState));
+      expect(await store.getLimits()).toEqual({ version: 1, reason: "unopenable" });
+      relay.plantRecord(
+        slot,
+        1,
+        await sealAtRest(key, { to: APP_ID, from: SCHEDULER_ID }, AT_REST_OPS.schedulerSettings, {
+          version: 1,
+          limits: {},
+        }),
+      );
+      expect(await store.getLimits()).toEqual({ version: 1, reason: "unopenable" });
+      relay.plantRecord(slot, 1, await limitsEnv({ version: 1, limits: { fleet: 0 } }));
+      expect(await store.getLimits()).toEqual({ version: 1, reason: "malformed" });
+      // An authentic old blob put back names the version it was sealed at.
+      relay.plantRecord(slot, 2, await limitsEnv({ version: 1, limits: { fleet: 2 } }));
+      expect(await store.getLimits()).toEqual({ version: 2, reason: "version_mismatch" });
+
+      const env = await limitsEnv({ version: 1, limits: {} });
+      relay.replyNextStore((frame) => ({
+        t: "store-record",
+        re: frame.id,
+        record: { key: "settings:main", version: 1, env },
+      }));
+      expect(await store.getLimits()).toEqual({ version: 1, reason: "key_mismatch" });
+    });
+  });
+
+  test("a limit a reader would refuse is refused without a frame", async () => {
+    await withRig(async ({ relay, store }) => {
+      expect(await store.putLimits(0, { fleet: 0 })).toEqual({ ok: false, code: "refused" });
+      expect(relay.storeFrames.size).toBe(0);
+    });
+  });
+});
+
 describe("size", () => {
   test("a full prefix of full-size records arrives whole, as one frame", async () => {
     await withRig(async ({ relay, store }) => {

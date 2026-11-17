@@ -135,7 +135,7 @@ describe("a queued verdict's body", () => {
 });
 
 describe("a Start now refusal on the queued verdict", () => {
-  const refusal = { taskId: "t", message: "Something besides the concurrency caps keeps it from every machine." };
+  const refusal = { taskId: "t", message: "Something besides the concurrency limit keeps it from every machine." };
   const body = (t: Task, r: typeof refusal | null): string =>
     describeVerdict({ kind: "queued", task: t }, [], {}, NOW, null, r).body;
 

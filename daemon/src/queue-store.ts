@@ -2,10 +2,12 @@ import {
   StoreRevoked,
   type QueueStore,
   type StoreEntry,
+  type StoredLimits,
   type StoredPause,
   type StoredTask,
   type StoreWrite,
   type Task,
+  type UnreadableLimits,
   type UnreadablePause,
 } from "@seance/scheduler";
 import {
@@ -15,13 +17,16 @@ import {
   openTaskListing,
   openTaskRecord,
   parsePauseRecord,
+  parseSchedulerSettingsRecord,
   PAUSE_KEY,
   sealAtRest,
   sealTaskRecord,
   SCHEDULER_ID,
+  SCHEDULER_SETTINGS_KEY,
   STORE_PREFIXES,
   taskKey,
   type PauseHold,
+  type SchedulerLimits,
 } from "@seance/shared";
 import { storeIo, withinCap, type StoreLeg } from "./store-frames.ts";
 import type { VersionFloor } from "./version-floor.ts";
@@ -128,6 +133,37 @@ export function createQueueStore(o: QueueStoreOpts): QueueStore {
       if (!withinCap(env, expect)) return { ok: false, code: "too_large" };
       return write({ t: "store-put", id: crypto.randomUUID(), key: PAUSE_KEY, expect, env, term: o.term }, version);
     },
+
+    async getLimits(): Promise<StoredLimits | UnreadableLimits | null> {
+      const key = SCHEDULER_SETTINGS_KEY;
+      const reply = await read({ t: "store-get", id: crypto.randomUUID(), key });
+      if (reply.t !== "store-record") throw new Error(`store-get: answered with ${reply.t}`);
+      const { record } = reply;
+      if (record === null) return null;
+      if (record.key !== key) return { version: record.version, reason: "key_mismatch" };
+      if (record.env.to !== SCHEDULER_ID) return { version: record.version, reason: "unopenable" };
+      let payload: unknown;
+      try {
+        payload = (await openAtRest(o.key, record.env, AT_REST_OPS.schedulerSettings)).payload;
+      } catch {
+        return { version: record.version, reason: "unopenable" };
+      }
+      const parsed = parseSchedulerSettingsRecord(payload);
+      if (parsed === null) return { version: record.version, reason: "malformed" };
+      if (parsed.version !== record.version) return { version: record.version, reason: "version_mismatch" };
+      return { version: record.version, limits: parsed.limits };
+    },
+
+    async putLimits(expect: number, limits: SchedulerLimits): Promise<StoreWrite> {
+      const version = expect + 1;
+      const parsed = parseSchedulerSettingsRecord({ version, limits });
+      if (parsed === null) return { ok: false, code: "refused" };
+      const sealed = { to: SCHEDULER_ID, from: SCHEDULER_ID };
+      const env = await sealAtRest(o.key, sealed, AT_REST_OPS.schedulerSettings, parsed);
+      if (!withinCap(env, expect)) return { ok: false, code: "too_large" };
+      const key = SCHEDULER_SETTINGS_KEY;
+      return write({ t: "store-put", id: crypto.randomUUID(), key, expect, env, term: o.term }, version);
+    },
   };
 }
 
@@ -141,7 +177,8 @@ const regressed = (entry: StoreEntry): StoreEntry => ({
  * `inner` held to the process's version floor (`version-floor.ts`): a readable
  * task record below it reads `version_regressed`; a pause below it, or missing
  * once one was seen, reads the same, so the library holds the whole queue as it
- * does for any unreadable pause; and a task record that vanished without this
+ * does for any unreadable pause; the limits record the same, so nothing is
+ * placed as for any unreadable one; and a task record that vanished without this
  * leader deleting it is no answer — the read rejects, and the library keeps the
  * task as it held it. Every read at or above the floor, and every write that
  * landed, raises it, saved before the library acts on what it read.
@@ -200,6 +237,24 @@ export function flooredStore(inner: QueueStore, floor: VersionFloor): QueueStore
       const write = await inner.putPause(expect, holds);
       if (write.ok) {
         floor.wrotePause(write.version);
+        await floor.save();
+      }
+      return write;
+    },
+
+    async getLimits(): Promise<StoredLimits | UnreadableLimits | null> {
+      const limits = await inner.getLimits();
+      if (limits === null) return floor.limits() === 0 ? null : { version: 0, reason: "version_regressed" };
+      if (limits.reason !== undefined) return limits;
+      if (limits.version < floor.limits()) return { version: limits.version, reason: "version_regressed" };
+      if (floor.sawLimits(limits.version)) await floor.save();
+      return limits;
+    },
+
+    async putLimits(expect: number, limits: SchedulerLimits): Promise<StoreWrite> {
+      const write = await inner.putLimits(expect, limits);
+      if (write.ok) {
+        floor.wroteLimits(write.version);
         await floor.save();
       }
       return write;

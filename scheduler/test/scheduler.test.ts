@@ -24,7 +24,6 @@ import {
 } from "../src/index.ts";
 import { advance } from "../src/task.ts";
 import {
-  accountMax,
   attachment,
   enqueue,
   exclave,
@@ -365,7 +364,8 @@ describe("reservation TTL", () => {
 
   test("a connected machine that answers only errors: lost after lostAfterMs past the TTL, freeing its slot without a twin", async () => {
     const fleet = new FakeFleet([machine("a")]);
-    const { clock, scheduler, store } = setup(fleet, { ...DEFAULT_CONFIG, globalMax: 1 });
+    const { clock, scheduler, store } = setup(fleet);
+    await scheduler.setLimits({ fleet: 1 });
     fleet.scripts.set("a", () => ({ ok: false, code: "internal_error", message: "crashed after launch?" }));
     fleet.sessionsReply = () => ({ ok: false, code: "internal_error", message: "tmux failing" });
     const t1 = await enqueue(store, scheduler, spec());
@@ -589,8 +589,9 @@ describe("a machine that stops answering", () => {
   const LOST_AFTER = DEFAULT_CONFIG.lostAfterMs;
 
   /** One task running on `a`, then `a` gone — disconnected, or forgotten from the registry. */
-  async function runningThenGone(gone: "disconnected" | "forgotten", config = DEFAULT_CONFIG) {
-    const env = setup(new FakeFleet([machine("a"), machine("b")]), config);
+  async function runningThenGone(gone: "disconnected" | "forgotten", fleetLimit?: number) {
+    const env = setup(new FakeFleet([machine("a"), machine("b")]));
+    if (fleetLimit !== undefined) await env.scheduler.setLimits({ fleet: fleetLimit });
     env.fleet.scripts.set("b", () => ({ ok: false, code: "repo_not_found", message: "only a runs it" }));
     const task = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
     await pass(env.scheduler);
@@ -629,11 +630,8 @@ describe("a machine that stops answering", () => {
     }
   });
 
-  test("a lost task frees its slot: it does not count toward the global cap", async () => {
-    const { clock, fleet, scheduler, store, task } = await runningThenGone("disconnected", {
-      ...DEFAULT_CONFIG,
-      globalMax: 1,
-    });
+  test("a lost task frees its slot: it does not count toward the fleet limit", async () => {
+    const { clock, fleet, scheduler, store, task } = await runningThenGone("disconnected", 1);
     fleet.scripts.delete("b");
     expect(scheduler.preview(spec()).candidates.flatMap((c) => c.rejected)).toContainEqual(
       expect.objectContaining({ code: "cap_reached" }),
@@ -743,9 +741,10 @@ describe("a machine that stops answering", () => {
 describe("a machine asleep past slotReleaseAfterMs", () => {
   const GRACE = DEFAULT_CONFIG.slotReleaseAfterMs;
 
-  /** One task running on `a` under a global max of 1, then `a` asleep, seen by a pass. */
+  /** One task running on `a` under a fleet limit of 1, then `a` asleep, seen by a pass. */
   async function asleepHoldingTheSlot() {
-    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const env = setup(new FakeFleet([machine("a"), machine("b")]));
+    await env.scheduler.setLimits({ fleet: 1 });
     const first = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
     await pass(env.scheduler);
     expect(env.scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
@@ -869,9 +868,10 @@ describe("a session idle past idleReleaseAfterMs", () => {
   /** `STAMP_RETRY_MS`: how long a refused stamp write waits. */
   const STAMP_RETRY = 5 * 60_000;
 
-  /** One task running on `a` under a global max of 1, a second waiting behind it. */
+  /** One task running on `a` under a fleet limit of 1, a second waiting behind it. */
   async function holdingTheSlot(onError?: (e: unknown) => void) {
-    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 }, onError);
+    const env = setup(new FakeFleet([machine("a"), machine("b")]), DEFAULT_CONFIG, onError);
+    await env.scheduler.setLimits({ fleet: 1 });
     const first = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
     await pass(env.scheduler);
     const pane = env.scheduler.task(first.id)?.assignment?.pane;
@@ -1020,14 +1020,13 @@ describe("a session idle past idleReleaseAfterMs", () => {
   });
 
   describe("across a leader change", () => {
-    /** A new leader over the same store and fleet, taken over at `now` and through its first pass. */
+    /** A new leader over the same store and fleet, taken over at `now` and through its first pass. It reads the limit the old one stored. */
     async function newLeader(env: Awaited<ReturnType<typeof holdingTheSlot>>, now: number): Promise<Scheduler> {
       env.clock.now = now;
       env.fleet.beat(now);
       const next = new Scheduler({
         store: readerChecked(env.store, () => env.clock.now),
         fleet: env.fleet,
-        config: { ...DEFAULT_CONFIG, globalMax: 1 },
         now: () => env.clock.now,
       });
       await next.takeover();
@@ -1589,11 +1588,10 @@ describe("a reply lost, then the session ends", () => {
 });
 
 describe("run now", () => {
-  const ONE_SLOT = { ...DEFAULT_CONFIG, globalMax: 1, ...accountMax(1) };
-
-  /** One task running on `a`, a second `ready` and held by both caps. */
+  /** One task running on `a`, a second `ready` and held by the fleet limit. */
   async function capped() {
-    const env = setup(new FakeFleet([machine("a")]), ONE_SLOT);
+    const env = setup(new FakeFleet([machine("a")]));
+    await env.scheduler.setLimits({ fleet: 1 });
     const first = await enqueue(env.store, env.scheduler, spec());
     await pass(env.scheduler);
     const second = await enqueue(env.store, env.scheduler, spec());
@@ -1601,12 +1599,11 @@ describe("run now", () => {
     expect(env.scheduler.task(second.id)?.state).toBe("ready");
     expect(env.scheduler.lastDecision(second.id)?.candidates.flatMap((c) => c.rejected)).toEqual([
       { code: "cap_reached", inFlight: 1, max: 1 },
-      { code: "cap_reached", inFlight: 1, max: 1, scope: "account" },
     ]);
     return { ...env, first, second };
   }
 
-  test("places a task past both caps; it then counts, so the next waits over the cap", async () => {
+  test("places a task past the fleet limit; it then counts, so the next waits over the limit", async () => {
     const { fleet, scheduler, store, first, second } = await capped();
     const ran = await scheduler.runNow(second.id);
     expect(ran).toMatchObject({ ok: true, task: { state: "reserved", reservation: { deviceId: "a" } } });
@@ -1669,7 +1666,9 @@ describe("run now", () => {
     }
     const store = new Gated();
     const fleet = new FakeFleet([machine("a"), machine("b")]);
-    const scheduler = new Scheduler({ store, fleet, config: { ...DEFAULT_CONFIG, ...accountMax(1) }, now: () => NOW });
+    const scheduler = new Scheduler({ store, fleet, now: () => NOW });
+    // First and `x` fill it, so a pass that routed `y` after the run-now would decide `cap_reached`.
+    await scheduler.setLimits({ fleet: 2 });
     await enqueue(store, scheduler, spec({ pin: { deviceId: "a" } }), "first", NOW - 3);
     await pass(scheduler);
     await enqueue(store, scheduler, spec({ pin: { deviceId: "b" } }), "x", NOW - 2);
@@ -2511,10 +2510,8 @@ describe("a spawn a closed machine turned away", () => {
 
 describe("a session whose ended event never came", () => {
   test("is done within one sweep, and its slot is free again", async () => {
-    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), {
-      ...DEFAULT_CONFIG,
-      globalMax: 1,
-    });
+    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]));
+    await scheduler.setLimits({ fleet: 1 });
     const first = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(scheduler.task(first.id)?.state).toBe("running");

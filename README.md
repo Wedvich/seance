@@ -650,7 +650,7 @@ authoring ones below. **Fresh worktree** is the switch under the repository list
 tile shows a `worktree` tag while it is; off runs the session in the repo as it stands). The form remembers
 the choice per repository, so picking one again brings back what you last chose there. Then queue it — or, from the chevron beside **Queue**,
 **Start now**, which queues it and asks the scheduler to place it at once, past its
-concurrency caps (shown only while the scheduler's leader supports it).
+session limit (shown only while the scheduler's leader supports it).
 
 A running task's card menu has **Pass to successor**: it pushes the task's branch, ends its
 session and queues a new task that picks the work up (two taps; shown only while the scheduler's
@@ -709,7 +709,13 @@ desktop, in the header menu on a phone) shows everything queued: what needs you,
 is running or waiting, and what finished. Each card shows its likeliest next step and keeps
 every action behind its ⋯ menu, **Cancel** and **Mark done** included (each takes a second
 tap when it would end a running session); the footer has **Pause** / **Resume**, for the
-whole queue; a hold on one account shows with its own **Resume**. To stop new work on one
+whole queue; a hold on one account shows with its own **Resume**. The queue
+runs free by default: nothing bounds how many sessions run at once but each account's quota. To
+bound it, tap the header's count (**5 running**) and set a **Session limit**, one number for the
+whole fleet; it is kept in the relay's store, so it survives a change of leader, and the header
+then reads **5/8 running**. Empty the field to lift it; **Start now** still goes past it. (Shown
+only while the scheduler's leader supports it; an older leader keeps its built-in 8 and 4 per
+account.) To stop new work on one
 account, flip **Open for work** off in its card's ⋯ menu on the Machines screen (or
 `seance close --account <alias|email|id>`): nothing new is placed on it on any machine, a
 task pinned to it waits, and its running sessions keep going; flip it back on (or
@@ -752,8 +758,8 @@ seance spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seance spawn --now seance --here   # run in the checkout as it stands, no worktree
 seance spawn --start seance -p "fix the flaky spawn test"
-#   queued, then started as soon as the scheduler admits it, past its concurrency cap (the app's Start now)
-seance start 3f2a…           # start a task already waiting in the queue now, past the concurrency cap
+#   queued, then started as soon as the scheduler admits it, past its session limit (the app's Start now)
+seance start 3f2a…           # start a task already waiting in the queue now, past the session limit
 seance continue 3f2a…        # resume a failed (e.g. OOM-killed), cancelled or blocked-awaiting-merge task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seance pass 3f2a…            # push a running task's branch, end its session and hand the work to a new task (a successor) on a fresh account's budget
 seance close [machine] [--drain] [--now] [--wait]  # stop the scheduler placing new work on a machine (default: this one). Soft by default where the machine and the scheduler support it: running tasks keep going until they finish (--wait blocks until they have, and a task idle at its prompt never finishes: once only idle or waiting ones are left it says so, once, and points to --drain). --drain (or a daemon or scheduler too old for the soft close) also drains it, on a fresh or an already-closed machine: its daemon asks each running session to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes (--now, which implies --drain: at once; refused for a daemon that does not ask yet, `seance update` it); a leader that supports it passes what is left to other machines after 10 minutes unless it reopens (--wait blocks until it is empty, exit 2 when only work that can't move is left); otherwise running sessions finish where they are. Over the relay as app-role, so a keyless box refuses: use the PWA
@@ -829,7 +835,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seance mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; the close is soft where the machine and the scheduler support it, leaving running tasks to finish, and `drain` also moves them off it, on a fresh or an already-closed machine; `now`, which implies `drain`, skips the 5-minute wait before its sessions are interrupted to pass themselves; `list_machines` shows when one was closed and, under a leader that passes its tasks on, whether it is draining and how that is going, or what still runs there), `set_account_open` (close an account to new scheduled work on every machine, or reopen it; its running sessions keep going), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`, or messaging another session's task (on this machine or, through the scheduler, another; a note, a question or a request; the receiver reads long ones with the inbox mod's `read_messages`), or answering a message by its id, which is how a session with no task is reached, `send_message`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the session limit — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; the close is soft where the machine and the scheduler support it, leaving running tasks to finish, and `drain` also moves them off it, on a fresh or an already-closed machine; `now`, which implies `drain`, skips the 5-minute wait before its sessions are interrupted to pass themselves; `list_machines` shows when one was closed and, under a leader that passes its tasks on, whether it is draining and how that is going, or what still runs there), `set_account_open` (close an account to new scheduled work on every machine, or reopen it; its running sessions keep going), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`, or messaging another session's task (on this machine or, through the scheduler, another; a note, a question or a request; the receiver reads long ones with the inbox mod's `read_messages`), or answering a message by its id, which is how a session with no task is reached, `send_message`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers

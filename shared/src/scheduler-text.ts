@@ -36,7 +36,7 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   dispatching: "the task is starting on a machine right now; try again in a moment",
   finished: "the task has already finished",
   not_waiting: "the task is not waiting for a slot — it is still waiting on its dependencies, or already placed",
-  unplaceable: "something besides the concurrency caps keeps it from every machine — see why it waits",
+  unplaceable: "something besides the concurrency limit keeps it from every machine — see why it waits",
   despawn_failed: "its session could not be ended — its machine refused or is offline; nothing changed",
   conflict: "the task changed while this was on its way; try again",
   reset_unknown: "no quota reading says when that account resets, so it can't be paused until then",
@@ -175,6 +175,7 @@ export function reasonText(reason: Reason): string {
     case "cap_reached":
       if (reason.scope === "account")
         return `${reason.inFlight} of ${reason.max} auto tasks already in flight on its account`;
+      if (reason.max === 0) return "the scheduler's limit cannot be read, so nothing is placed until it is set again";
       return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
     case "paused": {
       const why = reason.until === "reset" ? "until its quota resets" : "until resumed";

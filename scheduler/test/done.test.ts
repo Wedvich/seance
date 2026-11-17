@@ -53,10 +53,8 @@ function progress(taskId: string, fields: Partial<TaskProgress> = {}): TaskProgr
 
 describe("a session that ends", () => {
   test("with a PR open is awaiting-merge, and frees its slot for the next task", async () => {
-    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), {
-      ...DEFAULT_CONFIG,
-      globalMax: 1,
-    });
+    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]));
+    await scheduler.setLimits({ fleet: 1 });
     const first = await enqueue(store, scheduler, spec());
     const second = await enqueue(store, scheduler, spec());
     await pass(scheduler);

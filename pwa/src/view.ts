@@ -289,6 +289,8 @@ export interface AppState {
   readonly pausing: boolean;
   /** The Machines screen's account switch: its ask in flight, or its last failure. */
   readonly accountOpen: AccountOpenAsk;
+  /** A `set-limits` in flight. */
+  readonly limiting: boolean;
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
   readonly accounts: AccountsState;
@@ -448,6 +450,14 @@ export function deriveContinueAvailability(relay: RelayState): boolean {
  */
 export function deriveContinueHandoffAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.continueHandoff);
+}
+
+/**
+ * Whether the verified leader keeps the limits record and answers `set-limits`. An older one
+ * runs its built-in caps and refuses the op as one it does not know, so nothing is offered to it.
+ */
+export function deriveLimitsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.limits);
 }
 
 /** Whether the verified leader answers `pass`; an older one refuses it as an op it does not know. */

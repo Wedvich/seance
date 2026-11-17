@@ -1,6 +1,7 @@
 export * from "./config.ts";
 export * from "./task.ts";
 export * from "./ports.ts";
+export * from "./limits.ts";
 // Not `export *`: accountResetAt and windowResetOf are the Scheduler's, not package API.
 export {
   route,

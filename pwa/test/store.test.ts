@@ -33,6 +33,8 @@ import {
   type PassReply,
   type PauseReply,
   type PauseRequest,
+  type SetLimitsReply,
+  type SetLimitsRequest,
   type QueueChanged,
   type QueueReply,
   type QueueRequest,
@@ -717,6 +719,10 @@ class ScriptedClient extends RelayClient {
     holds: [{ until: "resume", at: 5 }],
   });
   onResume: (request: ResumeRequest) => Promise<PauseReply | null> = async () => ({ holds: [] });
+  readonly limitRequests: SetLimitsRequest[] = [];
+  onSetLimits: (request: SetLimitsRequest) => Promise<SetLimitsReply | null> = async (request) => ({
+    limits: request.fleet === null ? {} : { fleet: request.fleet },
+  });
   /** How many times the archivist's counts were asked for. */
   archiveAsks = 0;
   onArchiveStatus: () => Promise<ArchiveStatusReply | null> = async () => ARCHIVE_STATUS;
@@ -875,6 +881,11 @@ class ScriptedClient extends RelayClient {
 
   override resume(request: ResumeRequest = {}): Promise<PauseReply | null> {
     return this.onResume(request);
+  }
+
+  override setLimits(request: SetLimitsRequest): Promise<SetLimitsReply | null> {
+    this.limitRequests.push(request);
+    return this.onSetLimits(request);
   }
 
   override onQueueChanged(listener: (change: QueueChanged) => void): () => void {
@@ -2190,7 +2201,7 @@ describe("start now", () => {
     client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
     client.nudge({ at: 2, tasks: [created.id] });
     await until(() => store.getState().startNowRefusal !== null, "the refusal");
-    const message = "Something besides the concurrency caps keeps it from every machine — see why it waits.";
+    const message = "Something besides the concurrency limit keeps it from every machine — see why it waits.";
     expect(store.getState().startNowRefusal).toEqual({ taskId: created.id, message });
     expect(queuedState(store)).toBe("ready");
     const verdict = store.getState().verdict;
@@ -2888,7 +2899,7 @@ describe("the queue screen", () => {
     client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
     await store.runNow("w-1");
     expect(store.getState().queueNotice).toBe(
-      "Something besides the concurrency caps keeps it from every machine — see why it waits.",
+      "Something besides the concurrency limit keeps it from every machine — see why it waits.",
     );
   });
 
@@ -3277,6 +3288,42 @@ describe("the queue screen", () => {
     expect(resumed).toEqual([{ account: "acct" }]);
     expect(store.getState().accountOpen).toMatchObject({ kind: "failed", accountId: "acct" });
     expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("setting the fleet limit shows the leader's answer at once; lifting it drops the denominator", async () => {
+    const client = new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.limits] }), autoMachine("dev-b")],
+    });
+    client.onQueue = async () => ({ tasks: [], at: 1, limitsUnreadable: true });
+    const store = new Store(client);
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(store.getState().queueView).toMatchObject({ limitsUnreadable: true });
+
+    client.onQueue = async () => ({ tasks: [], at: 2, globalMax: 3 });
+    await store.setFleetLimit(3);
+    expect(client.limitRequests).toEqual([{ fleet: 3 }]);
+    expect(store.getState().queueView).toMatchObject({ globalMax: 3 });
+    expect(store.getState().queueView).not.toHaveProperty("limitsUnreadable");
+
+    client.onQueue = async () => ({ tasks: [], at: 3 });
+    await store.setFleetLimit(null);
+    expect(client.limitRequests).toEqual([{ fleet: 3 }, { fleet: null }]);
+    expect(store.getState().queueView).not.toHaveProperty("globalMax");
+    expect(store.getState().limiting).toBe(false);
+
+    client.onSetLimits = async () => ({ ok: false, code: "conflict", message: "ask again" });
+    await store.setFleetLimit(5);
+    expect(store.getState().queueNotice).not.toBeNull();
+    expect(store.getState().queueView).not.toHaveProperty("globalMax");
+  });
+
+  test("a limit is never sent to a leader that keeps none", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    await store.setFleetLimit(3);
+    expect(client.limitRequests).toEqual([]);
+    expect(store.getState().queueNotice).toContain("session limit");
   });
 
   test("a hold changing asks the preview again: at once for our own, after the quiet for a read's", async () => {

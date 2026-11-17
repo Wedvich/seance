@@ -209,7 +209,7 @@ export function describeDecision(
   };
 }
 
-const CAPS_ONLY_SUB = "Skip the queue — past the concurrency caps";
+const CAPS_ONLY_SUB = "Skip the queue — past the concurrency limit";
 
 /** The Queue button's Start now row: what skipping the queue would do, read off the placement preview. */
 export interface StartNowItem {
@@ -218,7 +218,7 @@ export interface StartNowItem {
 }
 
 /**
- * The preview routes with both caps applied, so a candidate turned down for
+ * The preview routes with the limit applied, so a candidate turned down for
  * `cap_reached` alone is one `run-now` would take; anything else it rejects
  * holds Start now too. No preview to go by (asking, failed, a pinned form) is
  * no reason to block a tap the leader answers for itself.
@@ -244,7 +244,7 @@ export function decisionStartNowItem(decision: Decision | null): StartNowItem {
   };
 }
 
-/** Turned down for `cap_reached` and nothing else: a candidate `run-now`, which lifts both caps, would weigh. */
+/** Turned down for `cap_reached` and nothing else: a candidate `run-now`, which lifts the limit, would weigh. */
 export function heldByCapsAlone(candidate: Candidate): boolean {
   return candidate.rejected.length > 0 && candidate.rejected.every((r) => r.code === "cap_reached");
 }

@@ -924,6 +924,59 @@ describe("leader requests", () => {
     expect(audits).toContainEqual(expect.stringContaining(`op=resume id="${ids["resume"]}" ok`));
   });
 
+  test("set-limits holds dispatch at the fleet limit and queue shows it; lifting it places the rest; each is audited", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store, 50);
+    const ids: Record<string, string> = {};
+    const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
+      const request = await appRequest(op, payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        relay.setRegistry([await routableEntry("b")]);
+        // No record: no limit, and the queue reply names none.
+        expect(queueReply(await ask("free", "queue", {}))).not.toHaveProperty("globalMax");
+
+        expect(await ask("set", "set-limits", { fleet: 1 })).toEqual({ limits: { fleet: 1 } });
+        expect(await ask("zero", "set-limits", { fleet: 0 })).toMatchObject({ ok: false, code: "invalid_request" });
+        expect(await store.getLimits()).toEqual({ version: 1, limits: { fleet: 1 } });
+
+        const spec = { repo: "github.com/acme/app", mode: "worktree" } as const;
+        await enqueueQueued(store, leader, "first", { spec });
+        const first = await nextRequest(relay, 5_000);
+        expect((await open(key, first.env)).payload).toMatchObject({ taskId: "first" });
+        await enqueueQueued(store, leader, "second", { spec });
+        // Ticks every 50ms: a limit that leaked would have dispatched by now.
+        await Bun.sleep(300);
+        expect(await queuedRequests(relay)).toEqual([]);
+        const shown = queueReply(await ask("queue", "queue", {}));
+        expect(shown.globalMax).toBe(1);
+        expect(shown.tasks.find((t) => t.id === "second")?.decision?.candidates[0]?.rejected).toContainEqual({
+          code: "cap_reached",
+          inFlight: 1,
+          max: 1,
+        });
+
+        expect(await ask("lift", "set-limits", { fleet: null })).toEqual({ limits: {} });
+        const second = await nextRequest(relay, 5_000);
+        expect((await open(key, second.env)).payload).toMatchObject({ taskId: "second" });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits).toContainEqual(expect.stringContaining(`op=set-limits id="${ids["set"]}" fleet=1 ok`));
+    expect(audits).toContainEqual(expect.stringContaining(`op=set-limits id="${ids["lift"]}" fleet=none ok`));
+  });
+
   test("a pause past the hold limit is invalid_request, and a revoked store is not_leader and ends the term", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
@@ -982,6 +1035,8 @@ describe("leader requests", () => {
       delete: (id, version) => inner.delete(id, version),
       getPause: () => inner.getPause(),
       putPause: (version, holds) => inner.putPause(version, holds),
+      getLimits: () => inner.getLimits(),
+      putLimits: (version, limits) => inner.putLimits(version, limits),
     };
     const { leader, replies } = leaderOver(relay, slow);
     try {
@@ -1014,6 +1069,8 @@ describe("leader requests", () => {
       delete: (id, version) => inner.delete(id, version),
       getPause: () => inner.getPause(),
       putPause: (version, holds) => inner.putPause(version, holds),
+      getLimits: () => inner.getLimits(),
+      putLimits: (version, limits) => inner.putLimits(version, limits),
     };
     const pass = {
       session: "%3",
@@ -2114,6 +2171,8 @@ describe("leader push", () => {
       delete: (id, version) => store.delete(id, version),
       getPause: () => store.getPause(),
       putPause: (version, holds) => store.putPause(version, holds),
+      getLimits: () => store.getLimits(),
+      putLimits: (version, limits) => store.putLimits(version, limits),
     };
     const { leader } = leaderOver(relay, faulty);
     await captureLog(async () => {
@@ -2481,6 +2540,8 @@ describe("leader lifecycle", () => {
       delete: (id, version) => inner.delete(id, version),
       getPause: () => inner.getPause(),
       putPause: (version, holds) => inner.putPause(version, holds),
+      getLimits: () => inner.getLimits(),
+      putLimits: (version, limits) => inner.putLimits(version, limits),
     };
     const { leader } = leaderOver(relay, flaky, 50);
     try {

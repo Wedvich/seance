@@ -1,11 +1,14 @@
+import { FLEET_LIMIT_MAX } from "@seance/shared";
 import type { ComponentChildren, JSX } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
 import {
   ASLEEP_SECTION,
   armKey,
   armTap,
   disarmRow,
+  parseLimitDraft,
   type ArmOp,
+  type LimitView,
   type LineageLine,
   type QueueRow,
   type QueueScreenView,
@@ -37,12 +40,100 @@ const ARM_MS = 4_000;
 const MARK_MS = 3_000;
 
 /** The Queue's title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
-export function QueueHeading(props: { summary: string | null }): JSX.Element {
+export function QueueHeading(props: {
+  summary: string | null;
+  /** Opens the Limits sheet; null while there is no limit to change, and the line is then plain text. */
+  onLimits: (() => void) | null;
+}): JSX.Element {
+  const { summary, onLimits } = props;
   return (
     <div>
       <h1 className="header-title">Queue</h1>
-      {props.summary !== null && <p className="header-meta">{props.summary}</p>}
+      {summary !== null &&
+        (onLimits === null ? (
+          <p className="header-meta">{summary}</p>
+        ) : (
+          <button type="button" className="header-meta header-meta-button" aria-haspopup="dialog" onClick={onLimits}>
+            <span className="sr-only">Session limit: </span>
+            {summary}
+            <StrokeIcon size={12}>
+              <path d="M6 9l6 6 6-6" />
+            </StrokeIcon>
+          </button>
+        ))}
     </div>
+  );
+}
+
+/**
+ * The fleet limit: how many sessions the queue runs at once, across every machine and account.
+ * An empty field is no limit, the default. A form, so Enter saves.
+ */
+function LimitsSheet(props: {
+  limit: LimitView;
+  saving: boolean;
+  onSave: (fleet: number | null) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const { limit, saving, onSave, onClose } = props;
+  const [draft, setDraft] = useState(limit.fleet === null ? "" : String(limit.fleet));
+  const input = useRef<HTMLInputElement>(null);
+  const inputId = useId();
+  const hintId = useId();
+  // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
+  useEffect(() => {
+    input.current?.focus();
+  }, []);
+
+  const parsed = parseLimitDraft(draft);
+  return (
+    <Sheet title="Session limit" variant="dialog" onClose={onClose}>
+      <form
+        className="rename"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!saving && parsed !== undefined) onSave(parsed);
+        }}
+      >
+        <label className="rename-label" htmlFor={inputId}>
+          Sessions at once, across all machines
+        </label>
+        <input
+          ref={input}
+          id={inputId}
+          type="text"
+          inputMode="numeric"
+          className="rename-input"
+          placeholder="No limit"
+          maxLength={String(FLEET_LIMIT_MAX).length}
+          value={draft}
+          disabled={saving}
+          aria-invalid={parsed === undefined}
+          aria-describedby={hintId}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        {parsed === undefined ? (
+          <p id={hintId} className="rename-error" role="alert">
+            A whole number from 1 to {FLEET_LIMIT_MAX}, or empty for no limit. To stop the queue, pause it.
+          </p>
+        ) : (
+          <p id={hintId} className="rename-hint">
+            <span>
+              Empty lets the queue run free: each account is then bound only by its quota. Sessions already running keep
+              running, and Start now still goes past the limit.
+            </span>
+          </p>
+        )}
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={saving || parsed === undefined}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </Sheet>
   );
 }
 
@@ -67,6 +158,12 @@ export function QueueScreen(props: {
   onDismissNotice: () => void;
   pausing: boolean;
   discarding: boolean;
+  /** The Limits sheet is open; the app holds it, since the header's count opens it too. */
+  limitsOpen: boolean;
+  limiting: boolean;
+  onOpenLimits: () => void;
+  onCloseLimits: () => void;
+  onSetLimit: (fleet: number | null) => void;
   /** A notification's task: scrolled to and marked once its row is listed. */
   focusedTask: string | null;
   /**
@@ -77,7 +174,7 @@ export function QueueScreen(props: {
   onFocused: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
-  /** Places a task the concurrency caps alone hold, past them. */
+  /** Places a task the concurrency limit alone holds, past it. */
   onRunNow: (taskId: string) => void;
   /** Queues a task that resumes this failed or cancelled one's session in its worktree, on its machine. */
   onContinue: (taskId: string) => void;
@@ -217,6 +314,19 @@ export function QueueScreen(props: {
             </button>
           </div>
         ))}
+        {view.limitsUnreadable !== null && (
+          <div className="banner card">
+            <span className="banner-rule" />
+            <span className="banner-text">
+              <span className="banner-body">{view.limitsUnreadable}</span>
+            </span>
+            {view.limit !== null && (
+              <button type="button" className="queue-resume" disabled={props.limiting} onClick={props.onOpenLimits}>
+                Set limit
+              </button>
+            )}
+          </div>
+        )}
         {view.unreadable !== null && (
           <div className="banner card">
             <span className="banner-rule" />
@@ -316,6 +426,14 @@ export function QueueScreen(props: {
         </button>
       </footer>
       <OlderFilterSheet sheet={props.older?.sheet ?? null} actions={props.olderActions} />
+      {props.limitsOpen && view.limit !== null && (
+        <LimitsSheet
+          limit={view.limit}
+          saving={props.limiting}
+          onSave={props.onSetLimit}
+          onClose={props.onCloseLimits}
+        />
+      )}
     </>
   );
 }

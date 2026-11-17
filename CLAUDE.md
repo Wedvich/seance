@@ -211,8 +211,8 @@ green:
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
   so only the AAD-bound `from` says which machine an entry describes), and the archivist answers only `archive-status`, `archive-metrics` and `archive-tasks`, only when sealed `from: "app"` with no `re`, parsed by that op's own parser (`parseArchiveStatusRequest`, `parseArchiveMetricsRequest`, `parseArchiveTasksRequest`) through one gate (`answerApp`, `archivist/src/answer.ts`), through its seat leg's replay guard, with a reply of counts, sizes and timestamps, metric points, or task records re-stripped through `archivedTask` (never a prompt, an attachment or a raw account id) with the machines the archive holds tasks for (device id, last known name, newest end time; display only), every task filter a bound SQL parameter, and nothing of a request logged, and an app believes the archivist card only from the flagged entry whose `info` blob is sealed `from` its own `deviceId` and parses as `ArchivistInfo`, and the daemon process never holds a Claude credential: auth health (`daemon/src/auth-health.ts`) reads each exclave's credential store only through a short-lived `bun -e` child running the one constant script, with the file handed over as a file descriptor (or, on macOS, `security -w` run by the child), a bare env and a timeout, and keeps only the child's `{lapsed, refreshExpiresAt}` after an exact-shape check — never the child's stdout or stderr in a log, and nothing on the wire but `ax`/`ae`/`au` indices, an expiry time and `CAPABILITIES.authHealth`, every blob opened outside
-  the replay guard (`machine-info`, `status`, `lead-proof`, and the store's `task` and
-  `pause-state` records) goes through `openAtRest` in
+  the replay guard (`machine-info`, `status`, `lead-proof`, and the store's `task`,
+  `pause-state` and `scheduler-settings` records) goes through `openAtRest` in
   `shared/src/crypto.ts`, which refuses one whose `op` isn't the slot's — shape alone does not say
   which blob it is — and an app believes a scheduler nominee only with a `lead-proof` sealed `from`
   the nominee for the pushed term, never because its registry entry opens (its `info` blob is
@@ -230,7 +230,7 @@ green:
   makes a seat entry a `Machine` (`#rebuildMachines`), so it is no spawn target to any reader,
   and the leader honours a scheduler request only when it was sealed
   `from: "app"`, parsed into a fresh value by that op's own parser (`parseQueueRequest`,
-  `parseTaskRequest`, `parseTaskRef`, `parseAmendRequest`, …), and checked against the one replay guard per daemon
+  `parseTaskRequest`, `parseTaskRef`, `parseAmendRequest`, `parseSetLimitsRequest`, …), and checked against the one replay guard per daemon
   process that every term's leg and the `not_leader` answer share (`schedulerGuard` in
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `cancel` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
@@ -251,8 +251,8 @@ green:
   noted and only while `refs/heads/<branch>` exists, under reap's lock, added detached at that ref's sha and then switched onto it (never origin's, never `--force`, never `worktree prune`) — and a task record carrying `continues` always carries
   `mode: "continue"`, which an older leader's parser refuses, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
   process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own
-  pause write alone may set it lower): a task record below it is `version_regressed`, a pause
-  below it or missing holds the whole queue, and a task record that vanishes without the
+  pause write and its own limits write alone may set it lower): a task record below it is `version_regressed`, a pause
+  below it or missing holds the whole queue, limits below it or missing place nothing, and a task record that vanishes without the
   leader's delete is never read as gone, and the
   relay's store: every store policy is a field on the prefix's `STORE_PREFIXES` rule and
   `relay/src/store.ts` names no prefix, a `term` on an app-leg store frame authorizes nothing, a
@@ -301,7 +301,7 @@ green:
   leader's own write on an `amend` (`Scheduler.amend`), only while the task is `queued`, `blocked` or
   `ready` with no spawn out, a prompt change only at the `basis` it names (never a replace on a
   successor), the record re-sealed through the one task sealer, and no prompt text — the amendment's
-  included — in any log or audit line, and the settings record (`settings:main`) is written only by the leader, held to
+  included — in any log or audit line, and the limits record (`settings:scheduler`, DESIGN.md "Routing caps") is written only by the leader, on a `set-limits` sealed `from: "app"`, read only through `getLimits` (`openAtRest` under `scheduler-settings`, then `parseSchedulerSettingsRecord`, strict down to an unknown key in `limits`), and one the leader cannot read places nothing (a fleet limit of 0, which `run-now` alone passes) until a `set-limits` overwrites it — never read as no limit; no record is no limit, the default; `set-limits` is on no MCP tool, broker action or local op (a session must not raise a limit its owner set), and a client offers it only to a verified leader advertising `CAPABILITIES.limits`, and the settings record (`settings:main`) is written only by the leader, held to
   the version floor, never regenerated nor written over when it cannot be read or has regressed,
   and never logged nor put in `queue`, MCP or `status`, and a push send goes only to an endpoint
   `pushEndpoint` accepts at send time (https, a `PUSH_SERVICE_HOSTS` host), redirects refused and

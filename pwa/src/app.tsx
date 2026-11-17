@@ -31,6 +31,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
   const actions = useSpawnActions(store);
   const olderActions = useOlderActions(store);
   const wide = useWide(store);
+  // Here, not in the store: the header's count and the Queue screen's banner both open it, and it holds nothing to keep.
+  const [limitsOpen, setLimitsOpen] = useState(false);
 
   useEffect(() => store.attach(), [store]);
 
@@ -88,7 +90,12 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
   const queue = (): Pane => {
     const queueView = deriveQueue(state, now);
     return {
-      heading: <QueueHeading summary={queueView.summary} />,
+      heading: (
+        <QueueHeading
+          summary={queueView.summary}
+          onLimits={queueView.limit === null ? null : () => setLimitsOpen(true)}
+        />
+      ),
       action: (
         <QueueRefresh
           onRefresh={() => {
@@ -104,6 +111,15 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onDismissNotice={() => store.dismissQueueNotice()}
           pausing={state.pausing}
           discarding={state.discarding}
+          limitsOpen={limitsOpen}
+          limiting={state.limiting}
+          onOpenLimits={() => setLimitsOpen(true)}
+          onCloseLimits={() => setLimitsOpen(false)}
+          onSetLimit={(fleet) => {
+            // Closed at once: a refusal is the screen's notice, as a pause's is.
+            setLimitsOpen(false);
+            void store.setFleetLimit(fleet);
+          }}
           focusedTask={visibleFocus(state)}
           onFocused={() => store.clearFocus()}
           onCancel={(id) => void store.cancelTask(id)}

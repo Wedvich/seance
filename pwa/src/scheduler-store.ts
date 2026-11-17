@@ -33,6 +33,7 @@ import {
   deriveAutoAvailability,
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveLimitsAvailability,
   derivePassAvailability,
   deriveRunNowAvailability,
   deriveTraitsAvailability,
@@ -55,6 +56,9 @@ export const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the ap
 
 const CONTINUE_UNAVAILABLE =
   "No verified scheduler that can continue a session is leading right now. Try again once one is.";
+
+const LIMITS_UNSUPPORTED =
+  "No verified scheduler that keeps a session limit is leading right now. Try again once one is.";
 
 const PASS_UNAVAILABLE =
   "No verified scheduler that can pass a task to a successor is leading right now. Try again once one is.";
@@ -776,6 +780,7 @@ export class SchedulerStore {
           unreadable: reply.unreadable ?? [],
           idle: reply.idle ?? [],
           ...(reply.globalMax === undefined ? {} : { globalMax: reply.globalMax }),
+          ...(reply.limitsUnreadable === true ? { limitsUnreadable: true as const } : {}),
           at: reply.at,
           skew: reply.at - Date.now(),
         };
@@ -803,6 +808,7 @@ export class SchedulerStore {
           unreadable: reply.unreadable ?? [],
           idle: reply.idle ?? [],
           ...(reply.globalMax === undefined ? {} : { globalMax: reply.globalMax }),
+          ...(reply.limitsUnreadable === true ? { limitsUnreadable: true as const } : {}),
           at: reply.at,
           skew: reply.at - Date.now(),
         };
@@ -867,7 +873,7 @@ export class SchedulerStore {
     return this.#actOnTask({ taskId, op: "mark-done" });
   }
 
-  /** Places a task the concurrency caps alone hold, past them; the reply is the task as reserved. */
+  /** Places a task the concurrency limit alone holds, past it; the reply is the task as reserved. */
   runNow(taskId: string): Promise<void> {
     return this.#actOnTask({ taskId, op: "run-now" });
   }
@@ -976,6 +982,41 @@ export class SchedulerStore {
 
   async resumeQueue(account?: string): Promise<void> {
     await this.#setHolds(() => this.#client.resume(account === undefined ? {} : { account }), true);
+  }
+
+  /**
+   * Sets the fleet limit, or lifts it with null. Offered only to a verified leader that keeps the
+   * record (`deriveLimitsAvailability`): an older one would refuse the op, and what it enforces is
+   * its own built-in caps, not anything this could change.
+   */
+  async setFleetLimit(fleet: number | null): Promise<void> {
+    if (this.#state.limiting) return;
+    if (!deriveLimitsAvailability(this.#state.relay)) {
+      this.#patch({ queueNotice: LIMITS_UNSUPPORTED });
+      return;
+    }
+    this.#patch({ limiting: true, queueNotice: null });
+    let notice: string | null = null;
+    try {
+      const reply = await this.#client.setLimits({ fleet });
+      if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
+      else if ("ok" in reply) notice = sentence(schedulerErrorText(reply.code));
+      else {
+        const view = this.#state.queueView;
+        if (view?.kind === "ok") {
+          // The reply is the record as written, so an unreadable one is replaced by it.
+          const { globalMax: _was, limitsUnreadable: _unreadable, ...rest } = view;
+          const set = reply.limits.fleet;
+          this.#patch({ queueView: { ...rest, ...(set === undefined ? {} : { globalMax: set }) } });
+        }
+        // What the limit held, or now holds, shows in each task's decision: read them again.
+        void this.refreshQueue();
+        if (previewAsked(this.#state.form)) void this.refreshPreview();
+      }
+    } catch (err) {
+      notice = this.#actionFailure(err);
+    }
+    this.#patch({ limiting: false, queueNotice: notice });
   }
 
   /**

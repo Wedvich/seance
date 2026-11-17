@@ -9,8 +9,6 @@ export interface SeatProfile {
   readonly capacity: number;
   /** `gatedModels` families this seat's quota covers; any other gated one is billed to credits. */
   readonly includes: readonly string[];
-  /** In-flight scheduler tasks per account on this seat, by the account of each task's placement. */
-  readonly accountMax: number;
 }
 
 /**
@@ -52,8 +50,6 @@ export interface SchedulerConfig {
   readonly gatedModels: readonly string[];
   /** Disk floor, MiB free; above it disk adds nothing to the score. */
   readonly minFreeMib: number;
-  /** In-flight (`IN_FLIGHT`: reserved, running, needs-input) scheduler tasks across the fleet. */
-  readonly globalMax: number;
   /**
    * A task in `needs-input` this long is alerted once (`inputAlert`): well above the seconds an
    * auto-mode classifier call flickers it, well below the escalation. A question, which cannot
@@ -71,7 +67,7 @@ export interface SchedulerConfig {
   readonly lostAfterMs: number;
   /**
    * An in-flight task whose machine has been absent this long stops counting
-   * toward `globalMax`, its seat's `accountMax` and projected usage, its state unchanged:
+   * toward the fleet limit (`SchedulerLimits.fleet`) and projected usage, its state unchanged:
    * nothing runs there while it sleeps. Short of `lostAfterMs`, which settles
    * reservations and writes a record. A blip or reconnect frees nothing; a
    * dark wake restarts the clock, so slots return only after the
@@ -81,8 +77,8 @@ export interface SchedulerConfig {
   /**
    * A `running` task whose session has sat idle at its prompt this long (its
    * own machine's `idle` event, nothing since) stops counting toward the
-   * caps and projected usage, as `slotReleaseAfterMs` does: nothing bills
-   * while it waits for a reply. Counted again on its next state, over a cap
+   * fleet limit and projected usage, as `slotReleaseAfterMs` does: nothing bills
+   * while it waits for a reply. Counted again on its next state, over the limit
    * or not. `needs-input` keeps its slot: a dialog is mid-task.
    */
   readonly idleReleaseAfterMs: number;
@@ -174,7 +170,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   // Account pressure is the convex `(u/(1-u))²` cost (1 at 50%, 16 at 80%); the other
   // three are fractions or small counts, so the weights put one busy machine, or the
   // farthest base, on the scale of an account near 70% (docs/scheduler.md). keepFree is a
-  // flat 1: at 8 it is worth `globalMax` in-flight tasks on a competitor (queuePressure), two fully loaded
+  // flat 1: at 8 it is worth eight in-flight tasks on a competitor (queuePressure), two fully loaded
   // machines, or an account near 74% at the start of a window (less of it counts later, scaled by the window
   // left), so a kept-free machine fills last, never not at all. Ties go by deviceId.
   weights: { accountPressure: 1, machinePressure: 4, dependencyDistance: 4, queuePressure: 1, keepFree: 8 },
@@ -182,17 +178,14 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
   taskEstimatePct: { "5h": 5, "7d": 1 },
-  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota. `accountMax`:
-  // half the fleet's slots on a premium seat, since one account's sessions draw on its 5h window
-  // together; two on a standard one, where each task projects a quarter of that window.
+  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota.
   seats: {
-    team_tier_1: { capacity: 1, includes: ["fable"], accountMax: 4 },
-    team_standard: { capacity: 1 / 5, includes: [], accountMax: 2 },
+    team_tier_1: { capacity: 1, includes: ["fable"] },
+    team_standard: { capacity: 1 / 5, includes: [] },
   },
-  unknownSeat: { capacity: 1, includes: [], accountMax: 4 },
+  unknownSeat: { capacity: 1, includes: [] },
   gatedModels: ["fable"],
   minFreeMib: MIN_FREE_MIB,
-  globalMax: 8,
   needsInputAlertMs: 2 * 60_000,
   needsInputEscalateMs: 30 * 60_000,
   // Outlives the leader's wait for a spawn reply (`OP_TIMEOUT_MS.spawn`): a daemon past its fetch deadline launches nothing.

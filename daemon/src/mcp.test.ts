@@ -3562,7 +3562,7 @@ describe("start_task", () => {
     const waiting = await callStart(() => ({ ok: false, code: "not_waiting", message: "not ready" }));
     expect(waiting).toMatchObject({ error: true, text: expect.stringContaining("start_task refused (not_waiting)") });
     const stuck = await callStart(() => ({ ok: false, code: "unplaceable", message: "held" }));
-    expect(stuck.text).toContain("something besides the concurrency cap");
+    expect(stuck.text).toContain("something besides the concurrency limit");
     const lost = await callStart(() => new RequestFailure("timeout", "no reply within 10000ms"));
     expect(lost).toMatchObject({
       error: true,
