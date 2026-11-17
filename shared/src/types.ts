@@ -2942,6 +2942,12 @@ export interface TaskSpec extends TaskRequest {
    * from older clients.
    */
   readonly client?: string;
+  /**
+   * Epoch ms; the leader places the task no earlier than its first pass at or after this time on its
+   * own clock. Resolved by the client at submit time; never a zone or offset. Not inherited by a
+   * successor or continuation. `run-now` ignores it. DESIGN.md, "Not before".
+   */
+  readonly notBefore?: number;
 }
 
 /**
@@ -4077,6 +4083,8 @@ export interface AmendRequest {
   readonly title?: string | null;
   readonly model?: string | null;
   readonly effort?: string | null;
+  /** Set or move the not-before time; `null` clears it; needs no `basis`. */
+  readonly notBefore?: number | null;
 }
 
 /**

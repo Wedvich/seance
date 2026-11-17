@@ -64,7 +64,8 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
  * effort, skill, autonomy, plan, title), what it needs of a machine (`requires`: the work depends on the
  * capability, so the successor must land where the old task could) and what settles it (`until`, `linear`, `avoid`), and
  * nothing that places or orders it: no `pin` (an account pin is the old account by definition),
- * `deps` (already satisfied), `batch`, `lineage`, `base`, `continues` or `attachments`. The mode is
+ * `deps` (already satisfied), `batch`, `lineage`, `base`, `continues`, `attachments` or `notBefore`
+ * (DESIGN.md, "Not before"). The mode is
  * a plain worktree spawn, so no daemon needs to know about successors to run one. `succeeds` names
  * the predecessor, its account and where it ran (display; nothing routes on its clone).
  *

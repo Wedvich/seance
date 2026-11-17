@@ -57,17 +57,19 @@ export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | Amend
   const title = amend.title === undefined ? spec.title : (amend.title ?? undefined);
   const model = amend.model === undefined ? spec.model : (amend.model ?? undefined);
   const effort = amend.effort === undefined ? spec.effort : (amend.effort ?? undefined);
-  const { prompt: _prompt, title: _title, model: _model, effort: _effort, ...rest } = spec;
+  const notBefore = amend.notBefore === undefined ? spec.notBefore : (amend.notBefore ?? undefined);
+  const { prompt: _prompt, title: _title, model: _model, effort: _effort, notBefore: _notBefore, ...rest } = spec;
   return {
     ...rest,
     ...(prompt === undefined || prompt === "" ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
+    ...(notBefore === undefined ? {} : { notBefore }),
   };
 }
 
 /** The fields an amendment names, for an audit line: names only, never a value. */
 export function amendedFields(amend: AmendRequest): readonly string[] {
-  return (["prompt", "title", "model", "effort"] as const).filter((f) => amend[f] !== undefined);
+  return (["prompt", "title", "model", "effort", "notBefore"] as const).filter((f) => amend[f] !== undefined);
 }
