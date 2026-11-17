@@ -69,6 +69,7 @@ describe("the committed agent definition", () => {
       "done",
       "notes",
       "nudge",
+      "nudge",
     ]);
     for (const { code, out } of await Promise.all(examples.map(underNoWrites))) {
       expect(code).toBe(0);
