@@ -1463,6 +1463,15 @@ describe("the Start now menu item", () => {
     expect(item(task("w"))?.enabled).toBe(true);
   });
 
+  test("a task the queue's pause alone holds: enabled when the leader lifts the pause, else greyed saying so", () => {
+    const paused: Reason = { code: "paused", until: "resume", scope: "queue" };
+    expect(item(rejecting(paused), [...CAN, CAPABILITIES.runNowPaused])).toEqual({
+      sub: "Skip the queue — spawn on m · main",
+      enabled: true,
+    });
+    expect(item(rejecting(paused))).toEqual({ sub: "The queue is paused", enabled: false });
+  });
+
   test("shown but disabled where nothing could take it, or the leader lacks runNow", () => {
     expect(item(rejecting(disk))?.enabled).toBe(false);
     expect(item(rejecting(capped), [])?.enabled).toBe(false);

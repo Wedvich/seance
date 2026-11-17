@@ -1623,14 +1623,31 @@ describe("run now", () => {
     });
   });
 
-  test("every other filter still holds: a paused queue is unplaceable and nothing is written or sent", async () => {
+  test("places past a whole-queue pause, which still holds every other task", async () => {
     const { fleet, scheduler, store, second } = await capped();
     expect(await scheduler.pause({ until: "resume" })).toMatchObject({ ok: true });
+    const third = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.runNow(second.id)).toMatchObject({ ok: true, task: { state: "reserved" } });
+    await scheduler.drain();
+    expect(fleet.spawns).toHaveLength(2);
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("ready");
+    expect(scheduler.lastDecision(third.id)?.candidates.flatMap((c) => c.rejected)).toContainEqual({
+      code: "paused",
+      until: "resume",
+      scope: "queue",
+    });
+  });
+
+  test("every other filter still holds: a paused account is unplaceable and nothing is written or sent", async () => {
+    const { fleet, scheduler, store, second } = await capped();
+    expect(await scheduler.pause({ until: "resume", account: "org:a" })).toMatchObject({ ok: true });
     const before = await stored(store, second.id);
     expect(await scheduler.runNow(second.id)).toEqual({ ok: false, code: "unplaceable" });
     expect(await stored(store, second.id)).toEqual(before);
     expect(fleet.spawns).toHaveLength(1);
-    // The held decision is still the pass's, not the uncapped one.
+    // The held decision is still the pass's, not run-now's.
     expect(scheduler.lastDecision(second.id)?.candidates.flatMap((c) => c.rejected)).toContainEqual(
       expect.objectContaining({ code: "cap_reached" }),
     );

@@ -214,6 +214,8 @@ export interface ViewModel {
   readonly button: PrimaryButton;
   /** The button's chevron and its Start now menu: only while the verified leader answers `run-now`. */
   readonly startNow: boolean;
+  /** Start now lifts a whole-queue pause too (`runNowPaused`). */
+  readonly startNowPastPause: boolean;
   readonly ignoredNote: string | null;
   /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
   readonly machine: Machine | null;
@@ -507,6 +509,11 @@ export function deriveDrainAvailability(relay: RelayState): boolean {
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
 export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
+}
+
+/** Whether the verified leader's `run-now` places past a whole-queue pause; an older one answers `unplaceable`. */
+export function deriveRunNowPastPause(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.runNowPaused);
 }
 
 /**
@@ -1137,6 +1144,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
     startNow: deriveRunNowAvailability(relay),
+    startNowPastPause: deriveRunNowPastPause(relay),
     ignoredNote: deriveIgnoredNote(relay),
     machine,
     account,

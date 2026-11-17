@@ -66,8 +66,16 @@ export interface RouteInput {
   readonly released?: ReadonlySet<string>;
   /** What a person set to bound the queue (`settings:scheduler`); absent, or a part absent, is no limit. */
   readonly limits?: SchedulerLimits;
-  /** `runNow`: the fleet limit (`cap_reached`) does not apply; every other filter does. */
-  readonly uncapped?: boolean;
+  /**
+   * A person's `run-now`: the fleet limit (`cap_reached`) and the whole-queue pause do not apply; an
+   * account's hold and every other filter do.
+   */
+  readonly runNow?: boolean;
+  /**
+   * The whole-queue hold is the fail-closed stand-in for an unreadable `queue:pause`
+   * (`PauseRecord.unread`): `runNow` keeps it, since no person's pause is there to lift.
+   */
+  readonly pauseUnread?: boolean;
   /**
    * Route as though the task carried attachments: `route-preview`'s flag, since a
    * preview has no manifest. A task's own `spec.attachments` applies regardless.
@@ -110,14 +118,15 @@ export function route(input: RouteInput): Decision {
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
     accountAt: (placement) => accountOfPlacement(machines, placement),
     capReached:
-      input.uncapped !== true && fleetMax !== undefined && inFlight.length >= fleetMax
+      input.runNow !== true && fleetMax !== undefined && inFlight.length >= fleetMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: fleetMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
     base: task.spec.base ?? stackedAt(task, input.tasks),
   };
-  const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
+  const liftsPause = input.runNow === true && input.pauseUnread !== true;
+  const caps = [liftsPause ? null : queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
   const attached = input.attachments === true || task.spec.attachments !== undefined;
 
   const candidates: Candidate[] = [];

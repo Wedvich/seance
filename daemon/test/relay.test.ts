@@ -821,6 +821,7 @@ describe("daemon ↔ relay integration", () => {
         "continueSession",
         "continueHandoff",
         "runNow",
+        "runNowPaused",
         "attachments",
         "traits",
         "successor",

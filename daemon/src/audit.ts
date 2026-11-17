@@ -320,7 +320,7 @@ export function availabilityAudit(
 
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
-  /** A `run-now` that reserved the task past the concurrency limit. */
+  /** A `run-now` that reserved the task past the concurrency limit and the queue's pause. */
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */

@@ -846,6 +846,7 @@ function QueueButton(props: {
       enabled={button.enabled}
       busy={button.busy}
       preview={props.preview}
+      pastPause={props.view.startNowPastPause}
       onStartNow={props.onStartNow}
     />
   );
@@ -857,11 +858,12 @@ function SplitQueueButton(props: {
   enabled: boolean;
   busy: boolean;
   preview: PreviewState | null;
+  pastPause: boolean;
   onStartNow: () => void;
 }): JSX.Element {
   const { face, enabled, busy } = props;
   const menu = useMenu<HTMLDivElement>();
-  const item = startNowItem(props.preview);
+  const item = startNowItem(props.preview, props.pastPause);
   return (
     <>
       <div ref={menu.anchor} className={busy ? "split split-busy" : "split"}>

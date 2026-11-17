@@ -3724,9 +3724,21 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   so would take a wire field on `Reason`.
   **Run now lifts the cap for one task** (2026-10-27; "both caps" until the account cap went,
   2026-11-17). The `run-now` op (`Scheduler.runNow`)
-  routes a `ready` task with `RouteInput.uncapped`, which leaves out
-  `cap_reached` and nothing else: a pause, the quota line and spill, disk, pins, skills and every
-  machine filter still hold it, and then it is refused `unplaceable` with nothing written. Placed,
+  routes a `ready` task with `RouteInput.runNow`, which leaves out
+  `cap_reached` and the whole-queue `paused` and nothing else: an account's pause, the quota line and
+  spill, disk, pins, skills and every machine filter still hold it, and then it is refused
+  `unplaceable` with nothing written. The queue stays paused: the next pass places nothing else.
+  The fail-closed stand-in for an unreadable `queue:pause` ("Pause" below; `RouteInput.pauseUnread`)
+  is not lifted: no person's pause is there for a tap to override, and a version-regressed or junked
+  record must hold the whole queue on every path.
+  **It lifts the whole-queue pause too** (2026-11-17): a queue pause stops the scheduler from
+  starting work on its own, and a person's tap on one task is the explicit start that pause waits
+  for, as it is past a limit they set; offering it greyed as "No machine can take it" while open
+  machines and accounts sat idle conflated "held by policy" with "nowhere to run". An account's
+  pause is that account being closed (a person's word about where work may run, not when), so it
+  holds. A client offers Start now for a task the pause alone holds only to a verified leader
+  advertising `CAPABILITIES.runNowPaused`; under an older one it greys it as "The queue is paused".
+  The CLI and MCP send `run-now` as before, an older leader answering `unplaceable`. Placed,
   it counts toward the limit like any task, so the fleet runs over it and nothing new is placed
   until the count drains, as when a machine wakes with released slots. One-shot: the record keeps no
   mark of it beyond its decision (with no `cap_reached` on the winner), so a takeover between the
@@ -3832,7 +3844,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   a real whole-queue hold, which then stays until a `resume`. A pause is usually about spending, and a term holder can put
   junk there (Threat model, item 3): failing open would let junk lift a pause, failing closed
   lets it stop dispatch, which holding the term already could. After a PSK rotation the cost is
-  one resume.
+  one resume. `run-now`, which lifts a person's whole-queue pause, keeps this one
+  (`PauseRecord.unread`, until a write replaces the record).
 - **Needs input** (`alerts.ts`, M3 item 5; docs/scheduler.md Settled defaults 5). The clock
   rides the write that moves the state: `#update`, the one write path, stamps
   `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on leaving
@@ -10338,12 +10351,14 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   button — two sibling buttons in one pill, never nested — whose chevron opens the shared menu
   (`components/menu.tsx`) with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
-  in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
+  in `decision-view.ts`, which counts the whole-queue pause beside the caps as lifted while the
+  verified leader advertises `runNowPaused` — "past the pause", "past the pause and the concurrency
+  limit" — and otherwise greys a task the pause alone holds as "The queue is paused"; with a cap-held candidate beside the chosen one it stays generic, since
   `run-now` weighs both and the held one has no score, so it is plain "Skip the queue", naming
   neither a machine nor the caps the chosen one would not need lifted; "past the concurrency
-  caps" is only for no chosen target and several cap-held candidates), and it is disabled when
-  the preview turns every candidate down for more than the caps; a candidate held by
-  `cap_reached` alone keeps it on, since that is what `run-now` lifts, and no preview (asking,
+  limit" is only for no chosen target and several cap-held candidates), and it is disabled when
+  the preview turns every candidate down for more than `run-now` lifts; a candidate held by
+  `cap_reached` alone (or, under `runNowPaused`, beside the whole-queue pause) keeps it on, and no preview (asking,
   failed, a pinned form) leaves it on as plain "Skip the queue".
   A tap enqueues exactly as Queue, then `SchedulerStore` holds one Start now intent: only a new
   successful enqueue (Queue or Start now) replaces it and only the store's `dispose` ends it from
@@ -10533,7 +10548,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   refusal (its notice), never a placement the cap-free route would not make.
   Every waiting card (`queued`, `blocked`, `ready`) also has **Start now** in its ⋯ menu, always shown (`QueueRow.startNow`),
   worded and greyed by the Spawn screen's rules (`decisionStartNowItem` over the task's latest decision: greyed only when
-  the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`). A `queued` or `blocked` one is
+  the decision has no winner and no candidate held by the caps alone — or by the caps and the whole-queue pause alone, under a leader advertising `runNowPaused` — or the leader lacks `runNow`). A `queued` or `blocked` one is
   greyed too, its line saying why ("Waiting for the scheduler", "Waiting on the tasks it depends on"): `run-now` takes only
   `ready` and refuses anything earlier `not_waiting`, so offering it there was a tap certain to fail (2026-11-12). A card shown
   `blocked` after its dependencies cleared waits for the next read (a `queue-changed` nudge, or Refresh) to enable it.
