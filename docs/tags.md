@@ -245,17 +245,26 @@ id for the same process from a source of its own:
   `<configDir>/sessions/<pid>.json`, which the daemon already reads for the custodian round's Remote Control link
   (`daemon/src/custodian-remote.ts`). Observed on Claude Code 2.1.326 (2026-11-17), it holds `pid`, `sessionId`,
   `procStart`, `startedAt`, `cwd` and, only while Remote Control is on, `bridgeSessionId` (and `name`, `nameSource`,
-  `status`). It is written for every `claude` past the trust dialog, `-p` and `--resume` launches included, under
+  `status`, among others; on Linux also `pidDomain`, `linux:<machine-id>:pid:[<pid-namespace inode>]`, which nothing
+  here relies on). It is written for every `claude` past the trust dialog, `-p` and `--resume` launches included, under
   whichever config dir the process runs with (S2), and removed on a clean exit but left behind by a `SIGKILL`. The daemon opens it
   exactly as `custodian-remote.ts` does (no symlink, no FIFO, a regular file of at most 64 KiB, the open descriptor
   checked), only for the pid of the `Bound.session` process, searching every config dir its exclave scan knows (the
   default one included) and requiring **exactly one** match, and verifies when the file's `pid` is that pid, its
-  `procStart` denotes the same start as `processStart`, and its `sessionId` equals the claim. On macOS (S3, evidence
-  below) `procStart` is the kernel's start second as a zone-less UTC `ctime` string, so the match is exact to the
-  second: parse it as UTC and compare with the seconds part of `processStart`'s `sec.usec`, which is two integers
-  (the microseconds unpadded), never a decimal. `startedAt` is no substitute: it trails the kernel's start by a
-  third to two thirds of a second. Linux (`/proc` ticks since boot) is still to be spiked. Undocumented behaviour, like the round's link: re-verified on Claude Code upgrades,
-  and a missing or changed file only means "claimed", never a failure.
+  `procStart` denotes the same start as `processStart`, and its `sessionId` equals the claim. **`procStart`'s format
+  differs by platform** (S3, evidence below), so the daemon reads it by the platform it runs on, never by guessing
+  from its shape:
+  - **Linux:** `procStart` is `/proc/<pid>/stat`'s start time itself, the decimal clock-tick count since boot that
+    `processStart` returns, so the match is plain string equality, exact to the tick. Neither side is wall time, so
+    no zone and no clock change can move it.
+  - **macOS:** `procStart` is the kernel's start second as a zone-less UTC `ctime` string, so the match is exact to
+    the second: parse it as UTC and compare with the seconds part of `processStart`'s `sec.usec`, which is two
+    integers (the microseconds unpadded), never a decimal.
+
+  `startedAt` is no substitute on either: it trails the kernel's start by a third of a second or more. Undocumented
+  behaviour, like the round's link: re-verified on Claude Code upgrades, and a missing or changed file only means
+  "claimed", never a failure.
+
 - **Codex** (docs/agents.md): from the session files under its own `CODEX_HOME`, read the same way; part of that
   spike, not this spec's build.
 
@@ -278,10 +287,11 @@ nothing on this machine defeats the owner's uid; the threat model says so, as #4
   nothing.
 - **A refuted claim is dropped at ingest.** When the daemon's own source for the claiming process names another id
   (its file, or the ledger for an unchanged launch), the claim is not kept, shown or counted: the source says which
-  conversation the process is in. **A claim that arrives on a `session.start` from `resume` is not refuted by the
-  first read**: Claude Code rewrites the file tens of milliseconds after that event (S1, evidence below), so the
-  daemon re-reads it for a bounded settle window (§4.3) and refutes only a file that still names another id at its
-  end. Until then the claim is held as unverifiable, which can refuse a delivery as `ambiguous`, never misdeliver.
+  conversation the process is in. **A claim is not refuted by the first read of the file**: Claude Code can rewrite
+  the file after the `session.start` event that carries the claim (tens of milliseconds after a `resume` on both
+  platforms, and a few after a `clear` or a `-p` start on Linux; S1, evidence below), so the daemon re-reads it for a
+  bounded settle window (§4.3) and refutes only a file that still names another id at its end. The ledger, which
+  never moves, refutes at once. Until then the claim is held as unverifiable, which can refuse a delivery as `ambiguous`, never misdeliver.
 - **Two live panes claiming one id refuse it** (T1): a delivery by that id is `ambiguous`, and the adapter is told so
   in its `session` records (`conflict: true`). The claims counted are the verified ones and the **unverifiable** ones
   (no file, no ledger entry), never a refuted one, and never one bound through the `pane` fallback (§3.1). Counting the
@@ -295,11 +305,13 @@ nothing on this machine defeats the owner's uid; the threat model says so, as #4
 
 `/clear` starts a new conversation and `/resume` switches to another, in the same `claude` process. The mod sees
 both (`session.start` with source `clear` or `resume`; `CONTINUES` in both mods) and reports the new id; the daemon
-moves the process's link and re-verifies. **The file follows both** (S1, macOS, evidence below): after `/clear` it
-already names the new conversation when the `SessionStart` event fires (written 13–19 ms before it), and after
-`/resume` it names the resumed one 37–46 ms after the event. So a `clear` report verifies on its first read, and a
-`resume` report re-reads the file until it agrees or a settle window of **500 ms** (ten times the slowest observed lag)
-has passed, only then demoting or refuting (§4.2). The mod's own `session.start` rides the same event; the lag the
+moves the process's link and re-verifies. **The file follows both** (S1, evidence below). On macOS, after `/clear`
+it already names the new conversation when the `SessionStart` event fires (written 13–19 ms before it), and after
+`/resume` it names the resumed one 37–46 ms after the event. On Linux the `/clear` write lands with the event (19 ms
+before to 3 ms after), the `/resume` one 13–30 ms after, and a `-p` process's first write 6 ms after its start event.
+So **every report whose id the file does not name yet**, whatever its source, re-reads the file until it agrees or a
+settle window of **500 ms** (ten times the slowest observed lag) has passed, only then demoting or refuting (§4.2); a
+report the file already agrees with verifies on its first read, which is the usual case for `clear` and `startup`. The mod's own `session.start` rides the same event; the lag the
 daemon sees also includes the report's trip over the socket, which only shortens the wait.
 
 ### 4.4 This amends a rejected alternative
@@ -621,7 +633,8 @@ second:
 - **S3.** What precision `procStart` carries (observed as a date string to the second) and how it compares with
   `processStart` on each platform, including across a clock change; whether `startedAt` (ms) is the better match.
 
-Linux is still to be run for all three; macOS is below.
+Both platforms are below. They agree on S1 and S2; S3 differs in `procStart`'s format, and §4.1 reads it per
+platform.
 
 ### Evidence, macOS (Claude Code 2.1.326, 2026-11-17)
 
@@ -676,6 +689,65 @@ from Claude's own clock), so a step moves neither side and the match survives. L
 `processStart` is ticks since boot and a date string has to add a boot time, is where a clock change could matter and
 is part of the Linux run.
 
+### Evidence, Linux (Claude Code 2.1.326, 2026-11-17)
+
+The macOS method, on a Linux host (Proxmox VE kernel 7.0, `CLK_TCK` 100, system zone UTC): throwaway `claude`
+processes in panes of a private tmux server, in a trusted checkout, no prompt typed but one `-p` call; a watcher
+polling every config dir's `sessions/*.json` every 5 ms and logging each change of `sessionId`; a `SessionStart`
+command hook from a `--settings` file logging its own time, `source` and `session_id`. Ids were compared as hashes,
+never recorded. Timings are the watcher's first sight minus the hook's log line, good to about ±5 ms; the hook stamps
+its line after its shell and `jq` start, so the event itself is a few ms earlier than the hook's time.
+
+**S1: the file follows `/clear` and `/resume`, in the same process.** Yes to both, as on macOS; the timings differ.
+
+| Act                                | Tries | File names the new id                                                  |
+| ---------------------------------- | ----- | ---------------------------------------------------------------------- |
+| `/clear`                           | 17    | 19 ms before to 3 ms after the hook (17/17); macOS was always before   |
+| `/resume <id>`                     | 6     | 13–30 ms **after** the hook (6/6)                                      |
+| fresh start                        | 5     | first write 225–826 ms before the hook, already carrying the hook's id |
+| `claude --resume <id>` (at launch) | 1     | first write 92 ms before the hook, already the resumed id              |
+| `-p`                               | 1     | first write 6 ms **after** the hook, carrying its id                   |
+
+`procStart`, `startedAt` and `pid` stay put across `/clear` and `/resume`, as on macOS. What changes the design: on
+Linux a `clear` (and a `-p` start) can be written just after the event, not only a `resume`, so §4.2 and §4.3 now
+hold any report the file does not name yet over the settle window, whatever its source, instead of `resume` alone.
+The slowest lag seen on either platform is 46 ms, so the 500 ms window stands.
+
+**S2: which `claude`s get a file.** The same answers as macOS.
+
+| Process                                                             | File?                                                                        |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| interactive, Remote Control at startup (the config's own setting)   | yes, `bridgeSessionId` added 1.16 s after the first write                    |
+| interactive, `remoteControlAtStartup: false` (through `--settings`) | yes, with no `bridgeSessionId` key; follows `/clear` and `/resume` the same  |
+| `-p`                                                                | yes, for its life (1.2 s here); `kind` `interactive`, `entrypoint` `sdk-cli` |
+| `claude --resume <id>`                                              | yes, the resumed id from the first write                                     |
+| under a named exclave's `CLAUDE_CONFIG_DIR`                         | yes, in that dir's `sessions/`                                               |
+| with no `CLAUDE_CONFIG_DIR` (the default dir)                       | yes, in `~/.claude/sessions/`, none in the named exclave's                   |
+| waiting at the trust dialog of an untrusted folder                  | no (and no `SessionStart` either)                                            |
+
+On exit: `SIGTERM` and the end of a `-p` run remove the file; `SIGKILL` leaves it with its `<pid>.<hash>.key`. `/exit`
+removes it, but in 2 of 5 tries (one with Remote Control on, one with it off after `/resume`) the file reappeared
+about 10 ms after its removal and was gone for good 0.5–0.8 s later. Its `pid` and `procStart` still name the exiting
+process, so a reader matching both is not misled; a reader treating the file's presence alone as "running" would be.
+The first write carries fewer keys than later ones (`status`, `statusUpdatedAt` and `updatedAt` arrive with the
+first status update), so a reader requires only the keys it uses. Linux files also carry `pidDomain`,
+`linux:<machine-id>:pid:[<pid-namespace inode>]` (the `/etc/machine-id` and `/proc/<pid>/ns/pid` of the writer),
+besides `version`, `peerProtocol`, `peerFeatures`, `messagingSocketPath`, `tmux` and `asksForConvertedSkills`; the
+design uses none of them.
+
+**S3: `procStart` against `processStart`.** **`procStart` on Linux is not a date string**: it is the decimal string
+of `/proc/<pid>/stat`'s field 22, the start time in clock ticks since boot, exactly what `processStart`
+(`daemon/src/peer.ts`) returns. It equals `processStart(pid)` byte for byte in 10 of 10 files (the spike's processes
+and the machine's other sessions' files, read for these two fields only), under the default and two named config
+dirs, and with `TZ=Europe/Oslo` set on the `claude` process. So the Linux match is string equality, exact to the
+tick (10 ms here), with no parse and no zone. `startedAt` (ms) trails the kernel's start by 0.30–0.42 s in 7 files
+(the kernel's start taken as `CLOCK_REALTIME − CLOCK_BOOTTIME` plus the ticks, so good to a tick): as on macOS it
+cannot match, and `procStart` is the match.
+
+A clock change needs no test on Linux: both sides are ticks since boot, so a wall-clock step moves neither, and no
+date conversion (where a step would matter) happens on either side. The platforms disagree only in format, which is
+why §4.1 now reads `procStart` per platform.
+
 ## Build order
 
 Small PRs, each landing on its own. #526's PR 1 (`self.doing`) can land before or after PR 1 here: its shapes are
@@ -683,8 +755,9 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
 
 1. **The vocabulary and `agent.*`.** `shared/src/tags.ts` (grammar, namespaces, caps, `displayLine` moved,
    `parseTags`, known-key parsers, `joinTags`, `displayName`); the session-event frame's `agent`, on every report;
-   `Conversations` in memory; verification from the launch ledger and `sessions/<pid>.json` (`procStart` read as UTC
-   against `processStart`'s seconds; a `resume` report re-read over the settle window, §4.3), re-read at each act; the
+   `Conversations` in memory; verification from the launch ledger and `sessions/<pid>.json` (`procStart` read per platform: on
+   Linux equal to `processStart`'s tick string, on macOS read as UTC against its seconds; a report the file does not
+   name yet re-read over the settle window, whatever its source, §4.3), re-read at each act; the
    daemon's own read for panes with no report since start; `remoteSession` as `agent.remote`'s fallback (§7 steps 1
    and 4); retention keyed on the bound `claude` process, for any such pane (§3.2, §3.3); `SessionEntry.tags` with
    `scope`.
@@ -692,9 +765,11 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
      known key's parser, the caps and per-writer budgets (`full`), `joinTags`' precedence and `displayName`'s sources;
      daemon tests with real peers (`ClaudeStub.runInPane`): a claim verified from the ledger; one verified from a
      `sessions/<pid>.json` the stub writes; one left unverifiable with no file; a refuted claim (the file names
-     another id) neither kept nor counted toward a conflict; a `resume` report whose file still names the old id at
-     first read and the new one within the settle window verified, and one whose file never changes refuted only at
-     the window's end; a `procStart` in UTC matched across a non-UTC `TZ`, and one a second off not; a file for
+     another id) neither kept nor counted toward a conflict; a `resume` report, and a `clear` one, whose file still names
+     the old id at first read and the new one within the settle window verified, and one whose file never changes
+     refuted only at the window's end; on macOS a `procStart` in UTC matched across a non-UTC `TZ`, and one a second
+     off not; on Linux a `procStart` equal to `processStart` matched, and one a tick off, or in macOS's `ctime` form,
+     not; a file for
      another pid, an older start, a symlink or a FIFO ignored; two config dirs both matching is no verification; two verified or unverifiable claims marked
      `conflict`; a claim through the `pane` fallback never verified or counted; a `/clear` in a tasked pane demoting
      the ledger's id until the file agrees, and an act after it re-reading the file and answering `unverified`; a
