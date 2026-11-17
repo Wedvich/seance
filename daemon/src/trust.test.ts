@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureRepoTrusted, isDirTrusted } from "./trust.ts";
+import { ensureAttachmentsTrusted, ensureRepoTrusted, isDirTrusted } from "./trust.ts";
 
 let dir: string;
 
@@ -121,6 +121,31 @@ describe("ensureRepoTrusted", () => {
     const config = await readConfig();
     expect(config.projects?.[a]?.["hasTrustDialogAccepted"]).toBe(true);
     expect(config.projects?.[b]?.["hasTrustDialogAccepted"]).toBe(true);
+  });
+});
+
+describe("ensureAttachmentsTrusted", () => {
+  test("one entry, under its real path, for the root above every task's directory", async () => {
+    const root = join(dir, "real-attachments");
+    await mkdir(join(root, "task-a"), { recursive: true });
+    await mkdir(join(root, "task-b"), { recursive: true });
+    const linked = join(dir, "linked-attachments");
+    await symlink(root, linked);
+    await writeFile(configPath(), JSON.stringify({ projects: {} }));
+
+    await ensureAttachmentsTrusted([join(linked, "task-a"), join(linked, "task-b")], configPath());
+
+    const projects = (await readConfig()).projects ?? {};
+    expect(Object.keys(projects)).toEqual([await realpath(root)]);
+    expect(projects[await realpath(root)]?.["hasTrustDialogAccepted"]).toBe(true);
+    // What Claude Code's own walk would conclude for a task directory added later.
+    expect(await isDirTrusted(join(root, "task-c"), configPath())).toBe(true);
+  });
+
+  test("no directories: the config is not touched", async () => {
+    await writeFile(configPath(), JSON.stringify({ projects: {} }));
+    await ensureAttachmentsTrusted([], configPath());
+    expect((await readConfig()).projects).toEqual({});
   });
 });
 

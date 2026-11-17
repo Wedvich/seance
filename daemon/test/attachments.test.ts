@@ -50,6 +50,7 @@ let repos: readonly RepoEntry[];
 let relay: TestRelay;
 let key: CryptoKey;
 let source: AttachmentSource;
+let claudeConfig: string;
 let ctx: HandlerContext;
 let tasks = 0;
 
@@ -62,6 +63,8 @@ beforeAll(async () => {
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   const home = join(base, "home");
   await mkdir(home, { recursive: true });
+  claudeConfig = join(home, ".claude.json");
+  await Bun.write(claudeConfig, JSON.stringify({ projects: {} }));
   fixture = await makeGitFixture(base);
   stub = await makeClaudeStub(base);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
@@ -162,6 +165,10 @@ describe("a spawn carrying attachments", () => {
       const at = argv.indexOf("--add-dir");
       expect(argv[at + 1]).toBe(dir);
       expect(argv[at + 2]).toBe("--model");
+      // Claude Code asks its trust dialog for an `--add-dir` too: the root's entry answers it for every task's dir.
+      const projects = ((await Bun.file(claudeConfig).json()) as { projects: Record<string, unknown> }).projects;
+      expect(projects[await realpath(source.root)]).toEqual({ hasTrustDialogAccepted: true });
+      expect(projects[dir]).toBeUndefined();
 
       const seed = await stub.stdin();
       expect(seed).toContain("Task: look at these\n");
