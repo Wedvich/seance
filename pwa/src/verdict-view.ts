@@ -135,7 +135,7 @@ export function describeVerdict(
     stage: null,
     primary:
       verdict.retry === undefined
-        ? { label: "Back to the form", onClick: "back" }
+        ? { label: "Back to prompt", onClick: "back" }
         : { label: "Try again", onClick: "retry" },
     showBack: verdict.retry !== undefined,
   };

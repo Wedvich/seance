@@ -140,6 +140,54 @@ function layerEntry(state: unknown): LayerEntry | null {
   };
 }
 
+/** Every open layer holds one history entry, so this is also how deep the current entry should be. */
+function openLayers(state: AppState): number {
+  const { sheet, settings, machines, queue, verdict, accounts, older } = state;
+  return (
+    (sheet === null ? 0 : 1) +
+    (older.sheet === null ? 0 : 1) +
+    (settings ? 1 : 0) +
+    (machines ? 1 : 0) +
+    (queue ? 1 : 0) +
+    (verdict === null ? 0 : 1) +
+    (accounts.renaming === null ? 0 : 1)
+  );
+}
+
+/** The patch closing the top layer, null with none open. Closing the Queue also closes Older's list (the caller's). */
+function closeTop(state: AppState): Partial<AppState> | null {
+  // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
+  if (state.accounts.renaming !== null) return { accounts: { ...state.accounts, renaming: null, notice: null } };
+  const { sheet } = state;
+  if (sheet !== null) {
+    // Cleared on the way out, not on the next open: a failure that landed while
+    // another layer was up would otherwise be reset before it was ever shown.
+    const rescan = sheet === "machine" && state.rescan.kind === "failed" ? RESCAN_IDLE : state.rescan;
+    return { sheet: null, rescan };
+  }
+  // Opened over the Queue screen, so it closes first.
+  if (state.older.sheet !== null) return { older: { ...state.older, sheet: null } };
+  // The modal over every screen (a link opens a screen beneath it), so it closes before any of them.
+  if (state.settings) return { settings: false };
+  if (state.machines) return { machines: false, history: null };
+  // Opened over a verdict, never under one, so it closes first.
+  // A notification's focus never listed (the task was pruned) must not scroll some later visit.
+  if (state.queue) return { queue: false, queueNotice: null, focusedTask: null };
+  if (state.verdict !== null) return { verdict: null };
+  return null;
+}
+
+/**
+ * One patch closing every layer over the `base` the prompt flow holds, except `keep`. `keep` is the
+ * lowest of them, so closing from the top never reaches it while another remains.
+ */
+function closedOver(state: AppState, base: number, keep: "queue" | "machines"): Partial<AppState> {
+  if (openLayers(state) - base <= (state[keep] ? 1 : 0)) return {};
+  const step = closeTop(state);
+  if (step === null) return {};
+  return { ...step, ...closedOver({ ...state, ...step }, base, keep) };
+}
+
 const HISTORY_UNREADABLE = "Couldn't read the machine's answer. Update seanced and the app to matching versions.";
 
 const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
@@ -816,22 +864,26 @@ export class Store {
     if (wide) void this.refreshQueue();
   }
 
-  /** The phone's Machines screen, from the header menu: one entry, popped by back. */
+  /** The phone's Machines screen, from the header menu or a link (`#openScreen`). */
   openMachines(): void {
-    if (!this.#state.machines) this.#pushLayer();
-    this.#patch({ machines: true });
+    // Already a column beside the form: a layer there is an invisible back stop, and closes nothing.
+    if (this.#state.wide) {
+      if (!this.#state.machines) this.#pushLayer();
+      this.#patch({ machines: true });
+    } else {
+      this.#openScreen("machines");
+    }
     this.#refreshClosedSessions();
   }
 
-  /** The Queue screen is a layer like settings: one entry, popped by back. */
+  /** The phone's Queue screen, from the header menu, a verdict or a link (`#openScreen`). */
   openQueue(): void {
     // Already a column beside the form: a layer there would be an invisible back stop.
     if (this.#state.wide) {
       void this.refreshQueue();
       return;
     }
-    if (!this.#state.queue) this.#pushLayer();
-    this.#patch({ queue: true });
+    this.#openScreen("queue");
     void this.refreshQueue();
   }
 
@@ -1009,7 +1061,7 @@ export class Store {
   /** Always via history, so the entry pushed when the layer opened is consumed. */
   dismissLayer(): void {
     if (this.#openLayers() === 0) return;
-    history.back();
+    this.#back();
   }
 
   /**
@@ -1022,6 +1074,8 @@ export class Store {
     this.#held = false;
     this.#renameClosing = false;
     this.#olderSheetClosing = false;
+    // One delivered traversal, not all: a second back may still be in flight.
+    this.#pendingBacks = Math.max(0, this.#pendingBacks - 1);
     const entry = layerEntry(history.state);
     const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
     while (this.#openLayers() > depth) this.#closeTopLayer();
@@ -1029,16 +1083,18 @@ export class Store {
   }
 
   #openLayers(): number {
-    const { sheet, settings, machines, queue, verdict, accounts, older } = this.#state;
-    return (
-      (sheet === null ? 0 : 1) +
-      (older.sheet === null ? 0 : 1) +
-      (settings ? 1 : 0) +
-      (machines ? 1 : 0) +
-      (queue ? 1 : 0) +
-      (verdict === null ? 0 : 1) +
-      (accounts.renaming === null ? 0 : 1)
-    );
+    return openLayers(this.#state);
+  }
+
+  /**
+   * Layers whose close was asked for by `#back` and not yet delivered: the state still counts them, and
+   * their traversal pops their entry, so a `history.go` computed from the state must not pop it again.
+   */
+  #pendingBacks = 0;
+
+  #back(): void {
+    this.#pendingBacks += 1;
+    history.back();
   }
 
   /** Before the patch that opens the layer, so the depth counts it. */
@@ -1053,6 +1109,7 @@ export class Store {
   #releaseHeld(): void {
     if (!this.#held) return;
     this.#held = false;
+    // The held entry's layer is already closed in the state, so it is no pending close to net out of a go.
     history.back();
   }
 
@@ -1069,41 +1126,39 @@ export class Store {
   }
 
   #closeTopLayer(): void {
-    // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
-    if (this.#state.accounts.renaming !== null) {
-      this.#patch({ accounts: { ...this.#state.accounts, renaming: null, notice: null } });
-      return;
-    }
-    const sheet = this.#state.sheet;
-    if (sheet !== null) {
-      // Cleared on the way out, not on the next open: a failure that landed while
-      // another layer was up would otherwise be reset before it was ever shown.
-      const rescan = sheet === "machine" && this.#state.rescan.kind === "failed" ? RESCAN_IDLE : this.#state.rescan;
-      this.#patch({ sheet: null, rescan });
-      return;
-    }
-    // Opened over the Queue screen, so it closes first.
-    if (this.#state.older.sheet !== null) {
-      this.#patch({ older: { ...this.#state.older, sheet: null } });
-      return;
-    }
-    // Above settings, so it closes first.
-    if (this.#state.machines) {
-      this.#patch({ machines: false, history: null });
-      return;
-    }
-    if (this.#state.settings) {
-      this.#patch({ settings: false });
-      return;
-    }
-    // Opened over a verdict, never under one, so it closes first.
-    if (this.#state.queue) {
-      // A notification's focus never listed (the task was pruned) must not scroll some later visit.
-      this.#patch({ queue: false, queueNotice: null, focusedTask: null });
-      this.#older.close();
-      return;
-    }
-    if (this.#state.verdict !== null) this.#patch({ verdict: null });
+    const patch = closeTop(this.#state);
+    if (patch === null) return;
+    this.#patch(patch);
+    if (patch.queue === false) this.#older.close();
+  }
+
+  /**
+   * Queue and Machines are the phone's peers of the prompt screen: one entry over its flow (the verdict
+   * included) between them, never one stacked on the other. Whatever sits over that flow — the other
+   * screen, a sheet, a dialog — closes in one patch, so the switch is one screen change, and the lowest
+   * of their entries is kept for the target; back from either lands on Prompt. Settings is the exception:
+   * it stays up over the new screen (unsaved credentials), and back from it lands on that screen first.
+   */
+  #openScreen(screen: "queue" | "machines"): void {
+    const opened: Partial<AppState> = screen === "queue" ? { queue: true } : { machines: true };
+    const base = this.#state.verdict === null ? 0 : 1;
+    const before = this.#openLayers();
+    // Settings holds unsaved credential edits and is the modal over every screen: the screen opens
+    // beneath it rather than closing it (closedOver sees the state without it).
+    const patch = { ...closedOver({ ...this.#state, settings: false }, base, screen), ...opened };
+    const after = openLayers({ ...this.#state, ...patch });
+    const queueClosed = this.#state.queue && screen !== "queue";
+    if (after > before) this.#pushLayer();
+    this.#patch(patch);
+    if (queueClosed) this.#older.close();
+    const surplus = before - after - this.#pendingBacks;
+    if (surplus > 0) history.go(-surplus);
+  }
+
+  /** The menu's Prompt: everything over the form closes, a verdict too, so it lands where "Back to prompt" does. */
+  showPrompt(): void {
+    const open = this.#openLayers() - this.#pendingBacks;
+    if (open > 0) history.go(-open);
   }
 
   /** Toggles the Queue screen's Older section; opening it reads the archive's first page. */
@@ -1148,7 +1203,7 @@ export class Store {
   closeOlderSheet(): void {
     if (this.#state.older.sheet === null || this.#olderSheetClosing) return;
     this.#olderSheetClosing = true;
-    history.back();
+    this.#back();
   }
 
   /** Set from asking for the rename layer's back until the traversal lands, so a second ask pops nothing more. */
@@ -1158,7 +1213,7 @@ export class Store {
   closeAccountRename(): void {
     if (this.#state.accounts.renaming === null || this.#renameClosing) return;
     this.#renameClosing = true;
-    history.back();
+    this.#back();
   }
 
   /** The rename dialog for an account: a layer like the sheets, so back closes it. */

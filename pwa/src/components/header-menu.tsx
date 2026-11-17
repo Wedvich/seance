@@ -1,21 +1,29 @@
 import type { JSX } from "preact";
+import type { Screen } from "../transition.ts";
 import type { ConnectionState } from "../view.ts";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { CogIcon, RelayDot } from "./relay-dot.tsx";
 
 /**
  * The phone's header pill: relay dot on the track, as on a desk, but the face
- * opens a menu of the screens a desk shows as columns, plus Settings.
+ * opens a menu of the three screens a desk shows as columns, plus Settings.
+ * It stands in the one header every screen shares; the current screen's row is
+ * marked, and picking it only closes the menu.
  */
 export function HeaderMenu(props: {
   state: ConnectionState;
+  current: Screen;
   queueAttention: boolean;
+  onPrompt: () => void;
   onQueue: () => void;
   onMachines: () => void;
   onSettings: () => void;
 }): JSX.Element {
-  const { state, queueAttention } = props;
+  const { state, current } = props;
+  // The Queue on screen shows what needs you; a dot pointing at it would point at the page itself.
+  const queueAttention = props.queueAttention && current !== "queue";
   const menu = useMenu();
+  const go = (screen: Screen, open: () => void): (() => void) | undefined => (screen === current ? undefined : open);
 
   return (
     <>
@@ -38,8 +46,25 @@ export function HeaderMenu(props: {
         </span>
       </button>
       <Menu menu={menu} label="Menu">
-        <MenuItem label="Queue" icon={<QueueIcon />} onClick={props.onQueue} attention={queueAttention} />
-        <MenuItem label="Machines" icon={<MachinesIcon />} onClick={props.onMachines} />
+        <MenuItem
+          label="Prompt"
+          icon={<PromptIcon />}
+          current={current === "prompt"}
+          onClick={go("prompt", props.onPrompt)}
+        />
+        <MenuItem
+          label="Queue"
+          icon={<QueueIcon />}
+          current={current === "queue"}
+          onClick={go("queue", props.onQueue)}
+          attention={queueAttention}
+        />
+        <MenuItem
+          label="Machines"
+          icon={<MachinesIcon />}
+          current={current === "machines"}
+          onClick={go("machines", props.onMachines)}
+        />
         <MenuItem label="Settings" icon={<CogIcon size={18} />} onClick={props.onSettings} />
       </Menu>
     </>
@@ -71,6 +96,16 @@ function MenuIcon(): JSX.Element {
       <path d="M4 7h16" />
       <path d="M4 12h16" />
       <path d="M4 17h16" />
+    </Icon>
+  );
+}
+
+/** Feather's edit-3: a pen over a line, the prompt being written. */
+function PromptIcon(): JSX.Element {
+  return (
+    <Icon size={18}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
     </Icon>
   );
 }

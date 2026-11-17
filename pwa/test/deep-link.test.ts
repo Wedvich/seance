@@ -76,6 +76,17 @@ describe("opening a link", () => {
     expect(store.getState()).toMatchObject({ machines: true, focusedTask: null });
   });
 
+  test("a link replaces whichever screen shows, and a task link keeps its focus", () => {
+    history = fakeHistory([null]);
+    const store = storeOver();
+    store.openQueue();
+    openDeepLink(store, { to: "machines" });
+    expect(store.getState()).toMatchObject({ queue: false, machines: true });
+    openDeepLink(store, { to: "task", taskId: TASK });
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, focusedTask: TASK });
+    expect(history.entries()).toHaveLength(2);
+  });
+
   test("a launch query opens its link; an invalid id opens nothing", () => {
     history = fakeHistory([null]);
     const store = storeOver();

@@ -36,6 +36,8 @@ export function setVisibility(state: "visible" | "hidden"): void {
  */
 export function fakeHistory(entries: unknown[] = [null]): {
   settle: (store: { onPopState(): void }) => void;
+  /** Delivers only the oldest queued traversal, for what happens between two in flight. */
+  settleOne: (store: { onPopState(): void }) => void;
   forward: () => void;
   entries: () => readonly unknown[];
   index: () => number;
@@ -65,16 +67,21 @@ export function fakeHistory(entries: unknown[] = [null]): {
     },
     configurable: true,
   });
+  const deliver = (store: { onPopState(): void }, delta: number): void => {
+    const target = index + delta;
+    // Past the first entry is the OS's back: the app is gone, nothing pops.
+    if (target < 0) throw new Error("traversed out of the app");
+    if (target >= stack.length) return;
+    index = target;
+    store.onPopState();
+  };
   return {
     settle: (store) => {
-      for (let delta = queued.shift(); delta !== undefined; delta = queued.shift()) {
-        const target = index + delta;
-        // Past the first entry is the OS's back: the app is gone, nothing pops.
-        if (target < 0) throw new Error("traversed out of the app");
-        if (target >= stack.length) continue;
-        index = target;
-        store.onPopState();
-      }
+      for (let delta = queued.shift(); delta !== undefined; delta = queued.shift()) deliver(store, delta);
+    },
+    settleOne: (store) => {
+      const delta = queued.shift();
+      if (delta !== undefined) deliver(store, delta);
     },
     forward: () => queued.push(1),
     entries: () => stack,

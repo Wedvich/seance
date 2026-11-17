@@ -188,7 +188,7 @@ export function VerdictView(props: {
           )}
           {content.showBack && (
             <button type="button" className="quiet" onClick={onBack}>
-              Back to the form
+              Back to prompt
             </button>
           )}
         </div>
