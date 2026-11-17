@@ -1202,11 +1202,6 @@ export class Store {
     this.#older.loadMore();
   }
 
-  /** Reads Older's first page again, as the screen's ↻ re-reads the queue; nothing while it is closed. */
-  refreshOlder(): void {
-    this.#older.refresh();
-  }
-
   /** Set from asking for the filter sheet's back until the traversal lands, as `#renameClosing` is. */
   #olderSheetClosing = false;
 

@@ -66,7 +66,6 @@ export interface SpawnActions {
   readonly dismissLayer: () => void;
   readonly pickMachine: (deviceId: string | null) => void;
   readonly pickAccount: (accountId: string | null) => void;
-  readonly refreshPreview: () => void;
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
   readonly rescan: (deviceId: string) => void;
@@ -779,16 +778,10 @@ function PreviewCard(props: {
   preview: PreviewState | null;
   machines: readonly Machine[];
   now: number;
-  onRefresh: () => void;
 }): JSX.Element | null {
-  const { preview, machines, now, onRefresh } = props;
+  const { preview, machines, now } = props;
   if (preview === null) return null;
   const pending = preview.kind === "loading";
-  const refresh = (
-    <button type="button" className="preview-refresh" onClick={onRefresh} disabled={pending} aria-label="Preview again">
-      ↻
-    </button>
-  );
   const decision = preview.kind === "ok" ? preview.decision : pending ? preview.previous : undefined;
   if (decision !== undefined) {
     // Same tree for a re-ask as for its answer, so the card neither collapses nor closes its candidates.
@@ -800,7 +793,6 @@ function PreviewCard(props: {
           quota={false}
           age={seen(decision.at, now)}
         />
-        {refresh}
       </div>
     );
   }
@@ -812,7 +804,6 @@ function PreviewCard(props: {
           {preview.kind === "failed" ? preview.message : "Asking the scheduler…"}
         </p>
       </section>
-      {refresh}
     </div>
   );
 }
@@ -1286,9 +1277,7 @@ export function SpawnScreen(props: {
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
 
-        {view.previewShown && (
-          <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
-        )}
+        {view.previewShown && <PreviewCard preview={preview} machines={machines} now={now} />}
       </div>
 
       {renderedSheet !== null && (

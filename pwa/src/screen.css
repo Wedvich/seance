@@ -2747,8 +2747,8 @@
   background: var(--bg);
 }
 
-/* Top-aligned so a subtitle that wraps (Machines') grows the title block alone: the pill and the
-   Queue's ↻ keep one position across the three screens. The title block is at least the pill's
+/* Top-aligned so a subtitle that wraps (Machines') grows the title block alone: the pill
+   keeps one position across the three screens. The title block is at least the pill's
    height (44px), centred in it, so a short title sits where it did when the header centred. */
 .phone-header {
   align-items: flex-start;
@@ -2790,14 +2790,10 @@
 }
 
 /* A switch between the phone's peer screens moves only what changes: the
-   header's title block, the Queue's ↻ and the body. The pill is named so it
+   header's title block and the body. The pill is named so it
    is held still rather than cross-faded with the header around it. */
 :root:active-view-transition-type(switch) .phone-heading {
   view-transition-name: head-title;
-}
-
-:root:active-view-transition-type(switch) .phone-header .queue-refresh {
-  view-transition-name: head-action;
 }
 
 :root:active-view-transition-type(switch) .phone-header .relay-group {
@@ -2835,14 +2831,6 @@
 
 :root:active-view-transition-type(switch)::view-transition-new(head-title) {
   animation: vt-head-in 0.2s ease-out both;
-}
-
-:root:active-view-transition-type(switch)::view-transition-old(head-action) {
-  animation: vt-fade-out 0.2s ease-in both;
-}
-
-:root:active-view-transition-type(switch)::view-transition-new(head-action) {
-  animation: vt-fade-in 0.2s ease-out both;
 }
 
 :root:active-view-transition-type(switch)::view-transition-old(screen-body) {
@@ -3066,38 +3054,10 @@
 
 /* ---- decision record: the `auto` preview and a queued task's verdict ---- */
 
-.preview {
-  position: relative;
-}
-
-/* Sits in the card's label row, so it costs the card no height. */
-.preview-refresh {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 44px;
-  height: 44px;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  font-size: 17px;
-  cursor: pointer;
-}
-
+/* Delayed: a re-ask the leader answers quickly, usually with the same placement, should not flash the card. */
 .preview-pending .decision {
   opacity: 0.55;
-  transition: opacity 120ms;
-}
-
-.preview-pending .preview-refresh {
-  animation: preview-spin 0.9s linear infinite;
-  cursor: default;
-}
-
-@keyframes preview-spin {
-  to {
-    transform: rotate(1turn);
-  }
+  transition: opacity 120ms 300ms;
 }
 
 .decision {
@@ -3428,18 +3388,6 @@
 .queue-pr-stale .queue-pr-blocked {
   color: inherit;
   opacity: 0.5;
-}
-
-.queue-refresh {
-  width: 44px;
-  height: 44px;
-  margin: -8px -8px -8px 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  font-size: 17px;
-  cursor: pointer;
-  flex: none;
 }
 
 .queue-resume {

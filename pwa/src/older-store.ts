@@ -127,11 +127,6 @@ export class OlderStore {
     void this.#first();
   }
 
-  /** Reads page one again (the screen's ↻); nothing while the section is closed. */
-  refresh(): void {
-    if (this.#older.open) void this.#first();
-  }
-
   loadMore(): void {
     const { list } = this.#older;
     if (list?.kind !== "ok" || list.next === null || list.loadingMore || this.#base === null) return;

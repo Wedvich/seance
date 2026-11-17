@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
-import type { DecisionLine, DecisionSummary } from "../decision-view.ts";
+import { memo } from "preact/compat";
+import { sameMoment, sameSummary, type DecisionLine, type DecisionSummary } from "../decision-view.ts";
 import type { Moment } from "../timed.ts";
 import { Time, TimedText } from "./timed.tsx";
 
@@ -21,20 +22,15 @@ function Line(props: { line: DecisionLine; quota: boolean }): JSX.Element {
   );
 }
 
-/**
- * The record's "chose X because …, rejected Y because …", one row per
- * candidate. Losers sit behind a disclosure: the winner is the answer, the
- * rest is the explanation someone asks for. `quota` adds the reading each
- * candidate was judged on — the placed task's record shows it; the form's
- * preview, read before anything is queued, leaves it out.
- */
-export function DecisionCard(props: {
+interface DecisionCardProps {
   summary: DecisionSummary;
   title: string;
   quota: boolean;
   /** How long ago the decision was made, for a card that can outlive the fleet it read. */
   age?: Moment;
-}): JSX.Element {
+}
+
+function DecisionCardView(props: DecisionCardProps): JSX.Element {
   const { summary, title, quota, age } = props;
   const others = summary.others.length + (summary.omitted?.count ?? 0);
   return (
@@ -70,3 +66,19 @@ export function DecisionCard(props: {
     </section>
   );
 }
+
+/**
+ * The record's "chose X because …, rejected Y because …", one row per
+ * candidate. Losers sit behind a disclosure: the winner is the answer, the
+ * rest is the explanation someone asks for. `quota` adds the reading each
+ * candidate was judged on — the placed task's record shows it; the form's
+ * preview, read before anything is queued, leaves it out.
+ *
+ * Memoized on what it shows: the app re-derives the summary as a new object on
+ * every state change (a keystroke in the prompt), so identity would never hold.
+ */
+export const DecisionCard = memo(
+  DecisionCardView,
+  (a: DecisionCardProps, b: DecisionCardProps) =>
+    a.title === b.title && a.quota === b.quota && sameMoment(a.age, b.age) && sameSummary(a.summary, b.summary),
+);

@@ -137,15 +137,6 @@ function LimitsSheet(props: {
   );
 }
 
-/** The one screen-specific header control: re-reads the queue (and Older's first page). */
-export function QueueRefresh(props: { onRefresh: () => void }): JSX.Element {
-  return (
-    <button type="button" className="queue-refresh" onClick={props.onRefresh} aria-label="Refresh the queue">
-      ↻
-    </button>
-  );
-}
-
 /**
  * Reached from the phone's header menu, or a desk column: what the scheduler holds, by what each
  * task needs from the person, with a way to cancel, mark done, or hold the

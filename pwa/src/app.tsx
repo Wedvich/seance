@@ -2,7 +2,7 @@ import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { HeaderMenu } from "./components/header-menu.tsx";
 import { MachinesHeading, MachinesScreen } from "./components/machines.tsx";
-import { QueueHeading, QueueRefresh, QueueScreen, type OlderActions } from "./components/queue.tsx";
+import { QueueHeading, QueueScreen, type OlderActions } from "./components/queue.tsx";
 import { RelaySettings } from "./components/relay-dot.tsx";
 import { Settings } from "./components/settings.tsx";
 import { PromptHeading, SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
@@ -94,14 +94,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         <QueueHeading
           summary={queueView.summary}
           onLimits={queueView.limit === null ? null : () => setLimitsOpen(true)}
-        />
-      ),
-      action: (
-        <QueueRefresh
-          onRefresh={() => {
-            void store.refreshQueue();
-            store.refreshOlder();
-          }}
         />
       ),
       body: (
@@ -231,7 +223,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
             {tasks.heading}
             {/* The rightmost column, so the settings pill sits in its header. */}
             <div className="header-actions">
-              {tasks.action}
               <RelaySettings state={view.relayState} onClick={actions.openSettings} />
             </div>
           </header>
@@ -257,7 +248,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
               {pane.heading}
             </div>
             <div className="header-actions">
-              {pane.action}
               <HeaderMenu
                 state={view.relayState}
                 current={screen}
@@ -282,7 +272,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
 /** One screen as the app frames it: its header's title block, an optional header control, and the body. */
 interface Pane {
   readonly heading: JSX.Element | null;
-  readonly action?: JSX.Element;
   readonly body: JSX.Element;
 }
 
@@ -361,7 +350,6 @@ function useSpawnActions(store: Store): SpawnActions {
       dismissLayer: () => store.dismissLayer(),
       pickMachine: (deviceId) => store.pickMachine(deviceId),
       pickAccount: (accountId) => store.pickAccount(accountId),
-      refreshPreview: () => void store.refreshPreview(),
       removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
       rescan: (deviceId) => void store.rescan(deviceId),
