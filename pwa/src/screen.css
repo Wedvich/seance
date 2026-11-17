@@ -3852,9 +3852,6 @@
   border-radius: 3px;
   text-decoration: underline dotted transparent;
   text-underline-offset: 3px;
-  transition:
-    color 0.14s ease,
-    text-decoration-color 0.14s ease;
 }
 
 @media (hover: hover) {
