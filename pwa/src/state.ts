@@ -3,6 +3,7 @@ import {
   DEFAULT_MODEL,
   EFFORTS,
   isEffort,
+  nextClockTime,
   type Effort,
   type ArchiveMetricsStep,
   type ArchiveTaskOutcome,
@@ -61,7 +62,47 @@ export const AUTONOMY_HINTS: Record<AutonomyLevel, string> = {
   auto: "Also makes reversible choices itself, and notes each one",
 };
 
-export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "autonomy" | "after" | "requires";
+export type SheetKind =
+  | "machine"
+  | "account"
+  | "repo"
+  | "model"
+  | "effort"
+  | "autonomy"
+  | "after"
+  | "requires"
+  | "notBefore";
+
+/**
+ * The Not before choice, kept as what was picked and resolved at submit (`resolveNotBefore`): an "in 2 h"
+ * picked and left open stays honest. Transient, like the autonomy level: a deferral is usually a one-off.
+ */
+export type NotBeforeChoice =
+  | { readonly kind: "in"; readonly ms: number }
+  /** The next `hh:mm` on the phone's clock: "Tonight". */
+  | { readonly kind: "clock"; readonly hh: number; readonly mm: number }
+  /** The next calendar day at `hh:mm`, even when picked at 02:00: "Tomorrow morning". */
+  | { readonly kind: "tomorrow"; readonly hh: number; readonly mm: number }
+  /** A date-time from the picker, as the phone's local clock read it. */
+  | { readonly kind: "at"; readonly at: number };
+
+/** The instant `choice` means at `now`; `at` is taken as picked, and refused later when it has passed. */
+export function resolveNotBeforeChoice(choice: NotBeforeChoice, now: number): number {
+  switch (choice.kind) {
+    case "in":
+      return now + choice.ms;
+    case "clock":
+      return nextClockTime(choice.hh, choice.mm, now);
+    case "tomorrow": {
+      const day = new Date(now);
+      day.setDate(day.getDate() + 1);
+      day.setHours(choice.hh, choice.mm, 0, 0);
+      return day.getTime();
+    }
+    case "at":
+      return choice.at;
+  }
+}
 
 /**
  * The Machine sheet's rescan action: inline scanning/failure state on the row it

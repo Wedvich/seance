@@ -82,6 +82,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     relay: relay(),
     form: { ...DEFAULT_FORM, ...form },
     autonomy: "checkpoint",
+    notBefore: null,
     promptUndo: null,
     sheet: null,
     settings: false,
@@ -543,9 +544,9 @@ describe("repo scope", () => {
     const pinned = deriveView(state({ relay: relay({ machines }) }, { machine: "mac", account: "acct-home" }), NOW);
     expect(pinned.repoTile.value).toBe("me/blog");
     expect(pinned.previewShown).toBe(false);
-    expect(previewAsked({ machine: "mac", account: null })).toBe(false);
-    expect(previewAsked({ machine: null, account: "acct-home" })).toBe(false);
-    expect(previewAsked({ machine: null, account: null })).toBe(true);
+    expect(previewAsked({ machine: "mac", account: null }, null)).toBe(false);
+    expect(previewAsked({ machine: null, account: "acct-home" }, null)).toBe(false);
+    expect(previewAsked({ machine: null, account: null }, null)).toBe(true);
   });
 });
 
@@ -891,5 +892,18 @@ describe("the Start now chevron", () => {
     expect(deriveView(state({ relay: relay({ machines: [capable], scheduler: unverified }) }), NOW).startNow).toBe(
       false,
     );
+  });
+});
+
+describe("the not-before choice on the form", () => {
+  test("hides the split, shows the resolved time on its tile, and asks no preview", () => {
+    const plain = deriveView(state(), NOW);
+    expect(plain.notBeforeTile.value).toBe("Now");
+    const chosen = deriveView(state({ notBefore: { kind: "in", ms: 3_600_000 } }), NOW);
+    expect(chosen.notBeforeTile.value).not.toBe("Now");
+    expect(chosen.startNow).toBe(false);
+    expect(chosen.previewShown).toBe(false);
+    expect(previewAsked(DEFAULT_FORM, null)).toBe(true);
+    expect(previewAsked(DEFAULT_FORM, { kind: "in", ms: 1 })).toBe(false);
   });
 });

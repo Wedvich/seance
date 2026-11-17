@@ -4,6 +4,7 @@ import {
   closedAt,
   endedBySignal,
   fleetTraits,
+  formatNotBefore,
   knownAccounts,
   lastHeardAt,
   originLabel,
@@ -39,6 +40,8 @@ import {
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type NotBeforeChoice,
+  resolveNotBeforeChoice,
   type AccountOpenAsk,
   type StartNowRefusal,
   type TaskAction,
@@ -190,6 +193,8 @@ export interface ViewModel {
   readonly modelTile: Tile;
   readonly effortTile: Tile;
   readonly autonomyTile: Tile;
+  /** The time before which the task is not placed; "Now" with none. The choice resolves at submit, so this is what it means at this render. */
+  readonly notBeforeTile: Tile;
   /** The authoring tile: the tasks this one waits on. */
   readonly afterTile: Tile;
   /** Null while no machine declares a trait and the form requires none: there is nothing to pick. */
@@ -246,6 +251,8 @@ export interface AppState {
    * unnoticed on later tasks.
    */
   readonly autonomy: AutonomyLevel;
+  /** The next task's not-before choice; transient as `autonomy` is. */
+  readonly notBefore: NotBeforeChoice | null;
   /**
    * Text a CLEAR took away, offered back for six seconds. Deliberately outside
    * `form`: a draft you already discarded shouldn't survive a reload.
@@ -714,9 +721,12 @@ export function scopedRepos(machines: readonly Machine[], pins: Pins): readonly 
     .toSorted((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 
-/** `route-preview` drops a pin (`parseTaskRequest`), so a pinned form would be previewed as an unpinned one: it is not asked. */
-export function previewAsked(form: Pins): boolean {
-  return form.machine === null && form.account === null;
+/**
+ * `route-preview` drops a pin (`parseTaskRequest`), so a pinned form would be previewed as an unpinned one: it is not asked.
+ * Nor is a form with a not-before time: the preview would say where it would start now, which it will not.
+ */
+export function previewAsked(form: Pins, notBefore: NotBeforeChoice | null): boolean {
+  return form.machine === null && form.account === null && notBefore === null;
 }
 
 /** The remembered origin, else the first of those in scope. */
@@ -1117,6 +1127,13 @@ export function deriveView(state: AppState, now: number): ViewModel {
       tag: null,
     },
     autonomyTile: { label: "AUTONOMY", value: AUTONOMY_LABELS[state.autonomy], mono: false, dot: null, tag: null },
+    notBeforeTile: {
+      label: "NOT BEFORE",
+      value: state.notBefore === null ? "Now" : formatNotBefore(resolveNotBeforeChoice(state.notBefore, now)),
+      mono: false,
+      dot: null,
+      tag: null,
+    },
     afterTile: {
       label: "AFTER",
       value: afterValue(form.after),
@@ -1143,7 +1160,8 @@ export function deriveView(state: AppState, now: number): ViewModel {
     worktreeHint: worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
-    startNow: deriveRunNowAvailability(relay),
+    // A deferred task has no use for the split: Start now would contradict the time just chosen.
+    startNow: deriveRunNowAvailability(relay) && state.notBefore === null,
     startNowPastPause: deriveRunNowPastPause(relay),
     ignoredNote: deriveIgnoredNote(relay),
     machine,
@@ -1154,7 +1172,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     autoDot,
     machineChoices: deriveMachineChoices(state, now),
     accountChoices: deriveAccountChoices(state),
-    previewShown: previewAsked(form),
+    previewShown: previewAsked(form, state.notBefore),
     queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),
     attachments: deriveAttachments(state),
   };

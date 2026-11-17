@@ -2,6 +2,7 @@ import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   AUTONOMY_LEVELS,
+  parseDateTime,
   TASK_SPEC_LIMITS,
   type AutonomyLevel,
   type DepAfter,
@@ -19,6 +20,7 @@ import {
   MODEL_LABELS,
   type Effort,
   type Model,
+  type NotBeforeChoice,
   type PersistedForm,
   type PreviewState,
   type SheetKind,
@@ -43,7 +45,16 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   autonomy: "How much should it decide?",
   after: "Wait for which tasks?",
   requires: "Which traits must it have?",
+  notBefore: "Not before when?",
 };
+
+/** The quick choices on the Not before sheet: what is stored is the choice, resolved when the task is queued. */
+const NOT_BEFORE_QUICK: readonly { readonly label: string; readonly choice: NotBeforeChoice }[] = [
+  { label: "In 1 h", choice: { kind: "in", ms: 3_600_000 } },
+  { label: "In 2 h", choice: { kind: "in", ms: 7_200_000 } },
+  { label: "Tonight (21:00)", choice: { kind: "clock", hh: 21, mm: 0 } },
+  { label: "Tomorrow morning (08:00)", choice: { kind: "tomorrow", hh: 8, mm: 0 } },
+];
 
 const WHEN_LABELS: Record<DepAfter, string> = { opened: "Opened", merged: "Merged", done: "Done" };
 
@@ -76,6 +87,8 @@ export interface SpawnActions {
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
   readonly toggleRequires: (trait: string) => void;
+  /** Sets the not-before choice, or clears it with `null`. */
+  readonly setNotBefore: (choice: NotBeforeChoice | null) => void;
   /** Picked, pasted or dropped files; the store applies the limits. */
   readonly addFiles: (files: readonly File[]) => void;
   readonly removeFile: (key: string) => void;
@@ -468,6 +481,7 @@ function ActiveSheet(props: {
   model: Model;
   effort: Effort;
   autonomy: AutonomyLevel;
+  notBefore: NotBeforeChoice | null;
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
   worktree: boolean;
@@ -483,6 +497,7 @@ function ActiveSheet(props: {
     model: selectedModel,
     effort: selectedEffort,
     autonomy: selectedAutonomy,
+    notBefore,
     afterSheet,
     worktree,
     until,
@@ -600,6 +615,10 @@ function ActiveSheet(props: {
     );
   }
 
+  if (kind === "notBefore") {
+    return <NotBeforeSheet actions={actions} view={view} choice={notBefore} closing={closing} onExited={onExited} />;
+  }
+
   if (kind === "requires") {
     const { choices, note } = view.requires;
     return (
@@ -643,6 +662,53 @@ function ActiveSheet(props: {
           onClick={() => actions.setEffort(effort)}
         />
       ))}
+    </Sheet>
+  );
+}
+
+/** `datetime-local`'s value for `at`, in the phone's own zone. */
+function localInputValue(at: number): string {
+  const d = new Date(at);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function NotBeforeSheet(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  choice: NotBeforeChoice | null;
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, view, choice, closing, onExited } = props;
+  return (
+    <Sheet title={SHEET_TITLES.notBefore} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      {NOT_BEFORE_QUICK.map(({ label, choice: quick }) => (
+        <SheetItem
+          key={label}
+          label={label}
+          selected={JSON.stringify(choice) === JSON.stringify(quick)}
+          onClick={() => actions.setNotBefore(quick)}
+        />
+      ))}
+      <label className="sheet-note">
+        Or pick a time
+        <input
+          type="datetime-local"
+          value={choice?.kind === "at" ? localInputValue(choice.at) : ""}
+          onInput={(event) => {
+            // The picker's value has no zone: the phone's own, as the spec's `at` kind says.
+            const at = parseDateTime(event.currentTarget.value, { requireOffset: false });
+            actions.setNotBefore(at === null ? null : { kind: "at", at });
+          }}
+        />
+      </label>
+      {choice !== null && <SheetItem label="Clear" action onClick={() => actions.setNotBefore(null)} />}
+      <p className="sheet-note">
+        {choice === null
+          ? "It starts as soon as it can."
+          : `Not placed before ${view.notBeforeTile.value}. Start now is not offered while a time is set.`}
+      </p>
     </Sheet>
   );
 }
@@ -932,6 +998,7 @@ export function SpawnScreen(props: {
   view: ViewModel;
   form: PersistedForm;
   autonomy: AutonomyLevel;
+  notBefore: NotBeforeChoice | null;
   /** Text a CLEAR stashed; non-null for as long as UNDO is on offer. */
   promptUndo: string | null;
   sheet: SheetKind | null;
@@ -941,7 +1008,7 @@ export function SpawnScreen(props: {
   /** The After sheet's list; non-null only while that sheet is open. */
   afterSheet: AfterSheetView | null;
 }): JSX.Element {
-  const { actions, view, form, autonomy, promptUndo, sheet, machines, now, preview, afterSheet } = props;
+  const { actions, view, form, autonomy, notBefore, promptUndo, sheet, machines, now, preview, afterSheet } = props;
   const [dropping, setDropping] = useState(false);
   const attachOffered = view.attachments.offered;
   const offline = view.machine !== null && !view.machine.connected;
@@ -1270,6 +1337,7 @@ export function SpawnScreen(props: {
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
           <TileButton tile={view.autonomyTile} onClick={() => actions.openSheet("autonomy")} />
           <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
+          <TileButton tile={view.notBeforeTile} onClick={() => actions.openSheet("notBefore")} />
           {view.requiresTile !== null && (
             <TileButton tile={view.requiresTile} onClick={() => actions.openSheet("requires")} />
           )}
@@ -1289,6 +1357,7 @@ export function SpawnScreen(props: {
           model={form.model}
           effort={form.effort}
           autonomy={autonomy}
+          notBefore={notBefore}
           afterSheet={lastAfterSheet.current}
           worktree={view.worktree}
           until={form.until}

@@ -74,6 +74,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         view={view}
         form={state.form}
         autonomy={state.autonomy}
+        notBefore={state.notBefore}
         promptUndo={state.promptUndo}
         sheet={state.sheet}
         machines={state.relay.machines}
@@ -360,6 +361,7 @@ function useSpawnActions(store: Store): SpawnActions {
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
       toggleRequires: (trait) => store.toggleRequires(trait),
+      setNotBefore: (choice) => store.setNotBefore(choice),
       addFiles: (files) => store.addFiles(files),
       removeFile: (key) => store.removeFile(key),
       retryHeld: (taskId) => store.retryHeld(taskId),

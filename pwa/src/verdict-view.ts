@@ -1,5 +1,5 @@
 import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
-import { pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { notBeforeLine, pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
 import type { FollowEnd, StartNowRefusal, Verdict } from "./state.ts";
 import { plain } from "./timed.ts";
 
@@ -75,11 +75,14 @@ export function describeVerdict(
     const settled = isSettled(task.state);
     const pin = pinLine(task, machines, aliases);
     const requires = requiresLine(task, machines, now);
-    const waiting = waitingText(task);
+    // The device clock: the verdict has no skew.
+    const deferred = notBeforeLine(task, now);
+    const waiting = deferred === null ? waitingText(task) : null;
     const parts = [
       queuedBody(task),
       pin === null ? null : `${pin}.`,
       requires === null ? null : `${requires}.`,
+      deferred === null ? null : `Not placed ${deferred}.`,
       waiting === null ? null : `Waiting: ${waiting}.`,
       offlinePinNote(task, machines),
       // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.

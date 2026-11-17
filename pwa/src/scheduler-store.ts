@@ -293,7 +293,7 @@ export class SchedulerStore {
     if (reopened) this.#missedHidden = null;
     const refollowed = this.#catchUpQueue(relay.scheduler, reopened);
     if (relay.scheduler.kind === "ready") this.#leaderVerified(refollowed);
-    if (!previewAsked(this.#state.form)) return;
+    if (!previewAsked(this.#state.form, this.#state.notBefore)) return;
     if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
     else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
   }
@@ -657,7 +657,7 @@ export class SchedulerStore {
     this.#previewedLeader = schedulerKey(relay.scheduler);
     this.#previewedFleet = fleetKey(relay.machines);
     const repo = resolveRepo(scopedRepos(relay.machines, form), form);
-    if (!previewAsked(form) || !deriveAutoAvailability(relay).available || repo === null) {
+    if (!previewAsked(form, this.#state.notBefore) || !deriveAutoAvailability(relay).available || repo === null) {
       this.#patch({ preview: null });
       return;
     }
@@ -825,7 +825,11 @@ export class SchedulerStore {
       if (kept && watched) this.#noticeKept = false;
       // Another device's pause or resume, or a reset lifting a hold. A first read has nothing to
       // compare: the preview was asked under whatever holds stood.
-      if (previewAsked(this.#state.form) && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
+      if (
+        previewAsked(this.#state.form, this.#state.notBefore) &&
+        before?.kind === "ok" &&
+        holdsKey(before.holds) !== holdsKey(next.holds)
+      ) {
         this.#askPreviewSoon();
       }
       return;
@@ -1011,7 +1015,7 @@ export class SchedulerStore {
         }
         // What the limit held, or now holds, shows in each task's decision: read them again.
         void this.refreshQueue();
-        if (previewAsked(this.#state.form)) void this.refreshPreview();
+        if (previewAsked(this.#state.form, this.#state.notBefore)) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);
@@ -1055,7 +1059,7 @@ export class SchedulerStore {
         const view = this.#state.queueView;
         if (view?.kind === "ok") this.#patch({ queueView: { ...view, holds: reply.holds } });
         else void this.refreshQueue();
-        if (previewAsked(this.#state.form)) void this.refreshPreview();
+        if (previewAsked(this.#state.form, this.#state.notBefore)) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);

@@ -76,6 +76,7 @@ function state(
     },
     form: DEFAULT_FORM,
     autonomy: "checkpoint",
+    notBefore: null,
     promptUndo: null,
     sheet: null,
     settings: false,
@@ -1618,5 +1619,35 @@ describe("the screen debounce on needs-input", () => {
       nextReveal([waiting({ inputReason: "question" }, skew), task("r", { state: "running" })], NOW, skew),
     ).toBeNull();
     expect(nextReveal([], NOW, 0)).toBeNull();
+  });
+});
+
+describe("a task deferred by its not-before time", () => {
+  const LATER = NOW + 3_600_000;
+  const stale = (): Task =>
+    task("w", {
+      spec: { repo: ORIGIN, mode: "worktree", notBefore: LATER },
+      decision: {
+        at: NOW - 1000,
+        chosen: { deviceId: "dev-a", exclave: "default", clone: "app" },
+        candidates: [{ deviceId: "dev-a", machine: "m", exclave: "default", rejected: [] }],
+      },
+    });
+  const rowAt = (t: Task, skew = 0) =>
+    deriveQueue(state(ok([t], [], skew), {}, { machines: [machine({ capabilities: [CAPABILITIES.runNow] })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id);
+
+  test("says until when, in place of the decision's headline and body, and Start now names no machine", () => {
+    const row = rowAt(stale());
+    expect(lineText(row?.headline ?? [])).toMatch(/^Queued — until /);
+    expect(lineText(row?.body ?? [])).toMatch(/^Not placed before /);
+    expect(row?.startNow).toEqual({ sub: "Skip the queue", enabled: true });
+  });
+
+  test("says nothing once the leader's clock, by the skew, is past it", () => {
+    const row = rowAt(stale(), 3_600_001);
+    expect(lineText(row?.headline ?? [])).not.toContain("until");
+    expect(lineText(row?.body ?? [])).not.toContain("Not placed before");
   });
 });

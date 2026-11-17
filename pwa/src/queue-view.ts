@@ -31,6 +31,7 @@ import {
   decisionStartNowItem,
   inputWait,
   pinLine,
+  notBeforeLine,
   requiresLine,
   taskHeadline,
   waitingText,
@@ -309,7 +310,10 @@ function dotOf(task: Task): QueueDot | null {
  * `run-now` takes only a `ready` task and answers anything earlier `not_waiting`, so Start now
  * greys until then rather than offering a tap that is always refused. Shown still: it says why.
  */
-function startNowFor(task: Task, pastPause: boolean): StartNowItem {
+function startNowFor(task: Task, pastPause: boolean, leaderNow: number): StartNowItem {
+  // `run-now` ignores the time, but a stale decision's machine would be named for a task that is not being routed.
+  if (task.state === "ready" && notBeforeLine(task, leaderNow) !== null)
+    return { sub: "Skip the queue", enabled: true };
   if (task.state === "blocked") return { sub: "Waiting on the tasks it depends on", enabled: false };
   if (task.state === "queued") return { sub: "Waiting for the scheduler", enabled: false };
   return decisionStartNowItem(task.decision ?? null, pastPause);
@@ -357,6 +361,8 @@ function bodyLine(
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
   }
+  const deferred = notBeforeLine(task, now + skew);
+  if (deferred !== null) return deferred.replace(/^until/, "Not placed before");
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") {
@@ -574,14 +580,14 @@ function rowOf(
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
-  const item = startNowFor(task, deriveRunNowPastPause(state.relay));
+  const item = startNowFor(task, deriveRunNowPastPause(state.relay), now + skew);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   const session = sessionOf(task);
   const autonomy = autonomyOf(task.spec);
   return {
     id: task.id,
     title: taskTitle(task),
-    headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
+    headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now, now + skew)),
     body: bodyOf(
       task,
       state.relay.machines,
