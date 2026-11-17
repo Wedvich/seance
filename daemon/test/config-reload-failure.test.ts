@@ -53,8 +53,8 @@ afterAll(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
-afterEach(() => {
-  supervisor?.stop();
+afterEach(async () => {
+  await supervisor?.stop();
   supervisor = null;
   trigger = null;
   relay?.stop();
@@ -225,7 +225,7 @@ describe("config reload failure paths", () => {
     const path = await configFile();
     await writeConfig(path, "First", testRelay.url);
 
-    // `swap` stops the old daemon *before* its try block, so a throwing stop
+    // `swap` stops the old daemon *before* its try block, so a failing stop
     // escapes `reload` entirely. Nothing awaits the reload chain, so without a
     // guard this is an unhandled rejection — fatal under Bun's default — and a
     // chain that never runs another reload.
@@ -234,8 +234,8 @@ describe("config reload failure paths", () => {
       const handle = await startDaemon(opts);
       return {
         ...handle,
-        stop: (): void => {
-          handle.stop();
+        stop: async (): Promise<void> => {
+          await handle.stop();
           if (poisoned) throw new Error("injected stop failure");
         },
       };

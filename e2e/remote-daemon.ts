@@ -34,9 +34,9 @@ const daemon = await startDaemon({
   httpFetch: pushGuardFetch(),
 });
 
+// Exits once the stop has drained, so a state write is never cut short.
 const stop = (): void => {
-  daemon.stop();
-  process.exit(0);
+  void daemon.stop().finally(() => process.exit(0));
 };
 process.on("SIGTERM", stop);
 // The parent dying without signalling must not leave this daemon behind.

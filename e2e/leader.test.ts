@@ -73,7 +73,7 @@ describe("scheduler leadership ↔ real daemons", () => {
       // a redial that registers before the relay has processed its old socket's
       // close finds itself still a candidate, and a current leader keeps the
       // role across its own reconnect — on a fast runner, every time.
-      stack.daemon.stop();
+      await stack.daemon.stop();
       down = true;
       await pollUntil(
         () => watch.current()?.deviceId === second.deviceId && (watch.current()?.term ?? 0) > term,
@@ -362,7 +362,7 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
       // The window exists only after B's launch ledger recorded the id: the write precedes the spawn.
       await pollUntil(async () => (await listWindows()).includes(title), "B's spawn to reach its backend", 15_000);
 
-      stack.daemon.stop();
+      await stack.daemon.stop();
       down = true;
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader after the stop");
       const stopped = await app.client.getTask(id);

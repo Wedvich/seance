@@ -69,7 +69,7 @@ async function withDaemon(
     if (path === null) throw new Error("the local op socket did not bind");
     await body(relay, daemon, path);
   } finally {
-    daemon.stop();
+    await daemon.stop();
     relay.stop();
   }
 }

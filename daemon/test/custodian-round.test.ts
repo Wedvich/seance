@@ -467,14 +467,14 @@ describe("the capability bit", () => {
       const info = parseMachineInfo((await openSealed(await importPsk(PSK), frame.info)).payload);
       return info?.capabilities ?? [];
     } finally {
-      booted.stop();
+      await booted.stop();
     }
   }
 
   async function boot(
     custodian: Config["custodian"],
     opts: { readonly sandboxProblem: () => Promise<string | null>; readonly drilled?: boolean },
-  ): Promise<{ readonly relay: ReturnType<typeof startTestRelay>; readonly stop: () => void }> {
+  ): Promise<{ readonly relay: ReturnType<typeof startTestRelay>; readonly stop: () => Promise<void> }> {
     const home = await mkdtemp(join(base, "cap-home-"));
     await mkdir(join(home, ".claude"), { recursive: true });
     await writeFile(
@@ -512,8 +512,8 @@ describe("the capability bit", () => {
       });
       return {
         relay,
-        stop: (): void => {
-          daemon.stop();
+        stop: async (): Promise<void> => {
+          await daemon.stop();
           relay.stop();
         },
       };
@@ -545,7 +545,7 @@ describe("the capability bit", () => {
         await pollUntil(async () => (await paneInfo(stray)) === null, "the stray round pane to close");
         await Bun.sleep(50);
       });
-      booted?.stop();
+      await booted?.stop();
       const audit = lines.filter((line) => line.includes("audit custodian"));
       expect(audit.some((line) => line.includes("op=kill") && line.includes("reason=off"))).toBe(true);
       expect(audit.some((line) => line.includes("op=end") && line.includes("reason=lost"))).toBe(true);
@@ -582,7 +582,7 @@ describe("the capability bit", () => {
       await Bun.sleep(100);
       expect((await seatRecordNow()).socketDir).toBeUndefined();
     } finally {
-      booted.stop();
+      await booted.stop();
     }
   });
 
@@ -600,7 +600,7 @@ describe("the capability bit", () => {
         expect(await askVerb(socketIn(socketDir))).toEqual({ ok: false, code: "not_custodian" });
         expect(await askVerb(socketPath())).toEqual({ ok: false, code: "unsupported" });
       } finally {
-        first.stop();
+        await first.stop();
       }
       // The socket goes with the seat; its dir stays, so an adopted round's environment still names a live path.
       expect(await exists(socketIn(socketDir))).toBe(false);
@@ -614,7 +614,7 @@ describe("the capability bit", () => {
         );
         expect((await seatRecordNow()).socketDir).toBe(socketDir);
       } finally {
-        second.stop();
+        await second.stop();
       }
     } finally {
       const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
@@ -622,7 +622,7 @@ describe("the capability bit", () => {
         await pollUntil(async () => !(await exists(socketDir)), "the seat turned off to remove its socket dir");
         await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
       } finally {
-        off.stop();
+        await off.stop();
       }
     }
   });
@@ -651,13 +651,13 @@ describe("the capability bit", () => {
       expect(served).toMatch(/^\/tmp\/seance-cu-s-/u);
       expect(served).not.toBe(socketDir);
     } finally {
-      booted?.stop();
+      await booted?.stop();
       // A seat turned off removes the dir, so no test leaves one in /tmp.
       const off = await boot(undefined, { sandboxProblem: () => Promise.resolve(null) });
       try {
         await pollUntil(async () => (await seatRecordNow()).socketDir === undefined, "the record to drop the dir");
       } finally {
-        off.stop();
+        await off.stop();
       }
     }
   }
@@ -708,7 +708,7 @@ describe("the capability bit", () => {
       const frame = await off.relay.registers.next(5_000);
       expect(await ask(off, frame.deviceId, { act: "resume" })).toMatchObject({ ok: false, code: "unsupported" });
     } finally {
-      off.stop();
+      await off.stop();
     }
     // A seat whose checks failed: host_failed from the daemon's memory, however long ago it failed (no seat.json read).
     const failed = await boot(CUSTODIAN_DEFAULTS, {
@@ -734,7 +734,7 @@ describe("the capability bit", () => {
       // The pause survives behind `failing`, so the card can offer Resume.
       expect(await ask(failed, frame.deviceId, { act: "resume" })).toEqual({ ok: true, pause: null });
     } finally {
-      failed.stop();
+      await failed.stop();
     }
   });
 });

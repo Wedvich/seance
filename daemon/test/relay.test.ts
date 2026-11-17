@@ -216,7 +216,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.platform).toBe(process.platform);
       expect(info.repos[0]?.defaultBranch).toBe("main");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -229,7 +229,7 @@ describe("daemon ↔ relay integration", () => {
       // Stable once rejected: there is no accepted socket left to register over.
       expect(relay.registers.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -245,7 +245,7 @@ describe("daemon ↔ relay integration", () => {
       expect(response.re).toBe(id);
       expect(Array.isArray((response.payload as SessionsResponse).sessions)).toBe(true);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -265,7 +265,7 @@ describe("daemon ↔ relay integration", () => {
       const scheduler = (await open(appKey, sealed)).payload as SessionsResponse;
       expect(scheduler.ledgerSince).toEqual(expect.any(Number));
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -294,7 +294,7 @@ describe("daemon ↔ relay integration", () => {
       }
       await tmux(["kill-window", "-t", "main:From Phone"]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -310,7 +310,7 @@ describe("daemon ↔ relay integration", () => {
       expect(payload.ok).toBe(false);
       if (!payload.ok) expect(payload.code).toBe("internal_error");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -337,7 +337,7 @@ describe("daemon ↔ relay integration", () => {
       expect(lines.some((line) => line.includes("relay says follow"))).toBe(true);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -356,7 +356,7 @@ describe("daemon ↔ relay integration", () => {
       const response = await appReceive(relay);
       expect((response.payload as SessionsResponse).sessions).toBeDefined();
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -375,7 +375,7 @@ describe("daemon ↔ relay integration", () => {
       // set changed → an unprompted re-register carries the new list
       await registerWithRepo(relay, "newrepo");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
     }
@@ -415,7 +415,7 @@ describe("daemon ↔ relay integration", () => {
       expect(registers.at(-1)).toEqual(["myrepo", "newrepo", "slowrepo"]);
     } finally {
       await shim.release();
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       shim.dispose();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
@@ -512,7 +512,7 @@ describe("daemon ↔ relay integration", () => {
         break;
       }
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
@@ -528,7 +528,7 @@ describe("daemon ↔ relay integration", () => {
     let daemon = await startTestDaemon(first.url);
     try {
       await registerWithRepo(first, "myrepo");
-      daemon.stop();
+      await daemon.stop();
       first.stop();
 
       const relay = startTestRelay(TOKEN);
@@ -542,7 +542,7 @@ describe("daemon ↔ relay integration", () => {
         relay.stop();
       }
     } finally {
-      daemon.stop();
+      await daemon.stop();
       first.stop();
       process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
@@ -832,7 +832,7 @@ describe("daemon ↔ relay integration", () => {
       }
       expect(info.capabilities).toContain("traits");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -844,7 +844,7 @@ describe("daemon ↔ relay integration", () => {
       const { info } = await registerWithRepo(relay, "myrepo");
       for (const exclave of info.exclaves ?? []) expect(exclave).not.toHaveProperty("traits");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -860,7 +860,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.capabilities).toContain("drain");
       expect(info.capabilities).not.toContain("drainAsk");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -915,7 +915,7 @@ describe("daemon ↔ relay integration", () => {
       expect(reply.series.length).toBeGreaterThan(0);
       for (const series of reply.series) expect(series.metric).toBe(METRIC_NAMES.sess);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -953,7 +953,7 @@ describe("daemon ↔ relay integration", () => {
       const reply = parseMetricsReply(fits.payload);
       expect(reply !== null && "series" in reply && reply.series).toHaveLength(2);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       process.env["SEANCE_STATE_DIR"] = shared;
     }
@@ -968,7 +968,7 @@ describe("daemon ↔ relay integration", () => {
       await pollUntil(async () => (await stat(file).catch(() => null)) !== null, "metrics.sqlite to exist");
       expect((await stat(file)).mode & 0o777).toBe(0o600);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1007,7 +1007,7 @@ describe("daemon ↔ relay integration", () => {
         skills: [],
       });
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       await rm(home, { recursive: true, force: true });
     }
@@ -1035,7 +1035,7 @@ describe("daemon ↔ relay integration", () => {
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1049,7 +1049,7 @@ describe("daemon ↔ relay integration", () => {
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1074,7 +1074,7 @@ describe("daemon ↔ relay integration", () => {
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1093,7 +1093,7 @@ describe("daemon ↔ relay integration", () => {
         relay2.stop();
       }
     } finally {
-      daemon.stop();
+      await daemon.stop();
     }
   });
 
@@ -1121,7 +1121,7 @@ describe("daemon ↔ relay integration", () => {
       );
     } finally {
       console.log = realWarn;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1145,7 +1145,7 @@ describe("daemon ↔ relay integration", () => {
       }
       expect(seen).toEqual([["scheduler"], undefined, ["scheduler"]]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1179,7 +1179,7 @@ describe("daemon ↔ relay integration", () => {
       expect(roles.every((claim) => claim?.length === 1 && claim[0] === "scheduler")).toBe(true);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1207,7 +1207,7 @@ describe("daemon ↔ relay integration", () => {
       relay.autoPong = true;
       expect(after.roles).toEqual(["scheduler"]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1234,7 +1234,7 @@ describe("daemon ↔ relay integration", () => {
       expect(line).toContain("Failed to connect");
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
     }
   });
 
@@ -1248,7 +1248,7 @@ describe("daemon ↔ relay integration", () => {
       await relay.registers.next(3_000);
       expect(relay.connectionCount()).toBeGreaterThanOrEqual(2);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });

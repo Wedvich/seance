@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
 import { pskFingerprint } from "../src/config-checks.ts";
+import { saveState, type State } from "../src/state.ts";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
 import {
   awaitWatcherLive,
@@ -46,8 +47,8 @@ afterAll(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
-afterEach(() => {
-  supervisor?.stop();
+afterEach(async () => {
+  await supervisor?.stop();
   supervisor = null;
   trigger = null;
   relay?.stop();
@@ -139,8 +140,9 @@ describe("config hot reload", () => {
     await writeConfig(path, "BeforeEdit", relay.url);
 
     await startSupervised(path);
-    // The scan has to have landed before the edit: the reloaded daemon reads
-    // its repo set from the state file the first one wrote.
+    // The scan has to have committed before the edit. A register naming the repo
+    // proves only that, not its save; the reload's stop drains the save, so the
+    // reloaded daemon reads the repo from the state file the first one wrote.
     await registerAs(relay, "BeforeEdit", "myrepo");
 
     const pid = process.pid;
@@ -150,6 +152,45 @@ describe("config hot reload", () => {
     const info = await registerAs(relay, "AfterEdit");
     expect(info.repos.some((r) => r.name === "myrepo")).toBe(true);
     expect(process.pid).toBe(pid);
+  });
+
+  test("a reload starts its daemon only once the outgoing one's state save has landed", async () => {
+    const live = startTestRelay(TOKEN);
+    relay = live;
+    const path = await configFile();
+    await writeConfig(path, "BeforeEdit", live.url);
+    // Holds the boot scan's save, the first one carrying the repo, as a slow disk would.
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let held = false;
+    const writeState = async (state: State): Promise<void> => {
+      if (!held && state.repos.some((r) => r.name === "myrepo")) {
+        held = true;
+        entered.resolve();
+        await release.promise;
+      }
+      await saveState(state);
+    };
+
+    const lines = await captureLog(async () => {
+      trigger = makeConfigTrigger();
+      supervisor = await startSupervisor({ configPath: path, watch: trigger.watch, writeState, ...RUN_OPTS });
+      await entered.promise;
+      await writeConfig(path, "AfterEdit", live.url);
+      trigger.fire();
+      // Room for a reload that does not wait to start its daemon on the unsaved file.
+      await Bun.sleep(100); // a non-event can't be polled
+      release.resolve();
+      await supervisor.current();
+    });
+
+    const starts = lines.filter((line) => line.includes("seanced starting"));
+    expect(starts).toHaveLength(2);
+    expect(starts[1]).toContain(", 1 cached repos,");
+    const info = await registerAs(live, "AfterEdit");
+    expect(info.repos.some((r) => r.name === "myrepo")).toBe(true);
+    // The hold took effect: the save was in flight when the reload fired.
+    expect(held).toBe(true);
   });
 
   test("every start, the first and each reload's, logs the key's fingerprint and where it came from", async () => {
@@ -252,7 +293,7 @@ describe("config hot reload", () => {
     const handle = await startSupervised(path);
     await registerAs(relay, "Stopping");
 
-    handle.stop();
+    await handle.stop();
     supervisor = null;
 
     // With the seam this is the whole claim: the supervisor released the
