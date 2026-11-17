@@ -108,6 +108,29 @@ function amended(reply: TaskReply | { readonly ok: false } | null): TaskSpec {
   return reply.task.spec;
 }
 
+/**
+ * Why a task never ran, for a timeout's message: the leader's own state and route decision for it, and this
+ * client's view of each machine's status (a missing or stale one is a route filter). CI saw it time out twice
+ * with nothing in the log saying which filter held it.
+ */
+async function whyNotRunning(client: RelayClient, id: string): Promise<string> {
+  const queue = await client.queue({ tasks: [id] });
+  const task = queue !== null && "tasks" in queue ? queue.tasks.find((t) => t.id === id) : undefined;
+  const leader =
+    task === undefined
+      ? `leader: task not listed (${JSON.stringify(queue)})`
+      : `leader: state=${task.state} decision=${JSON.stringify(task.decision ?? null)}`;
+  const now = Date.now();
+  const machines = client.getState().machines.map((m) => {
+    const status =
+      m.status === undefined
+        ? "none"
+        : `age=${now - m.status.at * 1000}ms scan=${m.status.scan === m.scannedAt ? "current" : "other"} quota=${m.status.quota?.length ?? 0}`;
+    return `${m.name}: connected=${m.connected} status=${status}`;
+  });
+  return [leader, `client's machines: ${machines.join("; ")}`].join("\n");
+}
+
 const auditLines = (spy: { readonly mock: { readonly calls: readonly unknown[][] } }): readonly string[] =>
   spy.mock.calls.map((args) => args.join(" "));
 
@@ -174,6 +197,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
         async () => (await stack.queue().get(id))?.body?.state === "running",
         "the amended task to run",
         20_000,
+        () => whyNotRunning(client, id),
       );
       window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
       // The stub's records: the seed on its stdin, and claude's argv.
