@@ -83,6 +83,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
   item and lists the open questions. Read it before building amend deps, anything that reads a
   tracker, or a new kind of session that is not a task; build nothing from it until it is decided.
+- **docs/tags.md** — spec, nothing built: tags at task and session scope (namespace = writer), session identity
+  (pane, process, conversation; a verified `agent.session`) and the adapter subscription that amends messaging's D3.
+  Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
