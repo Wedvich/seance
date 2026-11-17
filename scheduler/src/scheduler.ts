@@ -1349,6 +1349,7 @@ export class Scheduler {
     if (task.state === "reserved" || this.#dispatches.has(taskId)) return { ok: false, code: "dispatching" };
     if (task.state !== "ready") return { ok: false, code: "not_waiting" };
     const now = this.#now();
+    // Skips `notBefore` too: one-shot, nothing written.
     const decision = this.#route(task, now, true);
     if (decision.chosen === null) return { ok: false, code: "unplaceable" };
     const reserved = await this.#reserve(taskId, task.spec, decision.chosen, decision, now);
@@ -1904,6 +1905,8 @@ export class Scheduler {
       const task = this.task(seen.id);
       if (task?.state !== "ready" || this.#dispatches.has(task.id)) continue;
       const now = this.#now();
+      // Held at placement, not admission (DESIGN.md "Not before"): no decision, no write; the spec says why it waits.
+      if (task.spec.notBefore !== undefined && now < task.spec.notBefore) continue;
       const decision = this.#route(task, now);
       this.#decisions.set(task.id, decision);
       this.#tellTraitHeld(task, decision);

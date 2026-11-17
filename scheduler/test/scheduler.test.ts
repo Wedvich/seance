@@ -2720,3 +2720,66 @@ describe("traits", () => {
     expect(held).toEqual([]);
   });
 });
+
+describe("not before", () => {
+  // Short: a machine's status goes stale on the fake clock a while after NOW.
+  const LATER = NOW + 10_000;
+
+  test("a ready task before its time is held: no decision, no write, no spawn; placed once the time comes", async () => {
+    const { store, fleet, clock, scheduler } = setup();
+    const task = await enqueue(store, scheduler, spec({ notBefore: LATER }));
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("ready");
+    expect(scheduler.lastDecision(task.id)).toBeUndefined();
+    const version = (await stored(store, task.id))?.version;
+    await pass(scheduler);
+    expect((await stored(store, task.id))?.version).toBe(version);
+    expect(fleet.spawns).toEqual([]);
+
+    clock.now = LATER;
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the spawn");
+    expect(scheduler.task(task.id)?.state).not.toBe("ready");
+  });
+
+  test("a deferred task does not hold up a newer one, and is placed in its turn once due", async () => {
+    const { store, fleet, clock, scheduler } = setup();
+    const older = await enqueue(store, scheduler, spec({ notBefore: LATER, title: "older" }));
+    const newer = await enqueue(store, scheduler, spec({ title: "newer" }));
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the newer's spawn");
+    expect(fleet.spawns[0]?.request.taskId).toBe(newer.id);
+    expect(scheduler.task(older.id)?.state).toBe("ready");
+
+    clock.now = LATER;
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 2, "the older's spawn");
+    expect(fleet.spawns[1]?.request.taskId).toBe(older.id);
+  });
+
+  test("run-now places a deferred task at once and writes nothing about the deferral", async () => {
+    const { store, fleet, scheduler } = setup();
+    const task = await enqueue(store, scheduler, spec({ notBefore: LATER }));
+    await pass(scheduler);
+    expect(await scheduler.runNow(task.id)).toMatchObject({ ok: true, task: { state: "reserved" } });
+    await until(() => fleet.spawns.length === 1, "the spawn");
+    expect((await stored(store, task.id))?.body.spec.notBefore).toBe(LATER);
+  });
+
+  test("a dependent of a deferred task stays blocked", async () => {
+    const { store, fleet, scheduler } = setup();
+    const first = await enqueue(store, scheduler, spec({ notBefore: LATER }));
+    const second = await enqueue(store, scheduler, spec({ deps: [{ task: first.id, after: "done" }] }));
+    await pass(scheduler);
+    await pass(scheduler);
+    expect(scheduler.task(second.id)?.state).toBe("blocked");
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("a past notBefore is placed on the first pass", async () => {
+    const { store, fleet, scheduler } = setup();
+    await enqueue(store, scheduler, spec({ notBefore: NOW - 1 }));
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the spawn");
+  });
+});

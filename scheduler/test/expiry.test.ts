@@ -331,6 +331,32 @@ describe("a ready continuation", () => {
     expect(fleet.spawns).toEqual([]);
   });
 
+  test("the clock runs from notBefore when that is later than createdAt, and from createdAt when not", async () => {
+    const { clock, scheduler, put } = setup();
+    const deferred = NOW + 5 * 86_400_000;
+    await put("late", {
+      ...continuing(NOW),
+      spec: spec({ mode: "continue", continues: { task: "t-old", at }, notBefore: deferred }),
+    });
+    await put("early", {
+      ...continuing(NOW - CONTINUE_MS),
+      spec: spec({ mode: "continue", continues: { task: "t-old", at }, notBefore: NOW - 10 }),
+    });
+    await scheduler.load();
+    clock.now = deferred;
+    await pass(scheduler);
+    expect(scheduler.task("late")?.state).toBe("ready");
+    // `early`'s notBefore is before createdAt, which still decides: it has outlived the bound.
+    expect(scheduler.task("early")).toMatchObject({ state: "failed", failure: { code: "continue_expired" } });
+
+    clock.now = deferred + CONTINUE_MS;
+    await pass(scheduler);
+    expect(scheduler.task("late")?.state).toBe("ready");
+    clock.now += 1;
+    await pass(scheduler);
+    expect(scheduler.task("late")).toMatchObject({ state: "failed", failure: { code: "continue_expired" } });
+  });
+
   test("a record loaded already past the bound, with no decision, says its machine never took it", async () => {
     const { scheduler, put } = setup();
     await put("t", continuing(NOW - CONTINUE_MS - 1));
@@ -428,6 +454,19 @@ describe("a ready pinned task", () => {
     expect(task).toMatchObject({ state: "failed", failure: { code: "pin_expired" } });
     expect(task?.failure?.message).toContain(reasonText({ code: "offline" }));
     expect(fleet.spawns).toEqual([]);
+  });
+
+  test("the clock runs from notBefore when that is later than createdAt", async () => {
+    const { clock, scheduler, put } = setup();
+    const deferred = NOW + 5 * 86_400_000;
+    await put("t", { ...pinned({ deviceId: "a" }, NOW), spec: spec({ pin: { deviceId: "a" }, notBefore: deferred }) });
+    await scheduler.load();
+    clock.now = deferred + PIN_MS;
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("ready");
+    clock.now += 1;
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "pin_expired" } });
   });
 
   test("a machine pin to a machine no decision lists says it was not seen", async () => {
