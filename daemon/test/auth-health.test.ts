@@ -573,6 +573,30 @@ describe("cadence", () => {
     expect((await Bun.file(log).text()).match(/^start /gmu)?.length).toBe(1);
   });
 
+  test("a check while the read waits for the lane does not queue the same exclave again", async () => {
+    const slowLog = join(base, "slow.log");
+    const log = join(base, "record.log");
+    await rm(slowLog, { force: true });
+    await rm(log, { force: true });
+    const slowText = (): Promise<string> =>
+      Bun.file(slowLog)
+        .text()
+        .catch(() => "");
+    // Another instance (a reload's) holds the process-wide lane for 150 ms, across several of the waiter's checks.
+    const holder = health([await exclave("holder", creds())], { bunBin: stubs.slow });
+    holder.start();
+    await pollUntil(async () => (await slowText()).includes("start"), "the holder's read");
+    const h = health([await exclave("waiter", creds())], { bunBin: stubs.record, checkIntervalMs: 20, minRereadMs: 0 });
+    h.start();
+    const heldAtStart = !(await slowText()).includes("end");
+    await pollUntil(async () => (await count(log)) >= 1, "the waiter's read");
+    // Negative assertion: a non-event cannot be polled.
+    await Bun.sleep(150);
+    await Promise.all([holder.stop(), h.stop()]);
+    expect(await count(log)).toBe(1);
+    expect(heldAtStart).toBe(true);
+  });
+
   test("one child at a time across instances: a reload's two daemons never read at once", async () => {
     const log = join(base, "slow.log");
     await rm(log, { force: true });
