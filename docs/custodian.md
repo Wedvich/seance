@@ -64,11 +64,6 @@ refused Read per path, none read).
 
 ## Open details (build time)
 
-- **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
-  closed (C24); `seance doctor` warns about it, and about an exclave without the `inbox` mod, whose
-  sessions a nudge answers `no_listener`. The retained state is per process, so a session already at rest
-  when the daemon restarts is `unobserved` too until its next frame; `sessions` says when retention began
-  (`retainedSince`), which is how the round can tell, though not why per pane.
 - **Queued nudges and Escape.** Measure, on the pinned Claude Code release, whether a message the inbox mod submits
   to a busy session is drawn inside the input box's rules (then `interrupt` after a `nudge` answers `waiting`, safe
   but it leaves such a session only flagged), and whether Escape moves queued messages back into the box as a draft

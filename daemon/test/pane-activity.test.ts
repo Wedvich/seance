@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { appendFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readSavedActivity, writeSavedActivity, type SavedActivity } from "../src/pane-activity-store.ts";
 import { createPaneActivity, type PaneActivityTracker } from "../src/pane-activity.ts";
 import { readPanePids } from "../src/session-events.ts";
 import { capturePane, CUSTODIAN_OPTION, tmuxOk } from "../src/tmux.ts";
@@ -113,4 +114,56 @@ test("a custodian round is never sampled, and all() lists exactly the tracked pa
   expect(tracker.activity(round)).toBeNull();
   expect(tracker.activity(session)).not.toBeNull();
   expect(tracker.all().map((entry) => entry.pane)).toEqual([session]);
+});
+
+test("a restart takes back a session at rest from the file, by its real process, and drops it once its screen moves", async () => {
+  const pane = (
+    await tmuxOk([
+      "new-window",
+      "-d",
+      "-P",
+      "-F",
+      "#{pane_id}",
+      "-t",
+      "act:",
+      "-n",
+      "rest",
+      ": --remote-control; printf 'at rest\\n'; exec sleep 600",
+    ])
+  ).trim();
+  await pollUntil(() => screenShows(pane, "at rest"), "the pane printed");
+  const path = join(base, "custodian", "activity.json");
+  const store = {
+    load: () => readSavedActivity(path, () => {}),
+    save: (panes: readonly SavedActivity[]) => writeSavedActivity(path, panes),
+  };
+  const make = (): PaneActivityTracker =>
+    createPaneActivity({
+      panes: readPanePids,
+      capture: (paneId) => capturePane(paneId, { history: false }),
+      now: () => clock,
+      store,
+      saveDelayMs: 1,
+    });
+  const listed = (await readPanePids()).find((each) => each.id === pane);
+  if (listed === undefined) throw new Error("the pane was not listed");
+  const first = make();
+  await first.sample();
+  const since = clock;
+  first.observe(listed, "idle", true);
+  first.stop();
+  await first.settled();
+
+  clock += 600_000;
+  const second = make();
+  await second.sample();
+  expect(second.activity(pane)).toMatchObject({ state: "idle", turnEnded: true, stateSince: since });
+
+  const tty = (await tmuxOk(["display-message", "-p", "-t", pane, "#{pane_tty}"])).trim();
+  await appendFile(tty, "a turn the daemon missed\n");
+  await pollUntil(() => screenShows(pane, "missed"), "the write reached the pane's screen");
+  const third = make();
+  await third.sample();
+  expect(third.activity(pane)).toMatchObject({ state: null, turnEnded: false });
+  await tmuxOk(["kill-pane", "-t", pane]);
 });

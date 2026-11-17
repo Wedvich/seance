@@ -446,8 +446,11 @@ green:
   `stuck` or `look` flag, by one `unflag` at the leader and then in the flags file: an act on the pane's own entry
   only, never one a frame names.
   Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, only while a
-  custodian seat runs) is retention of what ingest bound, not an act: nothing there is run, sent or persisted, no reply
-  depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text.
+  custodian seat runs) is retention of what ingest bound, not an act: nothing there is run or sent, no reply
+  depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text. Its one
+  write is the daemon's own 0600 `custodian/activity.json` (`pane-activity-store.ts`): those facts, keyed by pane id
+  and the pane process's pid and start time, never screen text; a reloaded entry stays hidden from every reader until
+  the pane's process matches and a fresh sample hashes its screen the same, and is dropped otherwise.
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
   Nothing reachable from `seance mcp` may call `log.ts` — that writes to stdout, which is the MCP

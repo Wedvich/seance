@@ -121,6 +121,11 @@ export function custodianSessionsPath(): string {
   return join(custodianDir(), "sessions.json");
 }
 
+/** The custodian's per-pane activity (`pane-activity-store.ts`), written by the daemon so a restart can take it back. */
+export function custodianActivityPath(): string {
+  return join(custodianDir(), "activity.json");
+}
+
 /** `seance custodian round` writes it, the seat reads and drops it. */
 export function custodianRoundRequestPath(): string {
   return join(custodianDir(), "round-request");
