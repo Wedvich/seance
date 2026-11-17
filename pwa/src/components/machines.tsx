@@ -375,7 +375,7 @@ function MachineCardView(props: {
         </p>
       )}
 
-      {card.exclaves.length > 0 && (
+      {card.connected && card.exclaves.length > 0 && (
         <ul className="exclaves">
           {card.exclaves.map((row) => (
             <li key={row.id} className="exclave">
@@ -383,11 +383,9 @@ function MachineCardView(props: {
               <span className="exclave-account" title={row.account}>
                 {row.account}
               </span>
-              {card.connected && (
-                <span className="exclave-sessions">
-                  {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
-                </span>
-              )}
+              <span className="exclave-sessions">
+                {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
+              </span>
               {row.auth !== null && (
                 <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
               )}

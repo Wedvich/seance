@@ -13047,7 +13047,7 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   (`closed 3 · nudged 1 · flagged 2`, `closed 0` reading `nothing closed`), `failing` in the warn colour, and, while
   running with a valid `rc`, an `Open round` link. Each part is one unbreakable span, so a 390px card wraps between parts.
   A connected machine advertising the capability whose status has no `cu` (not in yet, an older daemon) shows
-  `no report yet`. An asleep machine's card shows no custodian row at all, and no session counts on its exclave rows:
+  `no report yet`. An asleep machine's card shows no custodian row at all, and no exclave list (the divider and its rows):
   its last status is stale, and a `—` per row or a row that can only say `no report yet` is noise on a card that already
   says asleep.
 - **The live link.** The round runs with `--setting-sources project`, so the session-events mod never runs in it, its pane
