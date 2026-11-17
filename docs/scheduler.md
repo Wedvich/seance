@@ -414,6 +414,7 @@ of M4 has landed.
 | 2     | Traits: keep free — **Done** (#414)                                | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — **Done** (#408, #416, #425, #429)                | account records; fleet quota record; Web Push                          | M–L                      |
+| 2     | Not before (new) — **Done**                                        | amending a waiting task (built)                                        | M                        |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
 | Later | Proxmox node view (follow-up)                                      | LXC pressure view; reopens #17                                         | M                        |
 
@@ -1559,6 +1560,70 @@ of M4 has landed.
     PWA surface in V1 (owner): amending is asked for from an orchestration session, through MCP.
   - _Measure:_ the leader's `audit queue op=amend` lines, by `fields` and `mode`, against cancels of
     waiting tasks followed by an enqueue from the same client: whether amend replaced the workaround.
+
+- **Not before** (new) — **Built 2026-11-17, recorded in DESIGN.md, "Not before".** _Decided_ by the owner, 2026-11-17. "Do this in 2 hours", "do this at 21:30
+  tomorrow": a task carries a time before which the scheduler does not place it. Today the owner holds
+  such work back by hand, or queues it later.
+  - _Decided, the field:_ `TaskSpec.notBefore`, epoch ms, a positive safe integer. The client turns
+    what the person typed ("in 2h", "21:30 tomorrow") into that number at submit time, in its own
+    local time zone. The record holds the instant, never a zone or a relative offset. The leader
+    compares it with its own clock. Clock skew is accepted, as it is for `createdAt`.
+  - _Decided, no rollout guard (owner):_ every daemon updates together, so this is baseline. No
+    sentinel in `deps` and no `CAPABILITIES` entry. Clients write the field to any leader.
+    Accepted risk (owner): a deferred task queued while an older leader still runs mid-update may
+    start at once. Rejected: the `requires`-style sentinel, which only an older leader needs.
+  - _Decided, no maximum horizon (owner):_ any future time is accepted, since the PWA shows it on
+    the task (below). A time already past is not refused by the leader: the task is placeable at once.
+    A client turns a bare clock time into its next occurrence, so `21:30` typed at 22:00 means tomorrow.
+    A client refuses an explicit date-time that has already passed, because that is a typo, not a wish.
+  - _Decided, where it holds:_ at placement, not at admission. Admission runs as today: the task goes
+    `queued → blocked/ready` on its deps. "Reserve, then dispatch" skips a `ready` task while
+    `now < notBefore`. It is routed no earlier than the first pass after its time. The leader ticks
+    every 30 s, so a start up to 30 s late is accepted, and no timer is armed. Holding it `queued`
+    instead would run into `ADMIT_MAX_AGE_MS` (`isExpired`) for a time past 29 days. A skipped task
+    gets no `decision` write: why it waits is read from the spec itself, so a long wait costs no store
+    writes. Once its time comes it is routed in the existing oldest-first order (by `createdAt`).
+  - _Decided, dependencies:_ a deferred task's dependents wait on it as on any unfinished task. A
+    dependent with its own `notBefore` waits for both its deps and its time.
+  - _Decided, expiry:_ the `continue_expired` and `pin_expired` clocks (`continueExpiryMs`,
+    `pinExpiryMs`) run from `max(createdAt, notBefore)`, not `createdAt`. Without that, a continuation
+    deferred 5 days would fail before it could ever start. `lost` and merge expiry are untouched: they
+    run after a placement.
+  - _Decided, Start now skips it (owner):_ `run-now` (`RouteInput.runNow`) leaves out the not-before
+    check as it leaves out the cap and the whole-queue pause. It is one-shot like the rest: nothing is
+    written to the record, so a takeover between the route and the write leaves the task waiting for
+    its time, and a person can tap again. The Spawn screen's Start now, `start_task`, `seance start`,
+    `spawn_session`'s `start` and `seance spawn --start` all get it through that same op. A spawn
+    asking for both `start` and a not-before time is refused by the client as contradictory.
+  - _Decided, amendable (owner):_ `amend` gains `notBefore`, to set, move or clear (`null`) it. This
+    works under amend's existing rule: only while `queued`, `blocked` or `ready` with no spawn out
+    (`dispatching`, `placed` otherwise). It needs no `basis`: the last write wins, as with title, model
+    and effort. Audited `fields=notBefore` with no time on the line. The CLAUDE.md invariant listing
+    what amend may change ("prompt, title, model and effort") grows by this field.
+  - _Decided, not inherited (owner):_ a successor (any trigger: manual, quota, drain or the session's
+    own pass) and a continuation never copy the predecessor's `notBefore`. A continuation may carry
+    its own if the person asks for one when continuing.
+  - Surfaces:
+    - MCP: `spawn_session`, `queue_batch` (per task) and `continue_task` take `not_before`, ISO 8601
+      with an offset, since the model resolves "in 2 hours" itself. `amend_task` takes it, or `null`
+      to clear. `get_queue` shows it as ISO 8601 UTC.
+    - CLI: `seance spawn` and `seance continue` take `--at <HH:MM | ISO date-time>` and
+      `--in <duration>` (`90m`, `2h`, `1d2h`), one or the other, never both. `seance amend` takes the
+      same flags, plus `--not-before none` to clear. The spawn's confirmation line repeats the
+      resolved local time. The CLI has no queue listing to show it in.
+    - Broker: a keyless enqueue and amend carry the field like any other spec field.
+    - PWA: the Spawn form gets an optional **Not before** control: quick choices (in 1 h, in 2 h,
+      tonight, tomorrow morning) and a date-time picker, showing the resolved local time under it. The
+      Queue screen shows a deferred task as waiting with "until Tue 18 Nov, 21:30" in the viewer's
+      local time, in the tile and the task view. That visibility is the owner's condition for having no
+      horizon. Start now stays offered for it. Changing the time from the PWA: none in V1 (owner,
+      2026-11-17), MCP and the CLI are enough, as for amend's other fields.
+    - Raycast spawns only, at once: no surface.
+  - Record and archive: one number on the spec, negligible against `STORE_MAX_CT_LENGTH`. The
+    worst-case record fixtures carry it anyway. The archivist keeps it on the task row: it is
+    neither a prompt nor an account id.
+  - _Measure:_ the leader's `audit queue` enqueue lines with a not-before time (a flag, not the time)
+    against tasks queued and then started by hand: whether deferral replaced holding work back by hand.
 
 ## Settled defaults (interview, 2026-10-15)
 

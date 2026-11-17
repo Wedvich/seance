@@ -592,6 +592,16 @@ describe("parseTaskSpec", () => {
     client: "pwa",
   };
 
+  test("notBefore: a positive safe integer is kept, anything else nulls the spec", () => {
+    expect(parseTaskSpec({ ...request, notBefore: 1_900_000_000_000 })).toEqual({
+      ...request,
+      notBefore: 1_900_000_000_000,
+    });
+    for (const bad of [0, -1, 1.5, Number.NaN, "1", 2 ** 53, null]) {
+      expect(parseTaskSpec({ ...request, notBefore: bad })).toBeNull();
+    }
+  });
+
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
     expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
@@ -1737,6 +1747,7 @@ describe("store", () => {
       },
       client: "ø".repeat(TASK_SPEC_LIMITS.client),
       until: "reported",
+      notBefore: 8.64e15,
     },
   };
   const target: Target = { ...placement, clone: "c".repeat(TARGET_LIMITS.clone) };
@@ -3141,6 +3152,15 @@ describe("parsePushAlert", () => {
 describe("parseAmendRequest", () => {
   const basis = "a".repeat(64);
   const append = { taskId: "t-1", prompt: { mode: "append", text: "also" }, basis } as const;
+
+  test("notBefore: set or null, alone, with no basis; anything else is refused", () => {
+    expect(parseAmendRequest({ taskId: "t-1", notBefore: 1_900_000_000_000 })).toEqual({
+      taskId: "t-1",
+      notBefore: 1_900_000_000_000,
+    });
+    expect(parseAmendRequest({ taskId: "t-1", notBefore: null })).toEqual({ taskId: "t-1", notBefore: null });
+    for (const bad of ["x", 0, -5, 1.5]) expect(parseAmendRequest({ taskId: "t-1", notBefore: bad })).toBeNull();
+  });
 
   test("takes a prompt with its basis, and title, model and effort, each alone or together", () => {
     expect(parseAmendRequest(append)).toEqual(append);

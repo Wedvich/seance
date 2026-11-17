@@ -161,3 +161,17 @@ describe("a held verdict", () => {
     expect(content.primary).toEqual({ label: "Start another", onClick: "another" });
   });
 });
+
+describe("a deferred task's verdict", () => {
+  const deferred = task("ready", { spec: { repo: "github.com/acme/app", mode: "worktree", notBefore: NOW + 60_000 } });
+
+  test("says until when, and stops once the time has passed", () => {
+    const shown = verdictOf(deferred);
+    expect(shown.headline).toMatch(/^Queued — until /u);
+    expect(shown.body).toMatch(/Not placed until /u);
+    expect(shown.body).not.toContain("as soon as");
+    const past = describeVerdict({ kind: "queued", task: deferred }, [], {}, NOW + 60_000, null);
+    expect(past.headline).not.toContain("until");
+    expect(past.body).not.toContain("Not placed");
+  });
+});

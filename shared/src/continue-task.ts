@@ -319,7 +319,7 @@ function blockedOffer(
 /**
  * The spec of the task that continues `task`. Carries what shapes the session
  * (model, effort, plan, autonomy, title) and what settles it (`until`, `linear`), and
- * nothing that places or orders it: the target is exact, and the old task's
+ * nothing that places or orders it (never `notBefore`, DESIGN.md "Not before"): the target is exact, and the old task's
  * dependents stay failed. The caller stamps `client`.
  *
  * `continues` names the session it resumes: the task itself, or, for a chain's later continuation, the

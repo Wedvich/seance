@@ -1,6 +1,7 @@
 import {
   accountNameIn,
   fleetTraits,
+  formatNotBefore,
   knownAccounts,
   lastHeardAt,
   reasonText,
@@ -333,9 +334,25 @@ export function taskHeadline(
   machines: readonly Machine[],
   aliases: Readonly<Record<string, string>>,
   now: number,
+  leaderNow: number = now,
 ): Timed {
+  const deferred = notBeforeLine(task, leaderNow);
+  // A blocked task keeps its "Waiting on" headline: that wait outlasts the time, and the body carries the time.
+  if (deferred !== null && task.state !== "blocked") return [`Queued — ${deferred}.`];
   const headline = headlineOf(task, machines, aliases, now);
   return typeof headline === "string" ? [headline] : headline;
+}
+
+/**
+ * "until Wed 18 Nov, 21:30" while a waiting task's not-before time is still ahead of the leader's clock
+ * (`leaderNow`: the device's plus the skew), else null. It stands in for everything the decision says: a
+ * deferred task is never routed, so a decision on it is from before the time was set or is stale.
+ */
+export function notBeforeLine(task: Task, leaderNow: number): string | null {
+  const at = task.spec.notBefore;
+  if (at === null || at === undefined || leaderNow >= at) return null;
+  if (task.state !== "queued" && task.state !== "blocked" && task.state !== "ready") return null;
+  return `until ${formatNotBefore(at)}`;
 }
 
 /** An exclave by its account's alias, else its own id: never the email, too long for a headline. */

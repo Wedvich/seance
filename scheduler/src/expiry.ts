@@ -30,9 +30,9 @@ function fail(task: Task, code: TaskFailureCode, message: string): Task {
  * `lost` and `awaiting-merge` are never pruned and hold no slot, but outlive
  * every term: past their bound they fail,
  * which also fails their waiting dependents. A `ready` continuation fails past
- * `continueExpiryMs` since `createdAt`: its machine never took it. Its message
+ * `continueExpiryMs` since `max(createdAt, notBefore)` (a deferred task cannot have been taken before its time): its machine never took it. Its message
  * names that machine's rejections from `decision`, the leader's last in-memory one. A `ready`
- * pinned task fails past `pinExpiryMs` since `createdAt`, worded the same way: its machine or
+ * pinned task fails past `pinExpiryMs` since `max(createdAt, notBefore)`, worded the same way: its machine or
  * account may be gone for good, and a prompt that old is too stale to start unannounced. `lost` ages from when its machine
  * went away, `awaiting-merge` from `endedAt` (an older leader's record has none:
  * `createdAt`, which is never later). Null when nothing is due.
@@ -71,8 +71,9 @@ export function expiry(
       unreported ? `${age} and it was never reported done` : `${age} and no merge of its pull request was seen`,
     );
   }
+  const waitingSince = Math.max(task.createdAt, task.spec.notBefore ?? 0);
   if (task.state === "ready" && task.spec.continues !== undefined) {
-    if (now - task.createdAt <= config.continueExpiryMs) return null;
+    if (now - waitingSince <= config.continueExpiryMs) return null;
     const { at } = task.spec.continues;
     // Exact target only: the device's other exclaves are rejected `continue_elsewhere`, which says nothing of why this one never took it.
     const exact = (decision?.candidates ?? []).filter((c) => c.deviceId === at.deviceId && c.exclave === at.exclave);
@@ -88,7 +89,7 @@ export function expiry(
   // After the continuation arm: a pinned continuation expires at that arm's shorter bound.
   const { pin } = task.spec;
   if (task.state === "ready" && pin !== undefined && (pin.deviceId !== undefined || pin.account !== undefined)) {
-    if (now - task.createdAt <= config.pinExpiryMs) return null;
+    if (now - waitingSince <= config.pinExpiryMs) return null;
     return fail(
       task,
       "pin_expired",

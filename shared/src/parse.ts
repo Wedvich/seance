@@ -2,6 +2,7 @@ import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
 import { isTraitName, TRAIT_LIMITS } from "./traits.ts";
 import { isPromptBasis } from "./amend.ts";
+import { isNotBefore } from "./not-before.ts";
 import {
   isMessageId,
   MESSAGE_KINDS,
@@ -1314,6 +1315,8 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
           succeeding: follows !== undefined,
         });
   const issue = linear === undefined ? undefined : parseLinear(linear);
+  const notBefore = value["notBefore"];
+  if (notBefore !== undefined && !isNotBefore(notBefore)) return null;
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
   if (issue === null || resumes === null || files === null || needs === null || follows === null) return null;
   // A successor is a plain worktree spawn that resets its own branch: a resumed session or files would contradict that.
@@ -1343,6 +1346,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(files === undefined ? {} : { attachments: files }),
     ...(needs === undefined ? {} : { requires: needs }),
     ...(follows === undefined ? {} : { succeeds: follows }),
+    ...(notBefore === undefined ? {} : { notBefore }),
   };
 }
 
@@ -2373,7 +2377,15 @@ export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
-const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set(["taskId", "prompt", "basis", "title", "model", "effort"]);
+const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set([
+  "taskId",
+  "prompt",
+  "basis",
+  "title",
+  "model",
+  "effort",
+  "notBefore",
+]);
 const AMEND_PROMPT_KEYS: ReadonlySet<string> = new Set(["mode", "text"]);
 
 function onlyKeys(value: Record<string, unknown>, known: ReadonlySet<string>): boolean {
@@ -2390,7 +2402,7 @@ function amendField(value: unknown, max: number, empty: boolean): string | null 
  * `amend`, at the leader, which rewrites a task from it: built field by field, each held to
  * `TASK_REQUEST_LIMITS` as a create's is (an empty model or effort would reach the spawn as a flag
  * with no value; `null` drops one). `basis` comes exactly with `prompt`; an append of nothing, or an
- * amendment of nothing, is malformed. The amended prompt's own bound is the leader's (`amendSpec`),
+ * amendment of nothing, is malformed. `notBefore` (a positive safe integer, or `null` to clear) needs no `basis`. The amended prompt's own bound is the leader's (`amendSpec`),
  * since it depends on the task.
  *
  * Unlike most parsers here, a key it does not know refuses the whole request rather than being
@@ -2417,13 +2429,24 @@ export function parseAmendRequest(value: unknown): AmendRequest | null {
   const efforted = effort === undefined ? undefined : amendField(effort, limits.effort, false);
   if ((title !== undefined && titled === undefined) || (model !== undefined && modelled === undefined)) return null;
   if (effort !== undefined && efforted === undefined) return null;
-  if (amended === undefined && titled === undefined && modelled === undefined && efforted === undefined) return null;
+  const deferred = value["notBefore"];
+  if (deferred !== undefined && deferred !== null && !isNotBefore(deferred)) return null;
+  if (
+    amended === undefined &&
+    titled === undefined &&
+    modelled === undefined &&
+    efforted === undefined &&
+    deferred === undefined
+  ) {
+    return null;
+  }
   return {
     taskId: value["taskId"],
     ...(amended === undefined || !isPromptBasis(basis) ? {} : { prompt: amended, basis }),
     ...(titled === undefined ? {} : { title: titled }),
     ...(modelled === undefined ? {} : { model: modelled }),
     ...(efforted === undefined ? {} : { effort: efforted }),
+    ...(deferred === undefined ? {} : { notBefore: deferred }),
   };
 }
 

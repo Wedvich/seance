@@ -62,6 +62,8 @@ import {
   withWorktree,
   worktreeFor,
   type Effort,
+  type NotBeforeChoice,
+  resolveNotBeforeChoice,
   type HeldTask,
   type HistoryRange,
   type HistoryResult,
@@ -357,6 +359,7 @@ export class Store {
       relay: client.getState(),
       form,
       autonomy: DEFAULT_AUTONOMY,
+      notBefore: null,
       promptUndo: null,
       sheet: null,
       settings: false,
@@ -806,6 +809,12 @@ export class Store {
   removeAfter(taskId: string): void {
     const { form } = this.#state;
     this.#patch({ form: { ...form, after: form.after.filter((dep) => dep.task !== taskId) } });
+  }
+
+  /** Sets or clears (`null`) the not-before choice. Re-previews: a deferred form asks for no preview, and a cleared one does. */
+  setNotBefore(choice: NotBeforeChoice | null): void {
+    this.#patch({ notBefore: choice });
+    void this.refreshPreview();
   }
 
   setUntil(until: TaskUntil): void {
@@ -1375,6 +1384,11 @@ export class Store {
    */
   async #submit(runNow: boolean): Promise<void> {
     const { relay } = this.#state;
+    // The form hides the split while a time is set, so this is unreachable from it.
+    if (runNow && this.#state.notBefore !== null) {
+      this.#showVerdict(unqueued("Start now and a not-before time contradict each other."));
+      return;
+    }
     const holding = canHold(relay);
     if ((!holding && !deriveAutoAvailability(relay).available) || this.#state.spawning) return;
     // A resume's re-dial reconnects within a second or two (both settle windows are 1.5 s), so a tap
@@ -1468,7 +1482,12 @@ export class Store {
       const traitsProblem = this.#requiresProblem(form.requires, relay, form.machine, form.account);
       if (traitsProblem !== null) return refused(`${traitsProblem}.`);
     }
-    const { autonomy } = this.#state;
+    const { autonomy, notBefore } = this.#state;
+    // Resolved at the press, so "in 2 h" means 2 h from now however long the form sat open.
+    const startAt = notBefore === null ? null : resolveNotBeforeChoice(notBefore, Date.now());
+    if (notBefore?.kind === "at" && startAt !== null && startAt <= Date.now()) {
+      return refused("That time has already passed.");
+    }
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
     if (level === null) return refused(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
@@ -1505,6 +1524,7 @@ export class Store {
         ...(form.after.length === 0 ? {} : { deps: form.after }),
         ...(reported ? { until: form.until } : {}),
         ...(attachments === undefined ? {} : { attachments }),
+        ...(startAt === null ? {} : { notBefore: startAt }),
       }),
     };
   }
@@ -1553,6 +1573,8 @@ export class Store {
     const { form } = this.#state;
     // Only the files this task carries leave the form: a retry's task names the ones it was built with.
     const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
+    // `refreshPreview` patched the card away while a time was set, so nothing else asks again.
+    const hadNotBefore = this.#state.notBefore !== null;
     this.#patch({
       form: {
         ...form,
@@ -1562,10 +1584,12 @@ export class Store {
         requires: [],
       },
       autonomy: DEFAULT_AUTONOMY,
+      notBefore: null,
       promptUndo: null,
       attachments: this.#state.attachments.filter((f) => f.upload.kind !== "stored" || !sent.has(f.upload.id)),
       attachNotice: null,
     });
+    if (hadNotBefore) void this.refreshPreview();
   }
 
   /** Why the store refused a create, as the verdict and a held row say it. */

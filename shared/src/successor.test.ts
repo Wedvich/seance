@@ -194,6 +194,11 @@ describe("successorSpec", () => {
     expect(of({ autonomy: "checkpoint" })).toMatchObject({ autonomy: "checkpoint" });
   });
 
+  test("never carries notBefore", () => {
+    const next = successorSpec({ ...running({}, { notBefore: 1_900_000_000_000 }), assignment }, "org:a", "manual");
+    expect(next).not.toHaveProperty("notBefore");
+  });
+
   test("a drain keeps a steered task's autonomy and plan: nobody approved the plan it was at", () => {
     const of = (spec: Partial<TaskSpec>, trigger: "drain" | "quota"): TaskSpec =>
       successorSpec({ ...running({}, spec), assignment }, "org:a", trigger);

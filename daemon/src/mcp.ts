@@ -11,6 +11,7 @@ import {
   MESSAGE_PUSH_MAX,
   MESSAGE_RATE,
   fleetTraits,
+  parseDateTime,
   traitHealthByMachine,
   AUTONOMY_LEVELS,
   autonomyOf,
@@ -572,7 +573,24 @@ function isAutoRef(ref: string): boolean {
  * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins, avoided machines and required traits are set with spawn_session's after, until, linear, pin, avoid and requires fields and with queue_batch.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins, avoided machines and required traits are set with spawn_session's after, until, linear, pin, avoid and requires fields and with queue_batch. A start time (not_before) holds a task until then; it is not a deadline.";
+
+/** `not_before` on the tools that create a task: ISO 8601 with an offset, so the model resolves a relative request itself. */
+const NOT_BEFORE_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Not before this time: ISO 8601 date-time with an offset (`2026-11-18T21:30:00+01:00` or `…Z`). Resolve relative requests ('in 2 hours') yourself. The task is not started before then (to within about 30 s); start_task ignores it, and a time already past is refused",
+  );
+
+/** `not_before` as the epoch ms a spec holds, or why it is refused. */
+function notBeforeInput(text: string): { readonly at: number } | { readonly error: string } {
+  const at = parseDateTime(text, { requireOffset: true });
+  if (at === null) {
+    return { error: `not_before ${JSON.stringify(text.slice(0, 64))} is not an ISO 8601 date-time with an offset` };
+  }
+  return at <= Date.now() ? { error: "not_before is in the past" } : { at };
+}
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
@@ -917,7 +935,13 @@ function describeTask(
             return { trait, machines: traits.get(trait) ?? [], ...(failing.length === 0 ? {} : { failing }) };
           }),
         }),
-    ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
+    // A deferred task's record decision is stale: the scheduler skips it unrouted until the time.
+    ...(task.decision === undefined ||
+    (spec.notBefore !== undefined &&
+      spec.notBefore > now &&
+      (task.state === "queued" || task.state === "blocked" || task.state === "ready"))
+      ? {}
+      : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
@@ -939,6 +963,7 @@ function describeTask(
     ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
+    ...(spec.notBefore === undefined ? {} : { notBefore: new Date(spec.notBefore).toISOString() }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
     ...(task.stack === undefined ? {} : { stackedOn: { task: task.stack.task, base: task.stack.on } }),
@@ -1221,7 +1246,7 @@ export function buildMcpServer(
     "amend_task",
     {
       title: "Amend a task still waiting in the scheduler's queue",
-      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
+      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. \`not_before\` (ISO 8601 with an offset) sets or moves the time before which it will not start, and null clears it; it needs no prompt basis. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
       inputSchema: z.strictObject({
         taskId: z.string().describe("The waiting task's id from get_queue"),
         append: z.string().optional().describe("Text to add at the end of the prompt, after a blank line"),
@@ -1229,15 +1254,21 @@ export function buildMcpServer(
         title: z.string().nullable().optional().describe("A new title; null clears it"),
         model: z.string().nullable().optional().describe("A new model; null restores the default"),
         effort: z.string().nullable().optional().describe("A new effort; null restores the default"),
+        not_before: z
+          .union([z.string(), z.null()])
+          .optional()
+          .describe("Not before this time (ISO 8601 with an offset, in the future); null clears it"),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ taskId, append, replacePrompt, title, model, effort }) =>
+    async ({ taskId, append, replacePrompt, title, model, effort, not_before }) =>
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("amend_task"));
         if (append !== undefined && replacePrompt !== undefined) {
           return errorResult("amend_task refused: give append or replacePrompt, not both");
         }
+        const deferred = not_before === undefined || not_before === null ? null : notBeforeInput(not_before);
+        if (deferred !== null && "error" in deferred) return errorResult(`amend_task refused: ${deferred.error}`);
         const prompt =
           append !== undefined
             ? { mode: "append" as const, text: append }
@@ -1252,6 +1283,7 @@ export function buildMcpServer(
             ...(title === undefined ? {} : { title }),
             ...(model === undefined ? {} : { model }),
             ...(effort === undefined ? {} : { effort }),
+            ...(not_before === null ? { notBefore: null } : deferred === null ? {} : { notBefore: deferred.at }),
           },
           "mcp",
         );
@@ -1267,18 +1299,22 @@ export function buildMcpServer(
       inputSchema: z.strictObject({
         taskId: z.string().describe("The failed, cancelled or blocked awaiting-merge task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
+        not_before: NOT_BEFORE_FIELD,
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ taskId, prompt }) =>
+    async ({ taskId, prompt, not_before }) =>
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("continue_task"));
+        const deferred = not_before === undefined ? null : notBeforeInput(not_before);
+        if (deferred !== null && "error" in deferred) return errorResult(`continue_task refused: ${deferred.error}`);
         const outcome = await continueAuto(
           { machines: lease.machines, scheduler: lease.scheduler },
           taskId,
           prompt,
           audit,
           "mcp",
+          deferred === null ? undefined : deferred.at,
         );
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
@@ -1329,6 +1365,7 @@ export function buildMcpServer(
         pin: PIN_FIELD,
         avoid: AVOID_FIELD,
         requires: REQUIRES_FIELD,
+        not_before: NOT_BEFORE_FIELD,
         start: z
           .boolean()
           .optional()
@@ -1353,8 +1390,14 @@ export function buildMcpServer(
       pin,
       avoid,
       requires,
+      not_before,
       start,
     }) => {
+      if (start === true && not_before !== undefined) {
+        return errorResult("spawn refused: start and not_before contradict each other: start runs the task now");
+      }
+      const deferred = not_before === undefined ? null : notBeforeInput(not_before);
+      if (deferred !== null && "error" in deferred) return errorResult(`spawn refused: ${deferred.error}`);
       const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
       if (machinePin !== undefined && pin?.machine !== undefined) {
         return errorResult("spawn refused: give the machine once — machine or pin.machine, not both");
@@ -1378,6 +1421,7 @@ export function buildMcpServer(
           linear,
         ),
         ...(requires === undefined ? {} : { requires }),
+        ...(deferred === null ? {} : { notBefore: deferred.at }),
       };
       // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
       const invalid = specError(spec);
@@ -1461,6 +1505,7 @@ export function buildMcpServer(
               pin: PIN_FIELD,
               avoid: AVOID_FIELD,
               requires: REQUIRES_FIELD,
+              not_before: NOT_BEFORE_FIELD,
             }),
           )
           .min(1)
@@ -1515,6 +1560,9 @@ export function buildMcpServer(
         if ("error" in reported) return errorResult(`queue_batch refused: task ${n}: ${reported.error}`);
         const placement = placementInput(member.pin, member.avoid);
         if ("error" in placement) return errorResult(`queue_batch refused: task ${n}: ${placement.error}`);
+        const deferred = member.not_before === undefined ? null : notBeforeInput(member.not_before);
+        if (deferred !== null && "error" in deferred)
+          return errorResult(`queue_batch refused: task ${n}: ${deferred.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
           ...requestFields({
@@ -1524,6 +1572,7 @@ export function buildMcpServer(
           }),
           ...authoredFields(deps, member.until, member.linear),
           ...(member.requires === undefined ? {} : { requires: member.requires }),
+          ...(deferred === null ? {} : { notBefore: deferred.at }),
           batch: { id: batchId, index: n },
         };
         const invalid = specError(spec);

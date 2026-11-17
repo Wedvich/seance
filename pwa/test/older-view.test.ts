@@ -74,6 +74,7 @@ function state(
     },
     form: DEFAULT_FORM,
     autonomy: "checkpoint",
+    notBefore: null,
     promptUndo: null,
     sheet: null,
     settings: false,

@@ -209,6 +209,56 @@ describe("parseSpawnArgs", () => {
   });
 });
 
+describe("parseSpawnArgs, not before", () => {
+  test("--at and --in are collected once each, as strings", () => {
+    expect(parseSpawnArgs(["seance", "--at", "21:30", "fix it"])).toMatchObject({ at: "21:30", prompt: "fix it" });
+    expect(parseSpawnArgs(["seance", "--in", "2h"])).toMatchObject({ in: "2h" });
+    // A bare word `in` is prompt text, not the flag.
+    expect(parseSpawnArgs(["seance", "do", "it", "in", "prod"])).toMatchObject({ prompt: "do it in prod" });
+  });
+
+  test("both together, a repeat, a missing value, or either beside --now or --start is a usage error", () => {
+    expect(() => parseSpawnArgs(["seance", "--at", "21:30", "--in", "2h"])).toThrow("give one");
+    expect(() => parseSpawnArgs(["seance", "--at", "21:30", "--at", "22:00"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--in"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--now", "seance", "--in", "2h"])).toThrow("contradictory");
+    expect(() => parseSpawnArgs(["seance", "--start", "--at", "21:30"])).toThrow("contradictory");
+  });
+});
+
+describe("parseContinueArgs, not before", () => {
+  test("takes --at or --in, never both", () => {
+    expect(parseContinueArgs(["t-1", "--in", "90m"])).toEqual({ taskId: "t-1", in: "90m" });
+    expect(parseContinueArgs(["t-1", "--at", "08:00", "-p", "go"])).toEqual({
+      taskId: "t-1",
+      prompt: "go",
+      at: "08:00",
+    });
+    expect(() => parseContinueArgs(["t-1", "--at", "08:00", "--in", "1h"])).toThrow("give one");
+    expect(() => parseContinueArgs(["t-1", "--at"])).toThrow("usage: seance continue");
+  });
+});
+
+describe("parseAmendArgs, not before", () => {
+  test("--in and --at resolve to an instant; --not-before none clears; alone is a valid amendment", () => {
+    const before = Date.now();
+    const timed = parseAmendArgs(["t-1", "--in", "2h"]);
+    expect(timed.notBefore).toBeGreaterThanOrEqual(before + 7_200_000);
+    expect(timed.notBefore).toBeLessThanOrEqual(Date.now() + 7_200_000);
+    expect(typeof parseAmendArgs(["t-1", "--at", "21:30"]).notBefore).toBe("number");
+    expect(parseAmendArgs(["t-1", "--not-before", "none"])).toEqual({ taskId: "t-1", notBefore: null });
+  });
+
+  test("anything but none after --not-before, two timings, or a bad time is refused", () => {
+    expect(() => parseAmendArgs(["t-1", "--not-before", "tomorrow"])).toThrow("only `none`");
+    expect(() => parseAmendArgs(["t-1", "--in", "2h", "--not-before", "none"])).toThrow("give one of");
+    expect(() => parseAmendArgs(["t-1", "--at", "21:30", "--at", "22:00"])).toThrow("given twice");
+    expect(() => parseAmendArgs(["t-1", "--in", "1h", "--in", "2h"])).toThrow("given twice");
+    expect(() => parseAmendArgs(["t-1", "--in", "soon"])).toThrow("duration");
+    expect(() => parseAmendArgs(["t-1", "--at", "2020-01-01T10:00"])).toThrow("in the past");
+  });
+});
+
 describe("parseInstallArgs", () => {
   test("bare install stays user-scope", () => {
     expect(parseInstallArgs([])).toEqual({ system: false });

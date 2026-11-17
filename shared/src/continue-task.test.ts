@@ -330,6 +330,10 @@ describe("continuationSpec", () => {
     }
   });
 
+  test("never carries notBefore", () => {
+    expect(continuationSpec(failed({}, { notBefore: 1_900_000_000_000 }), at)).not.toHaveProperty("notBefore");
+  });
+
   test("the old prompt is not carried; a note is, trimmed, and a blank one is left out", () => {
     expect(continuationSpec(failed(), at)).not.toHaveProperty("prompt");
     expect(continuationSpec(failed(), at, "  \n ")).not.toHaveProperty("prompt");

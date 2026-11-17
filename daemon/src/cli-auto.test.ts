@@ -95,6 +95,24 @@ describe("spawnAuto", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("--in and --at reach the spec and the echo names the zone; one that cannot resolve queues nothing", async () => {
+    const fake = scheduledRelay();
+    const before = Date.now();
+    const { ok, text } = await run(fake, { in: "2h" });
+    expect(ok).toBe(true);
+    const notBefore = fake.creates[0]?.spec.notBefore;
+    expect(notBefore).toBeGreaterThanOrEqual(before + 7_200_000);
+    expect(text).toMatch(/, not before \w{3} \d{1,2} \w{3}, \d{2}:\d{2} (GMT|UTC)/u);
+    for (const bad of [{ in: "soon" }, { at: "2020-01-01T10:00" }, { in: "100000000d" }]) {
+      const refused = scheduledRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one case at a time keeps each answer readable
+      const result = await run(refused, bad);
+      expect(result.ok).toBe(false);
+      expect(result.text).toStartWith("spawn refused: ");
+      expect(refused.creates).toEqual([]);
+    }
+  });
+
   test("--autonomy reaches the task; steer is sealed with plan for a leader that drops the level", async () => {
     const auto = scheduledRelay();
     expect((await run(auto, { autonomy: "auto" })).ok).toBe(true);
@@ -613,6 +631,17 @@ describe("continueTaskAuto", () => {
     expect(audited).toEqual([
       `audit enqueue origin=cli client=cli task="${created?.id}" continues="t-1" createdAt=${created?.createdAt} queued`,
     ]);
+  });
+
+  test("--in reaches the continuation's spec; an unresolvable time queues nothing", async () => {
+    const timed = await runContinue([failedTask], machines(), { taskId: "t-1", in: "1h" });
+    expect(timed.ok).toBe(true);
+    expect(timed.fake.creates[0]?.spec.notBefore).toBeGreaterThan(Date.now());
+    expect(timed.text).toMatch(/, not before .*(GMT|UTC)/u);
+    const bad = await runContinue([failedTask], machines(), { taskId: "t-1", in: "soon" });
+    expect(bad.ok).toBe(false);
+    expect(bad.text).toStartWith("continue refused: ");
+    expect(bad.fake.creates).toEqual([]);
   });
 
   test("refuses a task nobody lists, one that is not a failed session, and a leader that cannot continue; nothing is queued", async () => {

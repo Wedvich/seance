@@ -5819,3 +5819,71 @@ describe("task history", () => {
     }
   });
 });
+
+describe("the not-before choice", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  test("is resolved at the press and written on the spec, then cleared once queued", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    store.setNotBefore({ kind: "in", ms: 7_200_000 });
+    const before = Date.now();
+    await store.spawn();
+    const after = Date.now();
+    const { notBefore } = firstCreate(client).spec;
+    expect(notBefore).toBeGreaterThanOrEqual(before + 7_200_000);
+    expect(notBefore).toBeLessThanOrEqual(after + 7_200_000);
+    expect(store.getState().notBefore).toBeNull();
+  });
+
+  test("the route preview goes while a time is set and is asked again once the queued task clears it", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    try {
+      await until(() => store.getState().preview?.kind === "ok", "the first preview");
+      store.setNotBefore({ kind: "in", ms: 7_200_000 });
+      await until(() => store.getState().preview === null, "the preview dropped while a time is set");
+      const asked = client.previews.length;
+      await store.spawn();
+      expect(store.getState().notBefore).toBeNull();
+      await until(() => client.previews.length > asked, "the preview asked again");
+      await until(() => store.getState().preview?.kind === "ok", "the preview back");
+    } finally {
+      detach();
+    }
+  });
+
+  test("none leaves the field off the spec", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.spawn();
+    expect(firstCreate(client).spec).not.toHaveProperty("notBefore");
+  });
+
+  test("a picked time that has passed is refused, nothing is queued, and the choice stays", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    store.setNotBefore({ kind: "at", at: Date.now() - 60_000 });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict?.kind).toBe("unqueued");
+    expect(store.getState().notBefore?.kind).toBe("at");
+  });
+
+  test("Start now with a time set is refused, nothing is queued", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    store.setNotBefore({ kind: "in", ms: 3_600_000 });
+    await store.startNow();
+    expect(client.creates).toEqual([]);
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().verdict?.kind).toBe("unqueued");
+  });
+});

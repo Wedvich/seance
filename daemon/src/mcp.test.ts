@@ -3741,6 +3741,94 @@ describe("pass_task", () => {
   });
 });
 
+describe("not_before on spawn_session", () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+
+  test("is stored on the spec and echoed with its offset; the audit line carries a flag, never the time", async () => {
+    const fake = leaderRelay();
+    const { text, error, audited } = await callAuto(fake, { not_before: future });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec.notBefore).toBe(Date.parse(future));
+    expect(text).toMatch(/, not before .*(GMT|UTC)/u);
+    expect(audited).toEqual([
+      `audit enqueue origin=mcp client=mcp task="${fake.creates[0]?.id}" notBefore=1 createdAt=${fake.creates[0]?.createdAt} queued`,
+    ]);
+    expect(audited.join()).not.toContain(future);
+  });
+
+  test("with start, without an offset, malformed or in the past is refused and nothing is stored", async () => {
+    for (const [args, text] of [
+      [{ not_before: future, start: true }, "contradict"],
+      [{ not_before: "2030-01-01T10:00:00" }, "with an offset"],
+      [{ not_before: "tomorrow" }, "with an offset"],
+      [{ not_before: "2020-01-01T10:00:00Z" }, "in the past"],
+    ] as const) {
+      const fake = leaderRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one case at a time keeps each answer readable
+      const result = await callAuto(fake, args);
+      expect(result.error).toBe(true);
+      expect(result.text).toContain(text);
+      expect(fake.creates).toEqual([]);
+    }
+  });
+});
+
+describe("get_queue, not before", () => {
+  test("shows notBefore as ISO 8601 UTC, and nothing for a task without one", async () => {
+    const at = Date.UTC(2030, 0, 2, 3, 4, 5);
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({ id: "t-1", state: "ready", spec: { repo: ORIGIN, mode: "worktree", notBefore: at } }),
+            task({ id: "t-2", state: "ready", spec: { repo: ORIGIN, mode: "worktree" } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      traitMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0].notBefore).toBe("2030-01-02T03:04:05.000Z");
+    expect(tasks[1]).not.toHaveProperty("notBefore");
+    lazy.stop();
+  });
+
+  test("leaves out a waiting task's stale decision while its time is ahead, keeps it after", async () => {
+    const stale = {
+      at: 1_000,
+      chosen: { deviceId: "device-1", exclave: "default", clone: "seance" },
+      candidates: [{ deviceId: "device-1", machine: "m", exclave: "default", rejected: [] }],
+    };
+    const later = Date.now() + 3_600_000;
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({
+              id: "t-1",
+              state: "ready",
+              decision: stale,
+              spec: { repo: ORIGIN, mode: "worktree", notBefore: later },
+            }),
+            task({ id: "t-2", state: "ready", decision, spec: { repo: ORIGIN, mode: "worktree", notBefore: 1_000 } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      traitMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0]).not.toHaveProperty("decision");
+    expect(tasks[1]).toHaveProperty("decision");
+    lazy.stop();
+  });
+});
+
 describe("amend_task", () => {
   const waiting = task({ id: "t-1", state: "queued", spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" } });
 
@@ -3787,6 +3875,20 @@ describe("amend_task", () => {
         },
       },
     ]);
+  });
+
+  test("not_before sets a time, or null clears it, with no basis and no store read", async () => {
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const set = await callAmend({ not_before: at }, () => ({ task: waiting }));
+    expect(set.error).toBe(false);
+    expect(set.text).toMatch(/amended \(notBefore\), not before .*(GMT|UTC)/u);
+    expect(set.fake.requests[0]?.payload).toEqual({ taskId: "t-1", notBefore: Date.parse(at) });
+    const cleared = await callAmend({ not_before: null }, () => ({ task: waiting }));
+    expect(cleared.fake.requests[0]?.payload).toEqual({ taskId: "t-1", notBefore: null });
+    expect(cleared.text).toContain("not-before time cleared");
+    const past = await callAmend({ not_before: "2020-01-01T00:00:00Z" }, () => ({ task: waiting }));
+    expect(past.error).toBe(true);
+    expect(past.fake.requests).toEqual([]);
   });
 
   test("a prompt that moved between the read and the send is read again and resent; a lost answer never is", async () => {

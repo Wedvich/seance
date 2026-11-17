@@ -416,7 +416,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
  * record, which leaves it `ready`, `blocked`, or `failed` at admission. The only
  * line an enqueue leaves on the leader: an app's create is a store write the
  * relay answers, never a request. `client` is the record's own (`TaskSpec.client`),
- * a PSK holder's word; `createdAt` is the app's clock. Never the prompt.
+ * a PSK holder's word; `createdAt` is the app's clock. `notBefore` is a flag, never the time. Never the prompt.
  */
 export function admitAudit(sink: AuditSink): (task: {
   readonly id: string;
@@ -427,11 +427,12 @@ export function admitAudit(sink: AuditSink): (task: {
     readonly avoid?: readonly unknown[];
     readonly requires?: readonly unknown[];
     readonly pin?: unknown;
+    readonly notBefore?: number;
   };
 }) => Promise<void> {
   return async (task) => {
     const client = task.spec.client === undefined ? "" : ` client=${quote(task.spec.client)}`;
-    const counts = `avoid=${task.spec.avoid?.length ?? 0} requires=${task.spec.requires?.length ?? 0} pin=${task.spec.pin === undefined ? 0 : 1}`;
+    const counts = `avoid=${task.spec.avoid?.length ?? 0} requires=${task.spec.requires?.length ?? 0} pin=${task.spec.pin === undefined ? 0 : 1} notBefore=${task.spec.notBefore === undefined ? 0 : 1}`;
     await sink(
       `audit queue origin=leader op=admit task=${quote(task.id)}${client} createdAt=${task.createdAt} state=${task.state} ${counts}`,
     );
@@ -462,7 +463,7 @@ export type EnqueueAuditLine = (
   task: {
     readonly id: string;
     readonly createdAt: number;
-    readonly spec?: { readonly continues?: { readonly task: string } };
+    readonly spec?: { readonly continues?: { readonly task: string }; readonly notBefore?: number };
   },
   outcome: EnqueueOutcome,
 ) => Promise<void>;
@@ -492,8 +493,10 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
     // Only a continuation has one, so every other line is unchanged.
     const continued = task.spec?.continues?.task;
     const continues = continued === undefined ? "" : ` continues=${quote(continued)}`;
+    // A flag, never the time.
+    const deferred = task.spec?.notBefore === undefined ? "" : " notBefore=1";
     await sink(
-      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues} createdAt=${task.createdAt} ${how}`,
+      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues}${deferred} createdAt=${task.createdAt} ${how}`,
     );
   };
 }
