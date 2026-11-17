@@ -142,7 +142,7 @@ export interface CustodianRow {
   /** A pause holds: `paused`, or `p` behind `running` or `failing`. The menu offers Resume for it. */
   readonly paused: boolean;
   /** "last round ended 5m ago", or "no round yet"; null while there is no report. */
-  readonly ended: string | null;
+  readonly ended: Timed | null;
   /** "closed 3 · nudged 1", or "nothing closed"; null with no counts. */
   readonly counts: string | null;
   /** The running round's claude.ai page; null unless it is running and its id passes `isRemoteSessionId` here too. */
@@ -166,7 +166,7 @@ export function custodianRow(machine: Machine, status: MachineStatus | undefined
   return {
     state: cu.s,
     paused: cu.s === "paused" || cu.p === true,
-    ended: cu.e === undefined ? "no round yet" : `last round ended ${formatSeen(cu.e * 1000, now)}`,
+    ended: cu.e === undefined ? timed`no round yet` : timed`last round ended ${seen(cu.e * 1000, now)}`,
     counts: parts.length === 0 ? null : parts.join(" · ") === "closed 0" ? "nothing closed" : parts.join(" · "),
     link: cu.s === "running" && isRemoteSessionId(cu.rc) ? `${CLAUDE_CODE_URL}${cu.rc}` : null,
     warn: cu.s === "failing",
