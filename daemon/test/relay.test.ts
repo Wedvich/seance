@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import {
   METRIC_NAMES,
   open,
   parseBranchState,
+  parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
   parseSessionEvent,
@@ -35,6 +36,7 @@ import type { Config, TraitsConfig } from "../src/config.ts";
 import { MetricsStore, type Sample } from "../src/metrics-store.ts";
 import { RelayClient } from "../src/relay-client.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
+import { readState } from "../src/state.ts";
 import { tmux } from "../src/tmux.ts";
 import {
   makeClaudeStub,
@@ -417,6 +419,65 @@ describe("daemon ↔ relay integration", () => {
       relay.stop();
       shim.dispose();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("a register built before the boot scan landed never leaves after the scan's own", async () => {
+    // The boot register is built from the state before any scan (no repos), the scan's re-register from the
+    // state after, and the relay keeps whichever lands last. Built side by side, the first could finish its
+    // signature behind the second (crypto completes on a threadpool, in any order) and the empty blob stood
+    // until the hourly rescan: e2e's second machine never showed its repos. Held here at its two boundaries:
+    // the scan at git, the boot register's signature by a spy until the scan has committed.
+    const dir = await mkdtemp(join(base, "reorder-"));
+    const stateDir = join(dir, "state");
+    process.env["SEANCE_STATE_DIR"] = stateDir;
+    const slowRoot = join(dir, "slow");
+    await mkdir(join(slowRoot, "slowrepo", ".git"), { recursive: true });
+    const shim = await holdGitInSlowrepo(dir);
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    const releaseFirst = Promise.withResolvers<void>();
+    let signs = 0;
+    let firstHeld = false;
+    const spy = spyOn(crypto.subtle, "sign").mockImplementation(async (algorithm, key, data) => {
+      const signature = await sign(algorithm, key, data);
+      signs += 1;
+      if (signs === 1) {
+        firstHeld = true;
+        await releaseFirst.promise;
+      }
+      return signature;
+    });
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url, { extraRoots: [slowRoot] });
+    try {
+      await pollUntil(() => existsSync(shim.heldMarker), "the boot rescan to reach git");
+      await pollUntil(() => firstHeld, "the boot register's signature to be held");
+      await shim.release();
+      await pollUntil(
+        async () => (await readState(join(stateDir, "state.json")))?.scannedAt !== undefined,
+        "the boot rescan to commit",
+      );
+      // Unordered, the scan's register leaves now, ahead of the held one; ordered, it waits behind it, and a
+      // non-event can't be polled, so the wait for it is bounded.
+      const deadline = Date.now() + 1_000;
+      while (relay.registers.size === 0 && Date.now() < deadline) await Bun.sleep(10);
+      releaseFirst.resolve();
+      const registers: (readonly string[] | undefined)[] = [];
+      for (const _ of [1, 2]) {
+        const info = parseMachineInfo((await open(appKey, (await relay.registers.next()).info)).payload);
+        registers.push(info?.repos.map((r) => r.name));
+      }
+      expect(registers.at(-1)).toContain("slowrepo");
+      // The hold took: the register signed first was built before the scan committed.
+      expect(registers[0]).toEqual([]);
+    } finally {
+      releaseFirst.resolve();
+      await shim.release();
+      spy.mockRestore();
+      daemon.stop();
+      relay.stop();
+      shim.dispose();
+      process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
   });
 

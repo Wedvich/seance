@@ -6643,7 +6643,11 @@ of this section built.
   in finish order, so the older could drop a clone the newer had found (and
   had already answered the app with). Results cached in
   state.json (restart re-registers instantly from cache); re-register only
-  when the set changed. `defaultBranch` is best-effort from local refs only
+  when the set changed. Registers are built and sent one at a time too, in call
+  order (`RelayClient.#register`): the relay keeps the last one to land, and the
+  boot register, built before the boot scan committed, could finish its seal and
+  signature behind that scan's re-register and leave a fresh machine advertising
+  no repos until the hourly rescan. `defaultBranch` is best-effort from local refs only
   (`origin/HEAD` on disk, null otherwise — ~⅓ of repos lack it), carried
   forward for known repos; the network-touching `git remote set-head -a`
   runs only in the self-update path when unresolved (it ran in the spawn path
