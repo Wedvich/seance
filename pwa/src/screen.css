@@ -2659,6 +2659,18 @@
   vector-effect: non-scaling-stroke;
 }
 
+/* Spans no gauge measured (asleep, daemon down), full height behind the lines. */
+.chart-offline {
+  fill: var(--fg2);
+  opacity: 0.1;
+}
+
+.chart-offline-swatch {
+  height: 10px;
+  background: var(--fg2);
+  opacity: 0.3;
+}
+
 .chart-axis {
   display: flex;
   justify-content: space-between;
