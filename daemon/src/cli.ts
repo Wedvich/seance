@@ -474,9 +474,10 @@ export function parseAmendArgs(argv: readonly string[]): AmendDraft {
     if (expect === "title") set.title = arg === "" ? null : arg;
     else if (expect === "model") set.model = arg === "default" ? null : arg;
     else if (expect === "effort") set.effort = arg === "default" ? null : arg;
-    else if (expect === "at") timing.at = arg;
-    else if (expect === "in") timing.in = arg;
-    else if (expect === "not-before") {
+    else if (expect === "at" || expect === "in") {
+      if (timing[expect] !== undefined) throw new Error(`--${expect} given twice\n${AMEND_USAGE}`);
+      timing[expect] = arg;
+    } else if (expect === "not-before") {
       if (arg !== "none") throw new Error(`--not-before takes only \`none\`\n${AMEND_USAGE}`);
       timing.clear = true;
     }

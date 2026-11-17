@@ -935,7 +935,13 @@ function describeTask(
             return { trait, machines: traits.get(trait) ?? [], ...(failing.length === 0 ? {} : { failing }) };
           }),
         }),
-    ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
+    // A deferred task's record decision is stale: the scheduler skips it unrouted until the time.
+    ...(task.decision === undefined ||
+    (spec.notBefore !== undefined &&
+      spec.notBefore > now &&
+      (task.state === "queued" || task.state === "blocked" || task.state === "ready"))
+      ? {}
+      : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),

@@ -252,6 +252,8 @@ describe("parseAmendArgs, not before", () => {
   test("anything but none after --not-before, two timings, or a bad time is refused", () => {
     expect(() => parseAmendArgs(["t-1", "--not-before", "tomorrow"])).toThrow("only `none`");
     expect(() => parseAmendArgs(["t-1", "--in", "2h", "--not-before", "none"])).toThrow("give one of");
+    expect(() => parseAmendArgs(["t-1", "--at", "21:30", "--at", "22:00"])).toThrow("given twice");
+    expect(() => parseAmendArgs(["t-1", "--in", "1h", "--in", "2h"])).toThrow("given twice");
     expect(() => parseAmendArgs(["t-1", "--in", "soon"])).toThrow("duration");
     expect(() => parseAmendArgs(["t-1", "--at", "2020-01-01T10:00"])).toThrow("in the past");
   });

@@ -883,7 +883,16 @@ export async function amendAuto(
     return failed(isTransportError(reply.code) ? `${said} — ${mayHave}` : said);
   }
   const fields = amendedFields(draft).join(", ");
-  return done(`task ${taskId}: amended (${fields}); it is still ${reply.task.state} and starts with the amended spec`);
+  // The resolved instant, with its zone: `--at 21:30` on a UTC host is 21:30 UTC, and the field name alone hides that.
+  const timing =
+    draft.notBefore === undefined
+      ? ""
+      : draft.notBefore === null
+        ? ", not-before time cleared"
+        : `, not before ${formatNotBefore(draft.notBefore, undefined, { withOffset: true })}`;
+  return done(
+    `task ${taskId}: amended (${fields})${timing}; it is still ${reply.task.state} and starts with the amended spec`,
+  );
 }
 
 /** The reads between a `--start` spawn's create and its `run-now`, as the PWA's Start now waits for `ready`. */
