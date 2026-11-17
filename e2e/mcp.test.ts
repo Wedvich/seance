@@ -68,7 +68,7 @@ describe("mcp ↔ relay ↔ daemon", () => {
         "the machine's exclaves in list_machines",
         20_000,
       );
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const spawned = await text("spawn_session", { machine: "TestMac", repo: "myrepo", prompt: "haunt the relay" });
       const id = /^task (\S+): queued/u.exec(spawned)?.[1];
@@ -254,7 +254,7 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       expect(before.error).toBe(false);
       expect(Array.isArray(JSON.parse(before.text))).toBe(true);
 
-      // Stands in for a `seanced mcp` that predates spawns-as-tasks: the broker's `request` action still
+      // Stands in for a `seance mcp` that predates spawns-as-tasks: the broker's `request` action still
       // carries `spawn`, which is what keeps such a process working until its Claude session restarts.
       const lease = await brokerFleet().open();
       try {
@@ -297,7 +297,7 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       expect(bLog).not.toContain("broker the fleet");
 
       // The current MCP's spawn is a task the broker enqueues, pinned to B: the leader (A) places it there.
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       // B's exclaves were listed above (its pin needs them); one spawn, not a retry that could queue twice.
       const queued = await call("spawn_session", {
@@ -323,7 +323,7 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
 
       // A stops mid-session: the error says so, and once it is back the same
       // MCP server recovers on its own — nothing here cached the broken path.
-      stack.daemon.stop();
+      await stack.daemon.stop();
       const down = await call("get_sessions", { machine: "RemoteBox" });
       expect(down.error).toBe(true);
       expect(down.text).toContain("is seanced running?");

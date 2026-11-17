@@ -258,10 +258,11 @@ describe("seatEnabled", () => {
 });
 
 describe("sandboxDrilled", () => {
-  test("macOS and a read-only /proc/sys (the weaker nested mode) were drilled; Linux's strict mode was not", () => {
-    expect(sandboxDrilled("darwin", false)).toBe(true);
-    expect(sandboxDrilled("linux", true)).toBe(true);
-    expect(sandboxDrilled("linux", false)).toBe(false);
+  test("macOS was drilled; Linux, in either bwrap mode, only on an arch the vsock filter covers", () => {
+    expect(sandboxDrilled("darwin", "riscv64")).toBe(true);
+    expect(sandboxDrilled("linux", "x64")).toBe(true);
+    expect(sandboxDrilled("linux", "arm64")).toBe(true);
+    expect(sandboxDrilled("linux", "riscv64")).toBe(false);
   });
 });
 
@@ -682,6 +683,47 @@ describe("the seat's lifecycle", () => {
     expect(r.log).toEqual(["kill %2 stray exited"]);
     expect([...r.live]).toEqual(["%1"]);
     r.seat.stop();
+  });
+
+  test("a recorded round this seat's socket cannot reach is closed and lost, never adopted, and nothing waits on it", async () => {
+    const r = rig(
+      { roundReachable: false },
+      { lastEndedAt: NOW - EVERY, round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default" } },
+    );
+    r.live.add("%1");
+    r.live.add("%2");
+    await r.seat.start();
+    expect(r.log).toEqual([
+      "kill %1 unreachable exited",
+      "kill %2 stray exited",
+      `rm ${TMP}`,
+      "end %1 lost",
+      `save ${JSON.stringify({ lastEndedAt: NOW })}`,
+    ]);
+    expect([...r.live]).toEqual([]);
+    expect(r.seat.roundPane()).toBeNull();
+    expect(r.rounds).toMatchObject([{ start: NOW, outcome: "failed", reason: "lost" }]);
+    r.seat.stop();
+  });
+
+  test("an unreachable recorded round already dead is exited, and one that reported done is done", async () => {
+    const dead = rig(
+      { roundReachable: false },
+      { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default" } },
+    );
+    dead.lingering.rounds.push({ pane: "%1", dead: true });
+    await dead.seat.start();
+    expect(dead.log.slice(0, 3)).toEqual(["kill %1 exited gone", `rm ${TMP}`, "end %1 exited"]);
+    dead.seat.stop();
+
+    const done = rig(
+      { roundReachable: false },
+      { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default", done: true } },
+    );
+    done.live.add("%1");
+    await done.seat.start();
+    expect(done.log.slice(0, 3)).toEqual(["kill %1 unreachable exited", `rm ${TMP}`, "end %1 done"]);
+    done.seat.stop();
   });
 
   test("adopting a recorded round whose pane is gone ends it as lost and removes its tmp", async () => {

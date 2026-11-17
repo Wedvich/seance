@@ -38,7 +38,7 @@ import { CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, TASK_FIELD, tmux } from
 /**
  * The `session-event` frame kind on the local op socket (DESIGN.md, "Session
  * events"): what the `claude-mods/session-events` mod reports about the session
- * it runs in, through `seanced session-event`. Ingest-only — the handler stores
+ * it runs in, through `seance session-event`. Ingest-only — the handler stores
  * (the ended-task memory, and each séance pane's last state, `pane-activity.ts`)
  * and forwards, and tells the bound pane's exclave it saw activity (the `/usage`
  * refresh's trigger, which decides alone whether anything runs); nothing here
@@ -407,6 +407,7 @@ export class EndedTasks {
               path: site.worktree,
               ...(site.session === undefined ? {} : { session: site.session }),
               ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
+              ...(site.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
             },
             launches.prUrl,
             landed?.server,
@@ -718,6 +719,7 @@ export class EndedTasks {
         readonly handedOff?: true;
         readonly continuedPr?: string;
         readonly branch?: string;
+        readonly stackedOn?: string;
       }
     | { readonly refused: string } {
     const site = this.worktree(taskId);
@@ -746,6 +748,8 @@ export class EndedTasks {
       ...(pr === undefined ? {} : { continuedPr: pr }),
       // Branch-state's last read of the live worktree: what a reaped worktree is re-added from.
       ...(note.branch === undefined ? {} : { branch: note.branch }),
+      // A continuation of a stacked task runs in the same worktree, on the same base.
+      ...(note.stackedOn === undefined ? {} : { stackedOn: note.stackedOn }),
     };
   }
 

@@ -56,9 +56,7 @@ export function runnableProblems(
   }
   if (psk === null) {
     if (!opts.pskDelivered) {
-      problems.push(
-        "no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seanced psk-import`",
-      );
+      problems.push("no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seance psk-import`");
     }
   } else {
     try {

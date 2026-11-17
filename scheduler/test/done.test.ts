@@ -53,10 +53,8 @@ function progress(taskId: string, fields: Partial<TaskProgress> = {}): TaskProgr
 
 describe("a session that ends", () => {
   test("with a PR open is awaiting-merge, and frees its slot for the next task", async () => {
-    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), {
-      ...DEFAULT_CONFIG,
-      globalMax: 1,
-    });
+    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]));
+    await scheduler.setLimits({ fleet: 1 });
     const first = await enqueue(store, scheduler, spec());
     const second = await enqueue(store, scheduler, spec());
     await pass(scheduler);
@@ -808,12 +806,19 @@ describe("until: reported", () => {
     expect(next.merged).toBeUndefined();
   });
 
-  test("progressed: the report settles it done by reported; under merged it is ignored (a switch is deliberate)", () => {
+  test("progressed: the report settles it done by reported; under merged only while it holds no PR", () => {
     expect(progressed(running("reported"), { reported: true })).toMatchObject({ state: "done", doneBy: "reported" });
     const awaiting = running("reported", { state: "awaiting-merge", prUrl: PR });
     expect(progressed(awaiting, { reported: true })).toMatchObject({ state: "done", doneBy: "reported" });
-    const ignored = running("merged");
-    expect(progressed(ignored, { reported: true })).toBe(ignored);
+    expect(progressed(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "reported" });
+    const withPr = running("merged", { prUrl: PR });
+    expect(progressed(withPr, { reported: true })).toBe(withPr);
+    // The entry's own PR counts too: it is absorbed before the report is read.
+    expect(progressed(running("merged"), { reported: true, prUrl: PR })).toMatchObject({ state: "running", prUrl: PR });
+    const passing = running("merged", { successor: "next" });
+    expect(progressed(passing, { reported: true })).toBe(passing);
+    const waiting = running("merged", { state: "awaiting-merge", prUrl: PR });
+    expect(progressed(waiting, { reported: true })).toBe(waiting);
   });
 
   test("ended: a merge with a PR is awaiting-merge with merged recorded; under merged it is done", () => {
@@ -835,7 +840,10 @@ describe("until: reported", () => {
     expect(ended(running("merged"), { exit: 1 })).toMatchObject({
       failure: { message: "its session exited with status 1 and reported no pull request" },
     });
-    expect(ended(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "session" });
+    // Under merged a report settles a PR-less end as under reported, a failed exit included; beside a PR it waits.
+    expect(ended(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(ended(running("merged"), { reported: true, exit: 1 })).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(ended(running("merged", { prUrl: PR }), { reported: true })?.state).toBe("awaiting-merge");
   });
 
   test("ended: the OOM verdict rides on the failure beside a SIGKILL only, a false one included", () => {

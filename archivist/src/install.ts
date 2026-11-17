@@ -32,7 +32,7 @@ const SYSTEM_UNIT_DIR = "/etc/systemd/system";
 const MAIN_PATH = fileURLToPath(new URL("./main.ts", import.meta.url));
 
 /**
- * The sudo form every refusal names, as `SUDO_SEANCED` is the daemon's but with the
+ * The sudo form every refusal names, as `SUDO_SEANCE` is the daemon's but with the
  * archivist's own bun by absolute path: `$(command -v bun)` would expand in the
  * invoking shell, whose user is usually the daemon's, and run a binary its
  * sessions can replace as root. `~archivist` is the account `--user` names (the

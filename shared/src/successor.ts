@@ -16,13 +16,13 @@ import {
 /**
  * Passing a running task to a successor (DESIGN.md, Scheduler, "Passing to a successor"): the
  * one rule for who may be offered it, the spec of the task that carries on, and the prompt that
- * tells it where the work stands. Imports nothing that logs, since `seanced mcp` reaches it.
+ * tells it where the work stands. Imports nothing that logs, since `seance mcp` reaches it.
  */
 
 export type PassOffer = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
 /**
- * Whether `task` can be passed now: the one rule the PWA's button, MCP's `pass_task` and `seanced
+ * Whether `task` can be passed now: the one rule the PWA's button, MCP's `pass_task` and `seance
  * pass` share, as `continueOffer` is for Continue, so they cannot drift. The leader checks the
  * same things again with what it alone knows (the old exclave's account, the PR's head).
  * `leaderSuccessor` is whether the verified leader advertises `CAPABILITIES.successor`: an older
@@ -48,13 +48,13 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
   const { assignment } = task;
   if (assignment === undefined) return { ok: false, reason: "the task was never placed on a machine" };
   if (!leaderSuccessor) {
-    return { ok: false, reason: "the scheduler's leader can't pass tasks to a successor yet (needs seanced update)" };
+    return { ok: false, reason: "the scheduler's leader can't pass tasks to a successor yet (needs seance update)" };
   }
   const machine = machines.find((m) => m.deviceId === assignment.deviceId);
   if (machine === undefined) return { ok: false, reason: "the machine it runs on is no longer listed" };
   if (!machine.connected) return { ok: false, reason: "the machine it runs on is not connected" };
   if (machine.capabilities?.includes(CAPABILITIES.successor) !== true) {
-    return { ok: false, reason: "the machine it runs on can't push for a successor yet (needs seanced update)" };
+    return { ok: false, reason: "the machine it runs on can't push for a successor yet (needs seance update)" };
   }
   return { ok: true };
 }

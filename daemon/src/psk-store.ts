@@ -118,7 +118,7 @@ export function dpapiStore(path: string = dpapiPskPath()): PskStore {
     source: "dpapi",
     nag: "a DPAPI blob",
     intro: `storing the PSK as a DPAPI (CurrentUser) blob at ${path}.`,
-    readBackHint: "check powershell.exe interop (`seanced doctor`)",
+    readBackHint: "check powershell.exe interop (`seance doctor`)",
     clearHint: "the DPAPI blob",
     available: () => Promise.resolve(isWsl()),
     read: () => readDpapiPsk(path),
@@ -147,7 +147,7 @@ export function tpmStore(
     source: "tpm",
     nag: "a TPM-sealed blob",
     intro: `storing the PSK as a TPM2-sealed systemd-creds blob at ${path}.`,
-    readBackHint: "check the TPM device (`seanced doctor`)",
+    readBackHint: "check the TPM device (`seance doctor`)",
     clearHint: "the sealed blob",
     available: tpmAvailable,
     read: () => readTpmPsk(path),
@@ -180,7 +180,7 @@ async function tpmChecks(path: string, unitDelivers: () => Promise<boolean>): Pr
         ? [
             {
               level: "ok",
-              message: "TPM seal/unseal via systemd-creds (no PSK blob yet — `seanced psk-import` creates it)",
+              message: "TPM seal/unseal via systemd-creds (no PSK blob yet — `seance psk-import` creates it)",
             },
           ]
         : [{ level: "warn", message: `${probe} — psk-import and a TPM-sealed PSK won't work` }];
@@ -207,7 +207,7 @@ async function tpmChecks(path: string, unitDelivers: () => Promise<boolean>): Pr
           message:
             `sealed PSK blob at ${path} but this process can't unseal it — expected where a system unit ` +
             "delivers it via LoadCredentialEncrypted= (docs/psk.md); otherwise blobs are machine-bound " +
-            "by design — re-run `seanced psk-import` on this machine",
+            "by design — re-run `seance psk-import` on this machine",
         },
       ]
     : [{ level: "ok", message: "no usable TPM — psk stays in config.json" }];

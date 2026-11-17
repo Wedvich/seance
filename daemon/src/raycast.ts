@@ -1,5 +1,5 @@
-// The mechanics behind `seanced raycast install|uninstall`, beside the doctor
-// checks they earn — the same shape mcp.ts has next to `seanced mcp`. Delegates
+// The mechanics behind `seance raycast install|uninstall`, beside the doctor
+// checks they earn — the same shape mcp.ts has next to `seance mcp`. Delegates
 // to Raycast's own CLI rather than writing its files, because the import is
 // recorded in Raycast's encrypted sqlite and nothing outside the app may touch
 // that (DESIGN.md).
@@ -486,7 +486,7 @@ async function newestMtime(dir: string): Promise<number | null> {
 export async function raycastChecks(home: string = homedir()): Promise<readonly Check[]> {
   if (process.platform !== "darwin") return [];
   const app = await raycastAppPath(home);
-  if (app === null) return [{ level: "warn", message: "Raycast not installed — `seanced raycast install` needs it" }];
+  if (app === null) return [{ level: "warn", message: "Raycast not installed — `seance raycast install` needs it" }];
 
   const workspace = raycastWorkspace();
   const name = await manifestName(workspace).catch(() => null);
@@ -499,7 +499,7 @@ export async function raycastChecks(home: string = homedir()): Promise<readonly 
   if (builtAt === null) {
     return [
       present,
-      { level: "warn", message: `extension not imported into Raycast — run \`seanced raycast install\`` },
+      { level: "warn", message: `extension not imported into Raycast — run \`seance raycast install\`` },
     ];
   }
   const imported: Check = { level: "ok", message: `extension "${name}" imported (${target})` };
@@ -518,7 +518,7 @@ export async function raycastChecks(home: string = homedir()): Promise<readonly 
       level: "warn",
       message:
         `the imported extension is older than raycast/src or shared/src — ` +
-        "re-run `seanced raycast install` to rebuild it",
+        "re-run `seance raycast install` to rebuild it",
     },
   ];
 }

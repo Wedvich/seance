@@ -1,4 +1,4 @@
-// The `seanced` name on PATH, in one place: doctor's resolution check, and the
+// The CLI's name on PATH (`seance`; the daemon it runs is still `seanced`), in one place: doctor's resolution check, and the
 // symlink pair behind `link`/`unlink`. Linking is opt-in — `install` only ever
 // suggests it — but `uninstall` removes it, so tearing down the service never
 // leaves a name pointing into a checkout the user is about to delete. A plain
@@ -12,6 +12,7 @@ import { access, lstat, readlink, realpath, rm, stat, symlink } from "node:fs/pr
 import { delimiter, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Check } from "./check.ts";
+import { CLI_NAME, LEGACY_CLI_NAME } from "./commands.ts";
 
 /** This checkout's entry point, symlink-resolved so comparisons survive symlinked checkouts. */
 export async function resolvedMain(): Promise<string> {
@@ -46,15 +47,15 @@ export function bunPathFor(found: string | null): string {
  * `selfRestart` exits instead of rewriting — so a runtime upgrade leaves the
  * agent pointing at a deleted binary with nothing to notice. This is what makes
  * that visible while the daemon is still up. `what`/`remedy` vary per record:
- * the service writers repoint via `seanced install`, the MCP entry via
- * `seanced mcp install`. Exported for tests.
+ * the service writers repoint via `seance install`, the MCP entry via
+ * `seance mcp install`. Exported for tests.
  */
 export function bunDriftCheck(
   recorded: string,
   current: string,
   recordedExists: boolean,
   what = "service",
-  remedy = "seanced install",
+  remedy = "seance install",
 ): Check {
   if (!recordedExists) {
     return {
@@ -93,7 +94,7 @@ export async function recordedBunCheck(
 }
 
 /**
- * init, scan, and doctor itself all print `seanced …` follow-ups, but nothing
+ * init, scan, and doctor itself all print `seance …` follow-ups, but nothing
  * installs the name unasked — so this says whether it resolves, and to *this*
  * checkout rather than a stale link to an old clone. Never a fail: `bun
  * main.ts` and shell aliases are the documented defaults, and an alias is
@@ -105,20 +106,20 @@ export function cliOnPathCheck(found: string | null, target: string | null, main
   if (found === null) {
     return {
       level: "warn",
-      message: `seanced not on PATH — \`bun ${mainPath} link\` symlinks it into a PATH dir, or alias seanced='bun ${mainPath}' (a shell alias won't show here)`,
+      message: `${CLI_NAME} not on PATH — \`bun ${mainPath} link\` symlinks it into a PATH dir, or alias ${CLI_NAME}='bun ${mainPath}' (a shell alias won't show here)`,
     };
   }
   if (target !== mainPath) {
     return {
       level: "warn",
-      message: `seanced on PATH is ${found} → ${target}, not this checkout's ${mainPath} — \`bun ${mainPath} link\` repoints it`,
+      message: `${CLI_NAME} on PATH is ${found} → ${target}, not this checkout's ${mainPath} — \`bun ${mainPath} link\` repoints it`,
     };
   }
-  return { level: "ok", message: `seanced on PATH at ${found}` };
+  return { level: "ok", message: `${CLI_NAME} on PATH at ${found}` };
 }
 
 export async function cliOnPath(): Promise<Check> {
-  const found = Bun.which("seanced");
+  const found = Bun.which(CLI_NAME);
   return cliOnPathCheck(found, found === null ? null : await realpath(found).catch(() => found), await resolvedMain());
 }
 
@@ -129,17 +130,17 @@ export interface PathEntry {
 }
 
 /**
- * Every `seanced` entry in PATH order. lstat, not which: a broken symlink
+ * Every entry named `name` in PATH order. lstat, not which: a broken symlink
  * (checkout moved or deleted) fails which's exec check and would become
  * invisible to unlink, exactly when it most needs cleaning up.
  */
-export async function findExisting(pathEnv: string): Promise<readonly PathEntry[]> {
+export async function findExisting(pathEnv: string, name: string = CLI_NAME): Promise<readonly PathEntry[]> {
   const entries: PathEntry[] = [];
   const seen = new Set<string>();
   for (const dir of pathEnv.split(delimiter)) {
     if (dir === "" || seen.has(dir)) continue;
     seen.add(dir);
-    const file = join(dir, "seanced");
+    const file = join(dir, name);
     try {
       // oxlint-disable-next-line no-await-in-loop -- PATH order is the result's order
       const info = await lstat(file);
@@ -190,8 +191,8 @@ export type LinkResult =
   | { readonly status: "already"; readonly file: string };
 
 /**
- * Symlink `seanced` onto PATH. An existing symlink is repointed in place —
- * that's doctor's stale-clone remedy — but a real file named seanced is
+ * Symlink `seance` onto PATH. An existing symlink is repointed in place —
+ * that's doctor's stale-clone remedy — but a real file of that name is
  * someone else's and refused. `explicitDir` skips the ranking for the odd
  * PATH with no writable dir; it must already exist.
  */
@@ -217,10 +218,10 @@ export async function createLink(
   const dir = explicitDir ?? (await firstWritableDir(rankLinkDirs(pathEnv, home)));
   if (dir === null) {
     throw new Error(
-      "no writable dir on PATH — mkdir -p ~/.local/bin and add it to your PATH, or pass one: seanced link <dir>",
+      "no writable dir on PATH — mkdir -p ~/.local/bin and add it to your PATH, or pass one: seance link <dir>",
     );
   }
-  const file = join(dir, "seanced");
+  const file = join(dir, CLI_NAME);
   await symlink(main, file);
   return { status: "created", file };
 }
@@ -232,15 +233,21 @@ export interface RemovedLinks {
 }
 
 /**
- * Remove every symlink that leads to this checkout — raw target match covers
+ * Remove every symlink that leads to this checkout, under `seance` and the CLI's old name `seanced` alike (a link
+ * made before the rename, which `link` replaces) — raw target match covers
  * broken links whose realpath no longer resolves. Anything else stays: a link
  * into another clone belongs to that clone's unlink, and deleting it here
  * would turn "uninstall on machine A" into "CLI gone for checkout B".
  */
-export async function removeLinks(pathEnv: string, main: string): Promise<RemovedLinks> {
+export async function removeLinks(
+  pathEnv: string,
+  main: string,
+  names: readonly string[] = [CLI_NAME, LEGACY_CLI_NAME],
+): Promise<RemovedLinks> {
   const removed: string[] = [];
   const kept: { file: string; target: string }[] = [];
-  for (const entry of await findExisting(pathEnv)) {
+  const entries = (await Promise.all(names.map(async (name) => findExisting(pathEnv, name)))).flat();
+  for (const entry of entries) {
     if (entry.target === null) {
       kept.push({ file: entry.file, target: "(not a symlink)" });
       continue;

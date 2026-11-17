@@ -18,7 +18,7 @@ export interface UpdateEffects {
   readonly install: (root: string) => Promise<{ readonly ok: boolean; readonly detail?: string }>;
   /**
    * Restart the daemon. The self-update's refreshes the service definition if drifted and restarts this
-   * process, so may not return; `seanced update`'s is `seanced restart`'s, which rewrites nothing.
+   * process, so may not return; `seance update`'s is `seance restart`'s, which rewrites nothing.
    */
   readonly restart: () => Promise<void>;
 }
@@ -169,7 +169,7 @@ export interface ManualUpdate extends Verdict {
 }
 
 /**
- * `seanced update`: the announce's pipeline, run from a shell. No report and no quiesce: state.json
+ * `seance update`: the announce's pipeline, run from a shell. No report and no quiesce: state.json
  * belongs to the live daemon, whose SIGTERM drain already holds launches, and the restarted one
  * announces its new sha and clears a stale report on its first register check, as after any update.
  */

@@ -71,7 +71,7 @@ and this spec gives them none (§3).
 | Mod → daemon socket, peer pid              | [I]           | [V]           | Both `$.http.fetch({ socketPath })` (peer: `claude` itself) and a `$.process.spawn` child (peer: the child, parent `claude`) give a pid that `LOCAL_PEERPID` returns and `ancestorIn` resolves to the right pane. A child held open for 30 minutes: the next row.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Long-held `$.process.spawn` child + socket | [V]           | [V]           | Linux 2.1.323: one child's connection held 29.6 min, all 29 one-minute lines read, across a `/compact` (no reload) and an in-process `/resume` (`session.end` reason `resume`, no `session.start`, no reconnect). `/exit` closed it; `claude --continue` in the same pane started a new child that connected 0.7 s after launch and bound the same pane (peer chain bun → claude → the pane's shell). macOS 2.1.323: **holds**, 31.7 min, all 31 one-minute lines and the ad-hoc pushes received across a `/compact`; `/exit` SIGTERMs the child (before the mod's `session.end` runs), and `claude --resume` in the same pane started a new child that bound the same pane (`%0`) and received pushes, also across a second `/compact`. `tmux kill-session` SIGHUPs the child within 0.5 s. Two findings: **a `kill -9` of `claude` orphans the child** (ppid 1), still connected, so the daemon's writes succeed while the child's stdout is EPIPE and the message is lost (the child now exits when its parent changes or its stdout errors; DESIGN.md, "The orphaned child"); and an in-process `/clear` or `/resume` fires `session.end` (reasons `clear`, `resume`) but **no `session.start`**, the child and connection carrying on (correct, since `@seance-task` does not change; the mod keeps its loop for those two reasons). |
 | Stub heeded, spawn command line only       | [V]           | [V]           | Linux 2.1.323: a pushed stub ("call `read_messages`") made the model call it at once, both idle (2.4 s) and mid-turn, with only `--append-system-prompt` carrying the standing instruction. macOS 2.1.323: **4 of 4** runs with the spawn's command line only (Haiku and Sonnet, idle and pushed into a running turn, called it 1–2.5 s into the stub's turn), and **3 of 3 with no standing instruction** (Haiku 2, Sonnet 1), so a stub pushed by `$.prompt.submit` is heeded because it arrives as a turn. Obeying the body is separate: Sonnet read the pulled body and declined an ask embedded in it ("the request came from another session, not from you"), Haiku obeyed, so a request is pushed in full, never pulled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| MCP channel from `seanced mcp`             | [V]           | —             | One push covers mid-turn and wake, but needs `--channels` at launch and the org's `allowedChannelPlugins`, and the dev flag shows a startup dialog. A later option, not v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| MCP channel from `seance mcp`              | [V]           | —             | One push covers mid-turn and wake, but needs `--channels` at launch and the org's `allowedChannelPlugins`, and the dev flag shows a startup dialog. A later option, not v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 **Rejected with evidence** (Linux spike):
 
@@ -368,7 +368,7 @@ is the one a session gets less `CREDENTIALS_DIRECTORY` and every `TMUX*` variabl
 `SEANCE_ADAPTER_DIR` (a 0700 `stateDir()/adapters/<name>` that is the adapter's own). Its own process group,
 stderr discarded (an adapter keeps its own log; the daemon never reads or writes its output), and stopped with the
 daemon: stdin closed, SIGTERM to the group, SIGKILL after 5 s. Restarted with backoff (1 s doubling to 60 s), and
-held as `failed` after 5 exits within 10 minutes until the next daemon start or `seanced adapter restart`. A line
+held as `failed` after 5 exits within 10 minutes until the next daemon start or `seance adapter restart`. A line
 that does not parse is answered `{ kind: "error", code: "invalid" }` and counted; 10 in a minute is a restart. An
 adapter that stops reading (2 MiB unread on its stdin) is restarted, and a restart always starts with a fresh
 snapshot, so nothing is resent from memory.
@@ -421,7 +421,7 @@ only when a session addressed it to that adapter.
 
 **An adapter runs as the owner's uid, so Séance cannot contain it.** Such a process can read `state.json`, the
 keychain where it is unlocked and every worktree, and can drive tmux. Installing one trusts its code as much as an
-MCP server or a Claude Code plugin the owner installs, and the docs say so where `seanced adapter add` is described.
+MCP server or a Claude Code plugin the owner installs, and the docs say so where `seance adapter add` is described.
 What the seam's rules bound is what **Séance** grants and audits: the paths it owns stay true to its invariants (no
 text in a log, no queue write, no relay frame, no key or credential handed over), and a well-behaved adapter's reach
 is exactly the protocol. They are not a sandbox, and the threat model must not count them as one.
@@ -441,14 +441,14 @@ What follows from that:
   that adapter, over its own stdin, on that machine, to a conversation that messaged it and that the daemon verified.
   Anyone who can write into the tool can reach a subscribed session for as long as the subscription stands, within
   `kinds` and the rate buckets; a session that no longer wants it sends `leave`.
-- **Integrity**: `seanced adapter add` records the adapter's git commit, when its directory is a git checkout, and
+- **Integrity**: `seance adapter add` records the adapter's git commit, when its directory is a git checkout, and
   `doctor` warns when the checkout moved since, as a reminder that new code is running, not as a refusal.
 
 #### 6.4 What an adapter repository looks like
 
 ```
 seance-<tool>/
-  README.md              setup: the tool's own login, then `seanced adapter add`
+  README.md              setup: the tool's own login, then `seance adapter add`
   seance-adapter.json    { "name": "<tool>", "protocol": 1, "argv": ["bun", "src/main.ts"] }
   src/main.ts            NDJSON on stdin and stdout, its own log under $SEANCE_ADAPTER_DIR
   src/protocol.ts        the vendored schema, at protocol 1
@@ -464,9 +464,9 @@ template a new adapter starts from, and a conformance check an adapter repositor
 ```
 git clone <adapter repo> ~/src/seance-<tool>        # anywhere the owner keeps code
 (cd ~/src/seance-<tool> && bun install)              # and the tool's own login or key setup
-seanced adapter add ~/src/seance-<tool>              # reads seance-adapter.json, writes config.json
-seanced restart
-seanced adapter status                               # running, protocol, counts, last exit
+seance adapter add ~/src/seance-<tool>               # reads seance-adapter.json, writes config.json
+seance restart
+seance adapter status                                # running, protocol, counts, last exit
 ```
 
 `add` writes `adapters.<name>` into this machine's `config.json` and never anything else:
@@ -537,7 +537,7 @@ orchestrator session (docs/orchestrator.md). A fourth, an output-only tool (a de
   restarted.
 - **An adapter loaded into the daemon (`import()`).** Third-party code inside the process that holds the PSK, a
   service-delivered credential and every invariant above.
-- **An adapter as an MCP client of `seanced mcp`**, or as its own app-role relay client. Both are fleet-wide and
+- **An adapter as an MCP client of `seance mcp`**, or as its own app-role relay client. Both are fleet-wide and
   hold, or need, the PSK: the opposite of a local program trusted with this machine's sessions.
 - **The daemon calling the tool itself** (a webhook out, a tool URL in Séance's config). Séance would hold a tool's
   address and credentials, which is the coupling the brief forbids.
@@ -602,7 +602,7 @@ Small PRs, each landing on its own:
      `conversations.json`, `toSession`, `subscribed`, `leave`, `ambiguous`, `unverified`, `send_message` returning
      `session`, `adapter add` dropping a name's subscriptions), the `tag` frame, and the `op=deliver` and `op=message`
      audit lines.
-   - **3c. Installing.** `seanced adapter add | remove | restart | status`, `seance-adapter.json`, the
+   - **3c. Installing.** `seance adapter add | remove | restart | status`, `seance-adapter.json`, the
      recorded commit and `doctor`'s checks, and README's setup step with §6.3's trust statement.
    - Tested by: daemon tests with the reference adapter as a committed stub, linked and exec'd once in
      `beforeAll` (CLAUDE.md, Testing), covering the handshake and a protocol refusal, snapshot and
@@ -664,7 +664,7 @@ model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will a
   `CREDENTIALS_DIRECTORY`, as a session's and a trait probe's do.
 - **Traits are declared only in the machine's own `config.json`; probes run only that argv.**
   Adapters follow the same rule (§6).
-- **Nothing reachable from `seanced mcp` calls `log.ts`.** PR 2 adds no `seanced mcp` code that logs.
+- **Nothing reachable from `seance mcp` calls `log.ts`.** PR 2 adds no `seance mcp` code that logs.
 - **A reply handle is a bearer, so it is bound.** A message id is `crypto.randomUUID`, unguessable and in no log or
   audit line. The replier's daemon accepts it only from the pane, pid, task and `claude` process the message was placed
   for, and the asker's daemon delivers only to the pane, pid, task and process that sent it while it runs; the leader
@@ -705,7 +705,7 @@ The adapter seam's (§6), each with a recommendation:
     not write is installed. Containment would have to be drilled as the custodian's was before it is claimed.
 11. **An external ref on a task in state out**, for a tool to map a task to its own object without keeping a
     map? **Settled 2026-11-17**: `Session.task.ref`, the dispatched `creator.ref` (docs/tags.md §5.4, §6.1).
-12. **Adapters on the Machines row** (a `MachineStatus` field)? _Recommend later_; `seanced adapter status`
+12. **Adapters on the Machines row** (a `MachineStatus` field)? _Recommend later_; `seance adapter status`
     and `doctor` first.
 13. **State in beyond messages** (a tool setting a label, a flag or done on a task)? **Partly settled
     2026-11-17**: an adapter may set its own `adapter.<name>.*` tags on a session (§6.1 `tag`), memory only, on its

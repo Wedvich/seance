@@ -15,7 +15,7 @@ const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 // ones. The claude stub refuses a duplicate `add` the way the real CLI was
 // observed to ("MCP server seance already exists in user config", exit 1); that
 // refusal is the whole reason install clears the name first.
-describe("seanced mcp install/uninstall through the CLI", () => {
+describe("seance mcp install/uninstall through the CLI", () => {
   let root: string;
   let bin: string;
   let recorded: string;

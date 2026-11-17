@@ -1,9 +1,11 @@
 import { homedir } from "node:os";
 import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { CLI_NAME } from "./commands.ts";
 import type { CustodianConfig } from "./config.ts";
 import { roundSeed, NOTES_MAX } from "./custodian-agent.ts";
 import { custodianFence, procSysReadOnly, type ReadDeny } from "./custodian-fence.ts";
+import { vsockFilter } from "./custodian-seccomp.ts";
 import { LaunchRefused } from "./custodian-seat.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { resolvedBun, resolvedMain } from "./link.ts";
@@ -249,26 +251,40 @@ export async function readNotes(path: string = custodianNotesPath()): Promise<st
 const NO_BWRAP = "bwrap and socat must be on PATH (apt install bubblewrap socat)";
 const BWRAP_BLOCKED =
   "bwrap cannot create a sandbox on this host (e.g. AppArmor's apparmor_restrict_unprivileged_userns)";
+const BWRAP_NESTED_BLOCKED =
+  "bwrap cannot run inside another bwrap on this host (e.g. AppArmor's bwrap-userns-restrict, as on Ubuntu 24.04), and a round runs Claude Code's bwrap inside the vsock filter's";
 const BWRAP_PROBE_MS = 5_000;
 
 /**
  * Why this host cannot sandbox a round, null when it can. Linux needs `bubblewrap` and `socat` (without them
  * `failIfUnavailable` refuses to start), and a host that forbids unprivileged user namespaces fails every command: one
  * real probe through the daemon's exec path (argv array, bare env, output never read or logged) approximates Claude
- * Code's own bwrap call. macOS has its own sandbox; other platforms never get here.
+ * Code's own bwrap call. The same probe runs again inside an outer bwrap, as the vsock filter's wraps Claude Code's in
+ * both of bwrap's modes: an AppArmor profile can allow `/usr/bin/bwrap` a user namespace only when it is not nested
+ * (Ubuntu 24.04's `bwrap-userns-restrict`), and such a host would fail every round's start rather than be refused.
+ * macOS has its own sandbox; other platforms never get here.
  */
 export async function sandboxProblem(platform: "darwin" | "linux"): Promise<string | null> {
   if (platform === "darwin") return null;
   const bwrap = Bun.which("bwrap");
   if (bwrap === null || Bun.which("socat") === null) return NO_BWRAP;
+  const inner = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-user", "--unshare-pid", "true"];
+  if (!(await bwrapProbe(inner))) return BWRAP_BLOCKED;
+  return (await bwrapProbe([bwrap, "--dev-bind", "/", "/", "--", ...inner])) ? null : BWRAP_NESTED_BLOCKED;
+}
+
+async function bwrapProbe(argv: readonly string[]): Promise<boolean> {
   try {
-    const probe = await exec(
-      [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-user", "--unshare-pid", "true"],
-      { timeoutMs: BWRAP_PROBE_MS, bareEnv: true, discardStdout: true, discardStderr: true, killGroup: true },
-    );
-    return probe.exitCode === 0 ? null : BWRAP_BLOCKED;
+    const probe = await exec(argv, {
+      timeoutMs: BWRAP_PROBE_MS,
+      bareEnv: true,
+      discardStdout: true,
+      discardStderr: true,
+      killGroup: true,
+    });
+    return probe.exitCode === 0;
   } catch {
-    return BWRAP_BLOCKED;
+    return false;
   }
 }
 
@@ -343,7 +359,7 @@ export function dedupeNested(paths: readonly string[]): string[] {
 }
 
 /**
- * What the round's bun and `seanced` need to run inside the mask: bun's own dirs (as found and as resolved) and the
+ * What the round's bun and `seance` need to run inside the mask: bun's own dirs (as found and as resolved) and the
  * parts of the checkout the CLI's import closure loads (`daemon/`, `shared/`, `node_modules/` and the configs bun
  * reads). Never the whole checkout: `relay/.dev.vars` holds the relay's bearer token.
  */
@@ -431,7 +447,7 @@ export function sandboxMasks(o: MaskInputs): string[] {
 }
 
 /**
- * Why the round's `seanced` would not run under the mask, or would undo it, null when it is safe to start (decision 7:
+ * Why the round's `seance` would not run under the mask, or would undo it, null when it is safe to start (decision 7:
  * fail closed, audited as `toolchain`). Refused:
  * - a `main.ts` outside the parts of the checkout `allowRead` re-adds (`toolchainAllow`), which holds only when it is
  *   `<checkout>/daemon/src/main.ts`; an unreadable `main.ts` is not a clean failure — bun execs the unreadable script
@@ -465,7 +481,7 @@ function expectedTmuxDir(): string {
 }
 
 /**
- * `toolchainProblem` against the masks this machine's rounds would get, for the seat's start and `seanced doctor`
+ * `toolchainProblem` against the masks this machine's rounds would get, for the seat's start and `seance doctor`
  * (before any round, so the tmux dir is the expected one; `launchRound` re-checks with the real one). Paths are
  * realpath'd as the launch does, so both read the same list.
  */
@@ -559,12 +575,12 @@ export function roundReadDenies(o: {
 }
 
 /**
- * The round's `seanced` shim. The `-r` guard is load-bearing: bun execs an unreadable executable script (`main.ts` is
+ * The round's `seance` shim. The `-r` guard is load-bearing: bun execs an unreadable executable script (`main.ts` is
  * mode 755 with a `#!/usr/bin/env bun` shebang) and the result is an unbounded fork storm (macOS spike Q7: 66
  * processes in 3 s), so a main the sandbox cannot read must stop here.
  */
-export function seancedShim(bun: string, main: string): string {
-  return `#!/bin/sh\n[ -r ${shq(main)} ] || { echo ${shq(`seanced: ${main} is not readable in this sandbox`)} >&2; exit 2; }\nexec ${shq(bun)} ${shq(main)} "$@"\n`;
+export function seanceShim(bun: string, main: string): string {
+  return `#!/bin/sh\n[ -r ${shq(main)} ] || { echo ${shq(`seance: ${main} is not readable in this sandbox`)} >&2; exit 2; }\nexec ${shq(bun)} ${shq(main)} "$@"\n`;
 }
 
 /**
@@ -625,11 +641,14 @@ const PROXY_URLS = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as
  * the window's shell has them (the sandbox's network is empty regardless). Every value goes through `shq` but `claude`,
  * which is the owner's own `SEANCE_CLAUDE_BIN`, and `args`, which the caller has quoted. `${X+X="$X"}` is POSIX: unset
  * gives nothing and set gives one word, whatever the value holds. A proxy URL with `user:pass@` is unset first: a
- * match on `://…@` also drops one with an `@` in its path, which fails closed.
+ * match on `://…@` also drops one with an `@` in its path, which fails closed. With `seccomp` (Linux, both bwrap modes) the
+ * whole command runs under an outer `bwrap --seccomp` reading that filter file on fd 3 (`vsockFilter`): it binds `/`
+ * whole, so the round sees the host as before, and the filter outlives every exec under it, srt's bwrap included.
  */
 export function roundScript(o: {
   readonly claude: string;
   readonly caffeinate: boolean;
+  readonly seccomp?: string;
   readonly env: readonly (readonly [string, string])[];
   readonly binDir: string;
   readonly args: string;
@@ -648,7 +667,9 @@ export function roundScript(o: {
     o.claude,
     o.args,
   ];
-  return `#!/bin/sh\n${dropped.join("\n")}\nexec ${o.caffeinate ? "caffeinate -is " : ""}${words.join(" ")} < ${shq(o.seed)}\n`;
+  const wrap = o.caffeinate ? "caffeinate -is " : o.seccomp === undefined ? "" : "bwrap --dev-bind / / --seccomp 3 -- ";
+  const fd3 = o.seccomp === undefined ? "" : ` 3< ${shq(o.seccomp)}`;
+  return `#!/bin/sh\n${dropped.join("\n")}\nexec ${wrap}${words.join(" ")} < ${shq(o.seed)}${fd3}\n`;
 }
 
 /**
@@ -776,18 +797,25 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
     });
     const fencePath = join(tmpDir, "fence.json");
     const seedPath = join(tmpDir, "seed.txt");
+    // Every Linux round, in both bwrap modes (`sandboxDrilled`): a container shares its host's kernel, whose vsock
+    // loopback no network namespace covers. Like the fence, the file is not writable from the round's sandbox.
+    const linux = o.platform === "linux";
+    const filter = linux ? vsockFilter(process.arch) : null;
+    if (linux && filter === null) throw new LaunchRefused("toolchain", `no vsock filter for ${process.arch}`);
+    const seccompPath = filter === null ? undefined : join(tmpDir, "seccomp.bpf");
     await Promise.all([
       writeFile(fencePath, JSON.stringify(fence), { mode: 0o600 }),
       writeFile(seedPath, roundSeed(o.notes), { mode: 0o600 }),
+      ...(filter === null || seccompPath === undefined ? [] : [writeFile(seccompPath, filter, { mode: 0o600 })]),
     ]);
-    // The fence allows `Bash(seanced custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
-    // `seanced` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
+    // The fence allows `Bash(seance custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
+    // `seance` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
     // on PATH, running this process's main. Like the fence, it is not writable from the round's sandbox. Bun by its
     // resolved path: bwrap binds an allow entry at its realpath, so a symlinked dir on the way (mise's
     // `installs/bun/latest`) does not exist inside, and the shim dies with the round (no keg to outlive).
     const binDir = join(tmpDir, "bin");
     await mkdir(binDir, { mode: 0o700 });
-    await writeFile(join(binDir, "seanced"), seancedShim(toolchain.bunReal, toolchain.main), { mode: 0o700 });
+    await writeFile(join(binDir, CLI_NAME), seanceShim(toolchain.bunReal, toolchain.main), { mode: 0o700 });
     const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
     // A file, not a string for the owner's `default-shell` to parse: the agents JSON holds apostrophes, and any quoting
     // of it that survives two shells differs between them. Like the fence, it is not writable from the round's sandbox.
@@ -797,6 +825,7 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
       roundScript({
         claude,
         caffeinate: o.platform === "darwin",
+        ...(seccompPath === undefined ? {} : { seccomp: seccompPath }),
         env: roundEnv({ home, user: loginName(), tmpDir, socket: o.custodianSocket, exclave: o.exclave }),
         binDir,
         args:

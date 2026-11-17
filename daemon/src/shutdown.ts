@@ -4,7 +4,8 @@ export interface ShutdownSeams {
   readonly stopPower: () => void;
   /** Holds task launches and waits for those in flight; a rejection is as good as a timeout. */
   readonly drain: () => Promise<unknown>;
-  readonly stop: () => void;
+  /** Settles once the daemon's in-flight state writes have landed, so `exit` cannot cut one short. */
+  readonly stop: () => Promise<void>;
   readonly exit: (code: number) => void;
 }
 
@@ -31,14 +32,9 @@ export function createShutdown(seams: ShutdownSeams): (signal: string) => void {
     void seams
       .drain()
       .catch(() => false)
-      .finally(() => {
-        try {
-          seams.stop();
-        } catch (err) {
-          seams.info(`stop failed (${String(err)}) — exiting anyway`);
-        } finally {
-          seams.exit(0);
-        }
-      });
+      // Called inside the arm, so a stop that throws rather than rejects lands in the catch too.
+      .then(() => seams.stop())
+      .catch((err: unknown) => seams.info(`stop failed (${String(err)}) — exiting anyway`))
+      .finally(() => seams.exit(0));
   };
 }

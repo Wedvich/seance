@@ -77,6 +77,11 @@ export interface SpawnOutcome {
    * ledger; backend-scoped, never on the wire.
    */
   readonly session?: string;
+  /**
+   * A stacked spawn's start: the commit its worktree was made at (`origin/<baseBranch>`'s tip after the
+   * fetch). Noted in the launch ledger (`TaskNote.stackedOn`); backend-scoped, never on the wire.
+   */
+  readonly stackedOn?: string;
 }
 
 /** What a frontend resolved of a continued task's last launch from its own ledger. */
@@ -97,6 +102,8 @@ export interface Continuation {
    * worktree from when reap removed it. Never shown to the session.
    */
   readonly branch?: string;
+  /** The continued launch's stacked start (`TaskNote.stackedOn`): noted on the new launch, never shown to the session. */
+  readonly stackedOn?: string;
 }
 
 /** One fetched attachment, for the seed: `name` is display text only, never part of `path`. */
@@ -154,7 +161,7 @@ export interface SessionBackend {
       readonly leaveDeadTask?: boolean;
     },
   ) => Promise<DespawnResult>;
-  /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
+  /** Backend-specific preflight for `seance doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
   /**
    * Whatever a started session is showing right now, for the one case the

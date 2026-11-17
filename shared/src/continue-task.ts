@@ -139,7 +139,7 @@ function sessionResumable(task: Task): boolean {
 
 /**
  * Whether a task's session can be resumed, and where: the one rule the PWA's button,
- * MCP's `continue_task` and `seanced continue` share so they cannot drift (DESIGN.md,
+ * MCP's `continue_task` and `seance continue` share so they cannot drift (DESIGN.md,
  * Daemon, "Continuing a session"). A task whose session failed (`session_failed`) or
  * whose window was closed from outside (`session_closed`), or
  * that was cancelled after it was placed, qualifies — the others may never have launched,
@@ -147,7 +147,7 @@ function sessionResumable(task: Task): boolean {
  * `continueTask` and `continueSession`, and for a cancelled task `continueCancelled`. And only the newest landed task in a chain holds the
  * offer: `tasks` is the list the caller read it from, and a continuation that landed has
  * the worktree, so a second would only be refused by the daemon. One still waiting withholds
- * it too, until it lands or ends unplaced. Imports nothing that logs, since `seanced mcp`
+ * it too, until it lands or ends unplaced. Imports nothing that logs, since `seance mcp`
  * reaches it.
  *
  * A third case: an `awaiting-merge` task whose PR is blocked (`taskPrBlock`), not under `until: "reported"`,
@@ -202,7 +202,7 @@ export function continueOffer(
   if (task.state === "cancelled" && !placed.machine.capabilities?.includes(CAPABILITIES.continueCancelled)) {
     return {
       ok: false,
-      reason: "the machine it ran on can't continue a cancelled session yet (needs seanced update)",
+      reason: "the machine it ran on can't continue a cancelled session yet (needs seance update)",
     };
   }
   return { ok: true, at: placed.at };
@@ -225,7 +225,7 @@ function placement(
   // `continueSession`: an older daemon resumes with `--continue`, which misses a worktree spawn's conversation.
   const caps = machine.capabilities;
   if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession)) {
-    return { ok: false, reason: "the machine it ran on can't continue a session yet (needs seanced update)" };
+    return { ok: false, reason: "the machine it ran on can't continue a session yet (needs seance update)" };
   }
   return {
     ok: true,
@@ -252,7 +252,7 @@ function blockedOffer(
   if (context === undefined || !context.leaderHandoff) {
     return {
       ok: false,
-      reason: "the scheduler's leader can't continue a task waiting to merge yet (needs seanced update)",
+      reason: "the scheduler's leader can't continue a task waiting to merge yet (needs seance update)",
     };
   }
   if (task.continuedBy?.live === true || continuationUnderway(task, tasks)) {
@@ -272,7 +272,7 @@ function blockedOffer(
   if (placed.machine.capabilities?.includes(CAPABILITIES.continueHandoff) !== true) {
     return {
       ok: false,
-      reason: "the machine it ran on can't continue a handed-off session yet (needs seanced update)",
+      reason: "the machine it ran on can't continue a handed-off session yet (needs seance update)",
     };
   }
   return {

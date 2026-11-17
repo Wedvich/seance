@@ -66,6 +66,10 @@ export const DRAIN_GRACE_MS = 1_500;
 export const TOKEN = "e2e-bearer";
 export const PSK = toBase64(new Uint8Array(32).fill(5));
 export const TMUX_SESSION = "e2e";
+/** A lead takes ~5 ms after the register; the margin is for a loaded runner. */
+const LEAD_WAIT_MS = 10_000;
+/** Enough to span a restart's terms and refusals, short enough to read in a CI log. */
+const RELAY_LOG_TAIL = 40;
 
 export function wsUrl(relay: TestRelay, path: string): string {
   const url = new URL(path, relay.url);
@@ -198,6 +202,12 @@ export interface Stack {
    * subprocess with the same guard, and reports nothing.
    */
   readonly pushAttempts: () => readonly string[];
+  /**
+   * Waits for the suite's daemon to hold a term. A timeout names the daemon socket's state and the
+   * relay's own last lines (term changes, refused or dropped registers), which nothing else in a CI
+   * log shows: a restarted daemon once connected and heard nothing for 10 s, with no word on why.
+   */
+  readonly waitForLead: (label: string) => Promise<void>;
   readonly dispose: () => Promise<void>;
 }
 
@@ -266,6 +276,8 @@ export async function startStack(
     ...(stackOpts.secondLeaders ?? []).map((name) => mintDeviceId(join(secondDir(base, name), "state"))),
   ]);
   const relay = await startRelay(TOKEN, {
+    // Kept for `waitForLead`'s timeout: the worker's lines never reached a CI log printed.
+    captureLogs: true,
     leaders: [...leaders, ...(stackOpts.leaders ?? [])],
     ...(stackOpts.archivist === undefined ? {} : { archivist: stackOpts.archivist }),
   });
@@ -322,11 +334,11 @@ export async function startStack(
 
   let daemon = await startTestDaemon().catch(failed);
   const state = await readState(join(stateDir, "state.json")).catch(async (error: unknown) => {
-    daemon.stop();
+    await daemon.stop();
     return failed(error);
   });
   if (state === null) {
-    daemon.stop();
+    await daemon.stop();
     return failed(new Error("the daemon's state.json is missing or unreadable"));
   }
   const { deviceId } = state;
@@ -401,7 +413,7 @@ export async function startStack(
       // Only an app creates a task, and an app's create nudges the leader, which would act on version 1
       // before version 2 lands. So the daemon goes, and a stand-in signing as it holds a term of its own:
       // it ignores the nudge, writes the rest, and leaves the record for the restarted daemon's takeover.
-      daemon.stop();
+      await daemon.stop();
       adoptIdentity(await identityOfState(await loadOrInitState(join(stateDir, "state.json"))));
       const standIn = await connectDaemon(relay);
       const app = await connectApp(relay);
@@ -430,14 +442,23 @@ export async function startStack(
       // A failed test's finally can land here with the old daemon still live;
       // an orphan would share the state dir, deviceId and tmux for the rest
       // of the process. stop() is idempotent, so always stop before starting.
-      daemon.stop();
+      await daemon.stop();
       daemon = await startTestDaemon(opts.spawnWaitMs, opts.quiet);
       stack.daemon = daemon;
     },
     startSecondDaemon,
     pushAttempts: () => [...pushAttempts],
+    waitForLead: (label: string): Promise<void> =>
+      pollUntil(
+        () => daemon.leader.term() !== null,
+        label,
+        LEAD_WAIT_MS,
+        async () =>
+          `daemon socket connected=${daemon.client.connected} registered=${daemon.client.registered}; ` +
+          `relay's last lines:\n${relay.logs().slice(-RELAY_LOG_TAIL).join("\n")}`,
+      ),
     dispose: async (): Promise<void> => {
-      daemon.stop();
+      await daemon.stop();
       for (const proc of secondProcs) proc.kill();
       await Promise.all([...secondProcs].map((proc) => proc.exited));
       await relay.dispose();

@@ -32,7 +32,7 @@ import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTm
 
 /**
  * Session messages with the binding real: panes in a private tmux server, the kernel's peer pid, and for the
- * socket-level cases the real `seanced inbox` child and a sender in its own pane. The cases that need no socket
+ * socket-level cases the real `seance inbox` child and a sender in its own pane. The cases that need no socket
  * call the surface with a pid inside a pane, which `ancestorIn` resolves exactly as a connection's would, and an
  * injected clock for the grace and the rate limit.
  */
@@ -244,7 +244,7 @@ async function runner(name: string, command: string, taskId?: string): Promise<R
 }
 
 /**
- * `seanced inbox`, the real CLI: stdout to a file, its exit code beside it, renamed in. A redirect creates the
+ * `seance inbox`, the real CLI: stdout to a file, its exit code beside it, renamed in. A redirect creates the
  * file before `echo` writes it, so a test polling for it to exist could read it empty.
  */
 function inboxCommand(out: string, state = stateDir): string {
@@ -1968,7 +1968,7 @@ describe("a hand-started session that restarts under the same shell", () => {
     await messages.listen(INBOX, t.pid, tListener.sink);
 
     // The pane's process is a shell; each `claude` is its child (an inner sh), and the peer a child of that, as a
-    // `seanced mcp` or `seanced inbox` is. The two run in sequence, so both sit under the same shell pid.
+    // `seance mcp` or `seance inbox` is. The two run in sequence, so both sit under the same shell pid.
     const file = (name: string): string => join(base, `rs-${name}`);
     const claude = (name: string): string =>
       underClaude(claudeBin, {

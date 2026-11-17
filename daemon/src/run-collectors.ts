@@ -10,7 +10,7 @@ import { log } from "./log.ts";
 import type { MetricsStore } from "./metrics-store.ts";
 import type { Fetch } from "./seams.ts";
 import { fitStatus } from "./status.ts";
-import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
+import { createTelemetry, MIN_CPU_WINDOW_MS, type HostProbe, type Registered } from "./telemetry.ts";
 import type { AuthView } from "./auth-health.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import type { TraitLists } from "./trait-probes.ts";
@@ -34,6 +34,8 @@ export interface CollectorDeps {
   readonly draining?: () => boolean;
   /** The close time (`state.closed`): the status's `cl`. */
   readonly closed?: () => number | null;
+  /** `closed.drainAt` while draining: the status's `dr`, only beside `cl`. */
+  readonly drainAt?: () => number | null;
   /** The custodian seat's view, read late (the seat starts after the loop): the status's `cu`. */
   readonly custodian?: () => CustodianStatus | null;
   /** Auth health's view: the status's `ax`/`ae`/`au`. */
@@ -94,6 +96,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
     ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
     ...(collectors.closed === undefined ? {} : { closed: collectors.closed }),
+    ...(collectors.drainAt === undefined ? {} : { drainAt: collectors.drainAt }),
     ...(collectors.custodian === undefined ? {} : { custodian: collectors.custodian }),
     ...(collectors.auth === undefined ? {} : { auth: collectors.auth }),
     ...(collectors.traits === undefined ? {} : { traits: collectors.traits }),
@@ -111,6 +114,8 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
   let lastStartedAt: number | null = null;
   let refreshPending = false;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let pressureTimer: ReturnType<typeof setTimeout> | null = null;
+  let pressureFollowed = false;
   // Samples started and not yet resolved (tick and send both), and the latest of them: ticks queue in
   // order, so the last to start is the last to finish.
   let active = 0;
@@ -140,8 +145,10 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
           trimWarned = true;
         }
         return loop.send(status, current).then((sent) => {
-          if (sent) lastSentAt = collectors.now();
-          return sent;
+          if (!sent) return false;
+          lastSentAt = collectors.now();
+          followPressure(status);
+          return true;
         });
       })
       .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`))
@@ -181,19 +188,38 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     // Fresh: a sample that starts after the gate change, never a tick already reading the old gate.
     sampleNow(true);
   };
+  const refresh = (): void => {
+    // One pending is enough: the collectors read the gate when the tick runs, not when it was asked for.
+    if (stopped || refreshPending) return;
+    refreshPending = true;
+    attemptRefresh();
+  };
+  // A status with neither cpu nor mem is `pressure_unknown` to the router, and a fresh daemon's first
+  // ones always lack cpu (no delta yet, or one under `MIN_CPU_WINDOW_MS`); where mem fails too (macOS's
+  // sysctl exec), the machine took no work until the next beat, up to an interval away. So one sample
+  // once a cpu window has passed, through `refresh` for the floor. Once per stretch without pressure,
+  // not per status: a host that never reads it would otherwise send at the floor's pace for good.
+  const followPressure = (status: MachineStatus): void => {
+    if (status.cpu !== undefined || status.mem !== undefined) {
+      pressureFollowed = false;
+      return;
+    }
+    if (pressureFollowed) return;
+    pressureFollowed = true;
+    pressureTimer = setTimeout(() => {
+      pressureTimer = null;
+      refresh();
+    }, MIN_CPU_WINDOW_MS);
+  };
   return {
     sampleNow: () => sampleNow(),
-    refresh: (): void => {
-      // One pending is enough: the collectors read the gate when the tick runs, not when it was asked for.
-      if (stopped || refreshPending) return;
-      refreshPending = true;
-      attemptRefresh();
-    },
+    refresh,
     latest: () => telemetry.latest(),
     stop: (): void => {
       stopped = true;
       stopBeat?.();
       if (refreshTimer !== null) clearTimeout(refreshTimer);
+      if (pressureTimer !== null) clearTimeout(pressureTimer);
     },
   };
 }

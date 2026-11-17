@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   CAPABILITIES,
   isRecord,
@@ -15,7 +15,7 @@ import { LazyRelay } from "../daemon/src/app-relay.ts";
 import { amendAuto } from "../daemon/src/auto.ts";
 import { relayFleet } from "../daemon/src/fleet.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
-import { killWindow, TOKEN, wsUrl, type Stack } from "./harness.ts";
+import { cancelTask, killWindow, takeLeakedTasks, TOKEN, wsUrl, type Stack } from "./harness.ts";
 import { startSuite, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
@@ -24,6 +24,10 @@ let stack: Stack;
 beforeAll(async () => {
   suite = await startSuite("e2e-amend");
   ({ stack } = suite);
+});
+
+afterEach(() => {
+  expect(takeLeakedTasks()).toEqual([]);
 });
 
 afterAll(async () => {
@@ -108,6 +112,29 @@ function amended(reply: TaskReply | { readonly ok: false } | null): TaskSpec {
   return reply.task.spec;
 }
 
+/**
+ * Why a task never ran, for a timeout's message: the leader's own state and route decision for it, and this
+ * client's view of each machine's status (a missing or stale one is a route filter). CI saw it time out twice
+ * with nothing in the log saying which filter held it.
+ */
+async function whyNotRunning(client: RelayClient, id: string): Promise<string> {
+  const queue = await client.queue({ tasks: [id] });
+  const task = queue !== null && "tasks" in queue ? queue.tasks.find((t) => t.id === id) : undefined;
+  const leader =
+    task === undefined
+      ? `leader: task not listed (${JSON.stringify(queue)})`
+      : `leader: state=${task.state} decision=${JSON.stringify(task.decision ?? null)}`;
+  const now = Date.now();
+  const machines = client.getState().machines.map((m) => {
+    const status =
+      m.status === undefined
+        ? "none"
+        : `age=${now - m.status.at * 1000}ms scan=${m.status.scan === m.scannedAt ? "current" : "other"} quota=${m.status.quota?.length ?? 0}`;
+    return `${m.name}: connected=${m.connected} status=${status}`;
+  });
+  return [leader, `client's machines: ${machines.join("; ")}`].join("\n");
+}
+
 const auditLines = (spy: { readonly mock: { readonly calls: readonly unknown[][] } }): readonly string[] =>
   spy.mock.calls.map((args) => args.join(" "));
 
@@ -121,7 +148,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     const dependent = crypto.randomUUID();
     let window: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const origin = await readyOrigin(client);
       expect(await client.pause({ until: "resume" })).toMatchObject({ holds: [{ until: "resume" }] });
@@ -174,6 +201,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
         async () => (await stack.queue().get(id))?.body?.state === "running",
         "the amended task to run",
         20_000,
+        () => whyNotRunning(client, id),
       );
       window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
       // The stub's records: the seed on its stdin, and claude's argv.
@@ -209,8 +237,8 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     } finally {
       audit.mockRestore();
       // Cancelled before the resume, so nothing still waiting is placed on the way out.
-      await client.cancel(id).catch(() => null);
-      await client.cancel(dependent).catch(() => null);
+      await cancelTask(client, id);
+      await cancelTask(client, dependent);
       await client.resume().catch(() => null);
       if (window !== null) await killWindow(window);
       client.stop();
@@ -223,7 +251,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     const big = crypto.randomUUID();
     const small = crypto.randomUUID();
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const origin = await readyOrigin(client);
       await client.pause({ until: "resume" });
@@ -274,8 +302,8 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
       ).toHaveLength(1);
     } finally {
       audit.mockRestore();
-      await client.cancel(big).catch(() => null);
-      await client.cancel(small).catch(() => null);
+      await cancelTask(client, big);
+      await cancelTask(client, small);
       await client.resume().catch(() => null);
       client.stop();
     }
@@ -298,7 +326,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     });
     const fleet = relayFleet(lazy);
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const origin = await readyOrigin(client);
       await client.pause({ until: "resume" });
@@ -326,7 +354,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
           "cli",
         );
         expect(refused.ok).toBe(false);
-        expect(refused.text).toContain("needs `seanced update`");
+        expect(refused.text).toContain("needs `seance update`");
         expect(amendCalls).not.toHaveBeenCalled();
         expect((await stack.queue().get(id))?.body?.spec.title).toBe("older");
 
@@ -338,7 +366,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
         lease.release();
       }
     } finally {
-      await client.cancel(id).catch(() => null);
+      await cancelTask(client, id);
       await client.resume().catch(() => null);
       lazy.stop();
       client.stop();

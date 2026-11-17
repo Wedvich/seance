@@ -1,28 +1,38 @@
 import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import { MachinesScreen } from "./components/machines.tsx";
-import { QueueScreen, type OlderActions } from "./components/queue.tsx";
+import { HeaderMenu } from "./components/header-menu.tsx";
+import { MachinesHeading, MachinesScreen } from "./components/machines.tsx";
+import { QueueHeading, QueueScreen, type OlderActions } from "./components/queue.tsx";
+import { RelaySettings } from "./components/relay-dot.tsx";
 import { Settings } from "./components/settings.tsx";
-import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
+import { PromptHeading, SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
-import { deriveArchivist, deriveCloseSheet, deriveMachines } from "./machines-view.ts";
+import {
+  deriveArchivist,
+  deriveCloseSheet,
+  deriveDrainSheet,
+  deriveMachines,
+  type DrainInputs,
+} from "./machines-view.ts";
 import { deriveOlder } from "./older-view.ts";
 import { archiveCharts } from "./state.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
-import { screenKey, TransitionRunner } from "./transition.ts";
+import { screenKey, TransitionRunner, visibleFocus } from "./transition.ts";
 import { deriveDrainAvailability, deriveView, type AppState } from "./view.ts";
 
 export function App(props: { store: Store; push: PushClient }): JSX.Element {
   const { store, push } = props;
   const state = useStoreState(store);
-  const { layer } = screenKey(state);
+  const { screen, settings: settingsOpen } = screenKey(state);
   const actions = useSpawnActions(store);
   const olderActions = useOlderActions(store);
   const wide = useWide(store);
+  // Here, not in the store: the header's count and the Queue screen's banner both open it, and it holds nothing to keep.
+  const [limitsOpen, setLimitsOpen] = useState(false);
 
   useEffect(() => store.attach(), [store]);
 
@@ -51,7 +61,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         machines={state.relay.machines}
         aliases={state.accounts.aliases}
         now={now}
-        onQueue={wide ? undefined : actions.openQueue}
+        onQueue={wide ? undefined : () => store.openQueue()}
         waitingNote={view.autoAvailability.note}
         startNowRefusal={state.startNowRefusal}
         onRetry={() => store.retrySpawn(verdict)}
@@ -70,41 +80,58 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         now={now}
         preview={state.preview}
         afterSheet={state.sheet === "after" ? deriveAfterSheet(state, now) : null}
-        columns={wide}
       />
     );
-  const queue = (onDismiss?: () => void, onOpenSettings?: () => void): JSX.Element => (
-    <QueueScreen
-      view={deriveQueue(state, now)}
-      relayState={view.relayState}
-      notice={state.queueNotice}
-      onDismissNotice={() => store.dismissQueueNotice()}
-      pausing={state.pausing}
-      discarding={state.discarding}
-      focusedTask={state.focusedTask}
-      onFocused={() => store.clearFocus()}
-      onDismiss={onDismiss}
-      onRefresh={() => {
-        void store.refreshQueue();
-        store.refreshOlder();
-      }}
-      onCancel={(id) => void store.cancelTask(id)}
-      onMarkDone={(id) => void store.markDone(id)}
-      onRunNow={(id) => void store.runNow(id)}
-      onContinue={(id) => void store.continueTask(id)}
-      onPass={(id) => void store.passTask(id)}
-      onFollowUp={(id) => store.followUp(id)}
-      onPause={() => void store.pauseQueue()}
-      onResume={(account) => void store.resumeQueue(account)}
-      onDiscard={() => void store.discardUnreadable()}
-      onOpenSettings={onOpenSettings}
-      older={deriveOlder(state, now)}
-      olderActions={olderActions}
-    />
-  );
+  const prompt = (): Pane => ({
+    // The verdict is a full screen of its own, with no header.
+    heading: verdict === null ? <PromptHeading meta={view.meta} /> : null,
+    body: formOrVerdict,
+  });
+  const queue = (): Pane => {
+    const queueView = deriveQueue(state, now);
+    return {
+      heading: (
+        <QueueHeading
+          summary={queueView.summary}
+          onLimits={queueView.limit === null ? null : () => setLimitsOpen(true)}
+        />
+      ),
+      body: (
+        <QueueScreen
+          view={queueView}
+          notice={state.queueNotice}
+          onDismissNotice={() => store.dismissQueueNotice()}
+          pausing={state.pausing}
+          discarding={state.discarding}
+          limitsOpen={limitsOpen}
+          limiting={state.limiting}
+          onOpenLimits={() => setLimitsOpen(true)}
+          onCloseLimits={() => setLimitsOpen(false)}
+          onSetLimit={(fleet) => {
+            // Closed at once: a refusal is the screen's notice, as a pause's is.
+            setLimitsOpen(false);
+            void store.setFleetLimit(fleet);
+          }}
+          focusedTask={visibleFocus(state)}
+          onFocused={() => store.clearFocus()}
+          onCancel={(id) => void store.cancelTask(id)}
+          onMarkDone={(id) => void store.markDone(id)}
+          onRunNow={(id) => void store.runNow(id)}
+          onContinue={(id) => void store.continueTask(id)}
+          onPass={(id) => void store.passTask(id)}
+          onFollowUp={(id) => store.followUp(id)}
+          onPause={() => void store.pauseQueue()}
+          onResume={(account) => void store.resumeQueue(account)}
+          onDiscard={() => void store.discardUnreadable()}
+          older={deriveOlder(state, now)}
+          olderActions={olderActions}
+        />
+      ),
+    };
+  };
   // A modal dialog rather than a screen: full-screen on a phone, centred over
   // the columns on a desk.
-  const settings = layer === "settings" && (
+  const settings = settingsOpen && (
     <SettingsDialog key="settings" wide={wide} onDismiss={actions.dismissLayer}>
       <main className={wide ? "screen stage-panel" : "screen stage-panel screen-layer-host"}>
         <Settings
@@ -120,91 +147,132 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       </main>
     </SettingsDialog>
   );
-  const machines = (onDismiss?: () => void): JSX.Element => (
-    <MachinesScreen
-      view={deriveMachines(
-        state.relay.machines,
-        now,
-        state.relay.scheduler,
-        state.accounts.aliases,
-        state.relay.fleetQuota,
-        archiveCharts(state.relay.archivist, state.accounts.nameable),
-        state.relay.status === "open",
-        {
-          passes: deriveDrainAvailability(state.relay),
-          tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
-          sessions: state.sessions,
-        },
-      )}
-      archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
-      relayLine={view.relayLine}
-      relayState={view.relayState}
-      settled={state.relay.registrySettled}
-      history={state.history}
-      accounts={state.accounts}
-      availability={state.availability}
-      custodian={state.custodian}
-      onCustodian={(deviceId, request) => void store.custodianControl(deviceId, request)}
-      closeSheet={(machine) =>
-        deriveCloseSheet(machine, {
-          passes: deriveDrainAvailability(state.relay),
-          tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
-          sessions: state.sessions,
-        })
-      }
-      machines={state.relay.machines}
-      onReadDrain={(deviceId) => store.readDrain(deviceId)}
-      onSetOpen={(deviceId, open, drainNow) => void store.setMachineOpen(deviceId, open, drainNow)}
-      onDismiss={onDismiss}
-      onShowHistory={(target, range) => void store.showHistory(target, range)}
-      onHideHistory={() => store.hideHistory()}
-      onOpenRename={(accountId) => store.openAccountRename(accountId)}
-      onCloseRename={() => store.closeAccountRename()}
-      onRename={(accountId, text) => store.renameAccount(accountId, text)}
-    />
-  );
+  const drainInputs = (): DrainInputs => ({
+    passes: deriveDrainAvailability(state.relay),
+    tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
+    sessions: state.sessions,
+    idle: state.queueView?.kind === "ok" ? state.queueView.idle.map((ref) => ref.taskId) : [],
+  });
+  const machines = (): Pane => {
+    const machinesView = deriveMachines(
+      state.relay.machines,
+      now,
+      state.relay.scheduler,
+      state.accounts.aliases,
+      state.relay.fleetQuota,
+      archiveCharts(state.relay.archivist, state.accounts.nameable),
+      state.relay.status === "open",
+      drainInputs(),
+      state.queueView?.kind === "ok" ? state.queueView.holds : null,
+    );
+    return {
+      heading: (
+        <MachinesHeading
+          relayLine={view.relayLine}
+          relayState={view.relayState}
+          settled={state.relay.registrySettled}
+          scheduler={machinesView.scheduler}
+        />
+      ),
+      body: (
+        <MachinesScreen
+          view={machinesView}
+          archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
+          settled={state.relay.registrySettled}
+          history={state.history}
+          accounts={state.accounts}
+          availability={state.availability}
+          custodian={state.custodian}
+          onCustodian={(deviceId, request) => void store.custodianControl(deviceId, request)}
+          closeSheet={(machine, soft) => deriveCloseSheet(machine, drainInputs(), state.relay.scheduler, soft)}
+          drainSheet={(machine) => deriveDrainSheet(machine, drainInputs())}
+          machines={state.relay.machines}
+          onReadDrain={(deviceId) => store.readDrain(deviceId)}
+          onSetOpen={(deviceId, open, close) => void store.setMachineOpen(deviceId, open, close)}
+          accountOpen={state.accountOpen}
+          pausing={state.pausing}
+          onSetAccountOpen={(accountId, open) => void store.setAccountOpen(accountId, open)}
+          onShowHistory={(target, range) => void store.showHistory(target, range)}
+          onHideHistory={() => store.hideHistory()}
+          onOpenRename={(accountId) => store.openAccountRename(accountId)}
+          onCloseRename={() => store.closeAccountRename()}
+          onRename={(accountId, text) => store.renameAccount(accountId, text)}
+        />
+      ),
+    };
+  };
 
   // Settings stays a layer, a dialog over the columns; queue and machines no
   // longer need to be one.
   if (wide) {
+    const form = prompt();
+    const fleet = machines();
+    const tasks = queue();
     return (
       <div className="desk">
         <main key="form" className="screen desk-col screen-base-host">
-          {formOrVerdict}
+          {form.heading !== null && <header className="header">{form.heading}</header>}
+          {form.body}
         </main>
         <main key="machines" className="screen desk-col">
-          {machines()}
+          <header className="header">{fleet.heading}</header>
+          {fleet.body}
         </main>
         <main key="queue" className="screen desk-col">
-          {queue(undefined, actions.openSettings)}
+          <header className="header">
+            {tasks.heading}
+            {/* The rightmost column, so the settings pill sits in its header. */}
+            <div className="header-actions">
+              <RelaySettings state={view.relayState} onClick={actions.openSettings} />
+            </div>
+          </header>
+          {tasks.body}
         </main>
         {settings}
       </div>
     );
   }
 
-  // Only the current depth renders: a view transition's old screen is a
-  // snapshot, so the one leaving never has to stay mounted.
+  // One header for the three peer screens, outside the keyed body, so its menu
+  // never re-mounts and a switch fades only what changed (screen.css, `switch`).
+  // Only the current screen's body renders: a view transition's old screen is a
+  // snapshot. Under Settings the page is hidden rather than unmounted, so the
+  // push captures it giving way and closing Settings finds it as it was.
+  const pane = screen === "queue" ? queue() : screen === "machines" ? machines() : prompt();
   return (
     <div className="stage">
-      {layer === null && (
-        <main key="form" className="screen stage-panel screen-base-host">
-          {formOrVerdict}
-        </main>
-      )}
-      {layer === "queue" && (
-        <main key="queue" className="screen stage-panel screen-layer-host">
-          {queue(actions.dismissLayer)}
-        </main>
-      )}
-      {layer === "machines" && (
-        <main key="machines" className="screen stage-panel screen-layer-host">
-          {machines(actions.dismissLayer)}
-        </main>
-      )}
+      <main className="screen stage-panel screen-base-host" hidden={settingsOpen}>
+        {pane.heading !== null && (
+          <header className="header phone-header">
+            <div key={screen} className="phone-heading">
+              {pane.heading}
+            </div>
+            <div className="header-actions">
+              <HeaderMenu
+                state={view.relayState}
+                current={screen}
+                queueAttention={view.queueAttention}
+                onPrompt={() => store.showPrompt()}
+                onQueue={() => store.openQueue()}
+                onMachines={() => store.openMachines()}
+                onSettings={actions.openSettings}
+              />
+            </div>
+          </header>
+        )}
+        <div key={screen} className="screen phone-body">
+          {pane.body}
+        </div>
+      </main>
       {settings}
     </div>
   );
+}
+
+/** One screen as the app frames it: its header's title block, an optional header control, and the body. */
+interface Pane {
+  readonly heading: JSX.Element | null;
+  readonly body: JSX.Element;
 }
 
 /** Room for three phone-width columns side by side. */
@@ -275,8 +343,6 @@ function useSpawnActions(store: Store): SpawnActions {
       clearPrompt: () => store.clearPrompt(),
       undoClear: () => store.undoClear(),
       openSettings: () => store.openSettings(),
-      openQueue: () => store.openQueue(),
-      openMachines: () => store.openMachines(),
       openSheet: (sheet) => store.openSheet(sheet),
       toggleWorktree: () => store.toggleWorktree(),
       spawn: () => void store.spawn(),
@@ -284,7 +350,6 @@ function useSpawnActions(store: Store): SpawnActions {
       dismissLayer: () => store.dismissLayer(),
       pickMachine: (deviceId) => store.pickMachine(deviceId),
       pickAccount: (accountId) => store.pickAccount(accountId),
-      refreshPreview: () => void store.refreshPreview(),
       removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
       rescan: (deviceId) => void store.rescan(deviceId),

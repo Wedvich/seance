@@ -28,6 +28,7 @@ import {
   CUSTODIAN_STATES,
   DECISION_MAX_CANDIDATES,
   DRAIN_REFUSALS,
+  STACK_BASES,
   DEP_AFTER,
   DONE_SIGNALS,
   EXIT_STATUS_MAX,
@@ -37,6 +38,7 @@ import {
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   LINEAR_KEY_MAX_LENGTH,
+  FLEET_LIMIT_MAX,
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   PAUSE_UNTIL,
@@ -133,12 +135,17 @@ import {
   type PauseHold,
   type PauseRecord,
   type PauseReply,
+  type SchedulerLimits,
+  type SchedulerSettingsRecord,
+  type SetLimitsReply,
+  type SetLimitsRequest,
   type PauseRequest,
   type ContinuedBy,
   type CustodianEvent,
   type FlagReason,
   type TaskFlag,
   type DrainedStamp,
+  type TaskStack,
   type PrAlertStamp,
   type QuotaExhaustedStamp,
   type PrStatus,
@@ -161,6 +168,7 @@ import {
   type UnreadableTaskRef,
   type IdleRelease,
   type IdleTaskRef,
+  type PassRefusalRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -633,7 +641,9 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (drn !== undefined && drn !== true) return null;
   const { cl } = value;
   if (cl !== undefined && !(isFiniteNumber(cl) && cl > 0)) return null;
-  // Unlike `drn` and `cl`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
+  const { dr } = value;
+  if (dr !== undefined && !(isFiniteNumber(dr) && dr > 0 && cl !== undefined)) return null;
+  // Unlike `drn`, `cl` and `dr`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
   const cu = value["cu"] === undefined ? null : parseCustodianStatus(value["cu"]);
   return {
     at: value["at"],
@@ -654,6 +664,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(tu === undefined ? {} : { tu }),
     ...(drn === undefined ? {} : { drn }),
     ...(cl === undefined ? {} : { cl }),
+    ...(dr === undefined ? {} : { dr }),
     ...(cu === null ? {} : { cu }),
   };
 }
@@ -1434,6 +1445,7 @@ function parseReason(value: unknown): Reason | null {
     case "predecessor_account":
     case "continue_unsupported":
     case "attachments_unsupported":
+    case "base_unsupported":
     case "auth_missing":
     case "auth_expired":
     case "base_unpushed":
@@ -1726,6 +1738,14 @@ export function parseQuotaExhaustedStamp(value: unknown): QuotaExhaustedStamp | 
 }
 
 /** The stamp of the leader's last drain pass, built field by field; null when malformed. */
+/** `Task.stack`, exact keys: display-only, so its caller drops a bad one and keeps the task. */
+export function parseTaskStack(value: unknown): TaskStack | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "task" || key === "on")) return null;
+  const { task, on } = value;
+  const known = STACK_BASES.find((b) => b === on);
+  return isTaskId(task) && known !== undefined ? { task, on: known } : null;
+}
+
 export function parseDrainedStamp(value: unknown): DrainedStamp | null {
   const keys = new Set(["at", "tried", "refused", "held"]);
   if (!isRecord(value) || !Object.keys(value).every((key) => keys.has(key))) return null;
@@ -1830,6 +1850,9 @@ export function parseTask(value: unknown): Task | null {
   const idleRelease = known === "running" ? parseIdleRelease(value["idleRelease"]) : null;
   // Dropped, never fatal, like `prAlert`: display-only.
   const flag = value["flag"] === undefined ? null : parseTaskFlag(value["flag"]);
+  // Dropped, never fatal, like `flag`: display-only, and a record without it reads as an older leader's.
+  const stack =
+    value["stack"] === undefined || known === "queued" || known === "ready" ? null : parseTaskStack(value["stack"]);
   const { remoteSession, inputReason, inputTool } = value;
   const waiting = known === "needs-input" || known === "lost";
   return {
@@ -1854,6 +1877,7 @@ export function parseTask(value: unknown): Task | null {
     ...(continuedBy === null ? {} : { continuedBy }),
     ...(idleRelease === null ? {} : { idleRelease }),
     ...(flag === null ? {} : { flag }),
+    ...(stack === null ? {} : { stack }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in
@@ -1929,6 +1953,27 @@ export function parsePauseRecord(value: unknown): PauseRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
   const holds = parseHolds(value["holds"]);
   return holds === null ? null : { version: value["version"], holds };
+}
+
+export function isFleetLimit(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= FLEET_LIMIT_MAX;
+}
+
+/**
+ * Strict, unknown keys included: a limit this build cannot read, or one a newer
+ * leader added, must not read as none.
+ */
+function parseLimits(value: unknown): SchedulerLimits | null {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "fleet")) return null;
+  const { fleet } = value;
+  if (fleet === undefined) return {};
+  return isFleetLimit(fleet) ? { fleet } : null;
+}
+
+export function parseSchedulerSettingsRecord(value: unknown): SchedulerSettingsRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"])) return null;
+  const limits = parseLimits(value["limits"]);
+  return limits === null ? null : { version: value["version"], limits };
 }
 
 /**
@@ -2371,12 +2416,18 @@ export function parsePushBranchResponse(value: unknown): PushBranchResponse | nu
   return typeof pushed === "boolean" ? { ok: true, remoteBranch, tip, pushed } : null;
 }
 
-/** `availability`, at the daemon: `now` is kept only as `true` (the drain's no-wait); a non-boolean refuses the request. */
+/** `availability`, at the daemon: `now` and `soft` are kept only as `true`; a non-boolean, or `soft` beside `now`, refuses the request. */
 export function parseAvailabilityRequest(value: unknown): AvailabilityRequest | null {
   if (!isRecord(value) || typeof value["open"] !== "boolean") return null;
-  const { now } = value;
+  const { now, soft } = value;
   if (now !== undefined && typeof now !== "boolean") return null;
-  return { open: value["open"], ...(now === true ? { now: true as const } : {}) };
+  if (soft !== undefined && typeof soft !== "boolean") return null;
+  if (soft === true && now === true) return null;
+  return {
+    open: value["open"],
+    ...(now === true ? { now: true as const } : {}),
+    ...(soft === true ? { soft: true as const } : {}),
+  };
 }
 
 /** An `availability` answer at a client: a code it does not know reads as a failure. */
@@ -2583,6 +2634,13 @@ export function parseResumeRequest(value: unknown): ResumeRequest | null {
   return isAccountId(account) ? { account } : null;
 }
 
+/** `set-limits`, at the leader. `fleet` must be stated: null lifts the limit, and 0 is a pause, not a limit. */
+export function parseSetLimitsRequest(value: unknown): SetLimitsRequest | null {
+  if (!isRecord(value)) return null;
+  const { fleet } = value;
+  return fleet === null || isFleetLimit(fleet) ? { fleet } : null;
+}
+
 /** `discard`, at the leader: the id and the version a `queue` reply listed the record under. */
 export function parseDiscardRequest(value: unknown): DiscardRequest | null {
   if (!isRecord(value) || !isTaskId(value["taskId"]) || !isVersion(value["version"])) return null;
@@ -2619,6 +2677,12 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   // Lenient: a cap that is not a positive integer only costs the header its denominator.
   const globalMax = value["globalMax"];
   const cap = typeof globalMax === "number" && Number.isInteger(globalMax) && globalMax > 0 ? globalMax : undefined;
+  // Lenient, whole and per entry: a bad list only costs a refused session pass its explanation ("not confirmed").
+  const listedRefused = value["passRefused"];
+  const passRefused =
+    Array.isArray(listedRefused) && listedRefused.length <= MAX_TASKS
+      ? listedRefused.map(parsePassRefusalRef).filter((entry) => entry !== null)
+      : undefined;
   return {
     tasks,
     at: value["at"],
@@ -2626,7 +2690,16 @@ export function parseQueueReply(value: unknown): QueueReply | null {
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
     ...(idle === undefined || idle.length === 0 ? {} : { idle }),
     ...(cap === undefined ? {} : { globalMax: cap }),
+    ...(value["limitsUnreadable"] === true ? { limitsUnreadable: true } : {}),
+    ...(passRefused === undefined || passRefused.length === 0 ? {} : { passRefused }),
   };
+}
+
+function parsePassRefusalRef(value: unknown): PassRefusalRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
+  const { code, sentAt } = value;
+  if (!isName(code, TASK_FAILURE_LIMITS.code)) return null;
+  return { taskId: value["taskId"], code, ...(isFiniteNumber(sentAt) ? { sentAt } : {}) };
 }
 
 function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
@@ -2670,6 +2743,12 @@ export function parsePauseReply(value: unknown): PauseReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const holds = isRecord(value) ? parseHolds(value["holds"]) : null;
   return holds === null ? null : { holds };
+}
+
+export function parseSetLimitsReply(value: unknown): SetLimitsReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const limits = isRecord(value) ? parseLimits(value["limits"]) : null;
+  return limits === null ? null : { limits };
 }
 
 /** A `lead-proof` payload. The term is the relay's counter, so never negative. */

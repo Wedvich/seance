@@ -167,6 +167,14 @@ describe("fitStatus", () => {
     expect(fitStatus(closed, padded({ ...closed, quota: undefined, tr: 3 })).cl).toBe(1_763_000_000_000);
   });
 
+  test("the drain's start is never trimmed either", () => {
+    const draining = { ...status(3), cl: 1_763_000_000_000, dr: 1_763_000_300_000 };
+    const crowded = fitStatus({ ...draining, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.dr).toBe(1_763_000_300_000);
+    expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
+  });
+
   test("the custodian's view is never trimmed, and the worst case beside every other kept field fits the budget", () => {
     const cu = {
       s: "running" as const,
@@ -179,7 +187,15 @@ describe("fitStatus", () => {
     expect(crowded.cu).toEqual(cu);
     expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
     const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
-    const worst = fitStatus({ ...status(12), ae, cu, drn: true, cl: 1_763_000_000_000, sess: [9] });
+    const worst = fitStatus({
+      ...status(12),
+      ae,
+      cu,
+      drn: true,
+      cl: 1_763_000_000_000,
+      dr: 1_763_000_300_000,
+      sess: [9],
+    });
     expect(worst.cu).toEqual(cu);
     expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
   });

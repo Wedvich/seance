@@ -91,6 +91,7 @@ export function sessionPassInput(pass: SessionPass, from: string): NonNullable<P
     pushed: { remoteBranch: pass.remoteBranch, tip: pass.tip },
     ...(pass.record === undefined ? {} : { record: pass.record }),
     ...(pass.drain === true ? { drain: true as const } : {}),
+    sentAt: pass.at,
   };
 }
 
@@ -283,7 +284,7 @@ function report(err: unknown): void {
 /**
  * Every write the leader makes is a change an app would show, and the library
  * has no hook for it, so the store is watched instead: `changed` hears the task
- * id (null for the pause record) of every write that landed or may have
+ * id (null for the pause record and the limits) of every write that landed or may have
  * (`indeterminate`). A refused one changed nothing.
  */
 function watched(inner: QueueStore, changed: (id: string | null) => void): QueueStore {
@@ -304,6 +305,8 @@ function watched(inner: QueueStore, changed: (id: string | null) => void): Queue
     },
     delete: async (id, expect) => landed(await inner.delete(id, expect), id),
     putPause: async (expect, holds) => landed(await inner.putPause(expect, holds), null),
+    getLimits: () => inner.getLimits(),
+    putLimits: async (expect, limits) => landed(await inner.putLimits(expect, limits), null),
   };
 }
 

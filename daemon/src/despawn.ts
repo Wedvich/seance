@@ -23,7 +23,7 @@ export interface DespawnOptions {
   readonly closing?: (taskId: string) => Promise<unknown>;
   /**
    * A task pane that dies during the graceful exit is left for harvest to note and close. For a process
-   * without the ledger (`seanced despawn`): the pane-died hook keeps the server's last pane dead, and
+   * without the ledger (`seance despawn`): the pane-died hook keeps the server's last pane dead, and
    * closing it here would take tmux down (`exit-empty`) with the recorded exit and the close mark.
    */
   readonly leaveDeadTask?: boolean;

@@ -1,4 +1,4 @@
-// Apart from `session-events.ts` so `seanced session-event`, which runs several
+// Apart from `session-events.ts` so `seance session-event`, which runs several
 // times a turn in every session, loads only these and not the daemon's side
 // (tmux, the launch ledger, the FFI parent walk).
 

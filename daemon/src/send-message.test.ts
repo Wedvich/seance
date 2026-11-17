@@ -101,7 +101,7 @@ describe("sendMessage", () => {
 
   test("every reply code has its own wording, and only a daemon that predates the frame is told to update", async () => {
     const wording = {
-      invalid: "may predate send_message (`seanced update`)",
+      invalid: "may predate send_message (`seance update`)",
       unbound: "not in a tmux pane this machine's daemon can see",
       unsupported: "runs no message delivery",
       stopping: "is stopping",
@@ -122,7 +122,7 @@ describe("sendMessage", () => {
         const result = await sendMessage(note, { path: fake.path });
         expect(result.ok).toBe(false);
         expect(result.text).toContain(text);
-        expect(result.text.includes("seanced update")).toBe(code === "invalid");
+        expect(result.text.includes("seance update")).toBe(code === "invalid");
       } finally {
         fake.stop();
       }
@@ -135,7 +135,7 @@ describe("sendMessage", () => {
       const result = await sendMessage(note, { path: fake.path });
       expect(result.ok).toBe(false);
       expect(result.text).toContain("has no inbox listener");
-      expect(result.text).toContain("`seanced mod install`");
+      expect(result.text).toContain("`seance mod install`");
     } finally {
       fake.stop();
     }
@@ -250,7 +250,7 @@ describe("sendMessage", () => {
         });
         expect(result.ok).toBe(false);
         expect(result.text).toContain("predate replies");
-        expect(result.text).toContain("`seanced update`");
+        expect(result.text).toContain("`seance update`");
         expect(fake.frames).toHaveLength(1);
       } finally {
         fake.stop();
@@ -411,7 +411,7 @@ describe("sendMessage", () => {
           // oxlint-disable-next-line no-await-in-loop -- one double per code
           const result = await sendMessage(note, { path: fake.path, routeGate: gateOk });
           expect(result.ok).toBe(false);
-          expect(result.text).toContain("predates cross-machine messages (`seanced update`)");
+          expect(result.text).toContain("predates cross-machine messages (`seance update`)");
           expect(result.text).not.toContain("no scheduler route was asked");
         } finally {
           fake.stop();

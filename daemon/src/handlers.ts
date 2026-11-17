@@ -30,6 +30,7 @@ import {
   isRecord,
   isAutonomyLevel,
   httpsUrl,
+  isBranchName,
   isTaskId,
   parseAttachmentManifest,
   parseDeliverMessageRequest,
@@ -74,6 +75,7 @@ import { log } from "./log.ts";
 import type { Messages } from "./messages.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
+import type { AvailabilityOutcome, CloseMode } from "./state.ts";
 import { isUpdateAvailable } from "./update-notice.ts";
 
 export interface HandlerContext {
@@ -127,11 +129,11 @@ export interface CustodianControl {
 
 export interface MachineAvailability {
   readonly closed: () => number | null;
-  /** Persists, then refreshes status; `changed` false when it already was. Throws when the write fails. */
+  /** Persists, then refreshes status; `outcome` `unchanged` when nothing changed. Throws when the write fails. */
   readonly set: (
     open: boolean,
-    now?: boolean,
-  ) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
+    mode: CloseMode,
+  ) => Promise<{ readonly closed: number | null; readonly outcome: AvailabilityOutcome }>;
 }
 
 /** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
@@ -172,6 +174,7 @@ export interface TaskLaunches {
         readonly handedOff?: true;
         readonly continuedPr?: string;
         readonly branch?: string;
+        readonly stackedOn?: string;
       }
     | { readonly refused: string };
   /**
@@ -217,10 +220,12 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (withAutonomy({ autonomy, plan }) === null) return false;
   // Bounded, not just typed: it is written to the pane and echoed into every session list.
   if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
-  // Fail closed until stacking lands: a spawn that silently started from the default branch
-  // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
-  // holds the name to `isBranchName` instead.
-  if (obj["baseBranch"] !== undefined) return false;
+  // Held to git's `check-ref-format` rules, and only beside worktree mode: dropped, or beside a mode
+  // that makes no worktree, the session would silently start from the default branch — the hazard
+  // the `baseBranch` capability exists for. Who may send it is `baseBranchRefusal`'s.
+  if (obj["baseBranch"] !== undefined && (!isBranchName(obj["baseBranch"]) || obj["mode"] !== "worktree")) return false;
+  // Only ever `true`, and it says the opposite of a base: both at once says two things, neither wins.
+  if (obj["noBase"] !== undefined && (obj["noBase"] !== true || obj["baseBranch"] !== undefined)) return false;
   // Malformed is never dropped: a session must not start without the files it was given. A
   // continuation carries none — it finds its directories by worktree.
   if (
@@ -370,6 +375,18 @@ function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | unde
   return undefined;
 }
 
+/**
+ * Who may start a session from another branch: the scheduler's own task spawn, the gate attachments and an
+ * inherited PR have. Refused, never dropped: dropped, the session would start from the default branch.
+ */
+function baseBranchRefusal(request: SpawnRequest, scheduler: boolean): SpawnRefusal | null {
+  if (request.baseBranch === undefined) return null;
+  if (!scheduler || request.client !== SCHEDULER_CLIENT || request.taskId === undefined) {
+    return { ok: false, code: "launch_error", message: "only the scheduler starts a task from another branch" };
+  }
+  return null;
+}
+
 function notContinuable(message: string): SpawnRefusal {
   return { ok: false, code: "not_continuable", message };
 }
@@ -460,6 +477,7 @@ async function continuationSite(
     ...(site.handedOff === true ? { handedOff: true as const } : {}),
     ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
     ...(site.branch === undefined ? {} : { branch: site.branch }),
+    ...(site.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
   };
 }
 
@@ -484,7 +502,7 @@ async function handleSpawn(
       return refusal;
     }
   }
-  const gate = attachmentsRefusal(ctx, payload, scheduler);
+  const gate = attachmentsRefusal(ctx, payload, scheduler) ?? baseBranchRefusal(payload, scheduler);
   if (gate !== null) {
     await audit.failed(gate.code);
     return gate;
@@ -566,6 +584,7 @@ async function handleSpawn(
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     // A continuation watches the worktree it resumed, under its new task id.
     const continuedPr = continuation?.continuedPr ?? inherited;
+    const stackedOn = continuation?.stackedOn ?? outcome.stackedOn;
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
     await settle?.(true, {
       ...(entry === undefined
@@ -576,6 +595,7 @@ async function handleSpawn(
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
               ...(continuedPr === undefined ? {} : { continuedPr }),
+              ...(stackedOn === undefined ? {} : { stackedOn }),
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),
@@ -774,7 +794,8 @@ async function handleMessageReceipt(
 /**
  * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
  * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
- * machine's own sticky `closed` and refreshes `status`; `now` moves the drain ask's interrupt deadline to now (ignored on an open).
+ * machine's own sticky `closed` and refreshes `status`. A plain close starts the drain; `soft` closes without one (a later
+ * plain close then starts it, outcome `drain_started`); `now` moves the drain ask's interrupt deadline to now. Both are ignored on an open.
  */
 async function handleAvailability(
   ctx: HandlerContext,
@@ -793,15 +814,16 @@ async function handleAvailability(
     return { ok: false, code: "invalid_request", message: "malformed availability request" };
   }
   if (ctx.availability === undefined) {
-    await audit(request.open, "unsupported", request.now);
+    await audit(request.open, "unsupported", request.now, request.soft);
     return { ok: false, code: "unsupported", message: "this daemon cannot be closed" };
   }
   try {
-    const { closed, changed } = await ctx.availability.set(request.open, request.now === true);
-    await audit(request.open, !changed ? "unchanged" : request.open ? "reopened" : "closed", request.now);
+    const mode: CloseMode = request.soft === true ? "soft" : request.now === true ? "now" : "drain";
+    const { closed, outcome } = await ctx.availability.set(request.open, mode);
+    await audit(request.open, outcome, request.now, request.soft);
     return { ok: true, closed };
   } catch (err) {
-    await audit(request.open, "internal_error", request.now);
+    await audit(request.open, "internal_error", request.now, request.soft);
     log.error(`availability: could not save state: ${String(err)}`);
     return { ok: false, code: "internal_error", message: "could not save this machine's state" };
   }
@@ -810,7 +832,7 @@ async function handleAvailability(
 /**
  * `custodian`: round now, pause or resume this machine's custodian seat (docs/custodian.md C45, C47). The owner's act,
  * as `availability` is: only an app, on the relay leg, never the scheduler or the local socket (the shell has its own
- * verbs, `seanced custodian round | pause | resume`, which run the same code from files).
+ * verbs, `seance custodian round | pause | resume`, which run the same code from files).
  */
 async function handleCustodian(
   ctx: HandlerContext,

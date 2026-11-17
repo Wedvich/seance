@@ -82,9 +82,15 @@ describe("sessionChange done (#21)", () => {
     expect(sessionChange(task(reported), "done", undefined)).toBeNull();
   });
 
-  test("under until: merged (or absent) it is ignored", () => {
-    expect(sessionChange(task(), "done", FROM_A)).toBeNull();
-    expect(sessionChange(task({ spec: spec({ until: "merged" }) }), "done", FROM_A)).toBeNull();
+  test("under until: merged (or absent) it settles only a task with no PR and no successor", () => {
+    const pr = "https://github.com/acme/app/pull/7";
+    expect(sessionChange(task(), "done", FROM_A)).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(sessionChange(task({ spec: spec({ until: "merged" }) }), "done", FROM_A)?.state).toBe("done");
+    expect(sessionChange(task({ prUrl: pr }), "done", FROM_A)).toBeNull();
+    expect(sessionChange(task(), "done", FROM_A, pr)).toBeNull();
+    expect(sessionChange(task({ successor: "next" }), "done", FROM_A)).toBeNull();
+    expect(sessionChange(task({ state: "awaiting-merge", prUrl: pr }), "done", FROM_A)).toBeNull();
+    expect(sessionChange(task(), "done", { deviceId: "b", pane: "%1" })).toBeNull();
   });
 
   test("a placed task with no pane takes the report's, as an event does", () => {

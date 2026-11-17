@@ -27,11 +27,14 @@ import {
   type PauseHold,
   type PauseRequest,
   type ResumeRequest,
+  type SchedulerLimits,
   type SessionState,
+  type SetLimitsRequest,
   type SpillStamp,
   type SuccessorTrigger,
   type Target,
   closedAt,
+  drainStart,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -50,6 +53,7 @@ import { admission } from "./deps.ts";
 import { resolveMessageTarget, type MessageRoute } from "./message-route.ts";
 import { branchChange, ended as settledEnd, prBound, prChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
+import { LimitsRecord, type LimitsResult } from "./limits.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
 import {
   StoreRevoked,
@@ -67,6 +71,7 @@ import {
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable, unprunable } from "./prune.ts";
+import { stackOf, stackRecord } from "./stack.ts";
 import { drainDue, stampDrain, stampDrainRefusal } from "./drain-trigger.ts";
 import { quotaDue, spillAlerted, stampQuota } from "./quota-trigger.ts";
 import { accountOfPlacement, accountResetAt, exhaustion, route, type Decision, type Exhaustion } from "./route.ts";
@@ -169,7 +174,7 @@ export type MarkDoneResult = ByHandResult;
 /**
  * `runNow`: the task as reserved, or why not. `not_waiting`: it is not `ready`
  * (waiting on admission or deps, or already placed). `unplaceable`: something
- * besides the caps holds it. `conflict`: it moved under the write.
+ * besides the fleet limit holds it. `conflict`: it moved under the write.
  */
 export type RunNowResult =
   | { readonly ok: true; readonly task: Task }
@@ -286,7 +291,25 @@ export interface SessionPassInput {
   readonly record?: string;
   /** The daemon sent it while its machine was closed: `trigger: "drain"` when the machine's status carries `cl`. */
   readonly drain?: true;
+  /** `SessionPass.at`, the daemon's clock: echoed in `sessionPassRefusals` so the session's own tool can tell its pass's verdict from an earlier one's. */
+  readonly sentAt?: number;
 }
+
+/**
+ * A session's own pass the leader refused (`sessionPassRefusals`): the refusal, the daemon's `sentAt` it answers, and
+ * when the leader decided it (its own clock, for expiry only). Memory only, so a new term forgets it.
+ */
+export interface SessionPassRefusal {
+  readonly taskId: string;
+  readonly code: Extract<PassResult, { readonly ok: false }>["code"];
+  readonly sentAt?: number;
+  readonly at: number;
+}
+
+/** How long a session pass's refusal stays readable: the session's tool reads it within seconds of its push. */
+export const SESSION_PASS_REFUSAL_TTL_MS = 10 * 60_000;
+/** At most this many refusals are kept, the oldest dropped first: a refusal is rare, and each is read once. */
+const SESSION_PASS_REFUSALS_MAX = 64;
 
 /** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
 interface ByHand {
@@ -332,6 +355,7 @@ export class Scheduler {
   readonly #log: (line: string) => void;
   readonly #held = new Map<string, Held>();
   readonly #pause: PauseRecord;
+  readonly #limits: LimitsRecord;
   readonly #spills: SpillAlerts;
   /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
   readonly #unreadable = new Map<string, UnreadableTask>();
@@ -426,6 +450,11 @@ export class Scheduler {
   /** Tasks whose session's own refused pass was alerted this term (`pass-refused`): once each, in memory, since a refusal is rare. */
   readonly #passRefusedAlerted = new Set<string>();
   /**
+   * Task id → its session's latest own pass, refused (`sessionPassRefusals`). The pass is fire-and-forget, so this is
+   * the only way its session learns why no successor came: `queue` carries it to the tool that sent the pass.
+   */
+  readonly #sessionPassRefusals = new Map<string, SessionPassRefusal>();
+  /**
    * Task id → when the leader closes its session itself, for a task carrying `successor` whose close has
    * not landed. Entered before the commit write (so no pass sees a task carrying `successor` that no
    * entry covers), kept while the task still carries it, and retried every pass once past `deadline`.
@@ -488,6 +517,7 @@ export class Scheduler {
     this.#prHead = options.prHead;
     this.#log = options.log ?? (() => {});
     this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
+    this.#limits = new LimitsRecord(this.#store, this.#onError);
     this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
   }
@@ -514,11 +544,20 @@ export class Scheduler {
         });
     }
     await this.#pause.load();
+    await this.#limits.load();
   }
 
-  /** The in-flight cap routing enforces. */
-  globalMax(): number {
-    return this.#config.globalMax;
+  /** The limits a person set (none while `unreadable`, when routing places nothing). */
+  limits(): { readonly limits: SchedulerLimits; readonly unreadable: boolean } {
+    return { limits: this.#limits.limits, unreadable: this.#limits.unreadable };
+  }
+
+  /**
+   * Sets every limit as the request states it (`fleet` null: none). Running sessions are never
+   * touched: under a limit below what runs, nothing new is placed until the count falls under it.
+   */
+  async setLimits(request: SetLimitsRequest): Promise<LimitsResult> {
+    return this.#limits.write(request.fleet === null ? {} : { fleet: request.fleet });
   }
 
   /** The holds in force now: a reset hold past its `resumeAt` has lifted, written or not. */
@@ -721,7 +760,7 @@ export class Scheduler {
   }
 
   /** `task` routed over the current fleet and queue, as a pass would. */
-  #route(task: Task, now: number, uncapped = false, attachments = false, release: readonly string[] = []): Decision {
+  #route(task: Task, now: number, runNow = false, attachments = false, release: readonly string[] = []): Decision {
     return capped(
       route({
         task,
@@ -730,10 +769,12 @@ export class Scheduler {
         now,
         config: this.#config,
         holds: this.#pause.holds,
+        pauseUnread: this.#pause.unread,
+        limits: this.#limits.enforced(),
         fleetQuota: this.#fleetQuota(),
         // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
         released: release.length === 0 ? this.#released(now) : new Set([...this.#released(now), ...release]),
-        uncapped,
+        runNow,
         attachments,
       }),
     );
@@ -1252,7 +1293,7 @@ export class Scheduler {
    * waiting for. A `running` or `needs-input` task, or a `lost` one whose
    * machine is connected, has its session ended first, as `cancel` does, since a
    * `done` task holds no slot and a session left running would keep working
-   * beyond the caps. `lost`, `awaiting-merge` and the waiting states are settled
+   * beyond the fleet limit. `lost`, `awaiting-merge` and the waiting states are settled
    * as they stand (their session is gone, or unreachable, or never was); a
    * `lost` one is marked `leftRunning`, as `cancel` marks it. A later event for a `done` task is ignored
    * (`sessionChange` and `branchChange` touch placed tasks only). `reserved` is
@@ -1281,10 +1322,11 @@ export class Scheduler {
   }
 
   /**
-   * Places a `ready` task now, past both concurrency caps (`RouteInput.uncapped`)
-   * and nothing else: a pause, the quota line, disk, a pin and every other filter
-   * still hold it, answered `unplaceable` with nothing written. Once placed it
-   * counts toward the caps like any task, so the fleet may run over them until
+   * Places a `ready` task now, past the fleet limit and the whole-queue pause
+   * (`RouteInput.runNow`) and nothing else: an account's hold, the quota line,
+   * disk, a pin and every other filter still hold it, answered `unplaceable` with
+   * nothing written. The pause stays: the next pass places nothing else. Once placed it
+   * counts toward the limit like any task, so the fleet may run over it until
    * the count drains — as when a machine wakes with released slots. One-shot:
    * nothing on the record says it was forced, so a takeover mid-way leaves it
    * `ready`, waiting as before.
@@ -1390,6 +1432,40 @@ export class Scheduler {
     session?: SessionPassInput,
     since?: number,
   ): Promise<PassResult> {
+    if (session === undefined) return this.#passTask(taskId, trigger, session, since);
+    // A new pass of the task answers for itself: an earlier refusal must not be read as this one's.
+    this.#sessionPassRefusals.delete(taskId);
+    return this.#passTask(taskId, trigger, session, since).then((result) => {
+      if (!result.ok) this.#noteSessionRefusal(taskId, result.code, session.sentAt);
+      return result;
+    });
+  }
+
+  /** Session passes this leader refused within `SESSION_PASS_REFUSAL_TTL_MS`: `queue` shows them. */
+  sessionPassRefusals(): readonly SessionPassRefusal[] {
+    const now = this.#now();
+    return [...this.#sessionPassRefusals.values()].filter((r) => now - r.at < SESSION_PASS_REFUSAL_TTL_MS);
+  }
+
+  #noteSessionRefusal(taskId: string, code: SessionPassRefusal["code"], sentAt: number | undefined): void {
+    const now = this.#now();
+    for (const [id, refusal] of this.#sessionPassRefusals) {
+      if (now - refusal.at >= SESSION_PASS_REFUSAL_TTL_MS) this.#sessionPassRefusals.delete(id);
+    }
+    this.#sessionPassRefusals.delete(taskId);
+    this.#sessionPassRefusals.set(taskId, { taskId, code, ...(sentAt === undefined ? {} : { sentAt }), at: now });
+    for (const id of this.#sessionPassRefusals.keys()) {
+      if (this.#sessionPassRefusals.size <= SESSION_PASS_REFUSALS_MAX) break;
+      this.#sessionPassRefusals.delete(id);
+    }
+  }
+
+  #passTask(
+    taskId: string,
+    trigger: SuccessorTrigger,
+    session: SessionPassInput | undefined,
+    since: number | undefined,
+  ): Promise<PassResult> {
     const joined = this.#passInFlight.get(taskId);
     if (joined !== undefined) {
       this.#log(`pass joined task=${quote(taskId)}`);
@@ -1399,7 +1475,9 @@ export class Scheduler {
       info.joinedBySession = true;
       // The drain pass refused before it created anything must not swallow the session's: that one holds the
       // commit and the record the outside pass could not make.
-      return joined.then((result) => (result.ok || info.created ? result : this.pass(taskId, trigger, session, since)));
+      return joined.then((result) =>
+        result.ok || info.created ? result : this.#passTask(taskId, trigger, session, since),
+      );
     }
     const info = {
       trigger: session === undefined ? trigger : ("session" as const),
@@ -1806,7 +1884,7 @@ export class Scheduler {
     await this.#expire();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
-    // usage and the caps. The spawns are not awaited: one slow machine
+    // usage and the fleet limit. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
     for (const seen of ready) {
@@ -1922,7 +2000,7 @@ export class Scheduler {
 
   /**
    * The drain's outside pass (docs/drain.md §4 step B; DESIGN.md, "Closing a machine"): each machine whose
-   * status carries `cl` has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
+   * whose drain has started (`drainStart`) has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
    * has gone by (`drainDue`). Not gated on placement: the successor waits `ready` when no machine can take
    * it, which is what routing's `closed` filter says. Detached (`#drainPasses`), like the quota trigger's
    * passes. Named so it never reads as `drain()`, the test quiescence helper.
@@ -1935,7 +2013,7 @@ export class Scheduler {
       .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id));
     for (const machine of this.#fleet.machines()) {
       const cl = closedAt(machine);
-      if (cl === null || this.#drainPasses.has(machine.deviceId)) continue;
+      if (cl === null || drainStart(machine) === null || this.#drainPasses.has(machine.deviceId)) continue;
       const task = running.find(
         (t) =>
           drainDue(t, machine, now, config) &&
@@ -2269,6 +2347,9 @@ export class Scheduler {
 
   async #dispatch(task: Task, at: Reservation, decision: Decision): Promise<void> {
     const { spec } = task;
+    // Read now, not at routing: a predecessor's merge or push in between changes the base, never the target,
+    // since routing filtered every daemon that cannot stack by the spec alone (`base_unsupported`).
+    const stack = stackOf(task, new Map(this.tasks().map((t) => [t.id, t])));
     const reply = await this.#fleet.spawn(at.deviceId, {
       repo: at.clone,
       mode: spec.mode,
@@ -2280,6 +2361,8 @@ export class Scheduler {
       ...(spec.autonomy === undefined ? {} : { autonomy: spec.autonomy }),
       ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
       ...(spec.attachments === undefined ? {} : { attachments: spec.attachments }),
+      ...(stack.on === "branch" ? { baseBranch: stack.branch } : {}),
+      ...(stack.on === "nothing" ? { noBase: true } : {}),
       // A successor holds its predecessor's PR (`#runPass`); its daemon notes it so the session may hand it off.
       // Never under `until: "reported"`: a hand-off leaves no session to report, so the task would sit
       // awaiting-merge until `merge_expired`; withholding it keeps the daemon's `prless` refusal.
@@ -2297,7 +2380,9 @@ export class Scheduler {
       ? this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota())
       : null;
     // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
-    await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
+    await this.#update(task.id, (current) =>
+      holds(current, at) ? verdict(current, at, reply, stackRecord(stack)) : null,
+    );
     if (spill === null) return;
     // Its own write, not part of the verdict: that one declines when a session event moved the task
     // first, which is the usual order (the reply waits for the pane's title, a hook need not).

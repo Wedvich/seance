@@ -108,7 +108,7 @@ describe("readState", () => {
   test("returns null for a missing file instead of minting a deviceId", async () => {
     const path = join(base, "never-run", "state.json");
     expect(await readState(path)).toBeNull();
-    // The probe must leave no trace: `seanced mcp` asks this on every tool call,
+    // The probe must leave no trace: `seance mcp` asks this on every tool call,
     // and a box that has never run the daemon must not acquire an identity from
     // being asked whether it has one.
     expect(await Bun.file(path).exists()).toBe(false);

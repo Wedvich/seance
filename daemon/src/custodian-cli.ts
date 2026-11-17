@@ -5,7 +5,7 @@ import { exchange, LocalRequestFailed, LocalUnavailable, RESTART_GRACE_MS } from
 import { custodianNotesPath } from "./paths.ts";
 
 /**
- * `seanced custodian <verb>`: the round's verbs (docs/custodian.md; DESIGN.md, "The custodian frame kind"). Each sends
+ * `seance custodian <verb>`: the round's verbs (docs/custodian.md; DESIGN.md, "The custodian frame kind"). Each sends
  * one `custodian` frame to the local daemon and prints its JSON reply, which is the round's data channel — so nothing
  * here may reach `log.ts` (`daemon/test/message-layering.test.ts` walks the import closure), and the daemon decides who
  * may ask: the frame is bound by this process's pid, never by anything it says. Imported statically by `main.ts` like
@@ -19,7 +19,7 @@ import { custodianNotesPath } from "./paths.ts";
  */
 
 const USAGE =
-  "usage: seanced custodian sessions | close <pane> | capture <pane> | pr <pane> | flag <pane> <reason> [note] | " +
+  "usage: seance custodian sessions | close <pane> | capture <pane> | pr <pane> | flag <pane> <reason> [note] | " +
   "nudge <pane> (text on stdin) | interrupt <pane> | notes [--clear] (text on stdin) | done (text on stdin)";
 
 /** `close` covers a graceful despawn, a fetch and a `gh` read; the rest answer from memory, one read or one small write. */
@@ -71,7 +71,7 @@ export function frameFor(rest: readonly string[], text: () => Promise<string>): 
 export async function cmdCustodian(rest: readonly string[]): Promise<void> {
   if (rest[0] === "notes" && rest[1] === "--clear" && rest.length === 2) {
     await clearNotes().catch(() => {
-      console.error("seanced custodian: could not clear the notes");
+      console.error("seance custodian: could not clear the notes");
       process.exitCode = 2;
     });
     return;
@@ -84,7 +84,7 @@ export async function cmdCustodian(rest: readonly string[]): Promise<void> {
   // The round's own socket, handed over by the round's launch: the CLI cannot derive it, since the round's env holds no state dir.
   const path = process.env["SEANCE_CUSTODIAN_SOCKET"];
   if (path === undefined || path === "") {
-    console.error("seanced custodian: not in a round (SEANCE_CUSTODIAN_SOCKET is unset)");
+    console.error("seance custodian: not in a round (SEANCE_CUSTODIAN_SOCKET is unset)");
     process.exitCode = 2;
     return;
   }
@@ -105,13 +105,13 @@ export async function cmdCustodian(rest: readonly string[]): Promise<void> {
     console.log(JSON.stringify(reply));
     if (isRecord(reply) && reply["ok"] === true) return;
     const code = isRecord(reply) && typeof reply["code"] === "string" ? reply["code"] : "unknown";
-    console.error(`seanced custodian: refused ${code}`);
+    console.error(`seance custodian: refused ${code}`);
     process.exitCode = 1;
   } catch (err) {
     console.error(
       err instanceof LocalUnavailable
-        ? "seanced custodian: the daemon is not running"
-        : `seanced custodian: ${err instanceof LocalRequestFailed ? err.message : "the request failed"}`,
+        ? "seance custodian: the daemon is not running"
+        : `seance custodian: ${err instanceof LocalRequestFailed ? err.message : "the request failed"}`,
     );
     process.exitCode = 2;
   }

@@ -11,19 +11,7 @@ import {
 } from "../src/index.ts";
 import { escalation, inputAlert, inputClock, prBlockedAlert } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
-import {
-  accountMax,
-  enqueue,
-  exclave,
-  FakeFleet,
-  machine,
-  NOW,
-  NOW_S,
-  obs,
-  readerChecked,
-  spec,
-  status,
-} from "./fixtures.ts";
+import { enqueue, exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 const MINUTE = 60_000;
 
@@ -573,14 +561,13 @@ describe("credits spill", () => {
     expect(alerts.map((a) => a.taskId)).toEqual([first.id, third.id]);
   });
 
-  const WIDE: SchedulerConfig = { ...DEFAULT_CONFIG, ...accountMax(20), globalMax: 20 };
   const noReset = machine("a", {
     exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
     status: status({ quota: [obs(0, { h: 95 })] }),
   });
 
   test("one window is one alert across reading jitter and a reading without its reset; the next window alerts", async () => {
-    const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE);
+    const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
     const spillOnce = async (): Promise<void> => {
       await enqueue(store, scheduler, spec());
       await pass(scheduler, fleet, clock.now);
@@ -604,11 +591,7 @@ describe("credits spill", () => {
   });
 
   test("a window warned of alerts once more when it fills, and a new leader holds both alerts", async () => {
-    const { alerts, clock, fleet, make, scheduler, store } = setup(
-      new FakeFleet([spilling(NOW_S + 3600)]),
-      undefined,
-      WIDE,
-    );
+    const { alerts, clock, fleet, make, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
     const forecast = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(alerts).toEqual([expect.objectContaining({ kind: "spill", taskId: forecast.id, window: "5h" })]);
@@ -643,7 +626,7 @@ describe("credits spill", () => {
   });
 
   test("a refused spawn alerts nothing and leaves the window's alert for the next confirmed spill", async () => {
-    const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE);
+    const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
     fleet.scripts.set("a", () => ({ ok: false, code: "launch_error", message: "no" }));
     await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
@@ -660,7 +643,7 @@ describe("credits spill", () => {
     const { clock, errors, fleet, scheduler, store } = setup(
       new FakeFleet([spilling(NOW_S + 3600)]),
       undefined,
-      WIDE,
+      DEFAULT_CONFIG,
       () => {
         throw new Error("sink down");
       },
@@ -672,11 +655,7 @@ describe("credits spill", () => {
   });
 
   test("the window is stamped on each dispatched record; a new leader alerts no spill for it, and one for a later window", async () => {
-    const { alerts, clock, fleet, make, scheduler, store } = setup(
-      new FakeFleet([spilling(NOW_S + 3600)]),
-      undefined,
-      WIDE,
-    );
+    const { alerts, clock, fleet, make, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
     const first = await enqueue(store, scheduler, spec());
     const second = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
@@ -763,7 +742,7 @@ describe("credits spill", () => {
 
     /** A first term alerts a spill whose reading carries `hr`, then `later` ms pass and a second term reads the record. */
     async function laterTerm(hr: number | undefined, later: number, then: number | undefined) {
-      const env = setup(new FakeFleet([fresh(hr, { now: NOW })]), undefined, WIDE);
+      const env = setup(new FakeFleet([fresh(hr, { now: NOW })]));
       await enqueue(env.store, env.scheduler, spec());
       await pass(env.scheduler, env.fleet, env.clock.now);
       expect(env.alerts).toHaveLength(1);
@@ -799,7 +778,7 @@ describe("credits spill", () => {
       exclaves: [exclave("main", "x".repeat(200), { extraUsageEnabled: true })],
       status: status({ quota: [obs(0, { h: 95, hr: NOW_S + 3600 })] }),
     });
-    const { alerts, clock, errors, fleet, scheduler, store } = setup(new FakeFleet([long]), undefined, WIDE);
+    const { alerts, clock, errors, fleet, scheduler, store } = setup(new FakeFleet([long]));
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(errors).toEqual([]);

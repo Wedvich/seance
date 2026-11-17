@@ -133,7 +133,7 @@ describe("wire correlation logging", () => {
       // Request and reply carry different ivs — the join crosses through `id`, not the iv.
       expect(reply.iv).not.toBe(env.iv);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -152,7 +152,7 @@ describe("wire correlation logging", () => {
       expect(logged()).toContain(`wire dropped iv=${JSON.stringify(env.iv)}`);
       expect(logged()).toContain("reason=replay");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -174,7 +174,7 @@ describe("wire correlation logging", () => {
       expect(logged()).toContain(`id=${JSON.stringify(id)} op="spawn"`);
       expect(logged()).not.toContain(SECRET_PROMPT);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -193,7 +193,7 @@ describe("status logging", () => {
       // means it would already be on the record.
       expect(logged()).not.toContain("status trimmed");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });

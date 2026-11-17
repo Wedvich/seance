@@ -232,12 +232,16 @@ export function MenuItem(props: {
   destructive?: boolean;
   attention?: boolean;
   keepOpen?: boolean;
+  /** The page this item names is the one showing (`aria-current="page"`). */
+  current?: boolean;
 }): JSX.Element {
   const close = useContext(CloseMenu);
+  const current = props.current === true;
   const className = [
     "menu-item",
     props.sub !== undefined && "menu-item-with-sub",
     props.destructive === true && "menu-item-destructive",
+    current && "menu-item-current",
   ]
     .filter(Boolean)
     .join(" ");
@@ -282,6 +286,7 @@ export function MenuItem(props: {
       className={className}
       role="menuitem"
       aria-disabled={disabled ? "true" : undefined}
+      aria-current={current ? "page" : undefined}
       onClick={pick}
     >
       {body}
@@ -293,6 +298,19 @@ export function MenuDivider(): JSX.Element {
   return <div className="menu-divider" role="separator" />;
 }
 
+/** A labelled run of items that act on one thing. The heading is no item, so roving focus skips it. */
+export function MenuGroup(props: { label: string; children: ComponentChildren }): JSX.Element {
+  const headingId = useId();
+  return (
+    <div className="menu-group" role="group" aria-labelledby={headingId}>
+      <div id={headingId} className="menu-heading label">
+        {props.label}
+      </div>
+      {props.children}
+    </div>
+  );
+}
+
 /** A setting the menu shows and flips in place: it stays open, so the item can be flipped back. */
 export function MenuSwitchItem(props: {
   label: string;
@@ -301,18 +319,28 @@ export function MenuSwitchItem(props: {
   onToggle: () => void;
   /** This flip opens a dialog over the menu, so the menu closes instead of staying open beneath it. */
   closesMenu?: boolean;
+  /** Reachable but inert, as `MenuItem`'s: `aria-disabled`, so roving focus still lands on it. */
+  disabled?: boolean;
 }): JSX.Element {
   const { checked } = props;
+  const disabled = props.disabled === true;
   const holdOpen = useContext(HoldMenuOpen);
   const close = useContext(CloseMenu);
   const toggle = (event: Event): void => {
-    if (!inOpenMenu(event)) return;
+    if (!inOpenMenu(event) || disabled) return;
     if (props.closesMenu === true) close();
     else holdOpen();
     props.onToggle();
   };
   return (
-    <button type="button" className="menu-item" role="menuitemcheckbox" aria-checked={checked} onClick={toggle}>
+    <button
+      type="button"
+      className="menu-item"
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      aria-disabled={disabled ? "true" : undefined}
+      onClick={toggle}
+    >
       {props.icon !== undefined && <span className="menu-icon">{props.icon}</span>}
       <span className="menu-text">{props.label}</span>
       <span className={checked ? "menu-switch menu-switch-on" : "menu-switch"} aria-hidden="true">

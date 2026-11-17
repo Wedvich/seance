@@ -128,9 +128,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   `TaskProgress.exit`, acted on by `failed` from exit status (M4 below, **Done**; DESIGN.md
   _Daemon_, "Exit status").
 - **`SpawnRequest.baseBranch?`**, `base_not_found` and the `"baseBranch"` capability are in the
-  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`). Still to build (Stacking, below): the
-  base fetched before launch as the default branch is (`base-fetch.ts`), so a stacked task never
-  starts from a stale `origin/<b>`, and how the worktree gets made.
+  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`), with `noBase?`. Built (Stacking, below):
+  DESIGN.md _Scheduler_, "Stacking" and _Daemon_, "Stacked worktrees".
 - **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` and
   `push-unsubscribe` included. `enqueue` stays a `store-put`, never a leader op.
 
@@ -172,10 +171,12 @@ they now live:
 
 **Routing, ahead.** M4 adds:
 
-- Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
-  filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
-  _Stacking_); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
-- Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
+- Filters (the per-account cap, gone again 2026-11-17, and `skill_absent` are DESIGN.md "Routing caps" and "Skills
+  filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): a daemon that cannot stack (`base_unsupported`, built,
+  DESIGN.md "Stacking"; the sketched `base_unpushed` is never emitted, since an `opened` edge
+  releases only on a pushed branch); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
+- Score: `dependencyDistance` reads the stacking predecessor's placement (built, DESIGN.md
+  "Stacking"; `TaskSpec.base` stays unwritten). The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
@@ -406,7 +407,7 @@ of M4 has landed.
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
 | 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
-| 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
+| 2     | Stacking — **Done**                                                | authoring surface; #28                                                 | L                        |
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
@@ -484,7 +485,7 @@ of M4 has landed.
   app client bounds a batch index at `createTask`; this item is the clients that write them. MCP:
   `spawn_session`'s `after`, `until`, `linear`, `pin` (a machine, an account or both — the M2
   placement restriction; added 2026-10-23, the account form replacing the exclave one 2026-10-25)
-  and `avoid` (machines to keep it off), and `queue_batch`; `seanced spawn` takes the
+  and `avoid` (machines to keep it off), and `queue_batch`; `seance spawn` takes the
   same placement as `--machine`, `--account` and `--not` (DESIGN.md "`pin` and `avoid` on a spawn"). PWA: the
   auto form's AFTER tile (and, until 2026-10-29, a BATCH tile), the settle-on-report switch (and, until 2026-10-27, a Linear field), and Follow
   up on queue rows. DESIGN.md records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
@@ -505,8 +506,9 @@ of M4 has landed.
     to a leader advertising `CAPABILITIES.reportedDone`. It is the first act session events
     gain beyond ingest, so it is a threat-model change: DESIGN.md records it (_Local op socket_,
     "Session events", and _Threat model_). The daemon notes the report in its launch ledger and
-    forwards it whatever the task's `until`; the leader settles only a `reported` task, from the
-    machine it was placed on, and ignores it otherwise. The slot is freed at the report while the
+    forwards it whatever the task's `until`; the leader settles a `reported` task, or (amended
+    2026-11-17) a `merged` one holding no PR, from the machine it was placed on, and ignores it
+    otherwise. The slot is freed at the report while the
     session may still run, and a session that cannot call the tool (a permission prompt, plan
     mode) is settled by `mark-done`. A session that lies about being done can do no more than one
     that exits. `mark-done` stays the manual override.
@@ -584,8 +586,8 @@ of M4 has landed.
     worktree); exact-target routing (only the `(deviceId, exclave, clone)` of the old assignment, only on
     a daemon advertising `continueTask`); the cwd resolved from the daemon's own launch ledger, never from
     the wire; a spawn sealed by the scheduler only (the local socket and every other `from` refused
-    `not_continuable`); a brokered enqueue allowed, so keyless `seanced mcp` works; a CLI,
-    `seanced continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
+    `not_continuable`); a brokered enqueue allowed, so keyless `seance mcp` works; a CLI,
+    `seance continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
     `claude --resume` is untracked by design); a stale worktree lock in Claude's own
     `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
     `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
@@ -670,7 +672,7 @@ of M4 has landed.
   "Asleep machines on the Queue screen", is the record.
 
 - **"Last seen" off the PWA (new, 2026-10-26) — Done.** Raycast's cached-list age and every
-  `seanced mcp` "last seen" (`list_machines`' `lastSeen`, the despawn not-connected refusal,
+  `seance mcp` "last seen" (`list_machines`' `lastSeen`, the despawn not-connected refusal,
   `auto`'s offline-pin note) still read the register's `lastSeen`, so they said "3d ago" of a
   machine that slept minutes ago. Exit: they read `lastHeardAt` like the PWA.
 
@@ -680,32 +682,13 @@ of M4 has landed.
   `PickerMachine` takes the live `status`, and the registry cache folds `lastHeardAt` into its
   existing `lastSeen` key rather than storing `status`, so an older cached entry still parses.
 
-- **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
-  dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
-  with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
-  Corrected by the review (R2):
-  - _The daemon has to make the worktree._ `claude --worktree` creates the worktree itself from
-    `origin/<default>`, and no CLI flag overrides that (DESIGN.md "Worktree mode does no git
-    preparation"). So "start the worktree from this branch" means the daemon creates it.
-    _Decided (#3):_ spike whether `claude --worktree <name>` reuses an existing worktree. Either
-    way the daemon runs `git worktree add --no-track -B worktree-<name> … origin/<base>` and keeps
-    the `.claude/worktrees` layout reap and branch-state rely on; if claude does not reuse it, the
-    daemon runs plain `claude` inside the worktree it made (the owner added this fallback, so the
-    spike's result does not stall stacking on a second decision).
-  - _Fetches are keyed by repo, not branch._ `base-fetch.ts` keys its in-flight fetch by common
-    dir alone, so two bases in one repo would share one fetch.
-  - _Decided (#4), which dependency stacks:_ only `after: opened`, the first in `deps` order, and
-    only on a pushed predecessor. `released` already frees an `opened` edge only with a PR and a
-    pushed branch; the one way past it is a predecessor `done` without either (`mark-done`, a
-    no-PR session end, a `here` task), and that dependent starts from `origin/<default>` with the
-    preamble saying there was nothing to stack on. No placement restriction (the review's, dropped:
-    it served only that case).
-  - _Decided (#15), validating `baseBranch`:_ `check-ref-format` rules at every hop (today a
-    branch name is only length-checked in `shared/src/parse.ts`), and pass
-    `refs/remotes/origin/<b>` after `--end-of-options`. Through `shq()` if it ever reaches the
-    shell string.
-  - _Decided (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
-    knows it, so the PR is the handoff.
+- **Stacking** — **Done** (2026-11-16). A dependent task's worktree starts from its predecessor's
+  branch; an unresolvable base fails `base_not_found`. DESIGN.md is the record: _Scheduler_,
+  "Stacking" for the leader's half (#4's predecessor, #15's leader hop, `base_unsupported`,
+  `noBase`, the distance score, the failure), and _Daemon_, "Stacked worktrees" for the daemon's
+  (#3's worktree, the fetch keyed by branch, #15's daemon hop, the preamble). #5 stands: no
+  transcript path, the PR is the handoff. Gap: a rebase after the predecessor changes is manual
+  ("Stacked rebases", below).
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
   #13 lapse with it; **Done** 2026-10-20 (PR #249), recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
   `claude --safe-mode --no-session-persistence --output-format json -p /usage` with the exclave's config dir, and Claude
@@ -808,7 +791,7 @@ of M4 has landed.
   what the key reveals are DESIGN.md _Scheduler_, "Account records". Exit, met in
   `e2e/accounts.test.ts`: an alias set in one client shows in another through `store-changed`, a
   record whose `accountId` does not hash to its key is ignored, and an old blob put back reads
-  unreadable rather than as the old name. `seanced mcp` and Raycast show them too: DESIGN.md "Account listings" and the Raycast "Scope is spawn" note.
+  unreadable rather than as the old name. `seance mcp` and Raycast show them too: DESIGN.md "Account listings" and the Raycast "Scope is spawn" note.
   - _Correction (R2), deleting an alias:_ the relay tombstoned every prefix apps could create
     into, and a standing tombstone refuses every put for 30 days. Account keys are a deterministic
     HMAC, so under those rules a token holder's delete would have blocked that alias for 30 days.
@@ -956,7 +939,7 @@ of M4 has landed.
     a per-probe cadence below 5 minutes.
   - _Decided, where a task says what it requires:_ one spelling per client, as #390 did for
     autonomy: `requires` (a list of names) on `spawn_session` and each `queue_batch` member;
-    `--requires <name>` (repeatable) on `seanced spawn`; a REQUIRES field on the PWA form offering
+    `--requires <name>` (repeatable) on `seance spawn`; a REQUIRES field on the PWA form offering
     the traits the fleet advertises. `TaskSpec.requires`, at most 4 names. Not on `--now`
     (the direct spawn bypasses routing) — refused there with a message. Not in Raycast for v1. A
     continuation inherits its task's `requires`; a route preview carries it. A client refuses a
@@ -1056,10 +1039,10 @@ of M4 has landed.
   its queue card. DESIGN.md is the record ("CLI spawn", "MCP server", "PWA", "Fleet broker").
   - _Follow-up:_ `route-preview` takes a pin. It drops one today (`parseTaskRequest`), so the
     PWA's placement preview is shown with both pickers on `auto` only.
-  - _Follow-up:_ drop `spawn` from `LOCAL_OPS` and `BROKER_OPS` once no pre-PR-1 `seanced mcp` can
+  - _Follow-up:_ drop `spawn` from `LOCAL_OPS` and `BROKER_OPS` once no pre-PR-1 `seance mcp` can
     still be running — a threat-model change, recorded in DESIGN.md with it.
 
-- **Keyless `auto`** — **Done**: MCP's `auto` and `seanced spawn` on a box that cannot
+- **Keyless `auto`** — **Done**: MCP's `auto` and `seance spawn` on a box that cannot
   read the key go through the daemon's fleet broker (DESIGN.md "Fleet broker", "The scheduler
   actions").
 
@@ -1069,7 +1052,7 @@ of M4 has landed.
 - **Batches are a group** — **Done** (owner, 2026-10-26). A batch is where a set of tasks came
   from, shown and acted on together, never a scheduling primitive: `sequential` and `parallel`
   went from the scheduler, `queue_batch` and the PWA, so order is `after` edges and concurrency
-  the global and per-account caps. #318's carve-out (a batch bound counting members on an asleep
+  the global and per-account caps (since 2026-11-17 the one fleet limit, none by default). #318's carve-out (a batch bound counting members on an asleep
   machine) went with them. DESIGN.md "Batches" is the record, with both strategies as rejected
   alternatives.
   The `strategy` field left the wire 2026-10-27; the parser still drops a stored one.
@@ -1175,7 +1158,7 @@ of M4 has landed.
     on every load and after every queued task, never remembered), the level as a chip on the Queue
     card off the default, and "Answer in Claude" (the claude.ai link) as the primary button on a
     `needs-input` card.
-  - **Done** (2026-11-12): one spelling per client. `seanced spawn --autonomy <level>` (queued or
+  - **Done** (2026-11-12): one spelling per client. `seance spawn --autonomy <level>` (queued or
     `--now`; the no-op `--auto` is gone), an Autonomy dropdown in Raycast that starts at
     `checkpoint` on every open, and MCP's `plan` input removed, with every tool's input strict so a
     stale `plan` is refused by name instead of stripped. The wire `plan` stays for older readers.
@@ -1207,7 +1190,7 @@ of M4 has landed.
      machine's daemon pushes the clean branch, the leader creates the successor and links the two,
      and the old session is closed.
      - **2a, from outside** — **Done** (2026-11-12): the PWA's "Pass to successor" on a running card,
-       `seanced pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
+       `seance pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
        three; the successor's prompt is the fallback one (below).
      - **2b, from the session** — **Done** (2026-11-12): MCP `pass_to_successor { record }`. The session commits
        and calls it last; its daemon pushes at once and the session's `record` becomes the
@@ -1288,7 +1271,10 @@ of M4 has landed.
        and despawn it causes audit under their own origins. It is a leader-internal act, not a new surface.
      - **Session-pass refusals.** A session's own pass the leader refuses with a code other than `conflict`,
        `finished` or `not_found` raises a `pass-refused` alert, once per task per term (in memory: a new
-       leader may alert once more).
+       leader may alert once more). The session itself is told every refusal (2026-11-16): the leader keeps
+       it ten minutes and `queue` lists it (`passRefused`), which `pass_to_successor` reads after its push; a
+       task already finished (its merge settled it under `until: "merged"`) is refused before the push
+       (DESIGN.md, MCP server, `pass_to_successor`, and Scheduler, "Done detection").
      - _The spec this was built from:_
      - **Trigger.** The leader evaluates it every tick from what it already holds: `quotaOf`'s
        windows, `creditsSpent` and the spill notion (`Candidate.spill.spending`). An account is
@@ -1527,11 +1513,10 @@ of M4 has landed.
       they are not available);
     - a successor that opens its own PR when the old one was closed;
     - a PWA "passed to" link on the finished card;
-    - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
+    - a `seance doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
-    - the self path telling the session why the leader refused after the push (today: "not
-      confirmed" plus the leader's warn line) and a Queue-screen mark for a session pass the leader
-      refused (the push alert, `pass-refused`, is built);
+    - a Queue-screen mark for a session pass the leader refused (the push alert, `pass-refused`, and
+      telling the session why, `QueueResponse.passRefused`, are built);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch;
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).
@@ -1569,7 +1554,7 @@ of M4 has landed.
     they're needed.
   - Accepted only while `queued`, `blocked` or `ready` with no spawn out; a reservation or dispatch wins
     with a structured code (`dispatching`, `placed`), and a reservation routed on the old spec declines.
-  - Surfaces: MCP `amend_task` and `seanced amend` (append by default, replace on request), through
+  - Surfaces: MCP `amend_task` and `seance amend` (append by default, replace on request), through
     the broker when keyless. Offered only to a verified leader advertising `CAPABILITIES.amend`. No
     PWA surface in V1 (owner): amending is asked for from an orchestration session, through MCP.
   - _Measure:_ the leader's `audit queue op=amend` lines, by `fields` and `mode`, against cancels of
@@ -1625,7 +1610,9 @@ same PR, with the reason.
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
    dependency 4, queue 1, keepFree 8 (a flat 0/1, added with traits, 2026-11-12: `globalMax`'s
    worth of in-flight tasks on a competitor, two fully loaded machines); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
-   weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
+   weekly (all-models or per-model); no cap on in-flight tasks unless the owner sets the fleet limit
+   (2026-11-17: a stored record set from the PWA, DESIGN.md "Routing caps"; a constant global max of 8
+   until then); a reservation's TTL 240 s
    (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
    put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn
    reply, so no launch can start after the TTL check has proved the task never landed). The estimate is per span
@@ -1635,7 +1622,9 @@ same PR, with the reason.
    from observed deltas. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
    are fractions or counts, so the weights put one busy machine, or the farthest base, on
    the scale of an account near 70%. First guesses, to tune from decision records; nothing
-   observed yet argues for them. **Per-account max 4** in-flight tasks (`accountMax`, added
+   observed yet argues for them. _The per-account cap that follows went 2026-11-17 with the fleet
+   limit (owner): an account is bounded by its quota line alone, and the queue runs free by default._
+   **Per-account max 4** in-flight tasks (`accountMax`, added
    with M3 item 5, 2026-10-17): half the global max, so one account cannot take every slot,
    and an account's parallel sessions draw on its 5h window together — at the 5% estimate, four
    already project +20%. A fleet on one account therefore runs at most four `auto` tasks at
@@ -1705,7 +1694,7 @@ same PR, with the reason.
     (M4). A tier the table doesn't name, or none (an older daemon, a non-Team account), keeps
     today's estimate but includes no gated model: an unknown seat may bill Fable to credits.
 18. **A machine asleep 2 min holds no concurrency slot** (`slotReleaseAfterMs`, owner,
-    2026-10-26). Its in-flight tasks stop counting toward `globalMax`, `accountMax` and projected
+    2026-10-26). Its in-flight tasks stop counting toward the fleet limit (then `globalMax` and `accountMax`) and projected
     usage, with no change of state; on return they count again and the fleet may sit over a cap
     until work drains. A blip or relay reconnect frees nothing, and a dark wake restarts the clock, so after each one
     the slots come back only after the connected-read window (~2.5 min, DESIGN.md) plus the grace; `lostAfterMs` (10)
@@ -1808,9 +1797,9 @@ same PR, with the reason.
   the dashboard without `wrangler tail`.
 - **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
-  and can't dedupe a re-dispatch), while `seanced spawn --now`, the only direct path left, keeps working. Self-update makes
+  and can't dedupe a re-dispatch), while `seance spawn --now`, the only direct path left, keeps working. Self-update makes
   this a short window.
-- **An admitted task the leader never placed** (open, seen once, 2026-11-12). On ubuntu CI (run
+- **An admitted task the leader never placed** (resolved 2026-11-17; seen 2026-11-12 and twice more since). On ubuntu CI (run
   43224839001, attempt 1) `e2e/mcp.test.ts`'s pinned task logged `op=admit` and then nothing for
   20s: no reservation, no spawn, no store timeout, no refused write, the daemon's socket up
   throughout. The likeliest reading is a route that chose no machine on the admitting pass, then no
@@ -1834,6 +1823,18 @@ same PR, with the reason.
   only the failure, not the daemon's lines, so it can't be checked there. That run's test also died
   at bun's 15s timeout before its 20s poll could report; #400's 90s budget lets the next one print
   the decision. Still open.
+  _Resolved (2026-11-17):_ a race in the shared client, not a missing pass. The decision, caught by
+  probes on a looped ubuntu job (2 of ~325 full-suite runs, both in `e2e/amend.test.ts`), was
+  `status_stale` on every pass while the test's own client held a current status. A daemon registers
+  twice at boot (the rescan re-registers), and the leader's leg connected between the two: its first
+  push carried the first register's status, whose decrypt was still pending when the second
+  register's push and the current status frame landed. The slow open then settled last and overwrote
+  the current status in `#statuses`; `#rebuildMachines` dropped it for its scan, so the machine read
+  as having no status until the next beat, 30 to 60s out. `#decryptStatus` now lands an open only
+  while it is still the newest status asked for that machine (`#statusWanted`, reset with each push),
+  and `#decryptLeadProof` the same for the lead proof, whose slow open could leave a new term's
+  leader `unverified` until the next push. `pwa/test/client.test.ts` holds each open at WebCrypto
+  to pin both orders. The mcp occurrence's log is gone, so it is matched by signature only.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
   box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces

@@ -32,7 +32,7 @@ async function stateOf(id: string): Promise<string | undefined> {
 
 /** Enqueues a plain auto task through the PWA's own store and waits for it to run: the predecessor the tests wait on. */
 async function runningPredecessor(app: AppHandle, prompt: string): Promise<{ id: string; window: string }> {
-  await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+  await stack.waitForLead("the suite's daemon to lead");
   await stack.daemon.leader.settled();
   // A spawn before the machine's repos are listed resolves no repo and does nothing, silently.
   await app.waitForApp(

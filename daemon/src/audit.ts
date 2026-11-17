@@ -53,7 +53,7 @@ export const AUDIT_LOG_MODE = 0o600;
 export const daemonSink: AuditSink = (line) => log.info(line);
 
 /**
- * `seanced spawn` is a separate process with no launchd redirect, so it appends
+ * `seance spawn` is a separate process with no launchd redirect, so it appends
  * to the log itself. Never throws: an unwritable log must not fail a spawn the
  * human asked for. Two independent writers is safe while nothing rotates the
  * file — a rename-and-recreate would leave the daemon on the old inode.
@@ -70,7 +70,7 @@ export const cliSink: AuditSink = async (line) => {
 
 /**
  * Names the state observed in production: a log the daemon's own user cannot
- * append to, so `seanced spawn` records nothing and the both-paths-audit
+ * append to, so `seance spawn` records nothing and the both-paths-audit
  * invariant holds only for `origin=relay`.
  */
 export function unwritableLogMessage(path: string, user: string): string {
@@ -129,12 +129,12 @@ export async function auditLogChecks(path: string = logPath()): Promise<readonly
   if ((info.mode & 0o777) !== AUDIT_LOG_MODE) {
     const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
     const exposure = `log is ${mode}, and it records repo paths and window titles`;
-    // `seanced restart` repairs the mode only on a file the daemon owns
+    // `seance restart` repairs the mode only on a file the daemon owns
     // (ensureAuditLog); on someone else's file the honest fix is the chown pair.
     checks.push({
       level: "warn",
       message: ownedByUs(info.uid)
-        ? `${exposure} — \`seanced restart\` tightens it to 0600`
+        ? `${exposure} — \`seance restart\` tightens it to 0600`
         : `${exposure} — owned by another user, so restart can't tighten it: ` +
           `sudo chown ${userInfo().username} ${path} && sudo chmod 600 ${path}`,
     });
@@ -192,6 +192,9 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
       // Presence only: the URL names a private repo, and the log is plaintext at rest.
       const inheritedNote = request.inheritedPr === undefined ? "" : "inheritedPr=true ";
+      // Presence only, as push-branch audits no branch: a name is a slug of a prompt more often than not.
+      const baseNote =
+        request.baseBranch !== undefined ? "baseBranch=true " : request.noBase === true ? "noBase=true " : "";
       // Counts only: names are treated as prompt text, and ids and hashes say nothing an operator needs.
       const files = request.attachments;
       const attachmentsNote =
@@ -206,6 +209,7 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
           taskNote +
           continuesNote +
           inheritedNote +
+          baseNote +
           attachmentsNote +
           promptNote,
       );
@@ -305,18 +309,18 @@ export function passCloseAudit(
 export function availabilityAudit(
   origin: SpawnOrigin,
   sink: AuditSink,
-): (opened: boolean | null, outcome: string, now?: boolean) => Promise<void> {
-  return async (opened, outcome, now) => {
-    const nowNote = now === true ? " now=true" : "";
+): (opened: boolean | null, outcome: string, now?: boolean, soft?: boolean) => Promise<void> {
+  return async (opened, outcome, now, soft) => {
+    const notes = `${now === true ? " now=true" : ""}${soft === true ? " soft=true" : ""}`;
     await sink(
-      `audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}${nowNote}`,
+      `audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}${notes}`,
     );
   };
 }
 
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
-  /** A `run-now` that reserved the task past the concurrency caps. */
+  /** A `run-now` that reserved the task past the concurrency limit and the queue's pause. */
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */
@@ -346,6 +350,7 @@ export interface QueueAudit {
       | "amend"
       | "pause"
       | "resume"
+      | "set-limits"
       | "discard"
       | "push-subscribe"
       | "push-unsubscribe",
@@ -356,6 +361,8 @@ export interface QueueAudit {
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
   readonly held: (op: "pause" | "resume", id: string, account: string | undefined) => Promise<void>;
+  /** A `set-limits` answered with the limits now in force; `fleet` undefined is none. */
+  readonly limited: (id: string, fleet: number | undefined) => Promise<void>;
   /** A `push-subscribe` that is now held (added, or already was). Names no endpoint, host or key: the endpoint is the subscription's secret. */
   readonly subscribed: (id: string) => Promise<void>;
   /** A `push-unsubscribe` answered: the endpoint is no longer held (removed, or never was). Names no endpoint, as `subscribed`. */
@@ -394,6 +401,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
     },
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
+    limited: (id, fleet) => emit(`op=set-limits id=${quote(id)} fleet=${fleet ?? "none"} ok`),
     subscribed: (id) => emit(`op=push-subscribe id=${quote(id)} ok`),
     unsubscribed: (id) => emit(`op=push-unsubscribe id=${quote(id)} ok`),
     refused: (op, id, code, subject) =>
@@ -437,8 +445,8 @@ export type EnqueueOutcome =
   | { readonly kind: "unanswered" };
 
 /**
- * Who enqueued, as both the line's origin and its client: `seanced mcp`, or
- * `seanced spawn` typed at this machine — the CLI's own origin, since
+ * Who enqueued, as both the line's origin and its client: `seance mcp`, or
+ * `seance spawn` typed at this machine — the CLI's own origin, since
  * `audit enqueue` already tells the act apart from its `audit spawn`.
  */
 export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
@@ -515,7 +523,7 @@ export function traitRefusalAudit(
 
 /**
  * Something on this box asked the daemon to reach *another* machine, or the
- * scheduler, for it over the op socket — a keyless `seanced mcp` or `seanced
+ * scheduler, for it over the op socket — a keyless `seance mcp` or `seance
  * spawn`. Its own origin, never `local`: a
  * `local` line means this box's tmux was touched, and a brokered spawn touches
  * someone else's. The target daemon audits the spawn itself as `origin=relay`.
@@ -631,7 +639,7 @@ export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
   };
 }
 
-/** What triggered a self-update check: a fleet announce, this daemon's own register, or `seanced update`. */
+/** What triggered a self-update check: a fleet announce, this daemon's own register, or `seance update`. */
 export type UpdateOrigin = "announce" | "register" | "cli";
 
 export interface UpdateAudit {
@@ -731,7 +739,7 @@ export interface CustodianAudit {
   readonly start: (exclave: string, pane: string | null, outcome: "started" | "launch_failed") => Promise<void>;
   readonly kill: (
     pane: string,
-    reason: "deadline" | "stray" | "off" | "exited" | "done",
+    reason: "deadline" | "stray" | "off" | "exited" | "done" | "unreachable",
     outcome: "exited" | "killed" | "gone",
   ) => Promise<void>;
   readonly end: (
@@ -819,7 +827,7 @@ export function custodianAudit(sink: AuditSink): CustodianAudit {
 }
 
 /**
- * The owner's acts on the custodian (`custodian-owner.ts`): `seanced custodian pause | resume | round` under the `cli`
+ * The owner's acts on the custodian (`custodian-owner.ts`): `seance custodian pause | resume | round` under the `cli`
  * origin like every command typed at this machine, and the `custodian` app op under `relay`. `status` and `log` are
  * reads and write nothing. No text from a file or a payload reaches a line: only the pause's end, and a fixed outcome.
  */

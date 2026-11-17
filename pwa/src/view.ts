@@ -39,6 +39,7 @@ import {
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type AccountOpenAsk,
   type StartNowRefusal,
   type TaskAction,
   type Verdict,
@@ -46,6 +47,7 @@ import {
 import { needsAttention } from "./asleep.ts";
 import { formatBytes, typeLabel, type PickedFile } from "./attachments.ts";
 import { taskTitle } from "./task-title.ts";
+import type { Moment } from "./timed.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -58,7 +60,7 @@ export type Tone = "fg2" | "err";
 export type ConnectionState = "connected" | "connecting" | "offline";
 
 /**
- * A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike.
+ * A status dot: green online, blue for `auto`, a hollow grey ring otherwise — on the tile and its sheet row alike.
  * `unreachable` is the relay's own hollow red, worn while the relay is unreachable: the registry
  * then is the last one heard, so a green dot would claim a presence nobody can see.
  */
@@ -212,6 +214,8 @@ export interface ViewModel {
   readonly button: PrimaryButton;
   /** The button's chevron and its Start now menu: only while the verified leader answers `run-now`. */
   readonly startNow: boolean;
+  /** Start now lifts a whole-queue pause too (`runNowPaused`). */
+  readonly startNowPastPause: boolean;
   readonly ignoredNote: string | null;
   /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
   readonly machine: Machine | null;
@@ -285,6 +289,10 @@ export interface AppState {
   readonly startNowRefusal: StartNowRefusal | null;
   /** A pause or resume in flight. */
   readonly pausing: boolean;
+  /** The Machines screen's account switch: its ask in flight, or its last failure. */
+  readonly accountOpen: AccountOpenAsk;
+  /** A `set-limits` in flight. */
+  readonly limiting: boolean;
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
   readonly accounts: AccountsState;
@@ -317,6 +325,11 @@ export function formatSeen(lastSeen: number, now: number): string {
   if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m ago`;
   if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h ago`;
   return `${Math.floor(elapsed / DAY)}d ago`;
+}
+
+/** `formatSeen` with its instant kept, for a line that shows the timestamp on hover. */
+export function seen(at: number, now: number): Moment {
+  return { text: formatSeen(at, now), at };
 }
 
 function sessionCount(state: AppState, deviceId: string): number | null {
@@ -441,6 +454,14 @@ export function deriveContinueHandoffAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.continueHandoff);
 }
 
+/**
+ * Whether the verified leader keeps the limits record and answers `set-limits`. An older one
+ * runs its built-in caps and refuses the op as one it does not know, so nothing is offered to it.
+ */
+export function deriveLimitsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.limits);
+}
+
 /** Whether the verified leader answers `pass`; an older one refuses it as an op it does not know. */
 export function derivePassAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.successor);
@@ -453,6 +474,22 @@ export function derivePassAvailability(relay: RelayState): boolean {
 export function deriveCloseAvailability(relay: RelayState, machine: Machine): boolean {
   return (
     machine.capabilities?.includes(CAPABILITIES.close) === true && verifiedLeaderAdvertises(relay, CAPABILITIES.drain)
+  );
+}
+
+/** What a close asks: `soft` stops new work only, `drain` moves running tasks too, `now` drains without the grace. */
+export type CloseKind = "soft" | "drain" | "now";
+
+/**
+ * Whether the close sheet's Close is soft (no drain until asked): a close may be sent, and both `machine` and the
+ * verified leader advertise `softClose`. An older daemon would drop `soft` and drain; an older leader would pass on
+ * `cl` alone. Otherwise the sheet keeps the close and words it as before.
+ */
+export function canSoftClose(relay: RelayState, machine: Machine): boolean {
+  return (
+    deriveCloseAvailability(relay, machine) &&
+    machine.capabilities?.includes(CAPABILITIES.softClose) === true &&
+    verifiedLeaderAdvertises(relay, CAPABILITIES.softClose)
   );
 }
 
@@ -472,6 +509,11 @@ export function deriveDrainAvailability(relay: RelayState): boolean {
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
 export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
+}
+
+/** Whether the verified leader's `run-now` places past a whole-queue pause; an older one answers `unplaceable`. */
+export function deriveRunNowPastPause(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.runNowPaused);
 }
 
 /**
@@ -1102,6 +1144,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
     startNow: deriveRunNowAvailability(relay),
+    startNowPastPause: deriveRunNowPastPause(relay),
     ignoredNote: deriveIgnoredNote(relay),
     machine,
     account,

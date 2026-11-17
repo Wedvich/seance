@@ -349,7 +349,7 @@ export async function resolvePlacement(
     target = resolved.machine;
     if ((target.exclaves ?? []).length === 0) {
       return {
-        error: `${names.machine}: ${target.name} (${target.deviceId}) reports no exclaves, so the scheduler cannot place there — its daemon needs \`seanced update\``,
+        error: `${names.machine}: ${target.name} (${target.deviceId}) reports no exclaves, so the scheduler cannot place there — its daemon needs \`seance update\``,
       };
     }
   }
@@ -518,7 +518,7 @@ export function advertises(
 export function continueGateError(availability: SchedulerAvailability, advertised: boolean): string | null {
   if (advertised) return null;
   return availability.kind === "ready"
-    ? "the scheduler's leader cannot continue a session yet — its daemon needs `seanced update`"
+    ? "the scheduler's leader cannot continue a session yet — its daemon needs `seance update`"
     : "no verified scheduler is leading, so it cannot be confirmed to continue a session — try again once one leads";
 }
 
@@ -583,7 +583,7 @@ export async function continueAuto(
 export function pinAccountGateError(lease: SchedulerLease, fields: string): string | null {
   if (leaderAdvertises(lease, CAPABILITIES.pinAccount)) return null;
   return lease.scheduler.availability().kind === "ready"
-    ? `spawn refused: the scheduler's leader does not route on ${fields} yet — its daemon needs \`seanced update\``
+    ? `spawn refused: the scheduler's leader does not route on ${fields} yet — its daemon needs \`seance update\``
     : `spawn refused: no verified scheduler is leading, so it cannot be confirmed to route on ${fields} — try again once one leads`;
 }
 
@@ -598,7 +598,7 @@ export function traitsGateError(lease: SchedulerLease, field: string, label = "s
     return `${label} refused: ${lease.scheduler.staleDaemonRequires}`;
   if (leaderAdvertises(lease, CAPABILITIES.traits)) return null;
   return lease.scheduler.availability().kind === "ready"
-    ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seanced update\``
+    ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seance update\``
     : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to route on ${field} — try again once one leads`;
 }
 
@@ -616,7 +616,7 @@ export interface RequiresCheckRefusal {
  * The enqueue-time checks on `requires`, over the fleet as the registry shows it (offline machines count):
  * a name no machine declares is a typo, listed with the names that exist; and a task whose pin, account
  * pin and `avoid` leave no single exclave carrying every trait could never place, so it would wait until
- * `pin_expired` (or forever, unpinned). One check for MCP, the CLI and `seanced continue`'s neighbours;
+ * `pin_expired` (or forever, unpinned). One check for MCP, the CLI and `seance continue`'s neighbours;
  * `spec` is the whole spec with its pin and avoid already resolved to ids, not just `requires`.
  */
 export function requiresCheck(
@@ -642,7 +642,7 @@ export function requiresCheck(
 export function startGateError(lease: SchedulerLease): string | null {
   if (leaderAdvertises(lease, CAPABILITIES.runNow)) return null;
   return lease.scheduler.availability().kind === "ready"
-    ? "the scheduler's leader cannot start a task past the queue yet — its daemon needs `seanced update`"
+    ? "the scheduler's leader cannot start a task past the queue yet — its daemon needs `seance update`"
     : "no verified scheduler is leading, so nothing can start a task now — try again once one leads";
 }
 
@@ -696,9 +696,9 @@ async function sendRunNow(lease: SchedulerLease, taskId: string, surface: Enqueu
 }
 
 /**
- * `start_task` / `seanced start`: the Queue screen's Start now — one `run-now` for a task already
- * queued, placing it past the concurrency cap and nothing else (DESIGN.md "Run now lifts the cap
- * for one task"). Sent once, never retried: a lost answer may have reserved it. Never logs; the
+ * `start_task` / `seance start`: the Queue screen's Start now — one `run-now` for a task already
+ * queued, placing it past the concurrency limit and the queue's pause and nothing else (DESIGN.md "Run now
+ * lifts the cap for one task"). Sent once, never retried: a lost answer may have reserved it. Never logs; the
  * leader's own `op=run-now` audit line, and the broker's where it carried it, are the record.
  */
 export async function startAuto(lease: SchedulerLease, taskId: string, surface: EnqueueSurface): Promise<AutoEnqueued> {
@@ -719,7 +719,7 @@ const PASS_CHECK: Readonly<Record<EnqueueSurface, string>> = {
 };
 
 /**
- * `pass_task` / `seanced pass`: the Queue screen's "Pass to successor" — one `pass` for a running
+ * `pass_task` / `seance pass`: the Queue screen's "Pass to successor" — one `pass` for a running
  * task, which pushes its branch, ends the session and queues the task that carries on (DESIGN.md
  * "Passing to a successor"). The queue is read once first and the shared `passOffer` rule applied,
  * so a task the leader would refuse is refused here with the same words. A task the read shows
@@ -736,7 +736,7 @@ export async function passAuto(lease: SchedulerLease, taskId: string, surface: E
     return failed(
       `${label} refused: ${
         lease.scheduler.availability().kind === "ready"
-          ? "the scheduler's leader cannot pass a task to a successor yet — its daemon needs `seanced update`"
+          ? "the scheduler's leader cannot pass a task to a successor yet — its daemon needs `seance update`"
           : "no verified scheduler is leading, so nothing can be passed on now — try again once one leads"
       }`,
     );
@@ -824,7 +824,7 @@ export function amendDraftError(draft: AmendDraft): string | null {
 }
 
 /**
- * `amend_task` / `seanced amend`: one `amend` for a task still waiting in
+ * `amend_task` / `seance amend`: one `amend` for a task still waiting in
  * the queue (DESIGN.md "Amending a waiting task"). An append (or a replace without a `basis`) is made
  * against the prompt the store holds when it is sent (`sendAmend`). Sent once, never retried after a
  * lost answer: an append sent twice lands twice. Never logs; the leader's own `op=amend` audit line,
@@ -845,7 +845,7 @@ export async function amendAuto(
     return failed(
       `${label} refused: ${
         lease.scheduler.availability().kind === "ready"
-          ? "the scheduler's leader cannot amend a queued task yet — its daemon needs `seanced update`"
+          ? "the scheduler's leader cannot amend a queued task yet — its daemon needs `seance update`"
           : "no verified scheduler is leading, so nothing can be amended now — try again once one leads"
       }`,
     );
@@ -882,7 +882,7 @@ export const START_POLL_MS = 2_000;
 export const START_POLLS = 15;
 
 /**
- * The Spawn screen's Start now for `spawn_session start` / `seanced spawn --start`: the task just
+ * The Spawn screen's Start now for `spawn_session start` / `seance spawn --start`: the task just
  * created waits for the leader to admit it (`run-now` before `ready` is refused `not_waiting`),
  * so this reads the queue until it is `ready`, then sends `run-now` once. A task a pass placed
  * meanwhile needs nothing; a spent budget leaves it queued, which the answer says. Always `ok`:
@@ -924,7 +924,7 @@ export async function startQueuedAuto(
     // A refusal is the start's, not the enqueue's: the task is queued, so it is said, not failed.
     return done(answer.result.text);
   }
-  const again = surface === "mcp" ? `start_task ${taskId}` : `\`seanced start ${taskId}\``;
+  const again = surface === "mcp" ? `start_task ${taskId}` : `\`seance start ${taskId}\``;
   const waited = Math.round((polls * (opts.pollMs ?? START_POLL_MS)) / 1000);
   return done(`not started: it was not ready to start within ${waited} s; it stays queued — ${again} tries again`);
 }
@@ -934,7 +934,7 @@ const ENQUEUE_ATTEMPTS = 3;
 const ENQUEUE_RETRY_MS = 1_000;
 
 /** Only on failures where nothing was queued: after a "may have queued" one it would run the task twice. */
-export const NOW_HINT = "`seanced spawn --now` spawns on this machine without the relay, the key or the daemon.";
+export const NOW_HINT = "`seance spawn --now` spawns on this machine without the relay, the key or the daemon.";
 
 /** Where each surface's reader looks next: a shell user cannot call MCP's tools, so the CLI names the app's queue. */
 const FOLLOW_UP: Readonly<
@@ -961,7 +961,7 @@ const FOLLOW_UP: Readonly<
       "The scheduler places it as soon as a machine and account can take it; the app's queue shows where it lands and why, and cancels it.",
     check: "check the app's queue",
     leaderless:
-      "This task runs once a scheduler leads, so `seanced spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.",
+      "This task runs once a scheduler leads, so `seance spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.",
     cleanFailure: `. ${NOW_HINT}`,
   },
 };
@@ -971,7 +971,7 @@ const FOLLOW_UP: Readonly<
  * with none (or an unverified one) the task waits in the relay's queue until one
  * leads. A lost reply (timeout, dropped socket) or no socket is tried again with
  * the same task, since a repeat create reads `landedEarlier`; every try lost says
- * so and names the id. Never logs: `seanced mcp`'s stdout is its JSON-RPC
+ * so and names the id. Never logs: `seance mcp`'s stdout is its JSON-RPC
  * channel. `surface` is the record's `client` and the audit line's origin, and
  * picks the follow-up text.
  */

@@ -16,7 +16,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { accountDisplayName } from "./machines-view.ts";
-import { carriesOnLine, FLAG_LABELS, passedToLine, prNames, type QueueRow } from "./queue-view.ts";
+import { carriesOnLine, FLAG_LABELS, passedToLine, prNames, stackedOnLine, type QueueRow } from "./queue-view.ts";
 import {
   AUTONOMY_LABELS,
   NO_OLDER_FILTERS,
@@ -28,6 +28,7 @@ import {
   type OlderSheet,
 } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
+import { timed } from "./timed.ts";
 import { formatSeen, scopedRepos, type AppState, type Dot, type Tile } from "./view.ts";
 
 /**
@@ -198,10 +199,10 @@ function archivedRow(
   return {
     id: task.id,
     title: taskTitle(task),
-    headline: `${outcomePhrase(task)}${machine === null ? "" : ` on ${machine}`}`,
-    body: [...(why === null ? [] : [sentence(why)]), `Created ${formatSeen(task.createdAt, now)}.`].join(" "),
+    headline: [`${outcomePhrase(task)}${machine === null ? "" : ` on ${machine}`}`],
+    body: timed`${why === null ? "" : `${sentence(why)} `}Created ${{ text: formatSeen(task.createdAt, now), at: task.createdAt }}.`,
     dot: task.state === "failed" ? "err" : null,
-    age: formatSeen(row.endedAt, now),
+    age: { text: formatSeen(row.endedAt, now), at: row.endedAt },
     canCancel: false,
     canMarkDone: false,
     cancelEndsSession: false,
@@ -217,6 +218,7 @@ function archivedRow(
     continuing: null,
     carriesOn: carriesOnLine(task, chain.titles, chain.revealable),
     passedTo: passedToLine(task, chain.titles, chain.revealable),
+    stackedOn: stackedOnLine(task, chain.titles, chain.revealable),
     placement: [originLabel(task.spec.repo), ...(account === null ? [] : [account])].join(" · "),
     batch: null,
     busy: false,

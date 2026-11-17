@@ -1,10 +1,11 @@
 import type { JSX } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
-import { type ChartLine, chartLines } from "../chart.ts";
+import { type ChartLine, type ChartSpan, chartLines, offlineSpans } from "../chart.ts";
 import type {
   AccountCard,
   ArchivistCard,
   CustodianRow,
+  DrainAction,
   Gauge,
   GaugeIcon,
   MachineCard,
@@ -12,6 +13,7 @@ import type {
 } from "../machines-view.ts";
 import { custodianMenu } from "../machines-view.ts";
 import {
+  type AccountOpenAsk,
   type AccountsState,
   type AvailabilityState,
   type CustodianControlState,
@@ -20,12 +22,14 @@ import {
   type HistoryView,
 } from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
-import { canDrainNow, type ConnectionState } from "../view.ts";
+import type { Timed } from "../timed.ts";
+import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
-import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
+import { Menu, MenuDivider, MenuGroup, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
 import { Sheet } from "./sheet.tsx";
+import { TimedText } from "./timed.tsx";
 
 const TARGET_LABELS: Record<HistoryTarget["kind"], string> = { machine: "Load and disk", account: "Quota" };
 
@@ -34,8 +38,30 @@ const CHART_HEIGHT = 120;
 /** Series beyond the palette wrap around; a quota panel past five is already hard to read. */
 const PALETTE_SIZE = 5;
 
+/** The Machines title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+export function MachinesHeading(props: {
+  relayLine: string;
+  relayState: ConnectionState;
+  /** The registry is authoritative (`RelayState.registrySettled`). */
+  settled: boolean;
+  /** `MachinesView.scheduler`: who leads, or that nobody does. */
+  scheduler: string;
+}): JSX.Element {
+  const { relayLine, relayState, settled, scheduler } = props;
+  return (
+    <div>
+      <h1 className="header-title">Machines</h1>
+      <p className="header-meta header-status">
+        <RelayDot state={relayState} />
+        {/* One text node: the flex gap would otherwise split the " · ". Unsettled, the scheduler is still its initial "none"; offline, it is stale. */}
+        {settled && relayState === "connected" ? `${relayLine} · ${scheduler}` : relayLine}
+      </p>
+    </div>
+  );
+}
+
 /**
- * Reached from settings, stacked over it: every machine's pressure and
+ * Reached from the phone's header menu, or a desk column: every machine's pressure and
  * exclaves, then quota per account across the fleet. Charts follow the same
  * split — pressure under a machine, quota under an account — one open at a
  * time, under the card it belongs to.
@@ -44,8 +70,6 @@ export function MachinesScreen(props: {
   view: MachinesView;
   /** The archivist's own card, after the machines; null with no archivist in the registry. */
   archivist: ArchivistCard | null;
-  relayLine: string;
-  relayState: ConnectionState;
   /** The registry is authoritative (`RelayState.registrySettled`). */
   settled: boolean;
   history: HistoryView | null;
@@ -54,16 +78,25 @@ export function MachinesScreen(props: {
   custodian: CustodianControlState;
   /** Round now, pause or resume a machine's custodian (the card's menu, for a machine advertising `custodian`). */
   onCustodian: (deviceId: string, request: CustodianRequest) => void;
-  /** Asks a machine to close (false) or reopen (true); `now` is the close sheet's "Drain now". The confirm sheet for a close is this screen's. */
-  onSetOpen: (deviceId: string, open: boolean, now?: boolean) => void;
-  /** The registry, which the confirm sheet's words are derived from (`closeSheet`). */
+  /**
+   * Asks a machine to close (false) or reopen (true); `close` says how: soft, drained, or drained now (the sheets'
+   * buttons, and Drain / Drain now on a closed machine). The confirm sheets are this screen's.
+   */
+  onSetOpen: (deviceId: string, open: boolean, close?: CloseKind) => void;
+  /** The account switch's ask in flight or its last failure (`AppState.accountOpen`). */
+  accountOpen: AccountOpenAsk;
+  /** A pause or resume is out: the store takes one at a time, the queue's own included. */
+  pausing: boolean;
+  /** Closes an account to new scheduled work (false) or reopens it (true): no confirm, since nothing running is touched. */
+  onSetAccountOpen: (accountId: string, open: boolean) => void;
+  /** The registry, which the confirm sheets' words are derived from (`closeSheet`, `drainSheet`). */
   machines: readonly Machine[];
-  /** The confirm sheet's lines for a machine (`deriveCloseSheet`). */
-  closeSheet: (machine: Machine) => readonly string[];
+  /** The close sheet's lines for a machine (`deriveCloseSheet`); `soft` when its Close stops new work only. */
+  closeSheet: (machine: Machine, soft: boolean) => readonly string[];
+  /** The Drain sheet's lines for a soft-closed machine (`deriveDrainSheet`). */
+  drainSheet: (machine: Machine) => readonly string[];
   /** Reads a machine's sessions and the queue afresh: asked as the confirm sheet opens. */
   onReadDrain: (deviceId: string) => void;
-  /** Absent in the desktop layout, where the screen is a column rather than a layer. */
-  onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
   onOpenRename: (accountId: string) => void;
@@ -75,8 +108,6 @@ export function MachinesScreen(props: {
   const {
     view,
     archivist,
-    relayLine,
-    relayState,
     settled,
     history,
     accounts,
@@ -84,10 +115,13 @@ export function MachinesScreen(props: {
     custodian,
     onCustodian,
     onSetOpen,
+    accountOpen,
+    pausing,
+    onSetAccountOpen,
     machines,
     closeSheet,
+    drainSheet,
     onReadDrain,
-    onDismiss,
     onShowHistory,
     onHideHistory,
     onOpenRename,
@@ -95,9 +129,17 @@ export function MachinesScreen(props: {
     onRename,
   } = props;
   const { renaming } = accounts;
-  const [closing, setClosing] = useState<string | null>(null);
-  const closingCard = closing === null ? undefined : view.cards.find((card) => card.deviceId === closing);
-  const closingMachine = closing === null ? undefined : machines.find((machine) => machine.deviceId === closing);
+  // The open confirm sheet: closing an open machine, or Drain / Drain now on a closed one.
+  const [closing, setClosing] = useState<{ readonly deviceId: string; readonly act: "close" | DrainAction } | null>(
+    null,
+  );
+  const closingCard = closing === null ? undefined : view.cards.find((card) => card.deviceId === closing.deviceId);
+  const closingMachine =
+    closing === null ? undefined : machines.find((machine) => machine.deviceId === closing.deviceId);
+  const confirm = (deviceId: string, close: CloseKind) => (): void => {
+    setClosing(null);
+    onSetOpen(deviceId, false, close);
+  };
   // Kept while the account is briefly unreported (a sign-out in between), so a typed draft survives; Cancel or Save closes it.
   const seen = useRef<AccountCard | undefined>(undefined);
   const found = view.accounts.find((account) => account.accountId === renaming);
@@ -106,24 +148,6 @@ export function MachinesScreen(props: {
     renaming === null ? undefined : (found ?? (seen.current?.accountId === renaming ? seen.current : undefined));
   return (
     <>
-      <header className="header">
-        <div className="header-lead">
-          {onDismiss !== undefined && (
-            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-              ‹
-            </button>
-          )}
-          <div>
-            <h1 className="header-title">Machines</h1>
-            <p className="header-meta header-status">
-              <RelayDot state={relayState} />
-              {/* One text node: the flex gap would otherwise split the " · ". Unsettled, the scheduler is still its initial "none"; offline, it is stale. */}
-              {settled && relayState === "connected" ? `${relayLine} · ${view.scheduler}` : relayLine}
-            </p>
-          </div>
-        </div>
-      </header>
-
       <div className="fleet">
         {/* Unsettled, an empty list means "no push yet", not "no machines" — the store's rule too. */}
         {view.cards.length === 0 && (
@@ -143,7 +167,11 @@ export function MachinesScreen(props: {
             onToggleOpen={(open) => {
               if (open) return onSetOpen(card.deviceId, true);
               onReadDrain(card.deviceId);
-              setClosing(card.deviceId);
+              setClosing({ deviceId: card.deviceId, act: "close" });
+            }}
+            onDrain={(act) => {
+              onReadDrain(card.deviceId);
+              setClosing({ deviceId: card.deviceId, act });
             }}
           />
         ))}
@@ -155,6 +183,9 @@ export function MachinesScreen(props: {
             key={account.accountId}
             account={account}
             nameable={accounts.nameable}
+            ask={accountOpen?.accountId === account.accountId ? accountOpen : null}
+            pausing={pausing}
+            onToggleOpen={(open) => onSetAccountOpen(account.accountId, open)}
             onRename={() => onOpenRename(account.accountId)}
             history={
               history?.target.kind === "account" && history.target.accountId === account.accountId ? history : null
@@ -165,23 +196,12 @@ export function MachinesScreen(props: {
           />
         ))}
       </div>
-      {closingCard !== undefined && closingMachine !== undefined && (
+      {closing !== null && closingCard !== undefined && closingMachine !== undefined && (
         <CloseMachineDialog
-          name={closingCard.name}
-          lines={closeSheet(closingMachine)}
+          {...closeDialog(closing.act, closingCard, closingMachine, closeSheet, drainSheet, (close) =>
+            confirm(closingCard.deviceId, close),
+          )}
           onClose={() => setClosing(null)}
-          onConfirm={() => {
-            setClosing(null);
-            onSetOpen(closingCard.deviceId, false);
-          }}
-          {...(canDrainNow(closingMachine)
-            ? {
-                onDrainNow: () => {
-                  setClosing(null);
-                  onSetOpen(closingCard.deviceId, false, true);
-                },
-              }
-            : {})}
         />
       )}
       {renamed !== undefined && (
@@ -210,14 +230,29 @@ function MachineCardView(props: {
   onHideHistory: () => void;
   /** The switch's new state: true reopens at once, false asks for confirmation first. */
   onToggleOpen: (open: boolean) => void;
+  /** Drain or Drain now on a closed machine: asks for confirmation first. */
+  onDrain: (act: DrainAction) => void;
 }): JSX.Element {
-  const { card, history, ranges, availability, custodian, onCustodian, onShowHistory, onHideHistory, onToggleOpen } =
-    props;
+  const {
+    card,
+    history,
+    ranges,
+    availability,
+    custodian,
+    onCustodian,
+    onShowHistory,
+    onHideHistory,
+    onToggleOpen,
+    onDrain,
+  } = props;
   // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
   const here = availability[card.deviceId] ?? null;
   const asked = here?.kind === "sending" || here?.kind === "sent" ? here.open : null;
   const switchOn = asked ?? card.openSwitch === "on";
   const closed = here?.kind === "sent" ? !here.open : card.closed;
+  // Only for the machine's own closed state: a sent close or reopen leaves them hidden until its status agrees.
+  const drainActions = closed && card.closed && here?.kind !== "sent" ? card.drainActions : [];
+  const sending = here?.kind === "sending";
   const asking = custodian[card.deviceId] ?? null;
   const custodianState = custodianMenu(card, asking);
   const offersMenu = card.charts || history !== null || card.openSwitch !== null || card.custodianControls;
@@ -231,7 +266,7 @@ function MachineCardView(props: {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
-            <span className={card.connected ? "dot dot-ok" : "dot"} aria-hidden="true" />
+            <span className={card.connected ? "dot dot-ok" : "dot dot-off"} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
             {card.role !== null && (
               <span className={card.role === "leader" ? "fleet-badge" : "fleet-badge fleet-badge-unverified"}>
@@ -240,8 +275,14 @@ function MachineCardView(props: {
             )}
             {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
-          <p className="fleet-meta">{card.meta}</p>
-          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
+          <p className="fleet-meta">
+            <TimedText line={card.meta} />
+          </p>
+          {card.build !== null && (
+            <p className="fleet-meta fleet-build">
+              <TimedText line={card.build} />
+            </p>
+          )}
         </div>
         {offersMenu && (
           <>
@@ -256,20 +297,30 @@ function MachineCardView(props: {
                   onToggle={() => onToggleOpen(!switchOn)}
                 />
               )}
-              {card.custodianControls && (
-                <>
-                  {card.openSwitch !== null && <MenuDivider />}
-                  <CustodianItems
-                    paused={custodianState.paused}
-                    running={custodianState.running}
-                    sending={custodianState.sending}
-                    onCustodian={onCustodian}
-                  />
-                </>
-              )}
-              {(card.openSwitch !== null || card.custodianControls) && offersHistory && <MenuDivider />}
+              {drainActions.map((act) => (
+                <MenuItem
+                  key={act}
+                  label={DRAIN_LABELS[act]}
+                  icon={<DrainIcon />}
+                  disabled={sending}
+                  onClick={() => onDrain(act)}
+                />
+              ))}
               {offersHistory && (
                 <HistoryItem history={history} onShow={() => onShowHistory(target)} onHide={onHideHistory} />
+              )}
+              {card.custodianControls && (
+                <>
+                  {(card.openSwitch !== null || offersHistory) && <MenuDivider />}
+                  <MenuGroup label="Custodian">
+                    <CustodianItems
+                      paused={custodianState.paused}
+                      running={custodianState.running}
+                      sending={custodianState.sending}
+                      onCustodian={onCustodian}
+                    />
+                  </MenuGroup>
+                </>
               )}
             </Menu>
           </>
@@ -291,12 +342,23 @@ function MachineCardView(props: {
       )}
       {card.drain !== null && closed && (
         <div className="fleet-note">
-          <p>Draining: {card.drain.summary}</p>
+          <p>
+            {card.drain.draining ? "Draining" : "Closed"}: {card.drain.summary}
+          </p>
           {keyed(card.drain.stuck).map(({ key, line }) => (
             <p key={key} className="fleet-warn">
               {line}
             </p>
           ))}
+          {drainActions.length > 0 && (
+            <div className="fleet-drain-actions">
+              {drainActions.map((act) => (
+                <button key={act} type="button" disabled={sending} onClick={() => onDrain(act)}>
+                  {DRAIN_LABELS[act]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
       {asking?.kind === "failed" && (
@@ -307,9 +369,13 @@ function MachineCardView(props: {
       {custodianState.roundRequested && <p className="fleet-note">Round requested</p>}
       {card.custodian !== null && <CustodianLine row={card.custodian} paused={custodianState.paused} />}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
-      {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
+      {card.updateNote !== null && (
+        <p className="fleet-note fleet-warn">
+          <TimedText line={card.updateNote} />
+        </p>
+      )}
 
-      {card.exclaves.length > 0 && (
+      {card.connected && card.exclaves.length > 0 && (
         <ul className="exclaves">
           {card.exclaves.map((row) => (
             <li key={row.id} className="exclave">
@@ -346,11 +412,17 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
-            <span className={card.online ? "dot dot-ok" : "dot"} aria-hidden="true" />
+            <span className={card.online ? "dot dot-ok" : "dot dot-off"} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
           </div>
-          <p className="fleet-meta">{card.meta}</p>
-          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
+          <p className="fleet-meta">
+            <TimedText line={card.meta} />
+          </p>
+          {card.build !== null && (
+            <p className="fleet-meta fleet-build">
+              <TimedText line={card.build} />
+            </p>
+          )}
         </div>
       </div>
       {card.rows.length > 0 && (
@@ -380,14 +452,22 @@ function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
 function AccountCardView(props: {
   account: AccountCard;
   nameable: boolean;
+  /** This account's switch ask, if the last one was for it. */
+  ask: AccountOpenAsk;
+  pausing: boolean;
+  onToggleOpen: (open: boolean) => void;
   history: HistoryView | null;
   ranges: readonly HistoryRange[];
   onRename: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { account, nameable, history, ranges, onRename, onShowHistory, onHideHistory } = props;
+  const { account, nameable, ask, pausing, onToggleOpen, history, ranges, onRename, onShowHistory, onHideHistory } =
+    props;
   const menu = useMenu();
+  // The asked state shows while the request is out, so the switch does not bounce back before the holds land.
+  const switchOn = ask?.kind === "sending" ? ask.open : account.openSwitch === "on";
+  const closed = ask?.kind === "sending" ? !ask.open : account.openSwitch === "off";
   const { historyFrom } = account;
   // Pinned to the host it was opened against: without the archive a range change
   // re-asks that one, and a host gone since leaves the chart to say so rather than switch hosts.
@@ -401,11 +481,23 @@ function AccountCardView(props: {
     <section className="fleet-card card">
       <div className="fleet-card-head">
         <div className="fleet-card-title">
-          <h2 className="fleet-name">{account.title}</h2>
+          <div className="fleet-name-row">
+            <h2 className="fleet-name">{account.title}</h2>
+            {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
+          </div>
           <p className="fleet-meta">{account.detail}</p>
         </div>
         <MoreTrigger menu={menu} label={`More actions for ${account.title}`} />
         <Menu menu={menu} label={`Actions for ${account.title}`}>
+          {account.openSwitch !== null && (
+            <MenuSwitchItem
+              label="Open for work"
+              icon={<WorkIcon />}
+              checked={switchOn}
+              disabled={pausing}
+              onToggle={() => onToggleOpen(!switchOn)}
+            />
+          )}
           <MenuItem
             label="Rename"
             icon={<PencilIcon />}
@@ -432,7 +524,19 @@ function AccountCardView(props: {
           ))}
         </div>
       )}
-      <p className="fleet-note">{account.observed}</p>
+      {ask?.kind === "failed" && (
+        <p className="fleet-note fleet-warn" role="alert">
+          {ask.text}
+        </p>
+      )}
+      {account.hold !== null && ask?.kind !== "sending" && (
+        <p className="fleet-note">
+          <TimedText line={account.hold} />
+        </p>
+      )}
+      <p className="fleet-note">
+        <TimedText line={account.observed} />
+      </p>
       {history !== null && target !== null && (
         <HistoryChart history={history} ranges={ranges} onPick={(range) => onShowHistory(target, range)} />
       )}
@@ -440,7 +544,7 @@ function AccountCardView(props: {
   );
 }
 
-/** Round now, then pause (for an hour or until resumed) or resume, by what the seat reports or was last asked. */
+/** Run a round now, then pause (for an hour or until resumed) or resume, by what the seat reports or was last asked. */
 function CustodianItems(props: {
   paused: boolean;
   running: boolean;
@@ -452,7 +556,7 @@ function CustodianItems(props: {
   return (
     <>
       <MenuItem
-        label="Round now"
+        label="Run round now"
         icon={<RoundIcon />}
         disabled={sending || running}
         {...(running ? { sub: "A round is running" } : {})}
@@ -469,7 +573,7 @@ function CustodianItems(props: {
         <>
           <MenuItem
             label="Pause for 1 hour"
-            icon={<PauseIcon />}
+            icon={<TimerIcon />}
             disabled={sending}
             onClick={() => onCustodian({ act: "pause", minutes: 60 })}
           />
@@ -490,7 +594,7 @@ function HistoryItem(props: { history: HistoryView | null; onShow: () => void; o
   const { history, onShow, onHide } = props;
   return (
     <MenuSwitchItem
-      label="History"
+      label="Show history"
       icon={<HistoryIcon />}
       checked={history !== null}
       onToggle={history === null ? onShow : onHide}
@@ -591,18 +695,77 @@ function keyed(lines: readonly string[]): { readonly key: string; readonly line:
   });
 }
 
-/** A close needs a yes: it stops the scheduler's new work landing there. Reopening needs none. */
-function CloseMachineDialog(props: {
-  name: string;
-  lines: readonly string[];
-  onClose: () => void;
-  onConfirm: () => void;
-  /** Present for a machine that asks its sessions to pass themselves (`canDrainNow`): close and interrupt them at once. */
-  onDrainNow?: () => void;
-}): JSX.Element {
-  const { name, lines, onClose, onConfirm, onDrainNow } = props;
+const DRAIN_LABELS: Record<DrainAction, string> = { drain: "Drain", now: "Drain now" };
+
+interface DialogAction {
+  readonly label: string;
+  readonly onClick: () => void;
+}
+
+interface CloseDialogContent {
+  readonly title: string;
+  readonly lines: readonly string[];
+  /** Quieter actions, before the primary one. */
+  readonly quiet: readonly DialogAction[];
+  readonly primary: DialogAction;
+}
+
+/**
+ * Which sheet an act opens. Closing a soft-capable machine: Close is soft and primary, with Close and drain and Drain
+ * now (where its daemon asks its sessions) as quieter choices; otherwise Close drains, as before. Drain on a
+ * soft-closed machine offers Drain now beside it; Drain now while draining cuts the ask's grace.
+ */
+function closeDialog(
+  act: "close" | DrainAction,
+  card: MachineCard,
+  machine: Machine,
+  closeSheet: (machine: Machine, soft: boolean) => readonly string[],
+  drainSheet: (machine: Machine) => readonly string[],
+  confirm: (close: CloseKind) => () => void,
+): CloseDialogContent {
+  const asks = canDrainNow(machine);
+  const drainNow: DialogAction = { label: "Drain now", onClick: confirm("now") };
+  if (act === "close") {
+    return {
+      title: `Close ${card.name}?`,
+      lines: closeSheet(machine, card.softClose),
+      quiet: card.softClose
+        ? [{ label: "Close and drain", onClick: confirm("drain") }, ...(asks ? [drainNow] : [])]
+        : asks
+          ? [drainNow]
+          : [],
+      primary: { label: "Close", onClick: confirm(card.softClose ? "soft" : "drain") },
+    };
+  }
+  if (act === "drain") {
+    return {
+      title: `Drain ${card.name}?`,
+      lines: drainSheet(machine),
+      quiet: card.drainActions.includes("now") ? [drainNow] : [],
+      primary: { label: "Drain", onClick: confirm("drain") },
+    };
+  }
+  // A soft close offers Drain beside Drain now; a drain under way offers Drain now alone. The lines say what this act
+  // does, not the Drain sheet's 5-minute wording: the interrupt is at once, and a session waiting on you is cut off too.
+  const soft = card.drainActions.includes("drain");
+  return {
+    title: `Drain ${card.name} now?`,
+    lines: [
+      soft
+        ? `${card.name} is closed. Drain now moves its running work off it, and interrupts its sessions' turns at once instead of 5 minutes after the drain began.`
+        : `${card.name} is draining. Drain now interrupts its sessions' turns at once instead of 5 minutes after the drain began.`,
+      "A session waiting on you is interrupted too.",
+    ],
+    quiet: [],
+    primary: drainNow,
+  };
+}
+
+/** A close or a drain needs a yes: one stops the scheduler's new work landing there, the other moves what runs. Reopening needs none. */
+function CloseMachineDialog(props: CloseDialogContent & { onClose: () => void }): JSX.Element {
+  const { title, lines, quiet, primary, onClose } = props;
   return (
-    <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
+    <Sheet title={title} variant="dialog" onClose={onClose}>
       <div className="rename">
         {keyed(lines).map(({ key, line }) => (
           <p key={key} className="rename-hint">
@@ -613,17 +776,27 @@ function CloseMachineDialog(props: {
           <button type="button" className="quiet" onClick={onClose}>
             Cancel
           </button>
-          {onDrainNow !== undefined && (
-            <button type="button" className="quiet" onClick={onDrainNow}>
-              Drain now
+          {quiet.map((action) => (
+            <button key={action.label} type="button" className="quiet" onClick={action.onClick}>
+              {action.label}
             </button>
-          )}
-          <button type="button" className="primary" onClick={onConfirm}>
-            Close
+          ))}
+          <button type="button" className="primary" onClick={primary.onClick}>
+            {primary.label}
           </button>
         </div>
       </div>
     </Sheet>
+  );
+}
+
+function DrainIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M4 12h12" />
+      <path d="M12 7l5 5-5 5" />
+      <path d="M20 5v14" />
+    </StrokeIcon>
   );
 }
 
@@ -651,6 +824,16 @@ function PauseIcon(): JSX.Element {
     <StrokeIcon size={18}>
       <path d="M9 6v12" />
       <path d="M15 6v12" />
+    </StrokeIcon>
+  );
+}
+
+/** A clock, for the pause that ends on its own. */
+function TimerIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z" />
+      <path d="M12 8v4l2.5 2.5" />
     </StrokeIcon>
   );
 }
@@ -698,7 +881,7 @@ function SessionCount(props: { count: number }): JSX.Element {
  * leaves the column out entirely (a pressure gauge); `null` keeps it, empty,
  * so a window without a reset stamp stays in line with its siblings.
  */
-function Bar(props: { gauge: Gauge; note?: string | null }): JSX.Element {
+function Bar(props: { gauge: Gauge; note?: Timed | null }): JSX.Element {
   const { gauge, note } = props;
   return (
     <div className={note === undefined ? "bar" : "bar bar-resets"}>
@@ -712,7 +895,7 @@ function Bar(props: { gauge: Gauge; note?: string | null }): JSX.Element {
         <span className={`bar-fill bar-${gauge.level}`} style={{ width: `${gauge.pct}%` }} />
       </span>
       <span className="bar-value">{gauge.pct}%</span>
-      {note !== undefined && <span className="bar-reset">{note ?? ""}</span>}
+      {note !== undefined && <span className="bar-reset">{note !== null && <TimedText line={note} />}</span>}
     </div>
   );
 }
@@ -757,6 +940,10 @@ function HistoryChart(props: {
           ),
     [series, from, to, step],
   );
+  const offline = useMemo(
+    () => (series === null ? [] : offlineSpans(series, { from, to, step }, CHART_WIDTH)),
+    [series, from, to, step],
+  );
 
   // Every state fills the same frame, axis and legend row, so a range pick can't collapse the card mid-load.
   return (
@@ -768,7 +955,7 @@ function HistoryChart(props: {
         {result.kind === "loading" && <p className="chart-status">Loading…</p>}
         {result.kind === "failed" && <p className="chart-status chart-failed">{result.message}</p>}
         {result.kind === "ok" && lines.length === 0 && <p className="chart-status">Nothing recorded in this range.</p>}
-        {lines.length > 0 && <ChartPlot history={history} lines={lines} />}
+        {lines.length > 0 && <ChartPlot history={history} lines={lines} offline={offline} />}
       </div>
       <div className="chart-axis">
         <span>{history.range} ago</span>
@@ -781,13 +968,23 @@ function HistoryChart(props: {
             {line.label}
           </li>
         ))}
+        {lines.length > 0 && offline.length > 0 && (
+          <li key="offline">
+            <span className="chart-swatch chart-offline-swatch" aria-hidden="true" />
+            Offline
+          </li>
+        )}
       </ul>
     </div>
   );
 }
 
-function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] }): JSX.Element {
-  const { history, lines } = props;
+function ChartPlot(props: {
+  history: HistoryView;
+  lines: readonly ChartLine[];
+  offline: readonly ChartSpan[];
+}): JSX.Element {
+  const { history, lines, offline } = props;
   return (
     <svg
       className="chart-plot"
@@ -796,6 +993,10 @@ function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] })
       role="img"
       aria-label={`${TARGET_LABELS[history.target.kind]} over the last ${history.range}`}
     >
+      {/* Under the grid and the lines: the bands mark the ground, never cover a measurement. */}
+      {offline.map((span) => (
+        <rect key={span.x} className="chart-offline" x={span.x} y="0" width={span.width} height={CHART_HEIGHT} />
+      ))}
       {[25, 50, 75].map((pct) => (
         <line
           key={pct}
@@ -839,7 +1040,9 @@ function CustodianLine({ row, paused }: { readonly row: CustodianRow; readonly p
       {row.ended !== null && (
         <>
           {" "}
-          <span>· {row.ended}</span>
+          <span>
+            · <TimedText line={row.ended} />
+          </span>
         </>
       )}
       {row.counts !== null && (

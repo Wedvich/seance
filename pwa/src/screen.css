@@ -47,6 +47,20 @@
   color: var(--fg2);
 }
 
+/* The Queue's count, where it opens the Limits sheet: the same line, with a chevron saying it opens. */
+.header-meta-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  /* Pads the 44px tap target without moving the line. */
+  margin: -10px -8px -12px;
+  padding: 12px 8px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
 /* The settings header's subtitle carries the live status dot. */
 .header-status {
   display: flex;
@@ -113,6 +127,13 @@
 
 .dot-ok {
   background: var(--ok);
+}
+
+/* Offline: hollow like the relay's unreachable ring, so absence reads by shape and not only by a grey fill. */
+.dot-off {
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid var(--fg2);
 }
 
 .dot-err {
@@ -2330,6 +2351,27 @@
   color: var(--warn);
 }
 
+/* A closed machine's Drain / Drain now, under its drain row: small, so the card stays a status card. */
+.fleet-drain-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.fleet-drain-actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.8125rem;
+}
+
+.fleet-drain-actions button:disabled {
+  opacity: 0.5;
+}
+
 /* Wraps between its parts, never inside one: a 390px card holds two or three. */
 .custodian-row {
   display: flex;
@@ -2617,6 +2659,18 @@
   vector-effect: non-scaling-stroke;
 }
 
+/* Spans no gauge measured (asleep, daemon down), full height behind the lines. */
+.chart-offline {
+  fill: var(--fg2);
+  opacity: 0.1;
+}
+
+.chart-offline-swatch {
+  height: 10px;
+  background: var(--fg2);
+  opacity: 0.3;
+}
+
 .chart-axis {
   display: flex;
   justify-content: space-between;
@@ -2693,10 +2747,31 @@
   background: var(--bg);
 }
 
+/* Top-aligned so a subtitle that wraps (Machines') grows the title block alone: the pill
+   keeps one position across the three screens. The title block is at least the pill's
+   height (44px), centred in it, so a short title sits where it did when the header centred. */
+.phone-header {
+  align-items: flex-start;
+}
+
+.phone-heading {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 44px;
+}
+
+/* The phone's screen body, under the one header the three screens share. */
+.phone-body {
+  flex: 1 1 0;
+  height: auto;
+}
+
 /* Screen motion is the View Transition API, started by transition.ts with one
    type per kind. Names and classes exist only while a transition runs, so an
    idle panel is never a stacking context because of one, and a duplicate name
-   (which aborts a transition) can only come from these two hosts. */
+   (which aborts a transition) can only come from these two hosts and the phone
+   header's parts below, each of which exists once. */
 :root:active-view-transition .screen-base-host {
   view-transition-name: screen-base;
   view-transition-class: screen;
@@ -2709,9 +2784,81 @@
 
 /* The base is an opaque panel, so no root crossfade under it. The modal types
    keep root's default: it carries the desk dialog's backdrop. */
-:root:active-view-transition-type(push, pop, verdict-in, verdict-out)::view-transition-old(root),
-:root:active-view-transition-type(push, pop, verdict-in, verdict-out)::view-transition-new(root) {
+:root:active-view-transition-type(push, pop, switch, verdict-in, verdict-out)::view-transition-old(root),
+:root:active-view-transition-type(push, pop, switch, verdict-in, verdict-out)::view-transition-new(root) {
   animation: none;
+}
+
+/* A switch between the phone's peer screens moves only what changes: the
+   header's title block and the body. The pill is named so it
+   is held still rather than cross-faded with the header around it. */
+:root:active-view-transition-type(switch) .phone-heading {
+  view-transition-name: head-title;
+}
+
+:root:active-view-transition-type(switch) .phone-header .relay-group {
+  view-transition-name: head-pill;
+}
+
+:root:active-view-transition-type(switch) .phone-body {
+  view-transition-name: screen-body;
+}
+
+/* What is left of the panel (the header's surface, the stage) is the same on
+   both sides unless a verdict drops the header; the crossfade covers that. */
+:root:active-view-transition-type(switch)::view-transition-old(screen-base),
+:root:active-view-transition-type(switch)::view-transition-new(screen-base) {
+  animation-duration: 0.2s;
+}
+
+/* The groups jump to the new box: titles differ in width, and a morph would
+   stretch the old text into it. Each image keeps its own size, top-left. */
+:root:active-view-transition-type(switch)::view-transition-group(head-title),
+:root:active-view-transition-type(switch)::view-transition-group(screen-body),
+:root:active-view-transition-type(switch)::view-transition-group(head-pill) {
+  animation: none;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-title),
+:root:active-view-transition-type(switch)::view-transition-new(head-title) {
+  inline-size: auto;
+  block-size: auto;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-title) {
+  animation: vt-head-out 0.2s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(head-title) {
+  animation: vt-head-in 0.2s ease-out both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(screen-body) {
+  animation: vt-fade-out 0.15s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(screen-body) {
+  animation: vt-body-in 0.22s ease-out both;
+}
+
+/* Both images at full opacity would add up under plus-lighter: the new one
+   stands alone. Only a header appearing or leaving (a verdict) fades the pill. */
+:root:active-view-transition-type(switch)::view-transition-new(head-pill) {
+  animation: none;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-pill) {
+  animation: none;
+  opacity: 0;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-pill):only-child {
+  opacity: 1;
+  animation: vt-fade-out 0.2s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(head-pill):only-child {
+  animation: vt-fade-in 0.2s ease-out both;
 }
 
 /* An exit-only group paints after an entering one; the layer must stay on top. */
@@ -2819,6 +2966,27 @@
   }
 }
 
+@keyframes vt-head-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes vt-head-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@keyframes vt-body-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
 @keyframes vt-modal-in {
   from {
     opacity: 0;
@@ -2886,38 +3054,10 @@
 
 /* ---- decision record: the `auto` preview and a queued task's verdict ---- */
 
-.preview {
-  position: relative;
-}
-
-/* Sits in the card's label row, so it costs the card no height. */
-.preview-refresh {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 44px;
-  height: 44px;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  font-size: 17px;
-  cursor: pointer;
-}
-
+/* Delayed: a re-ask the leader answers quickly, usually with the same placement, should not flash the card. */
 .preview-pending .decision {
   opacity: 0.55;
-  transition: opacity 120ms;
-}
-
-.preview-pending .preview-refresh {
-  animation: preview-spin 0.9s linear infinite;
-  cursor: default;
-}
-
-@keyframes preview-spin {
-  to {
-    transform: rotate(1turn);
-  }
+  transition: opacity 120ms 300ms;
 }
 
 .decision {
@@ -3250,18 +3390,6 @@
   opacity: 0.5;
 }
 
-.queue-refresh {
-  width: 44px;
-  height: 44px;
-  margin: -8px -8px -8px 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  font-size: 17px;
-  cursor: pointer;
-  flex: none;
-}
-
 .queue-resume {
   align-self: center;
   padding: 8px 12px;
@@ -3380,6 +3508,12 @@
   color: var(--err);
 }
 
+/* The page showing: picking it only closes the menu. */
+.menu-item-current {
+  background: color-mix(in oklab, var(--acc) 14%, transparent);
+  color: var(--acc);
+}
+
 /* The label and icon dim; a sub-line stays at full `--fg2`, as it may be the only word on why. */
 .menu-item[aria-disabled="true"] .menu-icon,
 .menu-item[aria-disabled="true"] .menu-label {
@@ -3410,8 +3544,9 @@
   color: var(--fg2);
 }
 
-/* The icon follows the label's red. */
-.menu-item-destructive .menu-icon {
+/* The icon follows the label's red, or the current page's accent. */
+.menu-item-destructive .menu-icon,
+.menu-item-current .menu-icon {
   color: currentColor;
 }
 
@@ -3431,6 +3566,19 @@
   height: 1px;
   margin: 2px 8px; /* the flex gap adds 2px each side */
   background: var(--line);
+}
+
+/* Same gap as `.menu`, so grouped items sit as ungrouped ones do. */
+.menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* `.label` type, inset to the items' own padding. */
+.menu-heading {
+  padding: 8px 12px 4px;
+  font-size: 0.6875rem;
 }
 
 /* `.toggle` scaled to a menu row. Off is `--switch-off`, not `--line`: on the menu's surface a
@@ -3655,4 +3803,65 @@
 
 .after-when .seg {
   width: 100%;
+}
+
+/* ---- timestamp tooltip (tooltip.ts): the instant behind a relative time ---- */
+
+/* A hover target, not a link: no underline until the pointer is on it. */
+.reltime {
+  border-radius: 3px;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 3px;
+}
+
+@media (hover: hover) {
+  .reltime:hover {
+    color: var(--fg);
+    text-decoration-color: currentColor;
+  }
+}
+
+/* Top-layer popover; `left` and `top` are set from the anchor on open.
+   base.css's reduced-motion rule clamps the transitions to an instant. */
+.tip {
+  --tip-slide: 3px;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--sur2);
+  color: var(--fg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(var(--tip-slide));
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease,
+    overlay 0.12s allow-discrete,
+    display 0.12s allow-discrete;
+}
+
+.tip[data-side="below"] {
+  --tip-slide: -3px;
+}
+
+.tip:popover-open {
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .tip:popover-open {
+    opacity: 0;
+    transform: translateY(var(--tip-slide));
+  }
 }

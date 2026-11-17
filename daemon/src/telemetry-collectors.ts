@@ -136,11 +136,13 @@ function drainCollector(sources: CollectorSources): Collect {
     Promise.resolve(sources.draining?.() === true ? { fields: { drn: true }, samples: [] } : NO_CONTRIBUTION);
 }
 
-/** `cl` while a person has the machine closed: sticky, so every status carries it, the first after a restart included. No metric, as `drn`. */
+/** `cl` while a person has the machine closed: sticky, so every status carries it, the first after a restart included; `dr` beside it once its drain began. No metric, as `drn`. */
 function closedCollector(sources: CollectorSources): Collect {
   return () => {
     const at = sources.closed?.() ?? null;
-    return Promise.resolve(at === null ? NO_CONTRIBUTION : { fields: { cl: at }, samples: [] });
+    if (at === null) return Promise.resolve(NO_CONTRIBUTION);
+    const dr = sources.drainAt?.() ?? null;
+    return Promise.resolve({ fields: { cl: at, ...(dr === null ? {} : { dr }) }, samples: [] });
   };
 }
 

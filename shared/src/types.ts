@@ -390,6 +390,13 @@ export const PAUSE_KEY = "queue:pause";
 /** The one key the leader writes under `settings:`: one `SettingsRecord` holds every setting. */
 export const SETTINGS_KEY = "settings:main";
 
+/**
+ * The scheduler's own settings (`SchedulerSettingsRecord`: the fleet limit), under `settings:` beside
+ * `SETTINGS_KEY` and apart from it: that record holds the VAPID private key, sits near the store's size
+ * bound and is never written over once unreadable, none of which a routing limit should inherit.
+ */
+export const SCHEDULER_SETTINGS_KEY = "settings:scheduler";
+
 /** The one key under `quota:`. */
 export const QUOTA_KEY = "quota:fleet";
 
@@ -695,6 +702,8 @@ export const AT_REST_OPS = {
   account: "account",
   quota: "quota",
   settings: "settings",
+  /** `SchedulerSettingsRecord`, sealed to SCHEDULER_ID by the leader's queue-store adapter (`putLimits`). */
+  schedulerSettings: "scheduler-settings",
 } as const;
 
 export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
@@ -755,6 +764,7 @@ export const SCHEDULER_OPS = [
   "push-unsubscribe",
   "pass",
   "amend",
+  "set-limits",
 ] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
@@ -804,6 +814,7 @@ export const OP_TIMEOUT_MS = {
   "push-unsubscribe": 10_000,
   pass: 180_000,
   amend: 10_000,
+  "set-limits": 10_000,
   "push-branch": 90_000,
   "pass-close": 10_000,
   "deliver-message": 10_000,
@@ -1081,7 +1092,7 @@ export interface MachineInfo {
  * field — a daemon without it spawns a duplicate rather than refusing one.
  * `baseBranch`: the spawn field (M4, stacking) — a daemon without it drops the
  * field and starts the worktree from the default branch, so a leader sends it
- * only to a daemon advertising this. No daemon does yet. `exitStatus`: its
+ * only to a daemon advertising this. `exitStatus`: its
  * `sessions` `progress` carries `TaskProgress.exit` — a leader then settles a
  * PR-less `ended` event by that machine's next answer, not by the event, whose
  * hook runs before the pane dies (DESIGN.md, Daemon, "Exit status").
@@ -1116,6 +1127,9 @@ export interface MachineInfo {
  * so a second Continue would resume a session a continuation already owns.
  * `runNow`: as a leader, answers `run-now` — what a client checks of the
  * verified leader before offering it (an older one refuses the op as unknown).
+ * `runNowPaused`: as a leader, `run-now` places past a whole-queue pause too. A client
+ * offers Start now for a task the pause alone holds only to a verified leader advertising
+ * it: an older one answers `unplaceable`.
  * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
  * leader, routes, dispatches and leans them — what the PWA checks of the verified
  * leader before offering to attach. One build does both halves.
@@ -1148,9 +1162,12 @@ export interface MachineInfo {
  * leader fails the task.
  * `drainPass`: as a leader, passes the work off a closed machine (`trigger: "drain"`) and writes
  * `Task.drained`; what a client checks of the verified leader before showing a drain's per-task
- * counts or offering `seanced close --wait`.
+ * counts or offering `seance close --wait`.
  * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (drain step A) and honours
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
+ * `softClose`: as a daemon, honours `availability`'s `soft`, keeps `closed.drainAt` and reports `MachineStatus.dr`; as a
+ * leader, drains a machine only from `drainStart` (`dr`, else `cl` for a daemon without it). A client offers the soft
+ * close only to a target advertising it under a verified leader advertising it.
  * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
  * (docs/messaging.md); advertised only where the host names a socket's peer.
  * `messageRoute`: as a daemon, answers the leader's `deliver-message` and `message-receipt`; as a leader, routes a
@@ -1167,6 +1184,9 @@ export interface MachineInfo {
  * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`). It also means the daemon
  * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
  * rounds were held (`ROUNDS_LIVE`) on every build before custodian 4b, so the one bit gates the Machines card's menu too.
+ * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
+ * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
+ * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1180,6 +1200,7 @@ export const CAPABILITIES = {
   continueSession: "continueSession",
   continueHandoff: "continueHandoff",
   runNow: "runNow",
+  runNowPaused: "runNowPaused",
   attachments: "attachments",
   authHealth: "authHealth",
   traits: "traits",
@@ -1191,10 +1212,12 @@ export const CAPABILITIES = {
   drain: "drain",
   drainPass: "drainPass",
   drainAsk: "drainAsk",
+  softClose: "softClose",
   messages: "messages",
   messageRoute: "messageRoute",
   messageReply: "messageReply",
   custodian: "custodian",
+  limits: "limits",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1363,6 +1386,12 @@ export interface MachineStatus {
    * quota entry.
    */
   readonly cl?: number;
+  /**
+   * Unix ms the drain of this close began (`closed.drainAt`, docs/drain.md N5): only beside `cl`; absent while
+   * soft-closed, while open, and from an older daemon. Never trimmed: a trimmed `dr` would stop a drain the owner
+   * started. Not `QuotaObservation.dr` (seven-day reset), a field of a quota entry.
+   */
+  readonly dr?: number;
   /**
    * The custodian seat's view (docs/custodian.md; DESIGN.md, "The custodian's status and the Machines row"):
    * display-only, never trimmed by `fitStatus`, absent from a daemon with no seat. Not `QuotaObservation.cu`
@@ -1771,10 +1800,18 @@ export interface SpawnRequest {
    * malformed otherwise; resolved against `refs/remotes/origin/<b>`, never
    * interpolated, and unresolvable is `base_not_found`. An old daemon drops it
    * and starts from the default branch, so it is sent only to a daemon
-   * advertising `CAPABILITIES.baseBranch`. Accepted in shape today, acted on by
-   * none.
+   * advertising `CAPABILITIES.baseBranch`. Set only by the leader's dispatch,
+   * to the stacking predecessor's own `Task.branch` (DESIGN.md, Scheduler, "Stacking").
    */
   readonly baseBranch?: string;
+  /**
+   * The task stacks on a predecessor that left nothing to stack on — `done` with no PR or
+   * pushed branch (mark-done, a no-PR session end, a `here` task) — so its worktree starts
+   * from the default branch and its preamble says so (decided #4). Only ever `true`, never
+   * beside `baseBranch`; set only by the leader's dispatch, sent only to a daemon advertising
+   * `CAPABILITIES.baseBranch`. A note for the session's preamble: it changes no git act.
+   */
+  readonly noBase?: true;
   /**
    * The failed task whose worktree the session resumes. Required exactly when
    * `mode` is `"continue"`. Bounded by `TASK_ID_PATTERN`; resolved against the
@@ -1887,7 +1924,7 @@ export type SpawnResponse =
 /**
  * Ends one session: claude is asked to exit, and its pane is killed if it
  * hasn't within a few seconds. The window only — a worktree and its branch are
- * left for `seanced reap`.
+ * left for `seance reap`.
  */
 export interface DespawnRequest {
   /** `SessionEntry.id` from a session list — the daemon accepts nothing else as a target. */
@@ -1905,10 +1942,16 @@ export type DespawnErrorCode = (typeof DESPAWN_ERROR_CODES)[number];
 /** `exited`: claude left on its own once asked. `killed`: it didn't, or `force` said not to wait. */
 export type DespawnOutcome = "exited" | "killed";
 
-/** `now` is the drain's no-wait: a close's interrupt deadline moves to now (a daemon advertising `CAPABILITIES.drainAsk`); ignored on an open, and by an older daemon. */
+/**
+ * `now` is the drain's no-wait: a close's interrupt deadline moves to now (a daemon advertising `CAPABILITIES.drainAsk`);
+ * ignored on an open, and by an older daemon. `soft` closes without draining (a daemon advertising
+ * `CAPABILITIES.softClose`): `true` only; beside `now` the request is refused (`invalid_request`), even on an open. Otherwise ignored on an open
+ * and by an older daemon (which closes and drains).
+ */
 export interface AvailabilityRequest {
   readonly open: boolean;
   readonly now?: boolean;
+  readonly soft?: boolean;
 }
 
 export const AVAILABILITY_ERROR_CODES = [
@@ -2905,6 +2948,12 @@ export type Reason =
   | { readonly code: "continue_unsupported" }
   /** The task carries attachments and the machine does not advertise `CAPABILITIES.attachments`. */
   | { readonly code: "attachments_unsupported" }
+  /**
+   * M4, stacking: the task may stack (`mayStack`: a worktree task with an `after: "opened"` edge) and the
+   * machine does not advertise `CAPABILITIES.baseBranch`, whose daemon would drop `baseBranch` and start
+   * from the default branch silently. Judged from the spec, so routing and the dispatch after it agree.
+   */
+  | { readonly code: "base_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */
   | { readonly code: "auth_expired" }
@@ -2940,9 +2989,10 @@ export type Reason =
    */
   | { readonly code: "model_not_included"; readonly model: string }
   /**
-   * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
-   * per-account cap. (Scope `batch` and the `batch_order` reason went with
-   * batch strategies; a reader drops either as a reason it does not know.)
+   * `scope` absent is `global`, as M2's leaders sent it: the fleet limit (`SchedulerLimits.fleet`), and
+   * `max: 0` is a limit record the leader cannot read, which holds every task. `account` is what a leader
+   * that predates `CAPABILITIES.limits` sends for its per-account cap. (Scope `batch` and the `batch_order`
+   * reason went with batch strategies; a reader drops either as a reason it does not know.)
    */
   | {
       readonly code: "cap_reached";
@@ -3156,6 +3206,25 @@ export const DRAIN_REFUSALS = [
 export type DrainRefusal = (typeof DRAIN_REFUSALS)[number];
 
 /**
+ * `Task.stack`'s `on` (M4, stacking; DESIGN.md, Scheduler, "Stacking"): `branch`, its worktree started from
+ * the predecessor's pushed branch; `merged`, that predecessor's PR had merged, so it started from the default
+ * branch, which holds the work; `nothing`, that predecessor finished with no PR or pushed branch, so it
+ * started from the default branch without it (the spawn's `noBase`).
+ */
+export const STACK_BASES = ["branch", "merged", "nothing"] as const;
+export type StackBase = (typeof STACK_BASES)[number];
+
+/**
+ * `Task.stack`: what its confirmed dispatch started its worktree from. `task`: its stacking predecessor,
+ * the task holding the work after any pass chain, not always the dep the author named. No branch name: the
+ * predecessor's record holds it, and a copy here would outlive the archivist's strip of `branch`.
+ */
+export interface TaskStack {
+  readonly task: string;
+  readonly on: StackBase;
+}
+
+/**
  * `Task.drained`: the leader's write-ahead record of its drain pass. `at`: the machine's `cl` the attempt
  * was for (a stamp for an older close never suppresses a new one). `tried`: the leader's clock (ms) of
  * the last attempt, what the retry waits `drainRetryMs` from. `refused`: that attempt's refusal, what
@@ -3326,6 +3395,13 @@ export interface Task {
    * attempt's refusal, what clients show as stuck. Dropped, never fatal, when malformed, and on finishing.
    */
   readonly drained?: DrainedStamp;
+  /**
+   * What its worktree started from (`TaskStack`), written by the leader with the `running` its spawn's `ok`
+   * confirmed, only for a task with a stacking predecessor, and dropped on a return to `ready` (the next
+   * dispatch reads it afresh). Display-only: no reader routes, settles or binds by it. Dropped, never fatal,
+   * when malformed, and by an older reader's parser.
+   */
+  readonly stack?: TaskStack;
   /** The newest landed continuation of an `awaiting-merge` task's chain, the leader's pointer (`ContinuedBy`). */
   readonly continuedBy?: ContinuedBy;
   /**
@@ -3434,6 +3510,25 @@ export const MAX_PAUSE_HOLDS = 32;
 /** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader; sealed and opened by `daemon/src/queue-store.ts`). */
 export interface PauseRecord extends VersionBound {
   readonly holds: readonly PauseHold[];
+}
+
+/** The highest fleet limit `set-limits` takes: past the store's `MAX_TASKS` nothing could reach it. */
+export const FLEET_LIMIT_MAX = MAX_TASKS;
+
+/**
+ * What a person set to bound the queue; each part absent means no limit. `fleet`: in-flight scheduler
+ * tasks across every machine and account, 1 to `FLEET_LIMIT_MAX` (0 is a pause, and refused).
+ */
+export interface SchedulerLimits {
+  readonly fleet?: number;
+}
+
+/**
+ * Payload of `settings:scheduler` (`op: "scheduler-settings"`, sealed to SCHEDULER_ID by the leader; sealed
+ * and opened by `daemon/src/queue-store.ts`). Absent until a limit is first set: no record is no limit.
+ */
+export interface SchedulerSettingsRecord extends VersionBound {
+  readonly limits: SchedulerLimits;
 }
 
 /** An alias's length at most, in UTF-16 units: a name on a card. */
@@ -3708,7 +3803,7 @@ export const SCHEDULER_ERROR_CODES = [
   "finished",
   /** `run-now`: the task is not `ready` — waiting on admission or its deps, or already placed. */
   "not_waiting",
-  /** `run-now`: something besides the concurrency caps (a pause, quota, a pin, …) keeps it from every machine. */
+  /** `run-now`: something besides the concurrency limit (an account's pause, an unreadable pause record or an older leader's queue pause, quota, a pin, …) keeps it from every machine. */
   "unplaceable",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
@@ -3821,10 +3916,30 @@ export interface QueueResponse {
    */
   readonly idle?: readonly IdleTaskRef[];
   /**
-   * The leader's `globalMax`: the in-flight cap the header's "8/8 running" divides by. Not a
-   * ceiling on `running` — a task placed past the caps (`run-now`) overprovisions it. Absent from older leaders.
+   * The fleet limit (`SchedulerLimits.fleet`): the in-flight cap the header's "8/8 running" divides by. Not a
+   * ceiling on `running` — a task placed past it (`run-now`) overprovisions it. Absent when none is set (a
+   * leader advertising `CAPABILITIES.limits` then runs unbounded) and from older leaders.
    */
   readonly globalMax?: number;
+  /**
+   * The leader cannot read `settings:scheduler`, so it places nothing (`cap_reached` at `max: 0`) until a
+   * `set-limits` overwrites the record. `true` only.
+   */
+  readonly limitsUnreadable?: true;
+  /**
+   * Session passes (`session-pass`, fire-and-forget) this leader refused in the last ten minutes, whatever
+   * `QueueRequest.tasks` asked for: what `pass_to_successor` reads to tell its session why no successor came.
+   * Memory only, so a new term shows none. Absent from older leaders, and when there are none.
+   */
+  readonly passRefused?: readonly PassRefusalRef[];
+}
+
+/** A session's own pass the leader refused: the code, and the `SessionPass.at` it answers (the sender's clock). */
+export interface PassRefusalRef {
+  readonly taskId: string;
+  /** A `SchedulerErrorCode`, raw as read, as `SchedulerError.code` is. */
+  readonly code: string;
+  readonly sentAt?: number;
 }
 
 /** A task released for sitting idle at its prompt, and since when it has (leader's clock, ms). */
@@ -3927,6 +4042,20 @@ export interface ResumeRequest {
 /** `pause` and `resume` → every hold after the change. */
 export interface PauseResponse {
   readonly holds: readonly PauseHold[];
+}
+
+/**
+ * `op: "set-limits"`, only to a leader advertising `CAPABILITIES.limits`. States every limit, not a change:
+ * `fleet` null lifts it. Running sessions are never touched; a limit below what runs places nothing new
+ * until the count falls under it.
+ */
+export interface SetLimitsRequest {
+  readonly fleet: number | null;
+}
+
+/** `set-limits` → the limits after the change. */
+export interface SetLimitsResponse {
+  readonly limits: SchedulerLimits;
 }
 
 /**
@@ -4094,4 +4223,5 @@ export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
 export type TaskReply = TaskResponse | SchedulerError;
 export type PassReply = PassResponse | SchedulerError;
 export type PauseReply = PauseResponse | SchedulerError;
+export type SetLimitsReply = SetLimitsResponse | SchedulerError;
 export type DiscardReply = DiscardResponse | SchedulerError;

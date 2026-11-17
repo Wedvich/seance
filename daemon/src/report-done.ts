@@ -10,13 +10,13 @@ import {
 } from "./session-event-frame.ts";
 
 /**
- * A session's own `done` report (#21), as `seanced mcp`'s `report_task_done`
+ * A session's own `done` report (#21), as `seance mcp`'s `report_task_done`
  * tool sends it, its hand-off (`hand_off_task`) and its pass (`pass_to_successor`): the same
  * `session-event` frame the mod's CLI sends, so the daemon binds it by the sender's pid and a
  * session settles, closes or passes only its own task. The MCP server is a child of the
  * session's `claude`, itself in the pane, so the parent walk lands on that pane.
  *
- * Imports nothing that logs: this runs inside `seanced mcp`, whose stdout is the
+ * Imports nothing that logs: this runs inside `seance mcp`, whose stdout is the
  * JSON-RPC channel. That is why the reply codes live in `session-event-frame.ts`.
  */
 
@@ -75,7 +75,7 @@ const COMMON = {
 
 const REPORT_REFUSED = {
   ...COMMON,
-  invalid: "this machine's daemon predates done reports; run `seanced update`",
+  invalid: "this machine's daemon predates done reports; run `seance update`",
   untasked: "this session runs no scheduler task, so there is nothing to report",
   unrecorded: "this machine's daemon holds no launch of this session's task, so nothing was reported",
   unwritten:
@@ -92,7 +92,7 @@ const KEEP_WATCHING = "; keep watching the PR yourself";
 const HANDOFF_REFUSED = {
   unbound: COMMON.unbound + KEEP_WATCHING,
   unsupported: COMMON.unsupported + KEEP_WATCHING,
-  invalid: "this machine's daemon predates hand-offs (run `seanced update`)" + KEEP_WATCHING,
+  invalid: "this machine's daemon predates hand-offs (run `seance update`)" + KEEP_WATCHING,
   untasked: "this session runs no scheduler task, so nothing would watch the PR" + KEEP_WATCHING,
   unrecorded:
     "this machine's daemon holds no launch of this session's task, so nothing would watch the PR" + KEEP_WATCHING,
@@ -108,7 +108,7 @@ const HANDOFF_REFUSED = {
 const PASS_REFUSED = {
   unbound: COMMON.unbound,
   unsupported: COMMON.unsupported,
-  invalid: "this machine's daemon predates passing; restart seanced (`seanced update`)",
+  invalid: "this machine's daemon predates passing; restart seanced (`seance update`)",
   untasked: "this session runs no scheduler task, so there is nothing to pass",
   unrecorded: "this machine's daemon holds no launch of this session's task, so nothing was pushed or passed",
   // Never answered to a pass, which writes no note; listed so every code has words.
@@ -197,7 +197,7 @@ export function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneResult>
     { state: "done" },
     opts,
     REPORT_REFUSED,
-    "sent — settles the task if it was queued to settle on its report",
+    "sent — settles the task if it was queued to settle on its report or holds no pull request; one holding a pull request waits for its merge",
   );
 }
 

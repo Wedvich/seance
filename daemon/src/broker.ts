@@ -39,7 +39,7 @@ import { isDespawnRequest, isSpawnRequest } from "./handlers.ts";
 import { log } from "./log.ts";
 
 /**
- * The daemon side of the fleet broker: a keyless `seanced mcp` or `seanced spawn`
+ * The daemon side of the fleet broker: a keyless `seance mcp` or `seance spawn`
  * on this box asks for the registry, for one of three ops on one other
  * machine, or for the scheduler's enqueue, queue, cancel, run-now and account read, and
  * the daemon makes that app-role request itself with the key it already holds.
@@ -48,7 +48,7 @@ import { log } from "./log.ts";
  * daemon-role — it registers, receives ops and answers them, and the relay never
  * pushes it the registry or routes its envelopes to another daemon. Reaching
  * another machine means being an app, so the broker is a fourth app-role client
- * beside the PWA, Raycast and `seanced mcp`, built over the shared one.
+ * beside the PWA, Raycast and `seance mcp`, built over the shared one.
  *
  * What it is not: a crypto oracle, a relay forwarder or a key export. The peer
  * names an action and a deviceId; the daemon decides the address, builds the
@@ -59,7 +59,7 @@ import { log } from "./log.ts";
  * its own `createdAt`.
  *
  * Built only by a daemon whose key is service-delivered (`run-capabilities.ts`): elsewhere
- * `seanced mcp` reads the key itself, and the broker would add authority, not reach.
+ * `seance mcp` reads the key itself, and the broker would add authority, not reach.
  */
 
 /**
@@ -99,7 +99,7 @@ export interface Broker {
  * process can read the key, and a second lookup would be a second chance to get
  * it wrong. Both keys derive here (`importAppKeys`), on the first dial, so the
  * account HMAC key exists only in a daemon that brokers. Lazy and idle-closing
- * like `seanced mcp`'s, so a box nobody brokers through holds no extra socket.
+ * like `seance mcp`'s, so a box nobody brokers through holds no extra socket.
  */
 export function brokerRelay(config: Pick<Config, "relayUrl" | "bearerToken">, psk: string): LazyRelay {
   let keys: Promise<AppKeys> | undefined;
@@ -344,7 +344,7 @@ export function createBroker(opts: BrokerOpts): Broker {
           return await fail(
             id,
             "invalid_request",
-            `the scheduler's leader cannot ${pass ? "pass a task to a successor" : "amend a queued task"} yet — its daemon needs \`seanced update\``,
+            `the scheduler's leader cannot ${pass ? "pass a task to a successor" : "amend a queued task"} yet — its daemon needs \`seance update\``,
           );
         }
       }

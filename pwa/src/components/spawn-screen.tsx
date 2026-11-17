@@ -25,9 +25,8 @@ import {
 } from "../state.ts";
 import { matchesFilter, splitMatch } from "../sheet-filter.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { formatSeen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
+import { seen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
-import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
 import { Sheet, SheetItem, SheetSetting, TileButton, useSheetExit } from "./sheet.tsx";
@@ -59,8 +58,6 @@ export interface SpawnActions {
   readonly clearPrompt: () => void;
   readonly undoClear: () => void;
   readonly openSettings: () => void;
-  readonly openQueue: () => void;
-  readonly openMachines: () => void;
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
   readonly spawn: () => void;
@@ -69,7 +66,6 @@ export interface SpawnActions {
   readonly dismissLayer: () => void;
   readonly pickMachine: (deviceId: string | null) => void;
   readonly pickAccount: (accountId: string | null) => void;
-  readonly refreshPreview: () => void;
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
   readonly rescan: (deviceId: string) => void;
@@ -782,16 +778,10 @@ function PreviewCard(props: {
   preview: PreviewState | null;
   machines: readonly Machine[];
   now: number;
-  onRefresh: () => void;
 }): JSX.Element | null {
-  const { preview, machines, now, onRefresh } = props;
+  const { preview, machines, now } = props;
   if (preview === null) return null;
   const pending = preview.kind === "loading";
-  const refresh = (
-    <button type="button" className="preview-refresh" onClick={onRefresh} disabled={pending} aria-label="Preview again">
-      ↻
-    </button>
-  );
   const decision = preview.kind === "ok" ? preview.decision : pending ? preview.previous : undefined;
   if (decision !== undefined) {
     // Same tree for a re-ask as for its answer, so the card neither collapses nor closes its candidates.
@@ -801,9 +791,8 @@ function PreviewCard(props: {
           summary={describeDecision(decision, machines, now, "would")}
           title="PLACEMENT PREVIEW"
           quota={false}
-          age={formatSeen(decision.at, now)}
+          age={seen(decision.at, now)}
         />
-        {refresh}
       </div>
     );
   }
@@ -815,7 +804,6 @@ function PreviewCard(props: {
           {preview.kind === "failed" ? preview.message : "Asking the scheduler…"}
         </p>
       </section>
-      {refresh}
     </div>
   );
 }
@@ -849,6 +837,7 @@ function QueueButton(props: {
       enabled={button.enabled}
       busy={button.busy}
       preview={props.preview}
+      pastPause={props.view.startNowPastPause}
       onStartNow={props.onStartNow}
     />
   );
@@ -860,11 +849,12 @@ function SplitQueueButton(props: {
   enabled: boolean;
   busy: boolean;
   preview: PreviewState | null;
+  pastPause: boolean;
   onStartNow: () => void;
 }): JSX.Element {
   const { face, enabled, busy } = props;
   const menu = useMenu<HTMLDivElement>();
-  const item = startNowItem(props.preview);
+  const item = startNowItem(props.preview, props.pastPause);
   return (
     <>
       <div ref={menu.anchor} className={busy ? "split split-busy" : "split"}>
@@ -927,6 +917,16 @@ function StartNowIcon(): JSX.Element {
   );
 }
 
+/** The prompt screen's title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+export function PromptHeading(props: { meta: string }): JSX.Element {
+  return (
+    <div>
+      <h1 className="header-title">Séance</h1>
+      <p className="header-meta">{props.meta}</p>
+    </div>
+  );
+}
+
 export function SpawnScreen(props: {
   actions: SpawnActions;
   view: ViewModel;
@@ -940,10 +940,8 @@ export function SpawnScreen(props: {
   preview: PreviewState | null;
   /** The After sheet's list; non-null only while that sheet is open. */
   afterSheet: AfterSheetView | null;
-  /** Desktop layout: the queue is a column of its own and the settings pill sits in its header. */
-  columns: boolean;
 }): JSX.Element {
-  const { actions, view, form, autonomy, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
+  const { actions, view, form, autonomy, promptUndo, sheet, machines, now, preview, afterSheet } = props;
   const [dropping, setDropping] = useState(false);
   const attachOffered = view.attachments.offered;
   const offline = view.machine !== null && !view.machine.connected;
@@ -1111,22 +1109,6 @@ export function SpawnScreen(props: {
 
   return (
     <>
-      <header className="header">
-        <div>
-          <h1 className="header-title">Séance</h1>
-          <p className="header-meta">{view.meta}</p>
-        </div>
-        {!columns && (
-          <HeaderMenu
-            state={view.relayState}
-            queueAttention={view.queueAttention}
-            onQueue={actions.openQueue}
-            onMachines={actions.openMachines}
-            onSettings={actions.openSettings}
-          />
-        )}
-      </header>
-
       <div className="column column-last">
         <div
           className={dropping ? "prompt-card card prompt-card-drop" : "prompt-card card"}
@@ -1295,9 +1277,7 @@ export function SpawnScreen(props: {
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
 
-        {view.previewShown && (
-          <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
-        )}
+        {view.previewShown && <PreviewCard preview={preview} machines={machines} now={now} />}
       </div>
 
       {renderedSheet !== null && (

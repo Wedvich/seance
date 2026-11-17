@@ -392,7 +392,7 @@ describe("self-update pipeline", () => {
   });
 });
 
-describe("seanced update", () => {
+describe("seance update", () => {
   function manual(
     restartError?: Error,
     installFails = false,

@@ -8,8 +8,9 @@ import {
   type SessionState,
   type TaskFailureCode,
   type TaskProgress,
+  type TaskStack,
 } from "@seance/shared";
-import { ended, progressed, reportedPr } from "./done.ts";
+import { ended, progressed, reportedPr, reportSettles } from "./done.ts";
 import { UNDELIVERED, UNREACHABLE, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
 import {
   advance,
@@ -169,12 +170,14 @@ export function waitsForExit(
 
 /**
  * A session's own `done` report (#21): it settles its task `done` by `reported`,
- * only under `until: "reported"` and only from the machine the task was placed
- * (or reserved) on — a task is moved only by the machine it was given. Under
- * `until: "merged"` it is ignored, so a switch is one line here and in `done.ts`.
+ * under `until: "reported"`, or under `until: "merged"` while neither the task
+ * nor the event holds a PR (`reportSettles`), and only from the machine the task
+ * was placed (or reserved) on — a task is moved only by the machine it was given.
+ * A report beside a PR under `until: "merged"` is ignored: the merge settles it.
  */
 function reported(task: Task, from: SessionSource | undefined, prUrl: string | undefined): Task | null {
-  if (task.spec.until !== "reported" || from === undefined) return null;
+  if (from === undefined) return null;
+  if (task.spec.until !== "reported" && (prUrl !== undefined || !reportSettles(task))) return null;
   const pr = factsOf(task, from, prUrl);
   if (task.state === "reserved") {
     const at = task.reservation;
@@ -414,6 +417,9 @@ function provesNeverLanded(reply: SessionsAnswer, reservedAt: number | undefined
   return reply.ledgerSince + REPLAY_WINDOW_MS <= reservedAt;
 }
 
+/** Its own words first: the daemon's say which fetch or ref failed, not that the task stacked. */
+const BASE_NOT_FOUND = "the branch of the task it stacks on is not on origin (deleted, or never pushed there)";
+
 /**
  * One spawn resolves its reservation exactly once, with no second spawn:
  * started or already running → `running`; never delivered → `ready`, to be
@@ -422,11 +428,13 @@ function provesNeverLanded(reply: SessionsAnswer, reservedAt: number | undefined
  * answer, or a transport error that may have come after the spawn ran → stay
  * reserved until the TTL check reads `sessions`.
  */
-export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Task | null {
+export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply, stack?: TaskStack): Task | null {
   if (reply.ok) {
     // Path alone is ambiguous: every `here` session in a clone shares it.
     const pane = reply.sessions.find((s) => s.path === reply.path && s.window === reply.window)?.id;
-    return advance(task, "running", { assignment: assignmentOf(at, { window: reply.window, id: pane }) });
+    const assignment = assignmentOf(at, { window: reply.window, id: pane });
+    // Only an `ok` started from this dispatch's base: `task_running` confirms an earlier spawn, which may not have.
+    return advance(task, "running", { assignment, ...(stack === undefined ? {} : { stack }) });
   }
   if (reply.code === "task_running") {
     return advance(task, "running", { assignment: assignmentOf(at, { id: "id" in reply ? reply.id : undefined }) });
@@ -435,6 +443,7 @@ export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Tas
   if (reply.code === UNDELIVERED || reply.code === "machine_closed") return advance(task, "ready");
   if (reply.code === UNREACHABLE || isTransportError(reply.code)) return null;
   // A daemon's message can carry a whole stderr; the record keeps a line of it.
-  const failure = { code: reply.code, message: reply.message.slice(0, TASK_FAILURE_LIMITS.message) };
+  const message = reply.code === "base_not_found" ? `${BASE_NOT_FOUND}: ${reply.message}` : reply.message;
+  const failure = { code: reply.code, message: message.slice(0, TASK_FAILURE_LIMITS.message) };
   return advance(task, "failed", { failure });
 }

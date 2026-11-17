@@ -14,7 +14,7 @@ import { DEFAULT_EXCLAVE, EXCLAVE_NAME } from "./exclaves.ts";
 import { log } from "./log.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { runtimePath, statePath } from "./paths.ts";
-import { ROUND_TMP, type SeatRecord } from "./seat-record.ts";
+import { CUSTODIAN_SOCKET_DIR, ROUND_TMP, type SeatRecord } from "./seat-record.ts";
 
 /**
  * Owner-only, like the audit log: state.json lists every repo path this machine
@@ -39,8 +39,11 @@ export interface State {
   /**
    * Set while closed to new scheduled work (docs/drain.md), absent while open. Sticky across
    * restarts and reboots until someone reopens it. An older daemon ignores the field.
+   * `drainAt` is when the drain of this close began (a plain or `now` close, or a later drain request), `null` while
+   * soft-closed, set once per close; absent only in a file written before soft close existed, which closed and
+   * drained at once, so it reads as draining from `at`.
    */
-  readonly closed?: { readonly at: number };
+  readonly closed?: { readonly at: number; readonly drainAt?: number | null };
   readonly scannedAt: number | null;
   /** HEAD sha of the checkout the last run started from — the self-update announce compares against it. */
   readonly lastRunSha?: string;
@@ -122,6 +125,46 @@ export function closedOf(state: State): number | null {
   return typeof at === "number" && Number.isFinite(at) && at > 0 ? at : null;
 }
 
+/** `closed.drainAt` as written, `undefined` when absent (a legacy close) or when `closed` is no record. */
+function drainAtOf(state: State): unknown {
+  const closed: unknown = state.closed;
+  if (typeof closed !== "object" || closed === null) return undefined;
+  return Object.entries(closed).find(([key]) => key === "drainAt")?.[1];
+}
+
+/** This machine's close and the drain's start while it drains; null while open, soft-closed, or when `closed` is unreadable. */
+export function drainingOf(state: State): { readonly cl: number; readonly drainAt: number } | null {
+  const cl = closedOf(state);
+  if (cl === null) return null;
+  const drainAt = drainAtOf(state);
+  if (drainAt === undefined) return { cl, drainAt: cl };
+  return typeof drainAt === "number" && Number.isFinite(drainAt) && drainAt > 0 ? { cl, drainAt } : null;
+}
+
+export type CloseMode = "soft" | "drain" | "now";
+export type AvailabilityOutcome = "closed" | "reopened" | "drain_started" | "unchanged";
+
+/**
+ * The state an `availability` request leads to. A close while open sets `drainAt` once (`null` for a soft close);
+ * a drain request on a soft-closed box starts the drain and keeps `at`; anything else on a closed box changes nothing.
+ */
+export function availabilityChange(
+  state: State,
+  open: boolean,
+  mode: CloseMode,
+  at: number,
+): { readonly next: State; readonly outcome: AvailabilityOutcome } {
+  const cl = closedOf(state);
+  if (open)
+    return cl === null ? { next: state, outcome: "unchanged" } : { next: withoutClosed(state), outcome: "reopened" };
+  if (cl === null)
+    return { next: { ...state, closed: { at, drainAt: mode === "soft" ? null : at } }, outcome: "closed" };
+  if (mode !== "soft" && drainingOf(state) === null) {
+    return { next: { ...state, closed: { at: cl, drainAt: at } }, outcome: "drain_started" };
+  }
+  return { next: state, outcome: "unchanged" };
+}
+
 const finiteMs = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
 /**
@@ -132,8 +175,11 @@ const finiteMs = (value: unknown): value is number => typeof value === "number" 
 export function custodianSeatOf(state: State): SeatRecord {
   const raw: unknown = state.custodian;
   if (!isRecord(raw)) return {};
-  const { lastEndedAt, round } = raw;
-  const ended = finiteMs(lastEndedAt) ? { lastEndedAt } : {};
+  const { lastEndedAt, round, socketDir } = raw;
+  const ended = {
+    ...(finiteMs(lastEndedAt) ? { lastEndedAt } : {}),
+    ...(typeof socketDir === "string" && CUSTODIAN_SOCKET_DIR.test(socketDir) ? { socketDir } : {}),
+  };
   if (!isRecord(round)) return ended;
   const { pane, startedAt, tmpDir, exclave, done } = round;
   if (
@@ -156,13 +202,21 @@ export function withoutClosed(state: State): State {
 }
 
 /**
- * A `closed` that is present but unreadable loads as closed now: a damaged close must not
- * quietly put the box back in rotation. Only here, never in `readState`, which stays log-free.
+ * A `closed` that is present but unreadable loads as closed now, and draining as before soft close existed: a
+ * damaged close must not quietly put the box back in rotation, and clients before the soft surfaces read every close
+ * as draining. A readable `closed` whose `drainAt` is not loads as closed, not draining: failing toward a drain would
+ * interrupt and move work on a damaged file. Only here, never in `readState`, which stays log-free.
  */
 function failClosed(state: State, path: string): State {
-  if (state.closed === undefined || closedOf(state) !== null) return state;
-  log.warn(`state at ${path} has an unreadable closed field — staying closed`);
-  return { ...state, closed: { at: Date.now() } };
+  if (state.closed === undefined) return state;
+  const at = closedOf(state);
+  if (at === null) {
+    log.warn(`state at ${path} has an unreadable closed field — staying closed`);
+    return { ...state, closed: { at: Date.now() } };
+  }
+  if (drainingOf(state) !== null || drainAtOf(state) === null) return state;
+  log.warn(`state at ${path} has an unreadable closed.drainAt — closed, not draining`);
+  return { ...state, closed: { at, drainAt: null } };
 }
 
 /**
@@ -171,7 +225,7 @@ function failClosed(state: State, path: string): State {
  * which `loadOrInitState` does: it never mints a `deviceId`, so asking the
  * question on a box that has never run the daemon does not answer it by
  * inventing an identity; and it never logs, because `log.ts` writes to stdout
- * and `seanced mcp` — the caller this exists for — carries JSON-RPC frames
+ * and `seance mcp` — the caller this exists for — carries JSON-RPC frames
  * there.
  */
 export async function readState(path: string = statePath()): Promise<State | null> {
@@ -243,7 +297,7 @@ export async function saveState(state: State, path: string = statePath()): Promi
   await writeAtomic(path, state);
 }
 
-/** Written by the running daemon; read by `seanced status`. */
+/** Written by the running daemon; read by `seance status`. */
 export interface Runtime {
   readonly pid: number;
   readonly startedAt: number;

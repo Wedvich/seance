@@ -91,6 +91,16 @@ export type AvailabilityState = Readonly<Record<string, DeviceAvailability>>;
 export const AVAILABILITY_IDLE: AvailabilityState = {};
 
 /**
+ * An account card's "Open for work" switch (an account `pause` or `resume` at the leader), inline on that card. No
+ * `sent` stage as a machine's has: the reply carries the holds in force, which the queue view takes at once. Null when
+ * nothing was asked, or the last ask landed.
+ */
+export type AccountOpenAsk =
+  | { readonly kind: "sending"; readonly accountId: string; readonly open: boolean }
+  | { readonly kind: "failed"; readonly accountId: string; readonly text: string }
+  | null;
+
+/**
  * The Machines card's custodian controls (the `custodian` op), per machine, as `DeviceAvailability`: inline on the card
  * they were asked from. A `sent` pause or resume holds `paused` (what was asked) until the seat's `cu` agrees or the
  * store drops it, so the row and the menu do not flip back meanwhile; a `sent` round says it was requested. A refusal
@@ -393,8 +403,10 @@ export type QueueState =
       readonly unreadable: readonly UnreadableTaskRef[];
       /** Running tasks the leader holds no slot for while they sit idle at their prompt (`QueueResponse.idle`). */
       readonly idle: readonly IdleTaskRef[];
-      /** The leader's in-flight cap, the header's denominator; absent from an older leader. */
+      /** The fleet limit, the header's denominator; absent when none is set (an older leader always sends its cap). */
       readonly globalMax?: number;
+      /** The leader cannot read its limits record, so it places nothing until one is set again. */
+      readonly limitsUnreadable?: true;
       /** The leader's clock when it answered, ms. */
       readonly at: number;
       /**

@@ -294,6 +294,13 @@ describe("normaliseScreen", () => {
     expect(normaliseScreen(base)).not.toBe(normaliseScreen(base.replace("Cogitating", "Pondering")));
   });
 
+  test("a named session's labelled top edge still bounds the box", () => {
+    const named = (footer: string, typed = ""): string =>
+      ["⏺ Ran the build", "", `${"─".repeat(50)} fix-the-thing (thad) ─`, `❯ ${typed}`, rule, footer].join("\n");
+    expect(normaliseScreen(named("  ctx 41% · 12:01"))).toBe("⏺ Ran the build");
+    expect(normaliseScreen(named("  ctx 42% · 12:02", "half a"))).toBe("⏺ Ran the build");
+  });
+
   test("a screen without an input box is kept whole, bar the masks", () => {
     const dialog = "Exiting worktree session\n❯ 1. Keep worktree\n  2. Remove worktree";
     expect(normaliseScreen(dialog)).toBe(dialog);

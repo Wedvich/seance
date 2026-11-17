@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { parseTask } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task, type TaskSpec } from "../src/index.ts";
-import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec, STACKS } from "./fixtures.ts";
 
 /**
  * Batches are a group (2026-10-26): no bound, no order of their own. Order is
  * `after`, concurrency the caps; a pass only keeps members adjacent in index order.
  */
 
-const FLEET = ["a", "b", "c", "d"].map((id) => machine(id));
+const FLEET = ["a", "b", "c", "d"].map((id) => machine(id, { capabilities: STACKS }));
 
 function setup() {
   const clock = { now: NOW };

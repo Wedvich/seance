@@ -47,6 +47,7 @@ import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
+import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
 import { startCapabilities, type CustodianHost } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -60,11 +61,14 @@ import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { createUsageRefresh, type UsageRefreshOpts } from "./usage-refresh.ts";
 import { unmatchedTraitExclaves, withTraits } from "./traits.ts";
 import {
+  availabilityChange,
   closedOf,
   custodianSeatOf,
+  drainingOf,
   identityOfState,
   loadOrInitState,
   saveState,
+  type CloseMode,
   withoutClosed,
   writeRuntime,
   type State,
@@ -72,7 +76,12 @@ import {
 
 export interface DaemonHandle {
   readonly client: RelayClient;
-  readonly stop: () => void;
+  /**
+   * Tears down at once, then settles once every state.json write already begun has landed: the next
+   * daemon (a reload's, or a restart's) reads that file, and a caller removing the state dir must not
+   * race a rename into it.
+   */
+  readonly stop: () => Promise<void>;
   /** Null unless self-update is wired; tests await its `settled()` instead of sleeping. */
   readonly updater: Updater | null;
   /** Where the local op socket bound, or null when it could not — see `local-socket.ts`. */
@@ -164,6 +173,8 @@ export interface RunOpts {
   readonly now?: () => number;
   /** Outbound HTTP for the leader and telemetry; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
+  /** Writes state.json; defaults to `saveState`. Tests hold a write here to prove `stop` drains it. */
+  readonly writeState?: (state: State) => Promise<void>;
   /** The host telemetry samples; defaults to `hostProbe`. */
   readonly probe?: HostProbe;
   /** Tests only: the fleet quota writer's cadence, `FLEET_QUOTA_INTERVAL_MS` in production. */
@@ -266,8 +277,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let state: State = await loadOrInitState();
   // One write at a time, each of the latest `state`: two overlapping renames could land an older snapshot last and drop a close.
   let saving: Promise<void> = Promise.resolve();
+  const writeState = opts.writeState ?? saveState;
   const persistState = (): Promise<void> => {
-    const run = saving.then(() => saveState(state));
+    const run = saving.then(() => writeState(state));
     saving = run.catch(() => {});
     return run;
   };
@@ -348,6 +360,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       capabilities: [
         CAPABILITIES.metrics,
         CAPABILITIES.taskId,
+        CAPABILITIES.baseBranch,
         CAPABILITIES.exitStatus,
         CAPABILITIES.reportedDone,
         CAPABILITIES.pinAccount,
@@ -356,15 +369,19 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.continueSession,
         CAPABILITIES.continueHandoff,
         CAPABILITIES.runNow,
+        CAPABILITIES.runNowPaused,
         CAPABILITIES.attachments,
         CAPABILITIES.traits,
         CAPABILITIES.successor,
         CAPABILITIES.successorSelf,
         CAPABILITIES.successorAuto,
         CAPABILITIES.amend,
+        CAPABILITIES.limits,
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,
+        // Unconditional: the daemon honours `soft` and reports `dr` whether or not an ask is wired, and any daemon may lead.
+        CAPABILITIES.softClose,
         // Unconditional: any daemon may lead, and receiving a forward binds no peer (the leader checks `messages` too).
         CAPABILITIES.messageRoute,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
@@ -451,10 +468,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     return next;
   };
 
-  const updateRuntime = (connected: boolean): void => {
-    // Unawaited, so its rejection has to land somewhere: `status` reading a
+  const updateRuntime = (connected: boolean): Promise<void> =>
+    // Unawaited but by `stop`, so its rejection has to land somewhere: `status` reading a
     // stale runtime.json is a nuisance, an unhandled rejection is the daemon.
-    void writeRuntime({
+    writeRuntime({
       pid: process.pid,
       startedAt,
       connected,
@@ -462,7 +479,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sha: source?.sha ?? null,
       root,
     }).catch((err: unknown) => log.warn(`could not write runtime.json: ${String(err)}`));
-  };
 
   // Created after the client (its report re-registers); the closures below
   // read it late through this let. One announce per process: the wave must
@@ -496,15 +512,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
   // A `now` landing before the wiring is replayed there, since `start()` asks without it.
   const drainAsk = createLateDrainAsk();
+  // §12's time to empty, fed by the status loop's own sessions read below.
+  const drainEmpty = createDrainEmptyWatch({ now });
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
   // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
   let setting: Promise<unknown> = Promise.resolve();
-  const setOpen = async (open: boolean): ReturnType<MachineAvailability["set"]> => {
-    const was = closedOf(state);
-    if (open ? was === null : was !== null) return { closed: was, changed: false };
+  const setOpen = async (open: boolean, mode: CloseMode): ReturnType<MachineAvailability["set"]> => {
+    const { next, outcome } = availabilityChange(state, open, mode, now());
+    if (outcome === "unchanged") return { closed: closedOf(state), outcome };
     const previous = state.closed;
-    state = open ? withoutClosed(state) : { ...state, closed: { at: now() } };
-    const written = closedOf(state);
+    state = next;
     try {
       await persistState();
     } catch (err) {
@@ -513,16 +530,17 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       throw err;
     }
     status.refresh();
-    return { closed: written, changed: true };
+    return { closed: closedOf(state), outcome };
   };
   const availability: MachineAvailability = {
     closed: () => closedOf(state),
-    set: (open, immediately) => {
-      // After the write is durable, inside the serialized chain; an unchanged close still reaches the ask, so `now` applies to an already-closed machine.
+    set: (open, mode) => {
+      // After the write is durable, inside the serialized chain; an unchanged close still reaches the ask, so `now` applies to an already-draining machine.
       const run = setting.then(async () => {
-        const result = await setOpen(open);
-        if (!open && result.closed !== null) drainAsk.closed(result.closed, immediately === true);
-        else if (open && result.changed) drainAsk.reopened();
+        const result = await setOpen(open, mode);
+        const d = drainingOf(state);
+        if (!open && mode !== "soft" && d !== null) drainAsk.drain(d.cl, mode === "now");
+        else if (open && result.outcome === "reopened") drainAsk.reopened();
         return result;
       });
       setting = run.catch(() => {});
@@ -622,11 +640,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     {
       config,
       registered: () => registered,
-      sessions: () => handlerCtx.backend.sessions(state.repos),
+      sessions: watchedSessions(
+        () => handlerCtx.backend.sessions(state.repos),
+        () => closedOf(state),
+        drainEmpty,
+      ),
       now,
       httpFetch,
       draining: () => endedTasks.draining,
       closed: () => closedOf(state),
+      drainAt: () => drainingOf(state)?.drainAt ?? null,
       custodian: () => custodianSeat.status?.(now()) ?? null,
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
@@ -706,7 +729,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       fleetQuota.registered();
     },
     onConnect: (): void => {
-      updateRuntime(true);
+      void updateRuntime(true);
       announcedHere = false;
       if (announcePending && source !== null) {
         const notice: UpdateAvailable = { sha: source.sha, commitTs: source.commitTs };
@@ -729,7 +752,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       if (announcedHere) announcePending = true;
     },
     onDisconnect: () => {
-      updateRuntime(false);
+      void updateRuntime(false);
       // The term belongs to this socket: replies to the leader arrive on it, and
       // the relay re-nominates — under a new term — once the redial registers.
       leader.follow("the daemon's relay socket dropped");
@@ -822,6 +845,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     },
     stopped: () => stopped,
     closed: () => closedOf(state),
+    draining: () => drainingOf(state),
     refreshStatus: () => status.refresh(),
     version: source?.sha ?? null,
     now,
@@ -836,7 +860,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   if (capabilities.custodianPoke !== undefined) custodianSeat.poke = capabilities.custodianPoke;
   if (capabilities.custodianHost !== undefined) custodianSeat.host = capabilities.custodianHost;
   custodianSeat.status = capabilities.custodianStatus;
-  drainAsk.wire(capabilities.drainAsk, closedOf(state));
+  drainAsk.wire(capabilities.drainAsk, drainingOf(state)?.cl ?? null);
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
@@ -845,7 +869,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   return {
     client,
     localSocket: local.path,
-    stop: (): void => {
+    stop: async (): Promise<void> => {
       stopped = true;
       stopGateWatch();
       status.stop();
@@ -864,7 +888,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // Last, after every timer that writes: a tick still in flight fails its
       // write into the warn above rather than a closed-handle throw elsewhere.
       metrics.close();
-      updateRuntime(false);
+      const runtime = updateRuntime(false);
+      // A scan past its `stopped` check has its save queued already, and nothing queues one after
+      // it but work begun before stop; drain until the chain stands still.
+      const drain = async (): Promise<void> => {
+        const tail = saving;
+        await tail;
+        if (tail !== saving) await drain();
+      };
+      await drain();
+      await runtime;
     },
     updater,
     leader,

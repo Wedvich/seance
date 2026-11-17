@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -541,9 +541,14 @@ describe("cadence", () => {
     await Bun.sleep(150);
     expect(await count(log)).toBe(1);
     const file = join(f.exclave.configDir, ".credentials.json");
-    await writeFile(file, creds({ accessToken: "", refreshToken: "" }));
-    await utimes(file, new Date(NOW), new Date(NOW + 1000));
-    await pollUntil(async () => (await count(log)) === 2, "re-read after the file changed");
+    // One atomic change (the new inode moves the marker): a write then a utimes is two changes, and a
+    // check landing between them rightly reads each, overshooting an exact-count poll.
+    await writeFile(`${file}.tmp`, creds({ accessToken: "", refreshToken: "" }));
+    await rename(`${file}.tmp`, file);
+    await pollUntil(async () => (await count(log)) >= 2, "re-read after the file changed");
+    // Negative assertion: a non-event cannot be polled.
+    await Bun.sleep(150);
+    expect(await count(log)).toBe(2);
     await h.stop();
   });
 
@@ -566,6 +571,30 @@ describe("cadence", () => {
     await Bun.sleep(300);
     await h.stop();
     expect((await Bun.file(log).text()).match(/^start /gmu)?.length).toBe(1);
+  });
+
+  test("a check while the read waits for the lane does not queue the same exclave again", async () => {
+    const slowLog = join(base, "slow.log");
+    const log = join(base, "record.log");
+    await rm(slowLog, { force: true });
+    await rm(log, { force: true });
+    const slowText = (): Promise<string> =>
+      Bun.file(slowLog)
+        .text()
+        .catch(() => "");
+    // Another instance (a reload's) holds the process-wide lane for 150 ms, across several of the waiter's checks.
+    const holder = health([await exclave("holder", creds())], { bunBin: stubs.slow });
+    holder.start();
+    await pollUntil(async () => (await slowText()).includes("start"), "the holder's read");
+    const h = health([await exclave("waiter", creds())], { bunBin: stubs.record, checkIntervalMs: 20, minRereadMs: 0 });
+    h.start();
+    const heldAtStart = !(await slowText()).includes("end");
+    await pollUntil(async () => (await count(log)) >= 1, "the waiter's read");
+    // Negative assertion: a non-event cannot be polled.
+    await Bun.sleep(150);
+    await Promise.all([holder.stop(), h.stop()]);
+    expect(await count(log)).toBe(1);
+    expect(heldAtStart).toBe(true);
   });
 
   test("one child at a time across instances: a reload's two daemons never read at once", async () => {

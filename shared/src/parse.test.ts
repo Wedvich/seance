@@ -11,6 +11,7 @@ import {
   parseFleetQuotaRecord,
   parseContinuedBy,
   parseDrainedStamp,
+  parseTaskStack,
   parsePrAlertStamp,
   parseQuotaExhaustedStamp,
   parsePushAlert,
@@ -49,6 +50,9 @@ import {
   parseQueueChanged,
   parseQueueReply,
   parseQueueRequest,
+  parseSchedulerSettingsRecord,
+  parseSetLimitsReply,
+  parseSetLimitsRequest,
   parseRepoEntry,
   parseResumeRequest,
   parseCustodianEvent,
@@ -100,6 +104,7 @@ import {
   STATUS_MAX_AUTH_EXPIRED,
   STATUS_MAX_TRAIT_PAIRS,
   DECISION_MAX_CANDIDATES,
+  FLEET_LIMIT_MAX,
   MAX_PAUSE_HOLDS,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -1153,6 +1158,27 @@ describe("tasks and their records", () => {
     }
   });
 
+  test("a stack survives a parse; a malformed one, or one on a task not yet dispatched, is dropped", () => {
+    const bare: Task = { ...task, state: "running" };
+    for (const on of ["branch", "merged", "nothing"] as const) {
+      const stacked: Task = { ...bare, stack: { task: "t-0", on } };
+      expect(parseTask(stacked)).toEqual(stacked);
+    }
+    for (const bad of [
+      { task: "t-0", on: "default" },
+      { task: "a/b", on: "branch" },
+      { task: "t-0" },
+      { task: "t-0", on: "branch", branch: "worktree-x" },
+      "t-0",
+      null,
+    ]) {
+      expect(parseTask({ ...bare, stack: bad })).toEqual(bare);
+      expect(parseTaskStack(bad)).toBeNull();
+    }
+    const ready: Task = { ...task, state: "ready" };
+    expect(parseTask({ ...ready, stack: { task: "t-0", on: "branch" } })).toEqual(ready);
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },
@@ -1358,6 +1384,52 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, holds: [{ until: "never", at: 1 }] })).toBeNull();
   });
 
+  test("the limits record is strict: a limit this build cannot read is not read as none", () => {
+    expect(parseSchedulerSettingsRecord({ version: 1, limits: {} })).toEqual({ version: 1, limits: {} });
+    expect(parseSchedulerSettingsRecord({ version: 2, limits: { fleet: 8 }, more: 1 })).toEqual({
+      version: 2,
+      limits: { fleet: 8 },
+    });
+    // A limit a newer leader added: dropping it would lift it.
+    expect(parseSchedulerSettingsRecord({ version: 2, limits: { fleet: 8, machine: 2 } })).toBeNull();
+    expect(parseSchedulerSettingsRecord({ version: 1, limits: { fleet: FLEET_LIMIT_MAX } })).not.toBeNull();
+    for (const fleet of [0, -1, 1.5, "8", null, FLEET_LIMIT_MAX + 1]) {
+      expect(parseSchedulerSettingsRecord({ version: 1, limits: { fleet } })).toBeNull();
+    }
+    expect(parseSchedulerSettingsRecord({ version: 1 })).toBeNull();
+    expect(parseSchedulerSettingsRecord({ version: 0, limits: {} })).toBeNull();
+    expect(parseSchedulerSettingsRecord({ limits: {} })).toBeNull();
+  });
+
+  test("set-limits names a fleet limit or null for none; 0 is a pause's job and is refused", () => {
+    expect(parseSetLimitsRequest({ fleet: 4, extra: 1 })).toEqual({ fleet: 4 });
+    expect(parseSetLimitsRequest({ fleet: null })).toEqual({ fleet: null });
+    for (const fleet of [0, -1, 1.5, "4", FLEET_LIMIT_MAX + 1]) {
+      expect(parseSetLimitsRequest({ fleet })).toBeNull();
+    }
+    // No field is not "no limit": lifting one is said outright.
+    expect(parseSetLimitsRequest({})).toBeNull();
+    expect(parseSetLimitsRequest(null)).toBeNull();
+
+    expect(parseSetLimitsReply({ limits: { fleet: 4 } })).toEqual({ limits: { fleet: 4 } });
+    expect(parseSetLimitsReply({ limits: {} })).toEqual({ limits: {} });
+    expect(parseSetLimitsReply({ limits: { fleet: 0 } })).toBeNull();
+    expect(parseSetLimitsReply({})).toBeNull();
+    const refused = { ok: false, code: "conflict", message: "again" } as const;
+    expect(parseSetLimitsReply(refused)).toEqual(refused);
+  });
+
+  test("queue says when the limits cannot be read, and only as true", () => {
+    expect(parseQueueReply({ tasks: [], at: 5, limitsUnreadable: true })).toEqual({
+      tasks: [],
+      at: 5,
+      limitsUnreadable: true,
+    });
+    for (const bad of [false, 1, "true", null]) {
+      expect(parseQueueReply({ tasks: [], at: 5, limitsUnreadable: bad })).toEqual({ tasks: [], at: 5 });
+    }
+  });
+
   test("queue carries the leader's cap; one that is not a positive integer is dropped, not the reply", () => {
     expect(parseQueueReply({ tasks: [], at: 5, globalMax: 8 })).toEqual({ tasks: [], at: 5, globalMax: 8 });
     for (const bad of [0, -1, 1.5, "8", null]) {
@@ -1395,6 +1467,23 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, idle: [] })).toEqual({ tasks: [], at: 5 });
     expect(parseQueueReply({ tasks: [], at: 5, idle: {} })).toBeNull();
     expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
+  });
+
+  test("queue lists refused session passes, each one alone; a bad list costs only the explanations, never the reply", () => {
+    const refused = { taskId: "t-1", code: "finished", sentAt: 4 };
+    const stampless = { taskId: "t-2", code: "branch_mismatch" };
+    expect(
+      parseQueueReply({
+        tasks: [],
+        at: 5,
+        passRefused: [refused, { ...stampless, sentAt: "4" }, { taskId: "t:3", code: "finished" }, { taskId: "t-4" }],
+      }),
+    ).toEqual({ tasks: [], at: 5, passRefused: [refused, stampless] });
+    expect(parseQueueReply({ tasks: [], at: 5, passRefused: [] })).toEqual({ tasks: [], at: 5 });
+    expect(parseQueueReply({ tasks: [], at: 5, passRefused: {} })).toEqual({ tasks: [], at: 5 });
+    expect(
+      parseQueueReply({ tasks: [], at: 5, passRefused: Array.from({ length: MAX_TASKS + 1 }, () => refused) }),
+    ).toEqual({ tasks: [], at: 5 });
   });
 
   test("queue lists unreadable records, each one alone: a bad entry costs its own discard, too many the reply", () => {
@@ -2386,6 +2475,14 @@ describe("M4 shapes", () => {
     expect(parseDecision(decide({ code: "closed" }))?.candidates[0]?.rejected).toEqual([{ code: "closed" }]);
   });
 
+  test("`dr`, the drain's start, is kept only beside `cl` as a finite positive number", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, cl: 100, dr: 200 })).toEqual({ at: 1, scan: 2, cl: 100, dr: 200 });
+    expect(parseMachineStatus({ at: 1, scan: 2, cl: 100 })).not.toHaveProperty("dr");
+    expect(parseMachineStatus({ at: 1, scan: 2, dr: 200 })).toBeNull();
+    for (const dr of [0, -1, Number.NaN, "1", true, null])
+      expect(parseMachineStatus({ at: 1, scan: 2, cl: 100, dr })).toBeNull();
+  });
+
   test("a status carries the custodian's view as `cu`; a bad one is dropped alone and the rest of the status stays", () => {
     const rc = `session_${"A".repeat(64)}`;
     const good = { s: "running", e: 1_763_000_000, n: [999, 0, 3], rc } as const;
@@ -2477,7 +2574,18 @@ describe("M4 shapes", () => {
     expect(parseAvailabilityRequest({ open: false, now: true })).toEqual({ open: false, now: true });
     expect(parseAvailabilityRequest({ open: true, now: true })).toEqual({ open: true, now: true });
     expect(parseAvailabilityRequest({ open: false, now: false })).toEqual({ open: false });
-    for (const bad of [null, "x", {}, { open: "false" }, { open: true, now: 1 }])
+    expect(parseAvailabilityRequest({ open: false, soft: true })).toEqual({ open: false, soft: true });
+    expect(parseAvailabilityRequest({ open: true, soft: true })).toEqual({ open: true, soft: true });
+    expect(parseAvailabilityRequest({ open: false, soft: false })).toEqual({ open: false });
+    for (const bad of [
+      null,
+      "x",
+      {},
+      { open: "false" },
+      { open: true, now: 1 },
+      { open: false, soft: 1 },
+      { open: false, soft: true, now: true },
+    ])
       expect(parseAvailabilityRequest(bad)).toBeNull();
     expect(parseAvailabilityResponse({ ok: true, closed: null })).toEqual({ ok: true, closed: null });
     expect(parseAvailabilityResponse({ ok: true, closed: 5 })).toEqual({ ok: true, closed: 5 });

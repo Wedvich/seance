@@ -19,6 +19,7 @@ import {
   type PrChecks,
   type PrState,
   type Task,
+  FLEET_LIMIT_MAX,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
@@ -35,14 +36,18 @@ import { settlingInput } from "./input-debounce.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
+import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveLimitsAvailability,
   derivePassAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
+  deriveRunNowPastPause,
   failedBody,
   formatSeen,
+  seen,
   type AppState,
 } from "./view.ts";
 
@@ -95,13 +100,20 @@ export function disarmRow(rowId: string, armed: string | null): string | null {
   return armed !== null && own.includes(armed) ? null : armed;
 }
 
+/** A row prints `headline · age`, so a sentence's full stop would sit mid-line; an ellipsis stays. */
+function withoutPeriod(line: Timed): Timed {
+  const last = line.at(-1);
+  if (typeof last !== "string" || !last.endsWith(".") || last.endsWith("..")) return line;
+  return [...line.slice(0, -1), last.slice(0, -1)].filter((part) => part !== "");
+}
+
 export interface QueueRow {
   readonly id: string;
   readonly title: string;
-  readonly headline: string;
-  readonly body: string | null;
+  readonly headline: Timed;
+  readonly body: Timed | null;
   readonly dot: QueueDot | null;
-  readonly age: string;
+  readonly age: Moment;
   readonly canCancel: boolean;
   readonly canMarkDone: boolean;
   /** Cancelling despawns a session: the button asks twice. */
@@ -136,6 +148,8 @@ export interface QueueRow {
   readonly carriesOn: LineageLine | null;
   /** The task its work was passed to, one line; null for any other task. */
   readonly passedTo: LineageLine | null;
+  /** What its worktree started from, by the leader's `Task.stack`, one line; null until a stacked dispatch ran. */
+  readonly stackedOn: LineageLine | null;
   /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
   readonly continuing: { readonly id: string; readonly text: string } | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
@@ -193,13 +207,39 @@ export interface QueueSection {
 
 export interface HoldRow {
   readonly key: string;
-  readonly text: string;
+  readonly text: Timed;
   readonly account?: string;
 }
 
+/** The fleet limit, as the header's count opens it in the Limits sheet. */
+export interface LimitView {
+  /** The limit in force; null is none. */
+  readonly fleet: number | null;
+}
+
+/** The banner over a queue whose leader cannot read its limits record. */
+export const LIMITS_UNREADABLE =
+  "The session limit can't be read, so nothing new starts. Set it again to let the queue go.";
+
+/** The Limits sheet's field as a limit: null for none (empty), undefined for text that is no limit. */
+export function parseLimitDraft(draft: string): number | null | undefined {
+  const text = draft.trim();
+  if (text === "") return null;
+  if (!/^\d+$/u.test(text)) return undefined;
+  const fleet = Number(text);
+  return fleet >= 1 && fleet <= FLEET_LIMIT_MAX ? fleet : undefined;
+}
+
 export interface QueueScreenView {
-  /** The header's meta line, "2/8 running · 1 waiting"; null until a list has been read. */
+  /** The header's meta line, "2 running · 1 waiting", or "2/8 running" under a limit; null until a list has been read. */
   readonly summary: string | null;
+  /**
+   * The fleet limit to change; null while no verified leader that keeps one has answered `queue`,
+   * and the header's line is then plain text.
+   */
+  readonly limit: LimitView | null;
+  /** `LIMITS_UNREADABLE` while the leader says so, else null. */
+  readonly limitsUnreadable: string | null;
   /** A verified leader answers and the socket is open. */
   readonly available: boolean;
   /** The reply held `QUEUE_MAX_TASKS` tasks, so older ones may be left out. */
@@ -231,13 +271,14 @@ function statusLine(state: AppState): { text: string; available: boolean } {
   return { text: `Scheduler on ${leader?.name ?? scheduler.deviceId}`, available: true };
 }
 
-function holdText(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): string {
-  if (hold.account === undefined) return "The whole queue is paused until resumed";
+function holdText(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): Timed {
+  if (hold.account === undefined) return ["The whole queue is paused until resumed"];
   const who = accountDisplayName(known, hold.account, state.accounts.aliases);
-  if (hold.until === "resume") return `${who} is paused until resumed`;
+  if (hold.until === "resume") return [`${who} is paused until resumed`];
+  if (hold.resumeAt === undefined) return [`${who} is paused until its quota resets`];
   // `formatUntil` reads "resets in 3h"; inside this sentence the verb is already said.
-  const when = hold.resumeAt === undefined ? "" : ` (${formatUntil(hold.resumeAt, now).replace(/^resets /u, "")})`;
-  return `${who} is paused until its quota resets${when}`;
+  const when = { text: formatUntil(hold.resumeAt, now).replace(/^resets /u, ""), at: hold.resumeAt };
+  return timed`${who} is paused until its quota resets (${when})`;
 }
 
 function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): HoldRow {
@@ -260,20 +301,25 @@ function dotOf(task: Task): QueueDot | null {
  * `run-now` takes only a `ready` task and answers anything earlier `not_waiting`, so Start now
  * greys until then rather than offering a tap that is always refused. Shown still: it says why.
  */
-function startNowFor(task: Task): StartNowItem {
+function startNowFor(task: Task, pastPause: boolean): StartNowItem {
   if (task.state === "blocked") return { sub: "Waiting on the tasks it depends on", enabled: false };
   if (task.state === "queued") return { sub: "Waiting for the scheduler", enabled: false };
-  return decisionStartNowItem(task.decision ?? null);
+  return decisionStartNowItem(task.decision ?? null, pastPause);
 }
 
 /** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
-function bodyOf(
+function bodyOf(task: Task, machines: readonly Machine[], now: number, skew: number, idleSince?: number): Timed | null {
+  const line = bodyLine(task, machines, now, skew, idleSince);
+  return typeof line === "string" ? [line] : line;
+}
+
+function bodyLine(
   task: Task,
   machines: readonly Machine[],
   now: number,
   skew: number,
   idleSince?: number,
-): string | null {
+): string | Timed | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
@@ -294,9 +340,9 @@ function bodyOf(
     const clause = `${wait.slice(0, 1).toUpperCase()}${wait.slice(1)}`;
     return task.needsInputSince === undefined
       ? clause
-      : `${clause} since ${formatSeen(task.needsInputSince - skew, now)}`;
+      : timed`${clause} since ${seen(task.needsInputSince - skew, now)}`;
   }
-  if (idleSince !== undefined) return `Idle at its prompt since ${formatSeen(idleSince, now)} — its slot is free`;
+  if (idleSince !== undefined) return timed`Idle at its prompt since ${seen(idleSince, now)} — its slot is free`;
   return null;
 }
 
@@ -427,6 +473,27 @@ export function passedToLine(
   return lineage(`Passed to ${titles.get(next) ?? `task ${next.slice(0, 8)}`}`, next, revealable);
 }
 
+/**
+ * `Task.stack` in words: the predecessor's branch, or the default branch and why. Its `task` is the one holding
+ * the work, after any pass, so it can differ from the dep the form named.
+ */
+export function stackedOnLine(
+  task: Task,
+  titles: ReadonlyMap<string, string>,
+  revealable: ReadonlySet<string>,
+): LineageLine | null {
+  const { stack } = task;
+  if (stack === undefined) return null;
+  const name = titles.get(stack.task) ?? `task ${stack.task.slice(0, 8)}`;
+  const text =
+    stack.on === "branch"
+      ? `Stacked on ${name}`
+      : stack.on === "merged"
+        ? `Started from the default branch: ${name} had merged`
+        : `Started from the default branch: ${name} left nothing to stack on`;
+  return lineage(text, stack.task, revealable);
+}
+
 // Live cards link nothing: the other end may sit in collapsed Asleep or in Older, which this view cannot see.
 const NO_REVEAL: ReadonlySet<string> = new Set();
 
@@ -470,17 +537,17 @@ function rowOf(
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
-  const item = startNowFor(task);
+  const item = startNowFor(task, deriveRunNowPastPause(state.relay));
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   const session = sessionOf(task);
   const autonomy = autonomyOf(task.spec);
   return {
     id: task.id,
     title: taskTitle(task),
-    headline: taskHeadline(task, state.relay.machines, now),
+    headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
     body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
-    age: formatSeen(task.createdAt, now),
+    age: seen(task.createdAt, now),
     canCancel: actionable,
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
@@ -495,6 +562,7 @@ function rowOf(
     continues: continuesLine(task, titles),
     carriesOn: carriesOnLine(task, titles, NO_REVEAL),
     passedTo: passedToLine(task, titles, NO_REVEAL),
+    stackedOn: stackedOnLine(task, titles, NO_REVEAL),
     continuing: continuingOf(task, tasks),
     placement: placementLine(task, state, now),
     batch: batchLine(task),
@@ -614,6 +682,8 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
             ...(count(IDLE_SECTION) === 0 ? [] : [`${count(IDLE_SECTION)} idle`]),
             `${count("Waiting")} waiting`,
           ].join(" · "),
+    limit: ok !== null && available && deriveLimitsAvailability(state.relay) ? { fleet: ok.globalMax ?? null } : null,
+    limitsUnreadable: ok?.limitsUnreadable === true ? LIMITS_UNREADABLE : null,
     available,
     partial: tasks.length >= QUEUE_MAX_TASKS ? `Showing the ${QUEUE_MAX_TASKS} most relevant tasks` : null,
     holds,
@@ -664,7 +734,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .map((task) => ({
       id: task.id,
       title: taskTitle(task),
-      headline: taskHeadline(task, state.relay.machines, now),
+      headline: plain(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
       when: held.get(task.id) ?? null,
     }));
   const shown = new Set(listed.map((option) => option.id));

@@ -24,7 +24,7 @@ interface Child {
   readonly killed: () => boolean;
 }
 
-/** Stands in for the `seanced inbox` child: nothing is written until the test says, and it lives until it exits. */
+/** Stands in for the `seance inbox` child: nothing is written until the test says, and it lives until it exits. */
 function fakeChild(on: On): Child {
   const argvs: (readonly string[])[] = [];
   const queue: ({ readonly text: string } | { readonly exit: number | null })[] = [];

@@ -20,7 +20,8 @@ export interface SupervisorHandle {
    * handle, hence the promise.
    */
   readonly current: () => Promise<DaemonHandle>;
-  readonly stop: () => void;
+  /** Settles once any reload in flight has finished and the running daemon's stop has drained. */
+  readonly stop: () => Promise<void>;
 }
 
 /** A validated config and the psk it was validated against, kept together so neither is re-derived. */
@@ -94,7 +95,9 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
   let live = true;
 
   const swap = async (next: Runnable): Promise<SwapResult> => {
-    daemon.stop();
+    // Drained, not just stopped: the incoming daemon reads state.json, and a save the outgoing one
+    // still had in flight would land after that read, leaving it on a stale repo set.
+    await daemon.stop();
     try {
       daemon = await startWith(next.config, next.resolved, true);
       config = next.config;
@@ -132,11 +135,8 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
     if (live && Bun.deepEquals(next.config, config)) return;
     log.info(`config changed at ${path} — reloading`);
     const result = await swap(next);
-    // stop() can land while the swap is in flight; don't leave the new handle running.
-    if (stopped) {
-      daemon.stop();
-      return;
-    }
+    // stop() can land while the swap is in flight; it waits for this chain, then stops the new handle.
+    if (stopped) return;
     if (result !== "swapped") return;
     // The swapped-in daemon's start line carries the key's fingerprint.
     log.info(`reloaded as "${config.name}"`);
@@ -168,10 +168,13 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
 
   return {
     current: (): Promise<DaemonHandle> => reloading.then(() => daemon),
-    stop: (): void => {
+    stop: async (): Promise<void> => {
       stopped = true;
       unwatch();
-      daemon.stop();
+      // A swap in flight still owns `daemon`; once it settles, whatever it left running is current.
+      await reloading;
+      // Not live means a failed rollback left only the already-stopped outgoing handle.
+      if (live) await daemon.stop();
     },
   };
 }

@@ -27,11 +27,13 @@ import {
   type QuotaWindow,
   type Reason,
   type RepoEntry,
+  type SchedulerLimits,
   type ScoreComponents,
 } from "@seance/shared";
 import type { SchedulerConfig, SeatProfile } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
+import { mayStack, stackOf } from "./stack.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
 import { traitFilter } from "./traits.ts";
 
@@ -62,8 +64,18 @@ export interface RouteInput {
    * session idle at its prompt).
    */
   readonly released?: ReadonlySet<string>;
-  /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
-  readonly uncapped?: boolean;
+  /** What a person set to bound the queue (`settings:scheduler`); absent, or a part absent, is no limit. */
+  readonly limits?: SchedulerLimits;
+  /**
+   * A person's `run-now`: the fleet limit (`cap_reached`) and the whole-queue pause do not apply; an
+   * account's hold and every other filter do.
+   */
+  readonly runNow?: boolean;
+  /**
+   * The whole-queue hold is the fail-closed stand-in for an unreadable `queue:pause`
+   * (`PauseRecord.unread`): `runNow` keeps it, since no person's pause is there to lift.
+   */
+  readonly pauseUnread?: boolean;
   /**
    * Route as though the task carried attachments: `route-preview`'s flag, since a
    * preview has no manifest. A task's own `spec.attachments` applies regardless.
@@ -86,16 +98,18 @@ interface Pass {
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
-  readonly uncapped: boolean;
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
   readonly skills: readonly string[];
+  /** Where the work it builds on lives: `spec.base`, else its stacking predecessor's machine. */
+  readonly base: Placement | undefined;
 }
 
 export function route(input: RouteInput): Decision {
   const { task, machines, now, config } = input;
   const inFlight = holdingSlots(input.tasks, input.released).filter((t) => t.id !== task.id);
   const newest = newestQuotaByAccount(machines, input.fleetQuota);
+  const fleetMax = input.limits?.fleet;
   const pass: Pass = {
     task,
     now,
@@ -103,15 +117,16 @@ export function route(input: RouteInput): Decision {
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
     accountAt: (placement) => accountOfPlacement(machines, placement),
-    uncapped: input.uncapped === true,
     capReached:
-      input.uncapped !== true && inFlight.length >= config.globalMax
-        ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
+      input.runNow !== true && fleetMax !== undefined && inFlight.length >= fleetMax
+        ? { code: "cap_reached", inFlight: inFlight.length, max: fleetMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
+    base: task.spec.base ?? stackedAt(task, input.tasks),
   };
-  const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
+  const liftsPause = input.runNow === true && input.pauseUnread !== true;
+  const caps = [liftsPause ? null : queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
   const attached = input.attachments === true || task.spec.attachments !== undefined;
 
   const candidates: Candidate[] = [];
@@ -120,6 +135,7 @@ export function route(input: RouteInput): Decision {
       ...machineFilter(machine, now, config),
       ...continueFilter(task, machine),
       ...attachmentsFilter(attached, machine),
+      ...stackFilter(task, machine),
       ...caps,
     ];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
@@ -189,9 +205,6 @@ function judge(
   const account =
     exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  if (!pass.uncapped && sharing >= seat.accountMax) {
-    rejected.push({ code: "cap_reached", inFlight: sharing, max: seat.accountMax, scope: "account" });
-  }
   const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
   if (paused !== null) rejected.push(paused);
 
@@ -216,7 +229,7 @@ function judge(
   const components: ScoreComponents = {
     accountPressure: account.pressure,
     machinePressure: Math.max(status.cpu ?? 0, status.mem ?? 0) / 100,
-    dependencyDistance: distance(task.spec.base, placement),
+    dependencyDistance: distance(pass.base, placement),
     queuePressure: inFlight.filter((t) => (t.assignment ?? t.reservation)?.deviceId === machine.deviceId).length,
     ...(keepFree === 0 ? {} : { keepFree }),
   };
@@ -240,16 +253,16 @@ interface AccountJudgement {
 }
 
 /**
- * What the caps and projected usage count: in flight, and not released. A
- * released task that counts again is counted over a cap or not.
+ * What the fleet limit and projected usage count: in flight, and not released. A
+ * released task that counts again is counted over the limit or not.
  */
 function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
   return tasks.filter((t) => IN_FLIGHT.includes(t.state) && !released.has(t.id));
 }
 
 /**
- * In-flight tasks billed to `accountId`, by where each is placed: what the
- * account cap and projected usage both count. A task whose machine has left
+ * In-flight tasks billed to `accountId`, by where each is placed: what
+ * projected usage counts. A task whose machine has left
  * the registry has no account to read, so it counts toward neither.
  */
 function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: string): number {
@@ -364,6 +377,19 @@ function continueFilter(task: Task, machine: Machine): Reason[] {
  * Only a daemon advertising the capability fetches a manifest; any other would
  * refuse the spawn as malformed. A pin on such a machine waits, as on one offline.
  */
+/** A daemon that cannot stack would drop `baseBranch` and start from the default branch silently. */
+function stackFilter(task: Task, machine: Machine): Reason[] {
+  if (!mayStack(task.spec) || machine.capabilities?.includes(CAPABILITIES.baseBranch) === true) return [];
+  return [{ code: "base_unsupported" }];
+}
+
+/** Where its stacking predecessor ran, while it stacks on that one's branch: its clone may already hold it. */
+function stackedAt(task: Task, tasks: readonly Task[]): Placement | undefined {
+  if (!mayStack(task.spec)) return undefined;
+  const stack = stackOf(task, new Map(tasks.map((t) => [t.id, t])));
+  return stack.on === "branch" ? stack.at : undefined;
+}
+
 function attachmentsFilter(attached: boolean, machine: Machine): Reason[] {
   if (!attached || machine.capabilities?.includes(CAPABILITIES.attachments) === true) return [];
   return [{ code: "attachments_unsupported" }];

@@ -1,6 +1,7 @@
 import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
 import { pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
 import type { FollowEnd, StartNowRefusal, Verdict } from "./state.ts";
+import { plain } from "./timed.ts";
 
 /**
  * The verdict screen as data, derived in one pure pass like `deriveView`, so
@@ -98,7 +99,8 @@ export function describeVerdict(
             ? "verdict-glyph"
             : "verdict-glyph verdict-glyph-muted",
       stage: stageOf(task),
-      headline: taskHeadline(task, machines, now),
+      // Plain: the headline cross-fades as a string (`SwapText`).
+      headline: plain(taskHeadline(task, machines, aliases, now)),
       body: `${parts.join(" ")}${followText(verdict.follow)}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
       // The prompt was cleared when it queued, so "Start another" already lands on the form a back would.
@@ -133,7 +135,7 @@ export function describeVerdict(
     stage: null,
     primary:
       verdict.retry === undefined
-        ? { label: "Back to the form", onClick: "back" }
+        ? { label: "Back to prompt", onClick: "back" }
         : { label: "Try again", onClick: "retry" },
     showBack: verdict.retry !== undefined,
   };

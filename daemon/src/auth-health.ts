@@ -268,7 +268,10 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
   let draining: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let checking = false;
-  /** The exclave whose read is running: no longer in `queued`, and not yet in `entries` on a first read. */
+  /**
+   * The exclave taken off `queued`, from then until its read lands: while it waits for the process-wide lane
+   * (another instance's read) as well as during the read, since it is in neither `queued` nor `entries` yet.
+   */
   let inFlight: string | null = null;
   let stopped = false;
   let running: number | null = null;
@@ -412,21 +415,16 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
     const entry = entries.get(id);
     // Floored, not skipped: a poke inside the floor stays set and the next check re-queues it.
     if (entry?.readAt !== undefined && entry.readAt !== null && now() - entry.readAt < minRereadMs) return;
-    inFlight = id;
-    try {
-      const marker = await markerOf(exclave);
-      const reading = await readOnce(exclave);
-      if (stopped) return;
-      const next: Entry = entry ?? { reading: null, marker: null, readAt: null, poked: false, logged: null };
-      next.reading = reading;
-      next.marker = marker;
-      next.readAt = now();
-      next.poked = false;
-      entries.set(id, next);
-      noteChange(id, next);
-    } finally {
-      inFlight = null;
-    }
+    const marker = await markerOf(exclave);
+    const reading = await readOnce(exclave);
+    if (stopped) return;
+    const next: Entry = entry ?? { reading: null, marker: null, readAt: null, poked: false, logged: null };
+    next.reading = reading;
+    next.marker = marker;
+    next.readAt = now();
+    next.poked = false;
+    entries.set(id, next);
+    noteChange(id, next);
   };
 
   const drain = (): void => {
@@ -436,8 +434,13 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
         for (;;) {
           const id = queued.shift();
           if (id === undefined || stopped) return;
-          // oxlint-disable-next-line no-await-in-loop -- one child at a time is the point
-          await inLane(() => attempt(id)).catch(() => undefined);
+          inFlight = id;
+          try {
+            // oxlint-disable-next-line no-await-in-loop -- one child at a time is the point
+            await inLane(() => attempt(id)).catch(() => undefined);
+          } finally {
+            inFlight = null;
+          }
         }
       } finally {
         draining = null;

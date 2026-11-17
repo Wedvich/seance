@@ -33,6 +33,8 @@ import {
   type PassReply,
   type PauseReply,
   type PauseRequest,
+  type SetLimitsReply,
+  type SetLimitsRequest,
   type QueueChanged,
   type QueueReply,
   type QueueRequest,
@@ -270,6 +272,259 @@ describe("layers and history", () => {
     expect(fake.index()).toBe(0);
   });
 
+  test("Queue and Machines share one entry over the form: a switch replaces it, and back lands on the form", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openQueue();
+    store.openMachines();
+    store.openQueue();
+    store.openMachines();
+    expect(fake.entries()).toMatchObject([null, { depth: 1 }]);
+    expect(store.getState()).toMatchObject({ queue: false, machines: true });
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, machines: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("Settings over a screen closes first, and a screen opened over Settings goes beneath it", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openSettings();
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: false });
+    expect(fake.index()).toBe(1);
+
+    // A deep link while Settings holds unsaved credentials: Settings stays up, the screen switches beneath it.
+    store.openSettings();
+    store.openQueue();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, settings: true });
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, settings: false });
+    expect(fake.index()).toBe(1);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, settings: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a screen opened over Settings on the form takes an entry of its own", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: true });
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: false });
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a switch right after a dialog's close was asked pops no entry twice", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.closeAccountRename();
+    store.openQueue();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, accounts: { renaming: null } });
+    expect(fake.index()).toBe(1);
+  });
+
+  test("the menu's Prompt right after a dialog's close was asked lands on the form once", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.closeAccountRename();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: false, accounts: { renaming: null } });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a second back still in flight keeps the first one's popstate from clearing the count", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.dismissLayer();
+    store.dismissLayer();
+    store.showPrompt();
+    fake.settleOne(store);
+    expect(store.getState()).toMatchObject({ machines: true, accounts: { renaming: null } });
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a link while Settings' own close is still pending shows the linked screen, then Prompt", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openSettings();
+    store.dismissLayer();
+    store.openQueue();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, settings: false });
+    expect(fake.index()).toBe(1);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, settings: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a link while Settings is open over a verdict opens beneath it; back reaches the screen, then the verdict", async () => {
+    fake = fakeHistory();
+    const { store } = await followedAndListed(new ScriptedClient());
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false });
+    expect(store.getState().verdict).not.toBeNull();
+    expect(fake.index()).toBe(1);
+
+    store.openSettings();
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: true });
+    expect(fake.index()).toBe(3);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: false });
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(store.getState().verdict).not.toBeNull();
+    expect(fake.index()).toBe(1);
+  });
+
+  test("the menu's Prompt right after a retry gave its held entry back still closes the screen opened since", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient();
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.spawn();
+    const failed = store.getState().verdict;
+    if (failed?.kind !== "unqueued") throw new Error("expected unqueued");
+    fake.settle(store);
+
+    // A retry with nothing to put ends without a verdict: the held entry is given back.
+    store.retrySpawn({ kind: "unqueued", message: failed.message, mayHaveLanded: false });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    store.openMachines();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("showPrompt with nothing open traverses nothing, and from Machines lands on the form", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.showPrompt();
+    fake.settle(store);
+    expect(fake.index()).toBe(0);
+
+    store.openMachines();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("on a desk Machines opens as one invisible entry and closes nothing over it", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+    store.setWide(true);
+
+    store.openSettings();
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: true });
+    expect(fake.index()).toBe(2);
+  });
+
+  test("a switch away from the Queue with Older's sheet open gives back both entries and clears the focus", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.focusTask("t-1");
+    store.openQueue();
+    store.openOlderSheet("repo");
+    expect(fake.index()).toBe(2);
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({
+      queue: false,
+      machines: true,
+      focusedTask: null,
+      older: { sheet: null },
+    });
+    expect(fake.index()).toBe(1);
+  });
+
+  test("a switch closes the dialog over the screen it leaves and gives back that dialog's entry", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.openQueue();
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, accounts: { renaming: null } });
+    fake.settle(store);
+    expect(fake.index()).toBe(1);
+    expect(store.getState().queue).toBe(true);
+  });
+
+  test("back from a Queue opened over a verdict returns to it; the menu's Prompt lands on the form", async () => {
+    fake = fakeHistory();
+    const { store } = await followedAndListed(new ScriptedClient());
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().queue).toBe(false);
+    expect(store.getState().verdict).not.toBeNull();
+
+    store.openQueue();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, verdict: null });
+    expect(fake.index()).toBe(0);
+  });
+
   test("a chart closed before its answer stays closed", async () => {
     fake = fakeHistory();
     const store = new Store(idleClient());
@@ -466,6 +721,10 @@ class ScriptedClient extends RelayClient {
     holds: [{ until: "resume", at: 5 }],
   });
   onResume: (request: ResumeRequest) => Promise<PauseReply | null> = async () => ({ holds: [] });
+  readonly limitRequests: SetLimitsRequest[] = [];
+  onSetLimits: (request: SetLimitsRequest) => Promise<SetLimitsReply | null> = async (request) => ({
+    limits: request.fleet === null ? {} : { fleet: request.fleet },
+  });
   /** How many times the archivist's counts were asked for. */
   archiveAsks = 0;
   onArchiveStatus: () => Promise<ArchiveStatusReply | null> = async () => ARCHIVE_STATUS;
@@ -624,6 +883,11 @@ class ScriptedClient extends RelayClient {
 
   override resume(request: ResumeRequest = {}): Promise<PauseReply | null> {
     return this.onResume(request);
+  }
+
+  override setLimits(request: SetLimitsRequest): Promise<SetLimitsReply | null> {
+    this.limitRequests.push(request);
+    return this.onSetLimits(request);
   }
 
   override onQueueChanged(listener: (change: QueueChanged) => void): () => void {
@@ -1939,7 +2203,7 @@ describe("start now", () => {
     client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
     client.nudge({ at: 2, tasks: [created.id] });
     await until(() => store.getState().startNowRefusal !== null, "the refusal");
-    const message = "Something besides the concurrency caps keeps it from every machine — see why it waits.";
+    const message = "Something besides the concurrency limit keeps it from every machine — see why it waits.";
     expect(store.getState().startNowRefusal).toEqual({ taskId: created.id, message });
     expect(queuedState(store)).toBe("ready");
     const verdict = store.getState().verdict;
@@ -2637,7 +2901,7 @@ describe("the queue screen", () => {
     client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
     await store.runNow("w-1");
     expect(store.getState().queueNotice).toBe(
-      "Something besides the concurrency caps keeps it from every machine — see why it waits.",
+      "Something besides the concurrency limit keeps it from every machine — see why it waits.",
     );
   });
 
@@ -2990,6 +3254,78 @@ describe("the queue screen", () => {
     client.onPause = async () => ({ ok: false, code: "not_ready", message: "taking over" });
     await store.pauseQueue();
     expect(store.getState().queueNotice).toContain("taking over");
+  });
+
+  test("an account's switch pauses or resumes that account, its failure on the card, not the queue's notice", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const paused: unknown[] = [];
+    const resumed: unknown[] = [];
+    let release = (): void => {};
+    client.onPause = async (request) => {
+      paused.push(request);
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { holds: [{ account: "acct", until: "resume", at: 5 }] };
+    };
+    const closing = store.setAccountOpen("acct", false);
+    expect(store.getState().accountOpen).toEqual({ kind: "sending", accountId: "acct", open: false });
+    // One ask at a time: a second flip while the first is out sends nothing.
+    await store.setAccountOpen("acct", true);
+    release();
+    await closing;
+    expect(paused).toEqual([{ until: "resume", account: "acct" }]);
+    expect(store.getState()).toMatchObject({
+      accountOpen: null,
+      pausing: false,
+      queueView: { holds: [{ account: "acct", until: "resume" }] },
+    });
+
+    client.onResume = async (request) => {
+      resumed.push(request);
+      return { ok: false, code: "not_ready", message: "taking over" };
+    };
+    await store.setAccountOpen("acct", true);
+    expect(resumed).toEqual([{ account: "acct" }]);
+    expect(store.getState().accountOpen).toMatchObject({ kind: "failed", accountId: "acct" });
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("setting the fleet limit shows the leader's answer at once; lifting it drops the denominator", async () => {
+    const client = new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.limits] }), autoMachine("dev-b")],
+    });
+    client.onQueue = async () => ({ tasks: [], at: 1, limitsUnreadable: true });
+    const store = new Store(client);
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(store.getState().queueView).toMatchObject({ limitsUnreadable: true });
+
+    client.onQueue = async () => ({ tasks: [], at: 2, globalMax: 3 });
+    await store.setFleetLimit(3);
+    expect(client.limitRequests).toEqual([{ fleet: 3 }]);
+    expect(store.getState().queueView).toMatchObject({ globalMax: 3 });
+    expect(store.getState().queueView).not.toHaveProperty("limitsUnreadable");
+
+    client.onQueue = async () => ({ tasks: [], at: 3 });
+    await store.setFleetLimit(null);
+    expect(client.limitRequests).toEqual([{ fleet: 3 }, { fleet: null }]);
+    expect(store.getState().queueView).not.toHaveProperty("globalMax");
+    expect(store.getState().limiting).toBe(false);
+
+    client.onSetLimits = async () => ({ ok: false, code: "conflict", message: "ask again" });
+    await store.setFleetLimit(5);
+    expect(store.getState().queueNotice).not.toBeNull();
+    expect(store.getState().queueView).not.toHaveProperty("globalMax");
+  });
+
+  test("a limit is never sent to a leader that keeps none", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    await store.setFleetLimit(3);
+    expect(client.limitRequests).toEqual([]);
+    expect(store.getState().queueNotice).toContain("session limit");
   });
 
   test("a hold changing asks the preview again: at once for our own, after the quiet for a read's", async () => {
@@ -5217,7 +5553,8 @@ describe("task history", () => {
         total: 2,
         next: { endedAt: 1, createdAt: 0, id: "a-0" },
       });
-      store.refreshOlder();
+      store.toggleOlder();
+      store.toggleOlder();
       await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
       // An archivist too old to list its machines: the Machine sheet falls back to the rows read.
       const first = store.getState().older.list;
@@ -5455,7 +5792,8 @@ describe("task history", () => {
         next: { endedAt: 1, createdAt: 0, id: "x" },
       });
       client.archiveTaskAsks.length = 0;
-      store.refreshOlder();
+      store.toggleOlder();
+      store.toggleOlder();
       await pollUntil(() => store.getState().older.list?.kind === "ok", "the empty page");
       expect(client.archiveTaskAsks).toHaveLength(1);
     } finally {

@@ -18,7 +18,7 @@ the sweep takes it after 90 s.
 What that costs, from the evidence:
 
 - **Restarts dominate.** Of 35 SIGTERMs in Thad's log, 32 were restarts (self-update,
-  `seanced restart`), 3 shutdowns. Each reads as an outage in the app for its few seconds.
+  `seance restart`), 3 shutdowns. Each reads as an outage in the app for its few seconds.
 - **Tasks die unexplained.** Two orderly WSL power-offs lost three task windows; each settled
   `session_closed` ("vanished"), indistinguishable from a window someone closed by hand.
 - **macOS DarkWake flaps.** A lid-closed Mac DarkWakes every 14–18 min; inside a 45 s DarkWake
@@ -111,18 +111,18 @@ The envelope seals a `LeavingNote` (`shared/src/types.ts`), short keys like `Mac
 export const LEAVING_REASONS = ["update", "restart", "stop", "reboot", "shutdown", "sleep", "unknown"] as const;
 ```
 
-| Reason     | Means                                                                                                      | Sessions survive?                                   | Who knows it                                                                                          |
-| ---------- | ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `update`   | Self-update restart; `d` = target short sha                                                                | Yes (`KillMode=process`, launchd leaves tmux alone) | The daemon itself (`src: "self"`): the updater sets the process's pending reason before `selfRestart` |
-| `restart`  | `seanced restart`, a `seanced install` re-install                                                          | Yes                                                 | Hint file (`src: "hint"`), written by the CLI before it signals                                       |
-| `stop`     | Service stopped on purpose: `seanced uninstall`, `systemctl stop`, a user manager stopping alone, a logout | Yes, except a macOS logout                          | Hint file for our own commands; Linux probe; macOS notify (`d: "logout"`)                             |
-| `reboot`   | The OS is rebooting; `d: "os-update"` for a macOS install restart                                          | No                                                  | Linux probe; macOS notify                                                                             |
-| `shutdown` | The OS (or WSL, or the LXC host) is powering off                                                           | No                                                  | Linux probe; macOS notify                                                                             |
-| `sleep`    | About to sleep                                                                                             | Frozen, then yes                                    | macOS: IOKit `kIOMessageSystemWillSleep` (§5)                                                         |
-| `unknown`  | SIGTERM with no evidence: a macOS `bootout`, a stray `kill`                                                | Unknown                                             | —                                                                                                     |
+| Reason     | Means                                                                                                     | Sessions survive?                                   | Who knows it                                                                                          |
+| ---------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `update`   | Self-update restart; `d` = target short sha                                                               | Yes (`KillMode=process`, launchd leaves tmux alone) | The daemon itself (`src: "self"`): the updater sets the process's pending reason before `selfRestart` |
+| `restart`  | `seance restart`, a `seance install` re-install                                                           | Yes                                                 | Hint file (`src: "hint"`), written by the CLI before it signals                                       |
+| `stop`     | Service stopped on purpose: `seance uninstall`, `systemctl stop`, a user manager stopping alone, a logout | Yes, except a macOS logout                          | Hint file for our own commands; Linux probe; macOS notify (`d: "logout"`)                             |
+| `reboot`   | The OS is rebooting; `d: "os-update"` for a macOS install restart                                         | No                                                  | Linux probe; macOS notify                                                                             |
+| `shutdown` | The OS (or WSL, or the LXC host) is powering off                                                          | No                                                  | Linux probe; macOS notify                                                                             |
+| `sleep`    | About to sleep                                                                                            | Frozen, then yes                                    | macOS: IOKit `kIOMessageSystemWillSleep` (§5)                                                         |
+| `unknown`  | SIGTERM with no evidence: a macOS `bootout`, a stray `kill`                                               | Unknown                                             | —                                                                                                     |
 
 - **Hint file**: `stateDir()/run/leaving-hint` (the 0700 directory the local op socket already
-  relies on), JSON `{ r, pid, at }`, written 0600 by `seanced restart` / `install` / `uninstall`
+  relies on), JSON `{ r, pid, at }`, written 0600 by `seance restart` / `install` / `uninstall`
   just before they signal. The daemon reads and deletes it at SIGTERM and honours it only when `pid`
   is its own and `at` is under 60 s old. Not a local-socket op: widening that allowlist is a
   threat-model change, and a file a same-user process can already write buys nothing a socket op

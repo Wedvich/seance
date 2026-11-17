@@ -801,7 +801,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 
       await tmuxOk(["kill-window", "-t", killed.pane]);
       await despawnSession(despawned.pane, { force: true, closing: (id) => tasks.closing(id) });
-      // As `seanced despawn` does, in a process without the ledger.
+      // As `seance despawn` does, in a process without the ledger.
       await despawnSession(marked.pane, { force: true, closing: markClosed });
       await tmux(["send-keys", "-t", exited.pane, "-l", "/exit"]);
       await tmux(["send-keys", "-t", exited.pane, "Enter"]);
@@ -905,7 +905,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
         // oxlint-disable-next-line no-await-in-loop -- one pane at a time
         if (other !== "" && other !== pane) await tmuxOk(["kill-pane", "-t", other]);
       }
-      // As `seanced despawn` calls it.
+      // As `seance despawn` calls it.
       const result = await despawnSession(pane, { force: false, closing: markClosed, leaveDeadTask: true });
       expect(result.outcome).toBe("exited");
       expect((await paneInfo(pane))?.dead).toBe(true);
@@ -1499,6 +1499,155 @@ describe("spawnSession continuing a failed task's session", () => {
   });
 });
 
+describe("spawnSession stacked on a base branch (real git origin)", () => {
+  const ID = ["-c", "user.email=test@seance.local", "-c", "user.name=Seance Test"];
+  let other: string;
+  let seq = 0;
+
+  beforeAll(async () => {
+    // Another clone stands in for the predecessor's machine: what it pushes reaches this clone only by a fetch.
+    other = join(base, "predecessor");
+    await git(base, ["clone", "-q", fixture.barePath, other]);
+  });
+
+  /** Commits a file on `branch` in the other clone and pushes it; returns origin's new tip of it. */
+  async function pushBase(branch: string): Promise<string> {
+    seq += 1;
+    await git(other, ["switch", "-q", "-C", branch, "origin/main"]);
+    await Bun.write(join(other, `stack-${seq}.txt`), `${seq}\n`);
+    await git(other, ["add", "."]);
+    await git(other, [...ID, "commit", "-q", "-m", `stack ${seq}`]);
+    expect((await git(other, ["push", "-q", "--force", "origin", branch])).exitCode).toBe(0);
+    return (await git(other, ["rev-parse", "HEAD"])).stdout.trim();
+  }
+
+  const stacked = (title: string, baseBranch: string, taskId?: string): Promise<SpawnOutcome> =>
+    spawnSession(
+      {
+        repo: "myrepo",
+        mode: "worktree",
+        title,
+        prompt: "build on it",
+        baseBranch,
+        client: "scheduler",
+        ...(taskId === undefined ? {} : { taskId }),
+      },
+      repos,
+      WAIT,
+    );
+
+  async function dropStacked(outcome: SpawnOutcome, title: string): Promise<void> {
+    await killWindow(title);
+    await git(fixture.repoPath, ["worktree", "remove", "--force", "--force", outcome.path]);
+    const name = outcome.path.split("/").pop() ?? "";
+    await git(fixture.repoPath, ["branch", "-D", `worktree-${name}`]);
+  }
+
+  test("makes the worktree at origin's fresh tip of the base, keeps --worktree, and tells the session its PR base", async () => {
+    const tip = await pushBase("feat/stack-a");
+    const before = await headOf(fixture.repoPath);
+    await rm(stub.argvFile, { force: true });
+    const outcome = await stacked("Stack A", "feat/stack-a", "stack-a");
+    try {
+      expect(outcome.path).toBe(join(fixture.repoPath, ".claude", "worktrees", "stack-a"));
+      expect(outcome.stackedOn).toBe(tip);
+      // Fetched for this spawn: the clone had never seen the branch.
+      expect(await headOf(fixture.repoPath, "refs/remotes/origin/feat/stack-a")).toBe(tip);
+      expect(await headOf(outcome.path)).toBe(tip);
+      expect((await git(outcome.path, ["symbolic-ref", "HEAD"])).stdout.trim()).toBe("refs/heads/worktree-stack-a");
+      // `--no-track`, as claude's own add: no upstream, so push-branch's rules read it as any task branch.
+      expect((await git(fixture.repoPath, ["config", "--get", "branch.worktree-stack-a.merge"])).exitCode).not.toBe(0);
+      expect(await headOf(fixture.repoPath)).toBe(before);
+
+      const argv = await stub.argv();
+      expect(argv[argv.indexOf("--worktree") + 1]).toBe("stack-a");
+      const seed = await stub.stdin();
+      expect(seed).toContain("STACKED on `feat/stack-a`");
+      expect(seed).toContain("gh pr create --base feat/stack-a");
+      expect(seed).toContain("gh pr view feat/stack-a");
+      expect(seed).toContain("needs a rebase onto the default branch");
+    } finally {
+      await dropStacked(outcome, "Stack A");
+    }
+  });
+
+  test("a base origin does not have is base_not_found, with no worktree or branch left behind", async () => {
+    const refused = await stacked("Stack Missing", "feat/never-pushed").catch((err: unknown) => err);
+    expect(refused).toBeInstanceOf(SpawnFailure);
+    expect(refused).toMatchObject({ code: "base_not_found" });
+    expect(await readdir(join(fixture.repoPath, ".claude", "worktrees")).catch(() => [])).not.toContain(
+      "stack-missing",
+    );
+    expect(
+      (await git(fixture.repoPath, ["show-ref", "--verify", "refs/heads/worktree-stack-missing"])).exitCode,
+    ).not.toBe(0);
+  });
+
+  test("a base deleted on origin is base_not_found even with its stale tracking ref on disk", async () => {
+    await pushBase("feat/stack-gone");
+    await git(fixture.repoPath, [
+      "fetch",
+      "-q",
+      "origin",
+      "+refs/heads/feat/stack-gone:refs/remotes/origin/feat/stack-gone",
+    ]);
+    expect((await git(other, ["push", "-q", "origin", "--delete", "feat/stack-gone"])).exitCode).toBe(0);
+    const refused = await stacked("Stack Gone", "feat/stack-gone").catch((err: unknown) => err);
+    expect(refused).toMatchObject({ code: "base_not_found" });
+    expect(await readdir(join(fixture.repoPath, ".claude", "worktrees")).catch(() => [])).not.toContain("stack-gone");
+  });
+
+  test("two bases in one repo at once are each fetched, and each worktree starts at its own", async () => {
+    const [tipB, tipC] = [await pushBase("feat/stack-b"), await pushBase("feat/stack-c")];
+    const [b, c] = await Promise.all([stacked("Stack B", "feat/stack-b"), stacked("Stack C", "feat/stack-c")]);
+    try {
+      expect(await headOf(b.path)).toBe(tipB);
+      expect(await headOf(c.path)).toBe(tipC);
+      expect(await headOf(fixture.repoPath, "refs/remotes/origin/feat/stack-c")).toBe(tipC);
+    } finally {
+      await dropStacked(b, "Stack B");
+      await dropStacked(c, "Stack C");
+    }
+  });
+
+  test("two spawns of one slug never share a worktree", async () => {
+    await pushBase("feat/stack-d");
+    const [one, two] = await Promise.all([stacked("Stack D", "feat/stack-d"), stacked("Stack D", "feat/stack-d")]);
+    try {
+      expect(new Set([one.path, two.path]).size).toBe(2);
+    } finally {
+      await dropStacked(one, "Stack D");
+      await dropStacked(two, "Stack D");
+    }
+  });
+
+  test("noBase starts from the default branch, and the seed says there was nothing to stack on", async () => {
+    await rm(stub.argvFile, { force: true });
+    const outcome = await spawnSession(
+      { repo: "myrepo", mode: "worktree", title: "Stack None", prompt: "go", noBase: true, client: "scheduler" },
+      repos,
+      WAIT,
+    );
+    try {
+      expect(outcome.stackedOn).toBeUndefined();
+      const argv = await stub.argv();
+      expect(argv[argv.indexOf("--worktree") + 1]).toBe("stack-none");
+      expect(await stub.stdin()).toContain("left nothing to stack on");
+    } finally {
+      await killWindow("Stack None");
+    }
+  });
+
+  test("a base beside here mode is refused, never started from the default branch", async () => {
+    const refused = await spawnSession(
+      { repo: "myrepo", mode: "here", title: "Stack Here", baseBranch: "feat/stack-a" },
+      repos,
+      WAIT,
+    ).catch((err: unknown) => err);
+    expect(refused).toMatchObject({ code: "launch_error" });
+  });
+});
+
 // Only the branches the spawn case above cannot reach: an absent tag, a tag
 // needing normalisation, and unsuffixable ones — blank or with no ASCII
 // alphanumerics — that must not render as empty parens or slugify's "session"
@@ -1628,9 +1777,9 @@ describe("wire input cannot escape the repo set or the shell", () => {
   });
 });
 
-// docs/scheduler.md M4: a plain `seanced spawn` queues through the relay, so
-// `seanced spawn --now` is the form that must still work with the relay unreachable.
-describe("seanced spawn (the CLI, as a subprocess)", () => {
+// docs/scheduler.md M4: a plain `seance spawn` queues through the relay, so
+// `seance spawn --now` is the form that must still work with the relay unreachable.
+describe("seance spawn (the CLI, as a subprocess)", () => {
   test("spawn --now never dials the relay, audited origin=cli, and carries --autonomy", async () => {
     const configDir = join(base, "cli-config");
     const stateDir = join(base, "cli-state");

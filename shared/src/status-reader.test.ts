@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   closedAt,
+  drainStart,
   exclaveAuth,
   exclaveTraitHealth,
   exclaveTraitUnchecked,
@@ -47,6 +48,26 @@ describe("closedAt", () => {
     expect(closedAt(asleep)).toBe(NOW_MS - 1_000);
     expect(closedAt({ status })).toBeNull();
     expect(closedAt({})).toBeNull();
+  });
+});
+
+describe("drainStart", () => {
+  const soft = [CAPABILITIES.softClose];
+  const cl = NOW_MS - 5_000;
+  test("`dr` wins, whatever the capability", () => {
+    expect(drainStart({ status: { ...status, cl, dr: cl + 1_000 }, capabilities: soft })).toBe(cl + 1_000);
+    expect(drainStart({ status: { ...status, cl, dr: cl + 1_000 } })).toBe(cl + 1_000);
+  });
+  test("a daemon without softClose drains from its close", () => {
+    expect(drainStart({ status: { ...status, cl } })).toBe(cl);
+    expect(drainStart({ status: { ...status, cl }, capabilities: [CAPABILITIES.close] })).toBe(cl);
+  });
+  test("a softClose daemon with `cl` only has not started a drain", () => {
+    expect(drainStart({ status: { ...status, cl }, capabilities: soft })).toBeNull();
+  });
+  test("an open machine has none", () => {
+    expect(drainStart({ status, capabilities: soft })).toBeNull();
+    expect(drainStart({})).toBeNull();
   });
 });
 

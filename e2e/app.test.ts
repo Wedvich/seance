@@ -20,6 +20,7 @@ import { exec } from "../daemon/src/exec.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import { connectApp } from "../relay/test/harness.ts";
 import { deriveMachines } from "../pwa/src/machines-view.ts";
+import { plain } from "../pwa/src/timed.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { E2E_ACCOUNT_ID, killWindow, listWindows, ownMachine, startApp, type Stack } from "./harness.ts";
 import { startSuite, type Suite } from "./suite.ts";
@@ -156,7 +157,7 @@ describe("daemon ↔ relay ↔ app", () => {
       );
       expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
       // The daemon runs from this checkout, so its register blob names the build. Needs a git checkout (readSource).
-      expect(card?.build).toMatch(/^[0-9a-f]{12} · committed /u);
+      expect(plain(card?.build ?? [])).toMatch(/^[0-9a-f]{12} · committed /u);
       expect(card?.exclaves.map((row) => row.id)).toContain("default");
     } finally {
       app.stop();
@@ -185,7 +186,7 @@ describe("daemon ↔ relay ↔ app", () => {
         (s) => ownMachine(s, stack.deviceId)?.status?.quota !== undefined,
         "a status carrying quota",
       );
-      stack.daemon.stop();
+      await stack.daemon.stop();
       const asleep = await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
       const machine = ownMachine(asleep, stack.deviceId);
       if (machine === null) throw new Error("unreachable");
@@ -195,7 +196,7 @@ describe("daemon ↔ relay ↔ app", () => {
       const view = deriveMachines(asleep.relay.machines, Date.now(), asleep.relay.scheduler);
       expect(view.cards.find((c) => c.deviceId === stack.deviceId)?.gauges).toEqual([]);
       const account = view.accounts.find((a) => a.accountId === E2E_ACCOUNT_ID);
-      expect(account?.observed).toEndWith("on TestMac, asleep");
+      expect(plain(account?.observed ?? [])).toEndWith("on TestMac, asleep");
       expect(account?.bars.map((bar) => [bar.label, bar.pct])).toEqual([["5h", 20]]);
       // Drained to the close's push, so the next connected one is the register's.
       expect((await rawEntry(false)).status).toBeDefined();
@@ -221,7 +222,7 @@ describe("daemon ↔ relay ↔ app", () => {
   });
 
   // The PWA no longer sends `spawn` (every PWA spawn is a task), but the daemon still answers it for
-  // older apps, older MCP clients and `seanced spawn --now`: these two keep that op honest.
+  // older apps, older MCP clients and `seance spawn --now`: these two keep that op honest.
   test("the spawn op: worktree mode lands a reply and a real tmux window", async () => {
     const app = startApp(stack);
     let window: string | null = null;
@@ -288,7 +289,7 @@ describe("daemon ↔ relay ↔ app", () => {
     try {
       await app.waitForApp((s) => typeof s.sessions[stack.deviceId] === "object", "sessions answered");
 
-      // Straight down the transport, bypassing the Store: what a `seanced spawn`
+      // Straight down the transport, bypassing the Store: what a `seance spawn`
       // at the machine, or another device's session, looks like from here.
       const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
         repo: "myrepo",
@@ -374,7 +375,7 @@ describe("daemon ↔ relay ↔ app", () => {
     const app = startApp(stack);
     try {
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
-      stack.daemon.stop();
+      await stack.daemon.stop();
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
 
       // The DO answers a send to the dead daemon with a real undeliverable.
@@ -432,7 +433,7 @@ describe("daemon ↔ relay ↔ app", () => {
       // the relay refuses, which is why the CLI stops it first.
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "connected" });
 
-      stack.daemon.stop();
+      await stack.daemon.stop();
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
 
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "forgotten" });
@@ -518,7 +519,7 @@ describe("two daemons ↔ relay ↔ app", () => {
       expect(account?.detail).toContain("TestMac");
       expect(account?.detail).toContain("StatusBox");
       // StatusBox read the account nine minutes after TestMac did: its numbers win.
-      expect(account?.observed).toEndWith("on StatusBox");
+      expect(plain(account?.observed ?? [])).toEndWith("on StatusBox");
       expect(account?.bars.map((bar) => [bar.label, bar.pct])).toEqual([["5h", 64]]);
     } finally {
       app.stop();

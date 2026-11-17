@@ -1,4 +1,4 @@
-// Apart from `custodian-verbs.ts` so `seanced custodian`, which the round runs many times a turn, loads only these
+// Apart from `custodian-verbs.ts` so `seance custodian`, which the round runs many times a turn, loads only these
 // and not the daemon's side (tmux, the launch ledger, git), and never reaches `log.ts` (the CLI's stdout is the
 // round's data channel). The codes are local-socket codes, not wire codes, so they live here as the session-event
 // frame's do.
@@ -181,7 +181,15 @@ export type CustodianReply =
       readonly outcome: "exited" | "killed" | "harvested";
       readonly worktree: { readonly removed: true; readonly how: string } | { readonly kept: KeptWhy } | null;
     }
-  | { readonly ok: true; readonly verb: "capture"; readonly pane: string; readonly text: string }
+  | {
+      readonly ok: true;
+      readonly verb: "capture";
+      readonly pane: string;
+      /** The screen's bottom (`bottomOfScreen`). */
+      readonly text: string;
+      /** Whether lines above `text` were cut. */
+      readonly truncated: boolean;
+    }
   | ({
       readonly ok: true;
       readonly verb: "pr";

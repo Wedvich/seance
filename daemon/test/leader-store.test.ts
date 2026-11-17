@@ -590,7 +590,7 @@ describe("leader in the daemon", () => {
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "store-changed", key: "task:x", version: 1 }));
       await pollUntil(async () => (await stateOf(store, "x")) === "ready", "the daemon to pass the nudge on");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -620,7 +620,7 @@ describe("leader in the daemon", () => {
       expect(opened).toMatchObject({ version: 2, task: { id: "x", state: "ready" } });
       expect(held.env.from).toBe(SCHEDULER_ID);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -645,7 +645,7 @@ describe("leader in the daemon", () => {
       await daemon.leader.settled();
       return (await store.get("p"))?.body;
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   }

@@ -1,11 +1,14 @@
+import { FLEET_LIMIT_MAX } from "@seance/shared";
 import type { ComponentChildren, JSX } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
 import {
   ASLEEP_SECTION,
   armKey,
   armTap,
   disarmRow,
+  parseLimitDraft,
   type ArmOp,
+  type LimitView,
   type LineageLine,
   type QueueRow,
   type QueueScreenView,
@@ -13,12 +16,11 @@ import {
 import { OLDER_TITLE, type OlderSheetView, type OlderView } from "../older-view.ts";
 import { centeredScrollTop } from "../scroll.ts";
 import type { OlderPick, OlderSheet } from "../state.ts";
-import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } from "./menu.tsx";
-import { RelaySettings } from "./relay-dot.tsx";
 import { Sheet, SheetItem, TileButton, useSheetExit } from "./sheet.tsx";
 import { Toast } from "./toast.tsx";
+import { Time, TimedText } from "./timed.tsx";
 
 /** The Older section's acts, all the store's (`OlderStore`). */
 export interface OlderActions {
@@ -37,33 +39,133 @@ const ARM_MS = 4_000;
 /** How long a notification's row stays marked. */
 const MARK_MS = 3_000;
 
+/** The Queue's title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+export function QueueHeading(props: {
+  summary: string | null;
+  /** Opens the Limits sheet; null while there is no limit to change, and the line is then plain text. */
+  onLimits: (() => void) | null;
+}): JSX.Element {
+  const { summary, onLimits } = props;
+  return (
+    <div>
+      <h1 className="header-title">Queue</h1>
+      {summary !== null &&
+        (onLimits === null ? (
+          <p className="header-meta">{summary}</p>
+        ) : (
+          <button type="button" className="header-meta header-meta-button" aria-haspopup="dialog" onClick={onLimits}>
+            <span className="sr-only">Session limit: </span>
+            {summary}
+            <StrokeIcon size={12}>
+              <path d="M6 9l6 6 6-6" />
+            </StrokeIcon>
+          </button>
+        ))}
+    </div>
+  );
+}
+
 /**
- * Reached from the spawn form's header: what the scheduler holds, by what each
+ * The fleet limit: how many sessions the queue runs at once, across every machine and account.
+ * An empty field is no limit, the default. A form, so Enter saves.
+ */
+function LimitsSheet(props: {
+  limit: LimitView;
+  saving: boolean;
+  onSave: (fleet: number | null) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const { limit, saving, onSave, onClose } = props;
+  const [draft, setDraft] = useState(limit.fleet === null ? "" : String(limit.fleet));
+  const input = useRef<HTMLInputElement>(null);
+  const inputId = useId();
+  const hintId = useId();
+  // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
+  useEffect(() => {
+    input.current?.focus();
+  }, []);
+
+  const parsed = parseLimitDraft(draft);
+  return (
+    <Sheet title="Session limit" variant="dialog" onClose={onClose}>
+      <form
+        className="rename"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!saving && parsed !== undefined) onSave(parsed);
+        }}
+      >
+        <label className="rename-label" htmlFor={inputId}>
+          Sessions at once, across all machines
+        </label>
+        <input
+          ref={input}
+          id={inputId}
+          type="text"
+          inputMode="numeric"
+          className="rename-input"
+          placeholder="No limit"
+          maxLength={String(FLEET_LIMIT_MAX).length}
+          value={draft}
+          disabled={saving}
+          aria-invalid={parsed === undefined}
+          aria-describedby={hintId}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        {parsed === undefined ? (
+          <p id={hintId} className="rename-error" role="alert">
+            A whole number from 1 to {FLEET_LIMIT_MAX}, or empty for no limit. To stop the queue, pause it.
+          </p>
+        ) : (
+          <p id={hintId} className="rename-hint">
+            <span>
+              Empty lets the queue run free: each account is then bound only by its quota. Sessions already running keep
+              running, and Start now still goes past the limit.
+            </span>
+          </p>
+        )}
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={saving || parsed === undefined}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+/**
+ * Reached from the phone's header menu, or a desk column: what the scheduler holds, by what each
  * task needs from the person, with a way to cancel, mark done, or hold the
  * whole queue. Everything it shows is `deriveQueue`'s; this lays it out.
  */
 export function QueueScreen(props: {
   view: QueueScreenView;
-  relayState: ConnectionState;
   /** The last action's refusal or failure, as a sentence. */
   notice: string | null;
   onDismissNotice: () => void;
   pausing: boolean;
   discarding: boolean;
+  /** The Limits sheet is open; the app holds it, since the header's count opens it too. */
+  limitsOpen: boolean;
+  limiting: boolean;
+  onOpenLimits: () => void;
+  onCloseLimits: () => void;
+  onSetLimit: (fleet: number | null) => void;
   /** A notification's task: scrolled to and marked once its row is listed. */
   focusedTask: string | null;
   /**
    * The focus was acted on: the store forgets it. Only here, never on unmount: a callback that is a new
    * closure each render would make an unmount effect run on every re-render and drop a focus whose row
-   * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`).
+   * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`, or a switch to Machines).
    */
   onFocused: () => void;
-  /** Absent in the desktop layout, where the screen is a column rather than a layer. */
-  onDismiss?: () => void;
-  onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
-  /** Places a task the concurrency caps alone hold, past them. */
+  /** Places a task the concurrency limit alone holds, past it. */
   onRunNow: (taskId: string) => void;
   /** Queues a task that resumes this failed or cancelled one's session in its worktree, on its machine. */
   onContinue: (taskId: string) => void;
@@ -74,13 +176,11 @@ export function QueueScreen(props: {
   onPause: () => void;
   onResume: (account?: string) => void;
   onDiscard: () => void;
-  /** Desktop layout only: the queue is the rightmost column, so the settings pill moves to its header. */
-  onOpenSettings?: () => void;
   /** The archive's tasks past Finished; null while no archivist is online, and nothing of it renders (A35). */
   older: OlderView | null;
   olderActions: OlderActions;
 }): JSX.Element {
-  const { view, relayState, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
+  const { view, notice, pausing, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
   // Memory only: persist.ts keeps the spawn form's record, no place for a view's open/closed.
   const [asleepOpen, setAsleepOpen] = useState(false);
@@ -186,32 +286,14 @@ export function QueueScreen(props: {
 
   return (
     <>
-      <header className="header">
-        <div className="header-lead">
-          {onDismiss !== undefined && (
-            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-              ‹
-            </button>
-          )}
-          <div>
-            <h1 className="header-title">Queue</h1>
-            {view.summary !== null && <p className="header-meta">{view.summary}</p>}
-          </div>
-        </div>
-        <div className="header-actions">
-          <button type="button" className="queue-refresh" onClick={onRefresh} aria-label="Refresh the queue">
-            ↻
-          </button>
-          {props.onOpenSettings !== undefined && <RelaySettings state={relayState} onClick={props.onOpenSettings} />}
-        </div>
-      </header>
-
       <div className="fleet" ref={list}>
         {view.holds.map((hold) => (
           <div key={hold.key} className="banner card">
             <span className="banner-rule" />
             <span className="banner-text">
-              <span className="banner-body">{hold.text}</span>
+              <span className="banner-body">
+                <TimedText line={hold.text} />
+              </span>
             </span>
             <button
               type="button"
@@ -223,6 +305,19 @@ export function QueueScreen(props: {
             </button>
           </div>
         ))}
+        {view.limitsUnreadable !== null && (
+          <div className="banner card">
+            <span className="banner-rule" />
+            <span className="banner-text">
+              <span className="banner-body">{view.limitsUnreadable}</span>
+            </span>
+            {view.limit !== null && (
+              <button type="button" className="queue-resume" disabled={props.limiting} onClick={props.onOpenLimits}>
+                Set limit
+              </button>
+            )}
+          </div>
+        )}
         {view.unreadable !== null && (
           <div className="banner card">
             <span className="banner-rule" />
@@ -322,6 +417,14 @@ export function QueueScreen(props: {
         </button>
       </footer>
       <OlderFilterSheet sheet={props.older?.sheet ?? null} actions={props.olderActions} />
+      {props.limitsOpen && view.limit !== null && (
+        <LimitsSheet
+          limit={view.limit}
+          saving={props.limiting}
+          onSave={props.onSetLimit}
+          onClose={props.onCloseLimits}
+        />
+      )}
     </>
   );
 }
@@ -506,7 +609,7 @@ function QueueCard(props: {
             )}
           </h3>
           <p className="fleet-meta">
-            {row.headline} · {row.age}
+            <TimedText line={row.headline} /> · <Time moment={row.age} />
             {row.autonomy !== null && (
               <span className="fleet-badge queue-autonomy" title={`Autonomy: ${row.autonomy}`}>
                 {row.autonomy}
@@ -552,6 +655,7 @@ function QueueCard(props: {
       </div>
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
+      {row.stackedOn !== null && <Lineage line={row.stackedOn} onReveal={props.onReveal} />}
       {row.carriesOn !== null && <Lineage line={row.carriesOn} onReveal={props.onReveal} />}
       {row.passedTo !== null && <Lineage line={row.passedTo} onReveal={props.onReveal} />}
       {row.flag !== null && (
@@ -574,7 +678,11 @@ function QueueCard(props: {
       )}
       {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
       {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
-      {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
+      {row.body !== null && (
+        <p className="fleet-card-body">
+          <TimedText line={row.body} />
+        </p>
+      )}
       {(row.pr !== null || inline !== null || row.answer !== null) && (
         <div className="queue-actions">
           {row.pr !== null && (

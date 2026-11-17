@@ -11,9 +11,22 @@
 export const ROUND_TMP_PREFIX = "/tmp/seance-cu-";
 export const ROUND_TMP = /^\/tmp\/seance-cu-[A-Za-z0-9]{6}$/u;
 
+/**
+ * The round socket's directory (`custodian-socket.ts`): a `mkdtemp` of this prefix, so no other user can derive and
+ * pre-create it. The `s-` keeps it from ever matching `ROUND_TMP`, so the round-tmp sweep never touches it.
+ */
+export const CUSTODIAN_SOCKET_DIR_PREFIX = "/tmp/seance-cu-s-";
+export const CUSTODIAN_SOCKET_DIR = /^\/tmp\/seance-cu-s-[A-Za-z0-9]{6}$/u;
+
 export interface SeatRecord {
   /** When the last round ended; due checks wait `everyMinutes` after it. */
   readonly lastEndedAt?: number;
+  /**
+   * The round socket's directory this seat serves, and every recorded round's environment names: kept across a reload
+   * and a restart so an adopted round still reaches it. Absent (an older daemon's record), a recorded round is not
+   * adoptable.
+   */
+  readonly socketDir?: string;
   /** The running round, written ahead of its launch (`pane` null until it exists) so a restart or reload adopts it. */
   readonly round?: {
     readonly pane: string | null;

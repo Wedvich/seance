@@ -10,10 +10,10 @@ import { emptyCounts } from "../src/custodian-rounds.ts";
 const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
 /**
- * `seanced custodian status | log | round | pause | resume` through the real CLI as a subprocess, on a throwaway state
+ * `seance custodian status | log | round | pause | resume` through the real CLI as a subprocess, on a throwaway state
  * dir: what the owner types is the product, and the dispatch in `main.ts` is part of it.
  */
-describe("seanced custodian, the owner's verbs", () => {
+describe("seance custodian, the owner's verbs", () => {
   let root: string;
   let custodian: string;
   let env: Record<string, string | undefined>;

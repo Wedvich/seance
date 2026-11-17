@@ -233,7 +233,7 @@ Séance's noise is cover for a real intruder.
    its own store behind the same `loadPsk()` — a DPAPI blob
    (`ProtectedData`, CurrentUser scope) at `~/.local/state/seance/psk.dpapi`,
    encrypted and decrypted through `powershell.exe` interop, written by the
-   same `seanced psk-import`. What it buys: a Linux-context sweep of
+   same `seance psk-import`. What it buys: a Linux-context sweep of
    `~/.config` gets ciphertext, and the key never rests in plaintext inside
    the ext4.vhdx, so at-rest theft (the vhdx itself, backups of it) is
    covered. What it honestly does not: DPAPI has no ACL — any process in the
@@ -260,7 +260,7 @@ Séance's noise is cover for a real intruder.
    boxes that do have a TPM: where `/dev/tpmrm0` exists — bare metal, or a
    Proxmox LXC with the device passed through — `systemd-creds encrypt
    --with-key=tpm2` seals the PSK at `~/.local/state/seance/psk.cred`,
-   behind the same `loadPsk()` and the same `seanced psk-import`. Sealed to
+   behind the same `loadPsk()` and the same `seance psk-import`. Sealed to
    the TPM alone, deliberately no PCR binding: a PCR-bound blob dies on the
    next firmware update, and the threat here is at-rest exfiltration
    (container backups, ZFS snapshots, stolen disks), not a tampered boot
@@ -724,7 +724,8 @@ Séance's noise is cover for a real intruder.
    asking for its exclave's `/usage` refresh, which runs only on a stale reading
    (Daemon, "Usage refresh"), and, while the owner has closed the machine, timing
    the constant keys the daemon types into that pane (The drain's session ask). It can also report its
-   own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task and releases
+   own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task, or one holding
+   no PR (amended 2026-11-17), and releases
    `after: "done"` dependents. A session that lies about being done can do no more than one
    that exits. Through the inbox mod's listener it also reads only messages sent to the task its own
    pane carries, and through `send_message` it can send as that task and no other (Local op socket,
@@ -845,7 +846,7 @@ nothing checked it. The last is the gap they leave.
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
   absolute, bounded, free of NUL and newline, and `.`/`..` steps are refused — also when the
   ledger hands one back after a restart. Each read is bounded by a timeout, and nothing in the
-  module logs, since it runs under no `seanced mcp`.
+  module logs, since it runs under no `seance mcp`.
 - Every spawn is **logged at start and outcome** with repo, mode, title, model,
   effort, plan mode when on, the autonomy level when named, task id when present (and, on `task_running`, the
   session it collided with), prompt length and prompt SHA-256 prefix — never the
@@ -869,7 +870,7 @@ nothing checked it. The last is the gap they leave.
   requires the field and the mode to come together).
 - **Every spawn path audits, through one formatter**, tagged `origin=relay`,
   `origin=cli` or `origin=local`. A trail that covered only the relay would make
-  `seanced spawn` the quieter way in — precisely the path someone with local
+  `seance spawn` the quieter way in — precisely the path someone with local
   shell access would choose — and the tag is what separates "me at my desk at
   2pm" from "my phone was in a drawer at 3am". `local` is the third: the op
   socket below, driven by something on this box that is not the human at the
@@ -901,13 +902,13 @@ nothing checked it. The last is the gap they leave.
   daemon's scheduler loop dispatching to its own machine in process (_Scheduler_,
   "The leader") — distinct from `local`, which says a peer on the op socket asked,
   and from the `client=scheduler` other machines log under `relay`; the leader's
-  `op=admit` line is under it too. `mcp` is `seanced mcp` enqueuing on `auto` with the
+  `op=admit` line is under it too. `mcp` is `seance mcp` enqueuing on `auto` with the
   key itself: a store write the relay answers, which no daemon sees, so that process
   appends its own `audit enqueue` line to the log, as the CLI does (added 2026-10-18,
   M3 review S5). `continue_task` enqueues under the same `mcp` origin, since it is the same
-  surface (`seanced continue`, under `cli`), and the spawn line of a continuation gains
+  surface (`seance continue`, under `cli`), and the spawn line of a continuation gains
   `continues=<old id>` after `mode=continue` (2026-10-26; ordinary lines are byte-identical).
-  `seanced spawn` writes the same line under `cli`
+  `seance spawn` writes the same line under `cli`
   (`origin=cli client=cli`): the surface is still someone at this machine's shell,
   and `audit enqueue` beside `audit spawn` already tells the two acts apart, as `relay`
   covers spawn, despawn and queue (added 2026-10-25, M4). A process interrupted after a
@@ -924,7 +925,7 @@ nothing checked it. The last is the gap they leave.
   the `cli` half**, so the daemon repairs it on every start. Both service
   managers open the log _before_ dropping to the daemon's user — under a systemd
   system unit that is root, so a log the manager has to create lands root-owned
-  and every `seanced spawn` then fails its append, warns to stderr and proceeds
+  and every `seance spawn` then fails its append, warns to stderr and proceeds
   unaudited. That was the production state on a `--system` box: `install`
   chowned the log once, and nothing re-established it after the file was
   replaced. `ensureAuditLog` now creates it 0600 outright and tightens the mode
@@ -969,7 +970,9 @@ nothing checked it. The last is the gap they leave.
   through `openAtRest` with its op, refused unless it came under `queue:pause` and
   sealed `to: "scheduler"`, and bound by its sealed `version` against the relay's
   (`getPause` in `daemon/src/queue-store.ts`); one that fails any of it fails
-  closed, as a whole-queue hold (Scheduler, "Pause"). Both bindings hold against a
+  closed, as a whole-queue hold (Scheduler, "Pause"). `scheduler-settings`, the fleet limit under
+  `settings:scheduler`, is the leader's alone in the same way (`getLimits`), and one that fails any of
+  it places nothing (Scheduler, "Routing caps"). Both bindings hold against a
   token holder, not the relay, which can serve an older version at its own
   version (Threat model, item 4). `settings` is the leader's alone too: sealed `to` and
   `from` `"scheduler"`, opened through `openAtRest` with its op, refused unless it came under
@@ -1026,7 +1029,7 @@ nothing checked it. The last is the gap they leave.
   socket. A new kind, or a new act for this one, is a threat-model change like the
   broker's. The second act, built (#21, "Session events"): a `done` report finishing the sender's own
   task, noted in the launch ledger and forwarded, and settled only by a leader and only
-  for an `until: "reported"` task. The third (2026-11-11, "Session events", `handoff`): a hand-off
+  for an `until: "reported"` task or one holding no PR (amended 2026-11-17). The third (2026-11-11, "Session events", `handoff`): a hand-off
   closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
   launch and a PR URL of (for a continuation, the one that ledger noted on it at launch from the launch it
   continues, `continuedPr`: still the ledger's word, never a session-event frame's; for a successor, the one
@@ -1064,7 +1067,11 @@ nothing checked it. The last is the gap they leave.
   `loadOrInitState` only; `readState` never logs). `cl` is never trimmed from `status`, a closed
   daemon's gate runs before any fetch or ledger write, and `routesClosed` is accepted only as `true`.
   `now` is `true` only, honoured only by a daemon advertising `drainAsk`, offered only to such a target and never
-  persisted: it moves a deadline earlier and grants nothing else.
+  persisted: it moves a deadline earlier and grants nothing else. `soft` is `true` only, never beside `now`
+  (`invalid_request`) and never persisted (it is `closed.drainAt`'s `null`); a `closed.drainAt` the daemon cannot
+  read loads as not draining; `MachineStatus.dr` is sent only beside `cl` and never trimmed by `fitStatus`; and the
+  leader drains a machine only from `drainStart` (`dr`, else `cl` for a daemon not advertising `softClose`, else
+  never).
 - **The custodian's controls are the owner's act, sealed, and never reachable without the app role** (2026-11-14,
   Daemon, "The custodian's status and the Machines row"). The daemon answers `custodian` (round now, pause, resume)
   only when sealed `from: "app"` on the relay leg, parsed by `parseCustodianRequest`, audited without a payload
@@ -1075,11 +1082,11 @@ nothing checked it. The last is the gap they leave.
   request another. A round request is spaced and expires as the
   shell's is, so a holder of the PSK gains at most a round per 15 minutes it could not already ask for at a machine's
   shell; thresholds, the model and on/off stay in `config.json` (C46), out of its reach.
-- **The drain's session ask is constant keys, into ledger-bound panes, while closed** (2026-11-13, Daemon, "The
+- **The drain's session ask is constant keys, into ledger-bound panes, while draining** (2026-11-13, Daemon, "The
   drain's session ask"; `CLAUDE.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
   Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`: not
-  reported done, not being closed, no hand-off or pass mark), only while this machine is closed at the `cl` the
+  reported done, not being closed, no hand-off or pass mark), only while this machine is draining at the `cl` the
   ask began under. The text goes in only after that pane's `idle` carrying `turnEnded` and never while its last
   frame is `needs-input`, so the drain can deny a permission and never grant one; Ctrl+C is sent once, never
   twice (a second exits Claude Code), and no Escape belongs to the draft clear. Enter goes in only after every
@@ -1091,16 +1098,16 @@ nothing checked it. The last is the gap they leave.
   it is injectable by construction. Nothing it does is trusted: its `Bash` is sandboxed to one scratch
   directory and a short host list, its tools are `Bash` and `Read`, and `--permission-mode dontAsk` refuses what
   no rule allows instead of asking. The deny list (`custodian-fence.ts`) is generated from constants and the
-  one `COMMANDS` table, so a new `seanced` command is denied to it by default, and it is **for a cheap model's
+  one `COMMANDS` table, so a new `seance` command is denied to it by default (under the CLI's old name too), and it is **for a cheap model's
   mistakes, never a boundary**: `bash -c` and interpreters get around it. The daemon's verbs check every act that
   goes through them (custodian 4, built: "The custodian frame kind"), and that is all they bound. What bounds the round is
-  its sandbox (custodian 4b, built and drilled 2026-11-14 on macOS and Linux's weaker nested mode, "The custodian's seat", "Contained"): it reads only
+  its sandbox (custodian 4b, built and drilled 2026-11-14 on macOS and Linux, "The custodian's seat", "Contained"): it reads only
   its own directories and the read-only toolchain (everything under `$HOME`, the state dir and the config dir, the repo
-  and exclave roots and the Data-volume aliases of them is masked, and the Read tool is held to the round dir by an
-  allow rule and secret denies), reaches **no network** (`allowedDomains: []`) and **one socket that acts, its
+  and exclave roots and the Data-volume aliases of them is masked, and the round has no Read tool, with secret denies
+  kept behind that), reaches **no network** (`allowedDomains: []`) and **one socket that acts, its
   own**, which serves the verbs only (the tmux socket, the daemon's main socket and every other path socket are masked or
-  not listed), under a built environment with nothing inherited. A host where that cannot be shown (strict-mode Linux,
-  a checkout outside the allowed set) runs no round. What it still reads, by decision: the system tree, the toolchain,
+  not listed), under a built environment with nothing inherited. A host where that cannot be shown (Linux on a
+  CPU the vsock filter has no table for, a checkout outside the allowed set) runs no round. What it still reads, by decision: the system tree, the toolchain,
   whatever a pane shows (`capture`), macOS `launchctl print` and `defaults read`, and on the weaker nested Linux mode the
   host `/proc`'s `cmdline` and `status`. The round's seed, notes and agent text never reach a
   log or an audit line; the seat's lines name an exclave id, a pane id, a reason and an outcome.
@@ -1119,7 +1126,7 @@ nothing checked it. The last is the gap they leave.
 - **The daemon reads the custodian's trust and never writes it** (2026-11-13). `isDirTrusted` reads an exclave's
   `.claude.json` (`projects[<dir>].hasTrustDialogAccepted`, the dir's or an ancestor's) and nothing more; a
   write would race every running session's own rewrite of the file. An untrusted exclave is skipped and
-  `seanced doctor` names the owner's one-time step.
+  `seance doctor` names the owner's one-time step.
 - **A seat field in `state.json` is validated before the daemon acts on it** (2026-11-13). `custodianSeatOf`
   checks the recorded pane against `PANE_ID`, the tmp dir against `ROUND_TMP` and every number for finiteness
   before the seat closes a pane or removes a path it names, and `removeRoundTmp` re-checks the pattern and
@@ -1213,10 +1220,10 @@ that is already compromised (it holds the PSK, so it _is_ the boundary);
 zero-downtime key rotation.
 
 **Key rotation runbook.** Rotation and revocation are one operation: generate
-32 bytes in 1Password, paste into all four configs and the PWA, `seanced
+32 bytes in 1Password, paste into all four configs and the PWA, `seance
 restart` on each. Spawns fail closed in between. No `keyId` in the envelope —
 considered and rejected, because a rollover window buys nothing for four
-devices owned by one person and costs a wire-format change. `seanced doctor`
+devices owned by one person and costs a wire-format change. `seance doctor`
 prints a PSK fingerprint (SHA-256 prefix of the raw key) so agreement across
 devices is checkable without comparing secrets.
 
@@ -1246,7 +1253,7 @@ The Durable Object persists a machine registry:
   `detail`, and the parser caps it), reversing an earlier "not
   rendered — converged is the steady state" decision: a dev check found a
   scheduler leader still on an older build, and nothing an app could see said
-  so. `seanced doctor`/`status` print both too. No wire change was needed.
+  so. `seance doctor`/`status` print both too. No wire change was needed.
 - `connected` is **not persisted** — it's derived from `state.getWebSockets()`
   when the registry is read, so an eviction or crash can never leave a stale
   `true` on disk. Entries go out to the PWA as `RegistryEntry & { connected }`.
@@ -1256,7 +1263,7 @@ The Durable Object persists a machine registry:
   register's time, not its last heartbeat's: a machine up for three days
   reads "last seen 3d ago" until the sweep closes its slept socket and
   rewrites it. The kept `status.at` is the fresher stamp in that window, so every
-  displayed "last seen" (PWA, Raycast, `seanced mcp`) reads `lastHeardAt`, the later of the two.
+  displayed "last seen" (PWA, Raycast, `seance mcp`) reads `lastHeardAt`, the later of the two.
 - **Silent daemon sockets are swept.** An abruptly-slept Mac sends no close
   frame, so its socket would read `connected: true` until Cloudflare noticed
   the dead TCP peer — unbounded, hours in practice. A storage alarm runs
@@ -1508,65 +1515,66 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                                                          | Sent from                                                                                                                                                                                                                                                                                                                                                                          | Handled in                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `register`                                                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                                                                                                                                                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                                                                                                                                                                                       |
-| `lead` / `follow`                                                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                                                                                                                                                                                                                                                       | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                                                                                      |
-| `lead-proof` (daemon→relay, op `lead-proof` at rest)                | `daemon/src/relay-client.ts` `#proveLead`, on every `lead`                                                                                                                                                                                                                                                                                                                         | `relay/src/hub.ts` `#leadProof` (bounded in `relay/src/wire.ts`): the first from the leader's socket under the current term, kept on the leader record and carried in `registry`; opened by `shared/src/app-client.ts` `#decryptLeadProof`                                                                                                                                                              |
-| `msg` (→`"scheduler"`)                                              | any app or daemon                                                                                                                                                                                                                                                                                                                                                                  | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader`                                                                  |
-| ops `queue` / `route-preview` / `cancel`                            | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/scheduler-store.ts`, and `daemon/src/mcp.ts` for `queue` and `cancel`, through the broker (`daemon/src/broker.ts`) when keyless                                                                                                                                                                          | `daemon/src/leader-requests.ts` (`answer`, each op through its own parser: `parseQueueRequest`, `parseTaskRequest` for `route-preview`, `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                                                                                  |
-| `msg` (`from: "scheduler"`, `term`)                                 | the leader's app-role leg, built per term in `daemon/src/leader.ts` and sent on by `termFleet` in `daemon/src/leader-adapters.ts`, over `shared/src/app-client.ts` built with `scheduler: { term }`                                                                                                                                                                                | fenced by `relay/src/hub.ts` `#isCurrentTerm` (term only: an app socket has no identity to check) — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                                                                                           |
-| `msg` (app→daemon)                                                  | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                         |
-| `msg` (daemon→app)                                                  | `daemon/src/relay-client.ts`                                                                                                                                                                                                                                                                                                                                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                       |
-| `msg` (→`"machines"` broadcast)                                     | any PSK holder                                                                                                                                                                                                                                                                                                                                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                                                                                                                                                                                        |
-| op `update-available`                                               | `daemon/src/run.ts` via `broadcast()`                                                                                                                                                                                                                                                                                                                                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                                                                                                                                                                                         |
-| `registry`                                                          | `relay/src/hub.ts` (with `scheduler: { deviceId, term, proof? } \| null`)                                                                                                                                                                                                                                                                                                          | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened and its `proof` opens as its `lead-proof` for this term                                                                                                                                                                                                                       |
-| `undeliverable`                                                     | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                 | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                              |
-| `forget`                                                            | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                                                                                                                                                                                 |
-| `forget-refused`                                                    | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                 | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                                                                                     |
-| `"ping"` / `"pong"`                                                 | both socket legs                                                                                                                                                                                                                                                                                                                                                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                                                                                         |
-| envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                             | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                                                                                     |
-| ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
-| op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
-| op `availability` (built 2026-11-13; `now?` with drain 3/3)         | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seanced close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                         | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
-| op `custodian` (built 2026-11-14, custodian 7)                      | `pwa/src/store.ts` `custodianControl`, from the Machines card's menu, over the relay as app-role only                                                                                                                                                                                                                                                                              | `daemon/src/handlers.ts` `handleCustodian` → `CustodianControl` in `daemon/src/run.ts` → `ownerAct` (`daemon/src/custodian-owner.ts`); sealed `from: "app"` only; writes `custodian/state.json` or `round-request` and pokes the seat (Daemon, "The custodian's status and the Machines row")                                                                                                           |
-| op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
-| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector; `cl` through the `closed` collector, from `state.json`)                                                             | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
-| `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
-| op `metrics`                                                        | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
-| op `archive-status`                                                 | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                      | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
-| op `archive-metrics`                                                | `pwa/src/store.ts` via `shared/src/app-client.ts` `archiveMetrics()`                                                                                                                                                                                                                                                                                                               | `archivist/src/query.ts` → `queryArchive` in `archivist/src/metrics-archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveMetricsRequest`)                                                                                                                                                                                                                                      |
-| op `archive-tasks`                                                  | `pwa/src/older-store.ts` via `shared/src/app-client.ts` `archiveTasks()`                                                                                                                                                                                                                                                                                                           | `archivist/src/query.ts` → `queryTasks` and `taskMachines` in `archivist/src/archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveTasksRequest`)                                                                                                                                                                                                                               |
-| op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
-| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                                                                                              |
-| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                                                                                          |
-| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                                                                                                                                                                                | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                                                                                          |
-| records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                                                                                |
-| ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now); `run-now` also `daemon/src/auto.ts` (`startAuto`, `startQueuedAuto`: MCP's `start_task` and `spawn_session` `start`, `seanced start` and `spawn --start`)                                                                                     | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                                                                                           |
-| op `pass` (→`"scheduler"`, built 2026-11-12)                        | an app via `shared/src/app-client.ts` `pass`: `pwa/src/scheduler-store.ts`, and `daemon/src/auto.ts` `passAuto` (MCP `pass_task`) and `daemon/src/cli-auto.ts` `passTaskAuto` (`seanced pass`), through the broker when keyless                                                                                                                                                    | `daemon/src/leader-requests.ts` → `Scheduler.pass` (Scheduler, "Passing to a successor")                                                                                                                                                                                                                                                                                                                |
-| op `amend` (→`"scheduler"`, built 2026-11-12)                       | an app via `shared/src/amend-client.ts` `sendAmend` (a store read for `basis`, then `app-client.ts` `amend`): `daemon/src/mcp.ts` (`amend_task`) and `daemon/src/cli.ts` (`seanced amend`), through the broker when keyless; no PWA surface yet                                                                                                                                    | `daemon/src/leader-requests.ts`, parsed by `parseAmendRequest` → `Scheduler.amend` (Scheduler, "Amending a waiting task")                                                                                                                                                                                                                                                                               |
-| op `push-branch` (scheduler→daemon, built 2026-11-12)               | the leader's `termFleet` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                       | `daemon/src/push-branch.ts` through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                                            |
-| op `pass-close` (scheduler→daemon, built 2026-11-12)                | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                             | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
-| frame `message` (local socket, built 2026-11-13)                    | `daemon/src/send-message.ts`, from MCP's `send_message` only                                                                                                                                                                                                                                                                                                                       | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
-| frame `inbox` (local socket, built 2026-11-13)                      | `daemon/src/inbox-cli.ts`, the `inbox` mod's child (`seanced inbox`)                                                                                                                                                                                                                                                                                                               | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
-| frame `custodian` (the round's own socket, built 2026-11-14)        | `daemon/src/custodian-cli.ts`, the round's `seanced custodian`; served by `custodian-socket.ts`, handled by `custodian-verbs.ts`                                                                                                                                                                                                                                                   |
-| frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
-| op `session-pass` (→`"scheduler"`, built 2026-11-12)                | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                     | `daemon/src/leader.ts` `onSessionPass`                                                                                                                                                                                                                                                                                                                                                                  |
-| op `session-message` (→`"scheduler"`, built 2026-11-14)             | `daemon/src/messages.ts` (`route`), once per `route: "send"` frame for a task not deliverable here, through `run-capabilities.ts`; in process on the leader's machine                                                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent` → `daemon/src/leader-messages.ts` `onSessionMessage`                                                                                                                                                                                                                                                                                                                   |
-| op `deliver-message` (scheduler→daemon, built 2026-11-14)           | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
-| op `message-receipt` (scheduler→daemon, built 2026-11-14)           | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
-| op `custodian-event` (→`"scheduler"`, built 2026-11-14)             | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                       | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
-| op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
-| op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
-| record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
-| record `account` (at rest)                                          | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                                                                                                                                                                         | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                                                                                        |
-| record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); its `diskAlerts`, `authAlerts`, `archivistSilence`: the leader's own, one update (`daemon/src/machine-alerts.ts`); stored under `settings:main` (_Scheduler_, "The store") |
-| op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted and push not turned off, retried while the leader starts; sent with the `deviceLabel` label, and the re-send is also the one-time label backfill for a browser already held without one)            | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                                                                                   |
-| op `push-unsubscribe` (→`"scheduler"`)                              | `shared/src/app-client.ts` `pushUnsubscribe`, from `pwa/src/push.ts` `disablePush` (the Notifications card's Turn off, after the browser unsubscribed) and `removeDevice` (the card's per-row Remove for another device)                                                                                                                                                           | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushUnsubscribeRequest`, then one `update` of the settings record that drops the endpoint, none when it is not held (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request`                                                                                                                                    |
-| HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
-| HTTP `GET /attachments/<id>`                                        | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                               | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                                                                                     |
-| field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                                                                                           |
-| field `inheritedPr`                                                 | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                    | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only on a worktree spawn sealed from the scheduler (or the leader in process) with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                     |
+| Frame / op                                                                                   | Sent from                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Handled in                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register`                                                                                   | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                                                                                                                                                                                                                                                                                                                                                                            | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                                                                                                                                                                                       |
+| `lead` / `follow`                                                                            | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                                                                                                                                                                                                                                                                                                                                                   | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                                                                                      |
+| `lead-proof` (daemon→relay, op `lead-proof` at rest)                                         | `daemon/src/relay-client.ts` `#proveLead`, on every `lead`                                                                                                                                                                                                                                                                                                                                                                                                                     | `relay/src/hub.ts` `#leadProof` (bounded in `relay/src/wire.ts`): the first from the leader's socket under the current term, kept on the leader record and carried in `registry`; opened by `shared/src/app-client.ts` `#decryptLeadProof`                                                                                                                                                              |
+| `msg` (→`"scheduler"`)                                                                       | any app or daemon                                                                                                                                                                                                                                                                                                                                                                                                                                                              | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader`                                                                  |
+| ops `queue` / `route-preview` / `cancel`                                                     | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/scheduler-store.ts`, and `daemon/src/mcp.ts` for `queue` and `cancel`, through the broker (`daemon/src/broker.ts`) when keyless                                                                                                                                                                                                                                                                      | `daemon/src/leader-requests.ts` (`answer`, each op through its own parser: `parseQueueRequest`, `parseTaskRequest` for `route-preview`, `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                                                                                  |
+| `msg` (`from: "scheduler"`, `term`)                                                          | the leader's app-role leg, built per term in `daemon/src/leader.ts` and sent on by `termFleet` in `daemon/src/leader-adapters.ts`, over `shared/src/app-client.ts` built with `scheduler: { term }`                                                                                                                                                                                                                                                                            | fenced by `relay/src/hub.ts` `#isCurrentTerm` (term only: an app socket has no identity to check) — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                                                                                           |
+| `msg` (app→daemon)                                                                           | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                     | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                         |
+| `msg` (daemon→app)                                                                           | `daemon/src/relay-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                   | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                       |
+| `msg` (→`"machines"` broadcast)                                                              | any PSK holder                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                                                                                                                                                                                        |
+| op `update-available`                                                                        | `daemon/src/run.ts` via `broadcast()`                                                                                                                                                                                                                                                                                                                                                                                                                                          | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                                                                                                                                                                                         |
+| `registry`                                                                                   | `relay/src/hub.ts` (with `scheduler: { deviceId, term, proof? } \| null`)                                                                                                                                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened and its `proof` opens as its `lead-proof` for this term                                                                                                                                                                                                                       |
+| `undeliverable`                                                                              | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                              |
+| `forget`                                                                                     | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                                                                                                                                                                                 |
+| `forget-refused`                                                                             | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                                                                                     |
+| `"ping"` / `"pong"`                                                                          | both socket legs                                                                                                                                                                                                                                                                                                                                                                                                                                                               | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                                                                                         |
+| envelope `seal`/`open`, AAD, replay                                                          | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                         | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                                                                                     |
+| ops `sessions` / `spawn`                                                                     | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seance spawn --now`)                                                                                                                                                                                                                                                                                                                                         | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
+| op `rescan`                                                                                  | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
+| op `availability` (built 2026-11-13; `now?` with drain 3/3, `soft?` with the soft close)     | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seance close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                                                                                                                      | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
+| op `custodian` (built 2026-11-14, custodian 7)                                               | `pwa/src/store.ts` `custodianControl`, from the Machines card's menu, over the relay as app-role only                                                                                                                                                                                                                                                                                                                                                                          | `daemon/src/handlers.ts` `handleCustodian` → `CustodianControl` in `daemon/src/run.ts` → `ownerAct` (`daemon/src/custodian-owner.ts`); sealed `from: "app"` only; writes `custodian/state.json` or `round-request` and pokes the seat (Daemon, "The custodian's status and the Machines row")                                                                                                           |
+| op `despawn`                                                                                 | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
+| `status` (daemon→relay)                                                                      | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector; `cl` and `dr` through the `closed` collector, from `state.json`)                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
+| `status` (relay→app)                                                                         | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                                                                                                                           | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
+| op `metrics`                                                                                 | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                                                                         | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
+| op `archive-status`                                                                          | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                                                                                                                  | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
+| op `archive-metrics`                                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts` `archiveMetrics()`                                                                                                                                                                                                                                                                                                                                                                                                           | `archivist/src/query.ts` → `queryArchive` in `archivist/src/metrics-archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveMetricsRequest`)                                                                                                                                                                                                                                      |
+| op `archive-tasks`                                                                           | `pwa/src/older-store.ts` via `shared/src/app-client.ts` `archiveTasks()`                                                                                                                                                                                                                                                                                                                                                                                                       | `archivist/src/query.ts` → `queryTasks` and `taskMachines` in `archivist/src/archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveTasksRequest`)                                                                                                                                                                                                                               |
+| op `session-event` (→`"scheduler"`)                                                          | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                                                                                                             | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
+| `store-list` / `store-get` / `store-put` / `store-delete`                                    | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                                                                                                               | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                                                                                              |
+| `store-listed` / `store-record` / `store-written` / `store-refused`                          | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                                                                                                                        | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                                                                                          |
+| `store-changed`                                                                              | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                                                                                                                                                                                                                                                                            | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                                                                                          |
+| records `task` / `pause-state` (at rest)                                                     | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store                                                                                             | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                                                                                |
+| op `set-limits` (→`"scheduler"`, built 2026-11-17) and record `scheduler-settings` (at rest) | an app via `shared/src/app-client.ts` `setLimits`: `pwa/src/scheduler-store.ts` (the Queue screen's Session limit sheet), only to a verified leader advertising `CAPABILITIES.limits`; the record: `sealAtRest`, by the queue store's `putLimits`, under `settings:scheduler`                                                                                                                                                                                                  | `daemon/src/leader-requests.ts` `answer`, parsed by `parseSetLimitsRequest`, run by `Scheduler.setLimits` (`scheduler/src/limits.ts`); the record: `openAtRest` and `parseSchedulerSettingsRecord` in the queue store's `getLimits`, held to the version floor, read by `Scheduler.load` (Scheduler, "Routing caps")                                                                                    |
+| ops `mark-done` / `run-now` / `pause` / `resume` / `discard`                                 | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now; an account's `pause`/`resume` also the Machines screen's account switch); `run-now` also `daemon/src/auto.ts` (`startAuto`, `startQueuedAuto`: MCP's `start_task` and `spawn_session` `start`, `seance start` and `spawn --start`); an account's `pause`/`resume` also `daemon/src/availability-client.ts` `setAccountOpen` (`seance close | open --account`, MCP `set_account_open`)                                                                                                                                                                                                                                                                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard` |
+| op `pass` (→`"scheduler"`, built 2026-11-12)                                                 | an app via `shared/src/app-client.ts` `pass`: `pwa/src/scheduler-store.ts`, and `daemon/src/auto.ts` `passAuto` (MCP `pass_task`) and `daemon/src/cli-auto.ts` `passTaskAuto` (`seance pass`), through the broker when keyless                                                                                                                                                                                                                                                 | `daemon/src/leader-requests.ts` → `Scheduler.pass` (Scheduler, "Passing to a successor")                                                                                                                                                                                                                                                                                                                |
+| op `amend` (→`"scheduler"`, built 2026-11-12)                                                | an app via `shared/src/amend-client.ts` `sendAmend` (a store read for `basis`, then `app-client.ts` `amend`): `daemon/src/mcp.ts` (`amend_task`) and `daemon/src/cli.ts` (`seance amend`), through the broker when keyless; no PWA surface yet                                                                                                                                                                                                                                 | `daemon/src/leader-requests.ts`, parsed by `parseAmendRequest` → `Scheduler.amend` (Scheduler, "Amending a waiting task")                                                                                                                                                                                                                                                                               |
+| op `push-branch` (scheduler→daemon, built 2026-11-12)                                        | the leader's `termFleet` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                                                                                                                   | `daemon/src/push-branch.ts` through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                                            |
+| op `pass-close` (scheduler→daemon, built 2026-11-12)                                         | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                                                                                                                         | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
+| frame `message` (local socket, built 2026-11-13)                                             | `daemon/src/send-message.ts`, from MCP's `send_message` only                                                                                                                                                                                                                                                                                                                                                                                                                   | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
+| frame `inbox` (local socket, built 2026-11-13)                                               | `daemon/src/inbox-cli.ts`, the `inbox` mod's child (`seance inbox`)                                                                                                                                                                                                                                                                                                                                                                                                            | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
+| frame `custodian` (the round's own socket, built 2026-11-14)                                 | `daemon/src/custodian-cli.ts`, the round's `seance custodian`; served by `custodian-socket.ts`, handled by `custodian-verbs.ts`                                                                                                                                                                                                                                                                                                                                                |
+| frame `pass` (local socket, built 2026-11-12)                                                | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                                                                                                                           | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
+| op `session-pass` (→`"scheduler"`, built 2026-11-12)                                         | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                                                                                                                 | `daemon/src/leader.ts` `onSessionPass`                                                                                                                                                                                                                                                                                                                                                                  |
+| op `session-message` (→`"scheduler"`, built 2026-11-14)                                      | `daemon/src/messages.ts` (`route`), once per `route: "send"` frame for a task not deliverable here, through `run-capabilities.ts`; in process on the leader's machine                                                                                                                                                                                                                                                                                                          | `daemon/src/leader.ts` `onEvent` → `daemon/src/leader-messages.ts` `onSessionMessage`                                                                                                                                                                                                                                                                                                                   |
+| op `deliver-message` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                                                                                                                | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
+| op `message-receipt` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
+| op `custodian-event` (→`"scheduler"`, built 2026-11-14)                                      | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                                                                                                                   | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
+| op `queue-changed` (→`"app"`)                                                                | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                                                                                                                  | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
+| op `branch-state` (→`"scheduler"`)                                                           | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                                                                                                                          | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
+| record `quota` (at rest)                                                                     | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                                                                                                                      | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
+| record `account` (at rest)                                                                   | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                                                                                                                                                                                                                                                                     | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                                                                                        |
+| record `settings` (at rest)                                                                  | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                                                                                                                     | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); its `diskAlerts`, `authAlerts`, `archivistSilence`: the leader's own, one update (`daemon/src/machine-alerts.ts`); stored under `settings:main` (_Scheduler_, "The store") |
+| op `push-subscribe` (→`"scheduler"`)                                                         | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted and push not turned off, retried while the leader starts; sent with the `deviceLabel` label, and the re-send is also the one-time label backfill for a browser already held without one)                                                                                                        | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                                                                                   |
+| op `push-unsubscribe` (→`"scheduler"`)                                                       | `shared/src/app-client.ts` `pushUnsubscribe`, from `pwa/src/push.ts` `disablePush` (the Notifications card's Turn off, after the browser unsubscribed) and `removeDevice` (the card's per-row Remove for another device)                                                                                                                                                                                                                                                       | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushUnsubscribeRequest`, then one `update` of the settings record that drops the endpoint, none when it is not held (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request`                                                                                                                                    |
+| HTTP `PUT /attachments/<id>`                                                                 | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                                                                                                                    | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
+| HTTP `GET /attachments/<id>`                                                                 | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                                                                                                                           | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                                                                                     |
+| field `attachments`                                                                          | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                                                                                                                 | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                                                                                           |
+| field `inheritedPr`                                                                          | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                                                                                                                | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only on a worktree spawn sealed from the scheduler (or the leader in process) with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                     |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -1575,11 +1583,11 @@ only in the audit origin they are tagged with — see "Local op socket".
 
 The same three ops have a third sender on a credential-delivered box, and only
 there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
-`seanced mcp` that reached it over the local op socket with a broker frame — not a
+`seance mcp` that reached it over the local op socket with a broker frame — not a
 `Plain`, and not on this wire. To the relay and the target it is one more app. The
 same broker is the sender of `task:` `store-put`s (an enqueue it sealed itself, `expect: 0`),
 of `queue` and `cancel` to the scheduler, and of the `account:` list, all for a keyless
-`seanced mcp` or `seanced spawn` ("Fleet broker").
+`seance mcp` or `seance spawn` ("Fleet broker").
 
 A fourth is the scheduler leader, which dispatches the same three ops to the machines it
 places on: sealed `from: "scheduler"` with its `term` on its app-role leg (`termFleet` in
@@ -1667,7 +1675,7 @@ requesting socket only.
   to `account:` and `quota:` records, which it can overwrite but nobody can
   delete (Threat model, item 3).
 - **Uninstalling deregisters the machine, and does it as an app-role client.**
-  `seanced uninstall` sends the same `forget` on `/app` that the PWA's bin does
+  `seance uninstall` sends the same `forget` on `/app` that the PWA's bin does
   (`daemon/src/deregister.ts`), after the service is stopped and before the links
   are removed — that order matters, because the relay refuses while it still
   holds the socket, so the refusal is retried three times a second apart. It
@@ -1750,7 +1758,7 @@ requesting socket only.
   and cleared by a later register, any reply that decrypts, or a `status` beat
   that opens. Four clients exist — the daemon's leader client (its `sessions`
   and `spawn` requests are what mark), the daemon's broker client
-  (`list_machines` for a keyless `seanced mcp`; it sends only scheduler ops, so
+  (`list_machines` for a keyless `seance mcp`; it sends only scheduler ops, so
   it never marks, and it re-dials after five idle minutes with no marks at all),
   the PWA's and Raycast's — and two of them answer "is this machine connected"
   from one daemon process. Measured 2026-10-26 (UTC): the MacBook registered at
@@ -1866,18 +1874,26 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   the scheduler alone: a request sealed `from: "scheduler"`, or the leader's
   in-process call (Local op socket, "Session events"; `progress`, Scheduler,
   "Branch state"). The one live pull — session state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, autonomy?, client?, taskId?, baseBranch? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, autonomy?, client?, taskId?, baseBranch?, noBase? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
   rides only on `task_running`: the `SessionEntry.id` already running the
   request's `taskId` (Daemon, "Task ids"). Advertised as `"taskId"` in
   `capabilities`, since an old daemon ignores the field and spawns a duplicate.
-  `baseBranch` (M4, stacking; in the schema, not acted on yet) is the branch a stacked
-  worktree starts from, refused `base_not_found` when origin has no such branch. It is
+  `baseBranch` (M4, stacking; the daemon acts on it since 2026-11-15, Daemon, "Stacked
+  worktrees"; the leader sends it since 2026-11-16, Scheduler, "Stacking") is the branch a stacked worktree starts from, refused
+  `base_not_found` when a fetch of it from origin does not land. It is
   held to `isBranchName` (`shared/src/parse.ts`: `git check-ref-format` on
   `refs/heads/<b>`, no leading `-`, not `HEAD`) at every hop: the daemon's
-  `isSpawnRequest` rejects a spawn carrying any `baseBranch` today (fail closed: starting from the default branch silently is the hazard the capability exists for; stacking lifts the refusal), and the leader is to check the predecessor's
-  `Task.branch` before sending it (stacking), since a task record's branch is only
-  length-checked. Advertised as
+  `isSpawnRequest` rejects one that fails it, or one beside any mode but `worktree` (fail
+  closed: dropped, the session would start from the default branch, the hazard the
+  capability exists for), and the leader checks the predecessor's
+  `Task.branch` before sending it (Scheduler, "Stacking"), since a task record's branch is only
+  length-checked. The daemon takes it only on a spawn sealed `from` the scheduler with
+  `client: "scheduler"` and a `taskId` (or the leader's in-process dispatch), the gate
+  attachments have; any other sender is refused `launch_error` before anything is recorded,
+  never dropped. `noBase` (only `true`, never beside `baseBranch`, else malformed) says the
+  task would have stacked on a predecessor that left nothing to stack on (#4): a plain
+  worktree spawn whose preamble says so; it changes no git act. Both advertised as
   `"baseBranch"`, and required: an old daemon drops the field and starts from the
   default branch. The
   verdict embeds a refreshed session list so the PWA updates without a
@@ -1892,7 +1908,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   nothing and needs to. The daemon's transport allowlists it — any other op
   arriving group-addressed is dropped before dispatch.
 - `rescan {}` → `{ repos, scannedAt }`; daemon re-registers if the set changed.
-- `availability { open, now? }` → `{ ok: true, closed: number | null } | { ok: false, code, message }`; app-sealed only (Daemon, "Closing a machine"). `now` is `true` only: a daemon advertising `drainAsk` skips the session ask's wait before its interrupt (Daemon, "The drain's session ask").
+- `availability { open, now?, soft? }` → `{ ok: true, closed: number | null } | { ok: false, code, message }`; app-sealed only (Daemon, "Closing a machine"). `now` is `true` only: a daemon advertising `drainAsk` skips the session ask's wait before its interrupt (Daemon, "The drain's session ask"). `soft` is `true` only, never beside `now`: a daemon advertising `softClose` closes without starting the drain, and a later plain close starts it.
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
@@ -1932,7 +1948,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
-- `queue { tasks? }` → `{ tasks, holds, at, unreadable?, globalMax? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
+- `queue { tasks? }` → `{ tasks, holds, at, unreadable?, globalMax?, limitsUnreadable?, passRefused? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
   `needs-input` leading, newest first within each) with their latest
   decisions, prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task); a decision past the reply's budget carries
   only its winner, counted in `trimmed` (Scheduler, "The leader"). `tasks` asks for those ids
@@ -1941,9 +1957,16 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   ignores it and answers its own listing, so a reader filters the reply again. `unreadable`
   lists every `task:` record the leader cannot read, whatever the filter, as `{ taskId,
   version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any task, as
-  the holds are): what fills the store without ever running. `globalMax` is the leader's
-  in-flight cap, the denominator of the Queue header's "8/8 running"; `run-now` places past it, so
-  the numerator may exceed it ("9/8"). Absent from an older leader, whose header shows the bare count.
+  the holds are): what fills the store without ever running. `globalMax` is the fleet limit
+  (Scheduler, "Routing caps"), the denominator of the Queue header's "8/8 running"; `run-now` places past it, so
+  the numerator may exceed it ("9/8"). Absent when no limit is set (and from a leader older than M2's cap),
+  and the header shows the bare count; a leader older than the limits record always sends its built-in 8.
+  `limitsUnreadable: true` says the leader cannot read its limits record and places nothing until a
+  `set-limits`; never sent otherwise.
+  `passRefused` lists the session passes (`session-pass`) this term refused in the last ten minutes, whatever the
+  filter, as `{ taskId, code, sentAt? }` — `code` the wire code `pass` would answer, `sentAt` the refused frame's own
+  `at` (the sending daemon's clock) — at most 64, memory only: what `pass_to_successor` reads to tell its session why
+  no successor came (2026-11-16). Parsed leniently, a bad list or entry costing only that explanation.
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan?, autonomy?, skill? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
@@ -2050,7 +2073,8 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   capability and no sentinel: an older leader drops the op with one warn line (Daemon, "The custodian frame kind").
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
-  "Pause"). `queue` replies carry the same `holds`.
+  "Pause"). `queue` replies carry the same `holds`. An account hold is what closing an account sends ("Closing an
+  account").
 - `discard { taskId, version }` (`DiscardRequest`) → `{ taskId }` (`DiscardResponse`): deletes a
   record the leader holds unreadable, at the version a `queue` reply's `unreadable` listed it
   under (`Scheduler.discard`; added 2026-10-18, M3 review S2). Never a readable task
@@ -2211,7 +2235,7 @@ an old peer's frames parse as before. Mixed versions:
   note fields are dropped by an older daemon's field-by-field `parseNote`; windows it finds under
   `on` that exited 0 hold a dead pane it notes as exit 0 (harmless) and closes; windows from before the
   upgrade (`failed`, no `server`) are never judged. An older PWA words `session_closed` as a spawn refusal
-  (deploy the PWA with the change) and an older `seanced mcp` prints the message, a complete sentence; an
+  (deploy the PWA with the change) and an older `seance mcp` prints the message, a complete sentence; an
   older app's `continueOffer` does not offer Continue for it. The relay never parses `TaskProgress`.
 - `MachineStatus.drn` and reason `draining` (2026-10-27, no capability): an older leader's or app's
   `parseMachineStatus` builds a fresh object and ignores `drn`, so it routes into the gate as before
@@ -2226,6 +2250,12 @@ an old peer's frames parse as before. Mixed versions:
   close only to a target advertising `close` under a verified leader advertising `drain`; a reopen
   needs only `close`, so a close can always be undone. An older daemon's `isSpawnRequest` reads
   known fields only, so it ignores `routesClosed` and never closes.
+- `MachineStatus.dr`, `availability`'s `soft` and `CAPABILITIES.softClose` (docs/drain.md N5; Daemon,
+  "Closing a machine"): an older leader's `parseMachineStatus` ignores `dr` and passes on `cl` after the grace, and an
+  older daemon drops `soft` and closes and drains; a new leader reads a daemon without `softClose` as draining from
+  `cl`. The PWA, CLI and MCP send `soft` only to a target advertising `softClose` under a verified leader advertising
+  it, and close as before otherwise; an older client reads every `cl` as a drain. A daemon rolled back after a soft
+  close is the one hazard (recorded there).
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `TaskSpec.requires` (1 to `TASK_SPEC_LIMITS.requires` = 4 unique trait names), `ExclaveInfo.traits`
@@ -2235,7 +2265,7 @@ an old peer's frames parse as before. Mixed versions:
   (`REQUIRES_DEP_SENTINEL`, "Traits filter"), an older daemon advertises no traits so never
   receives one, an older app drops the reasons from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
-  that predates it refuses the frame `invalid`, which `report_task_done` words as "run `seanced
+  that predates it refuses the frame `invalid`, which `report_task_done` words as "run `seance
   update`"; the daemon's own new reply codes are `untasked` (a pane with no scheduler task),
   `unrecorded` (a task the daemon's launch ledger holds no launch of), `unwritten` (sent, but the
   ledger write failed) and `stopping`.
@@ -2425,7 +2455,7 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   the queue" — since M3 an enqueue needs no leader, so `auto` never reads unavailable. The
   lead proof (above) is the tripwire for a listed seed stolen without the PSK (Threat model,
   item 3). Cost: a new leader-capable machine is a `wrangler secret put` with its id read off
-  `seanced doctor`, which rolls the relay and drops every socket once. No relay op exposes the
+  `seance doctor`, which rolls the relay and drops every socket once. No relay op exposes the
   list. Rejected: a wildcard entry (it would reopen capture by configuration), a committed var
   (CI would overwrite it), and the reader check alone (it changes what readers believe, not who
   holds the term).
@@ -2724,7 +2754,7 @@ a reinstall or a retired machine took the fleet's newest reading with it. One re
 per account, since per-account writes would tell the relay when each account is in use.
 
 - **The writer.** Every daemon runs one, inside `startDaemon` only (it logs through `log.ts`,
-  which nothing `seanced mcp` reaches may call), on its own socket: `quota:` is not term-fenced,
+  which nothing `seance mcp` reaches may call), on its own socket: `quota:` is not term-fenced,
   so registration is the whole authority. Every `FLEET_QUOTA_INTERVAL_MS` (5 min) it takes its
   newest raw reading per account from the last untrimmed sample (`newestReadings`: through the
   register blob the sample indexes, only while the sample names that blob, a tie to the first
@@ -3313,7 +3343,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   task's `avoid` names the machine), `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
-  to credits — "Seats" below), `cap_reached` (global, or `scope: "account"`, "Routing caps" below; the
+  to credits — "Seats" below), `cap_reached` (the fleet limit, "Routing caps" below; `scope: "account"` only from a leader older than 2026-11-17; the
   `scope: "batch"` and `batch_order` an older leader sent went with batch strategies, "Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below), `trait_absent` (naming the trait; "Traits filter" below) and `trait_unhealthy` (the exclave carries the trait but its probe reads failing: `tf`; "Traits filter" below; an unknown probe routes).
   `auth_expired` (an exclave whose login `exclaveAuth` reads expired: its index in `ax`, or an `ae` time already
   past, on a daemon advertising `authHealth`; `expiring` and `unknown` still route, and `auth_missing`
@@ -3396,7 +3426,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   the cost decision #19 accepted, and plugin skills and legacy commands stay out of the
   inventory for now. `route-preview` routes through the same `route()`, so it says the same.
   An absent `RepoEntry.skills` reads as none: a daemon predating project skills therefore
-  rejects a project skill a newer daemon's clone of the same repo advertises, until `seanced
+  rejects a project skill a newer daemon's clone of the same repo advertises, until `seance
   update` heals it; so does a machine whose register blob dropped its project skills to fit
   the envelope (Daemon, "Exclaves"). Rejected: treating absent as unknown per clone (it would
   let an older daemon's clone take a task its checkout may not serve). A candidate's `clone`
@@ -3444,7 +3474,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     machine are no failing reading, since a probe nobody could run must not take a machine out of the
     fleet. A machine is named failing for a trait only when every exclave carrying it is (`traitHealthByMachine`).
   - **Submit-time checks, one per client.** Each client writes `requires` only to a verified leader
-    advertising `CAPABILITIES.traits`; otherwise it refuses, naming `seanced update` (or that no
+    advertising `CAPABILITIES.traits`; otherwise it refuses, naming `seance update` (or that no
     verified leader leads). Then, in this order, it refuses a name no machine declares ("no
     machine declares the trait nosuch — known: atlas"; a typo must not wait forever, `unknownTraitsText`)
     and a spec no reachable exclave could ever satisfy: the traits that no single exclave carries
@@ -3485,9 +3515,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     dropped, not a reason to null the score: a deliberate departure from every other component, where
     one bad candidate voids the decision and so the record, because `total` already carries the
     penalty and a later build that changes the component's shape (a count, a list of names) must not
-    leave a leader of this build holding its records unreadable. Weight 8 is the global cap's worth
-    (`globalMax`): a kept-free idle machine loses to one carrying up to 7 in-flight scheduler tasks
-    (`queuePressure` is 1 each), and at 8 the cap refuses every candidate anyway; other load on the
+    leave a leader of this build holding its records unreadable. Weight 8 is what the global cap was
+    (`globalMax`, a constant until 2026-11-17; the weight did not move with the limit): a kept-free idle machine loses to one carrying up to 7 in-flight scheduler tasks
+    (`queuePressure` is 1 each), and at 8 that cap refused every candidate anyway; other load on the
     competitor shifts that, and an exact tie goes to the lower deviceId. It is also two fully loaded machines' (`machinePressure` weighs 4),
     and it beats a competitor's account pressure up to about 74% projected at the start of a window
     (`(u/(1-u))²` is 8 at 0.74), a little more later in it, since that cost is scaled by the share of
@@ -3512,7 +3542,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   - **Surfaces.** MCP: `requires` on `spawn_session` and each `queue_batch` member; `get_queue` gives each
     task with `requires` a `requires: [{ trait, machines, failing? }]` (`failing`: the machines whose probe
     fails on every exclave carrying the trait) and `list_machines` each exclave's
-    `traits`, `traitsFailing` and `traitsUnchecked`. CLI: repeatable `seanced spawn --requires <name>`, refused with `--now` ("--requires needs
+    `traits`, `traitsFailing` and `traitsUnchecked`. CLI: repeatable `seance spawn --requires <name>`, refused with `--now` ("--requires needs
     the scheduler: --now spawns directly and skips routing"). PWA: a REQUIRES tile and sheet on the form,
     listing the traits the fleet declares with the machines that hold each, and a "Needs atlas (on
     MacBook)" line on the Queue screen and verdict, which leave a place lacking a required trait or with its probe failing out of the
@@ -3524,7 +3554,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     (an old app drops the unreadable record from its list). An old keyless peer talking to a new broker
     is covered by the broker; the reverse, a new `seanced` over an old broker, is checked client-side:
     the peer reads its own daemon's registry entry and, absent `CAPABILITIES.traits`, refuses with "this
-    machine's daemon is older than this seanced: restart or update it (seanced update)", ahead of the
+    machine's daemon is older than this seanced: restart or update it (seance update)", ahead of the
     unknown-trait check, so the answer is not "no machine declares" for a fleet the old broker never
     saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1>`), a refusal writes
     `audit enqueue origin=<surface> client=<surface> refused=<unknown_trait|unreachable_trait>
@@ -3556,36 +3586,124 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reason. The successor carries the old task's `requires` (`successorSpec`), so the traits filter
   ("Traits filter") applies to it unchanged: a trait is a machine capability the work needs, not
   a place the old task happened to run, and the old machine had it.
-- **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
-  and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below), nor a
-  released task (asleep or idle, below).
-  `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
-  it. `accountMax` (per seat, below) puts `cap_reached` with `scope: "account"` on each
-  candidate whose exclave's account already holds that many, counted by the account of each
-  task's reservation or assignment exactly as projected usage counts "each in-flight one billed
-  to the same account" — one count, `accountInFlight` in `route.ts`. A task whose machine has
-  left the registry has no account to read and counts toward neither; its machine's absence
-  makes it `lost` anyway. A client counting in-flight states sees more than the leader's count wherever a
+- **Stacking** (built 2026-11-16, docs/scheduler.md M4 _Stacking_, decisions #4 and #15; the daemon's
+  half, the worktree made from `origin/<b>`, is Daemon, "Stacked worktrees"). A dependent task's worktree
+  starts from its predecessor's branch, so B `after: "opened"` on A builds on A's commit, not on a
+  default branch that lacks it. The leader's half is `scheduler/src/stack.ts`:
+  - _Which predecessor (#4):_ a task may stack (`mayStack`) when it is a fresh worktree task (no
+    `continues`, no `succeeds`: a continuation resumes its own worktree, a successor its predecessor's
+    remote branch) with an `after: "opened"` edge. Its stacking predecessor is its **first**
+    `after: "opened"` dep in `deps` order, followed through a pass chain (`holder`) to the task holding the
+    work now. Only one: a worktree has one base, and the order the author wrote is the only order there is.
+  - _What it stacks on (`stackOf`, read at dispatch):_ `baseBranch` = that predecessor's own `Task.branch`,
+    never a branch an app names, sent only when it is pushed (`Task.pushed`), holds `isBranchName` (#15:
+    a record's branch is only length-checked) and its PR has not merged. A predecessor whose PR merged
+    (`doneBy: "merged"`, `Task.merged`, or `pr.state: "merged"`) starts the task from the default branch,
+    which holds its work and whose copy of its branch may already be deleted. A merge into a stacked parent's
+    branch (`pr.stacked`) is not one: the default branch lacks the work, so it still stacks. Anything else —
+    a predecessor `done` with no PR or pushed branch (mark-done, a no-PR session end), a `here` task, a
+    branch `isBranchName` refuses — leaves nothing to stack on: the spawn carries `noBase: true`, the daemon
+    starts from the default branch as it would anyway, and its preamble says the predecessor left nothing to
+    stack on (#4). `noBase` is only ever `true`, never beside `baseBranch`, changes no git act, and rides the
+    same capability. `released` already frees an `opened` edge only with a PR and a pushed branch, so a
+    `done` predecessor is the only way to `nothing`.
+  - _Routing (`base_unsupported`):_ a task that may stack is a hard filter on `CAPABILITIES.baseBranch`,
+    as attachments is: an older daemon drops `baseBranch` and starts from the default branch silently,
+    the hazard the capability exists for. Judged from the spec (`mayStack`), not from what the
+    predecessor did, so the routing filter and the dispatch after it never disagree when a predecessor
+    pushes or merges in between: a predecessor that merged still keeps its dependent off an older daemon
+    (accepted: the fleet updates as one). Older readers drop `base_unsupported` as any unknown reason. A
+    pin on an incapable machine waits there.
+  - _Placement (`dependencyDistance`):_ the score's distance reads `TaskSpec.base` when set, else the
+    stacking predecessor's own assignment while it stacks on a branch: 0 on its exclave, 0.25 on its
+    machine, 0.5 elsewhere (weight 4). A preference, never a filter (#4 dropped the review's placement
+    restriction): the branch is pushed, so any machine can fetch it. `TaskSpec.base` stays unset by every
+    client; nothing writes it.
+  - _`base_not_found`:_ the verdict fails the task with the code and a message naming the cause first
+    ("the branch of the task it stacks on is not on origin"), the daemon's detail after it, and its
+    dependents fail `dependency_failed` with it. Not re-routed to the default branch: a branch deleted between
+    the predecessor's merge and the leader's reading of it is the one benign cause, and starting without the
+    predecessor's work silently is what the code exists to refuse; re-queueing the task once the merge reads
+    is the owner's call.
+  - _The record (`Task.stack`, 2026-11-16):_ the verdict that moves a dispatch's `ok` to `running` writes
+    `stack: { task, on }` — `task` the predecessor `stackOf` read (the holder after a pass chain, not always
+    the dep the author named), `on` one of `branch`, `merged` (it started from the default branch since that
+    PR merged) or `nothing` (the `noBase` spawn) — and nothing for a task with no stacking predecessor. Only
+    on `ok`: `task_running` confirms an earlier spawn, whose base this dispatch's read need not be. `advance`
+    drops it on a return to `ready`, since the next dispatch reads the base afresh; it stays through finishing
+    and into the archive. No branch name: the predecessor's record holds it, and a copy would outlive the
+    archivist's strip of `branch`. Display-only, so it needs no dep sentinel: `parseTask` drops a malformed
+    one (or one on a `queued` or `ready` record) and keeps the task, and an older leader's rewrite drops it,
+    which costs the line, never the task. Clients: the Queue card's line (PWA, "Queue screen") and MCP
+    `get_queue`'s `stackedOn` ("MCP server", `spawn_session`).
+  - _Not built:_ a restack when the predecessor's branch moves in review (docs/scheduler.md, "Stacked
+    rebases"), and lineage or a richer handoff preamble (predecessor title, PR URL) from the leader: the
+    daemon's preamble names the base branch, and the PR is the handoff (#5).
+- **Routing caps** (one fleet limit, none by default; owner, 2026-11-17). `limits.fleet` is how many
+  tasks may be in flight across the whole fleet. It counts `IN_FLIGHT` — reserved, running
+  and `needs-input`, which keeps its slot — and never `lost` ("`lost`" below), nor a
+  released task (asleep or idle, below). At the limit, `cap_reached` with no `scope` goes on every
+  candidate, as M2's leaders sent it for their global cap (`scope: "account"` comes only from a
+  leader older than this). With no limit set nothing is counted: the queue runs free, an account is
+  bounded by its quota line and spill guard ("Seats" below) and a machine by its filters.
+  A client counting in-flight states sees more than the leader's count wherever a
   task holds no slot, so `get_queue` says which: `away: true` on a `reserved`, `running` or
   `needs-input` task whose machine is listed but not connected (`sleepingMachine`, the rule the Queue
   screen's Asleep section reads), and `idle: true` on one the reply's `idle` list names; neither holds a
   slot (after about 2 minutes away, 10 minutes idle), and both count again on return, so the fleet can
-  sit briefly over its cap.
-  **The account cap is per seat** (owner, 2026-10-29; docs/scheduler.md Settled defaults 8 and
-  17): `SeatProfile.accountMax`, read off the candidate exclave's `seatTier` as the estimate's
-  `capacity` is — 4 on a premium seat and on a tier the table doesn't name, 2 on a standard one.
-  Why: a standard seat has a fifth of a premium seat's room, so four of its tasks project its 5h
-  window full before they start. Rejected: scaling the cap by `capacity` (0.8 on a standard
-  seat), which leaves it none.
+  sit briefly over its limit.
+  **The limit is a stored record, not config** (owner, 2026-11-17; it replaces `globalMax`, 8, and the
+  per-seat `accountMax`, 4 premium and 2 standard, of 2026-10-29, which were constants in
+  `scheduler/src/config.ts`). It lives in the relay's store at `settings:scheduler`
+  (`SCHEDULER_SETTINGS_KEY`), sealed scheduler to scheduler under the at-rest op `scheduler-settings`,
+  body `{ version, limits: { fleet? } }` (`SchedulerSettingsRecord`), so it outlives the leader that
+  took it: a term reads it at takeover beside the pause (`LimitsRecord`, `scheduler/src/limits.ts`).
+  No record, or one with no `fleet`, is no limit. `fleet` is an integer from 1 to `FLEET_LIMIT_MAX`
+  (128, `MAX_TASKS`); 0 is refused, since holding everything is a pause's job, with its own record,
+  banner and resume. Only the leader writes it, on the app's `set-limits` op (`{ fleet: number | null }`,
+  null lifting the limit; answered `{ limits }`): sealed `from: "app"`, parsed by
+  `parseSetLimitsRequest`, past `schedulerGuard`, audited `op=set-limits … fleet=<n|none>`, followed by
+  a pass at once. The limits already in force write nothing. The record is never deleted (`settings:`
+  takes no deletes): lifting the limit writes `limits: {}`. A leader that keeps the record advertises
+  `CAPABILITIES.limits`, and a client offers the control only to a verified leader that does; an older
+  leader runs its built-in 8 and 4/2 and refuses the op as one it does not know. `queue` carries the
+  limit as `globalMax` (the field M2's leaders sent their cap in, so absent now means none) and
+  `limitsUnreadable: true` when the record cannot be read.
+  **A limit the leader cannot read places nothing.** A record that will not open, is not this slot's,
+  does not parse (an unknown key in `limits` included: a limit a newer leader wrote must not read as
+  none) or sits below the version floor makes routing enforce a fleet limit of 0, `cap_reached` with
+  `max: 0`, reported once per read, until a `set-limits` overwrites it at its version. `run-now`
+  passes it as it passes any limit. Why closed, as the pause is: the limit is a person's bound on
+  spending or load, and running free through one nobody can read is the costlier guess. Rejected:
+  a synthetic whole-queue hold in its place, which a resume would lift with nobody restating the
+  limit. The version floor keeps a `limits` slot (`daemon/src/version-floor.ts`), raised by reads
+  and set by the leader's own write as the pause's is, so a relay cannot lift a limit by serving an
+  older record or none: missing after one was seen is `version_regressed`, never "no limit".
+  Why its own record: `settings:main` holds the VAPID private key and the push subscriptions near
+  its size bound, is never written over while unreadable and is loaded un-awaited, and
+  `queue:pause`'s parser drops fields it does not know, so an older leader's pause write would erase
+  a limit kept there. The `settings:` prefix is already the leader's, term-fenced and capped at 8
+  keys, so the relay did not change.
+  Where it is set: the PWA's Queue screen. The header's count ("5 running", or "5/8 running" under a
+  limit) opens the Session limit sheet where the verified leader advertises `limits`, and an
+  unreadable record is a banner with Set limit. Not on MCP or the fleet broker: a session must not
+  raise a limit its owner set. No CLI verb yet.
+  Rejected: (a) keeping a per-account count, shared or one per account — the quota line already
+  bounds an account by what it can afford, and a count on top held work back on seats with room
+  (the 4/2 split was a proxy for that); (b) the limit in the leader's `config.json`, which a leader
+  change loses. Deferred: a per-machine limit. CPU and memory steer the score and filter nothing, so
+  an unbounded fleet can stack one box; it would be another field of `limits`, which an older leader
+  fails closed on rather than ignores. Accepted: with extra usage enabled, no limit lets a large
+  batch spill into credits as far as the spill guard allows; an owner who minds sets a limit.
   **A machine asleep past a grace holds no slot** (2026-10-26, docs/scheduler.md Settled
   defaults 18). An in-flight task placed (assignment, else reservation) on a machine the leader
-  has seen absent for `slotReleaseAfterMs` (2 min) counts toward neither cap nor projected usage
+  has seen absent for `slotReleaseAfterMs` (2 min) counts toward neither the limit nor projected usage
   (`accountResetAt` included): `route` takes the set as `RouteInput.released`, which the leader
   derives from the same in-memory `#absentSince` clock `lost` ages from, keeping only machines
   still away, so `route-preview` between a reconnect and the next pass agrees with that pass.
   The task's state is untouched. Why: a closed laptop's four tasks held a whole account's cap
-  for the 15 minutes before `lost`, while another machine on the account sat idle, and nothing
-  runs or bills on a sleeping machine. Once it is back its tasks count again; a fleet over a cap
+  (accounts had one then) for the 15 minutes before `lost`, while another machine on the account sat idle, and nothing
+  runs or bills on a sleeping machine. Once it is back its tasks count again; a fleet over its limit
   then is accepted — nothing is killed or despawned, and nothing new is placed until the count
   falls under it. A dark wake or blip restarts the clock (any pass that sees the machine
   connected clears it), so the grace starts over. Nothing else counts them: a batch has no
@@ -3604,11 +3722,24 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   writes and a misleading label; releasing slots needs none of that. The decision's
   `cap_reached` count is the released-free one and does not say how many were left out: saying
   so would take a wire field on `Reason`.
-  **Run now lifts both caps for one task** (2026-10-27). The `run-now` op (`Scheduler.runNow`)
-  routes a `ready` task with `RouteInput.uncapped`, which leaves out the global and the account
-  `cap_reached` and nothing else: a pause, the quota line and spill, disk, pins, skills and every
-  machine filter still hold it, and then it is refused `unplaceable` with nothing written. Placed,
-  it counts toward both caps like any task, so the fleet runs over them and nothing new is placed
+  **Run now lifts the cap for one task** (2026-10-27; "both caps" until the account cap went,
+  2026-11-17). The `run-now` op (`Scheduler.runNow`)
+  routes a `ready` task with `RouteInput.runNow`, which leaves out
+  `cap_reached` and the whole-queue `paused` and nothing else: an account's pause, the quota line and
+  spill, disk, pins, skills and every machine filter still hold it, and then it is refused
+  `unplaceable` with nothing written. The queue stays paused: the next pass places nothing else.
+  The fail-closed stand-in for an unreadable `queue:pause` ("Pause" below; `RouteInput.pauseUnread`)
+  is not lifted: no person's pause is there for a tap to override, and a version-regressed or junked
+  record must hold the whole queue on every path.
+  **It lifts the whole-queue pause too** (2026-11-17): a queue pause stops the scheduler from
+  starting work on its own, and a person's tap on one task is the explicit start that pause waits
+  for, as it is past a limit they set; offering it greyed as "No machine can take it" while open
+  machines and accounts sat idle conflated "held by policy" with "nowhere to run". An account's
+  pause is that account being closed (a person's word about where work may run, not when), so it
+  holds. A client offers Start now for a task the pause alone holds only to a verified leader
+  advertising `CAPABILITIES.runNowPaused`; under an older one it greys it as "The queue is paused".
+  The CLI and MCP send `run-now` as before, an older leader answering `unplaceable`. Placed,
+  it counts toward the limit like any task, so the fleet runs over it and nothing new is placed
   until the count drains, as when a machine wakes with released slots. One-shot: the record keeps no
   mark of it beyond its decision (with no `cap_reached` on the winner), so a takeover between the
   route and the write leaves the task `ready`, waiting as before; the audit line is the record that
@@ -3624,9 +3755,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   it short of `ready` (admission, deps) or already ran it, so the app reads on (PWA, "Every PWA
   spawn is a task", has the lifecycle). Rejected for the same reason as above: a flag on the
   create the leader would honour at admission.
-  **MCP and the CLI start too** (2026-10-29), as the same op: `start_task` and `seanced start
+  **MCP and the CLI start too** (2026-10-29), as the same op: `start_task` and `seance start
   <task-id>` send one `run-now` for a task already queued (the Queue screen's Start now), and
-  `spawn_session`'s `start` and `seanced spawn --start` the Spawn screen's (`startQueuedAuto` in
+  `spawn_session`'s `start` and `seance spawn --start` the Spawn screen's (`startQueuedAuto` in
   `daemon/src/auto.ts`): the create, then reads of the queue every `START_POLL_MS` (2 s), at most
   `START_POLLS` (15), until it is `ready`, then `run-now` once; `not_waiting` reads on, a task a
   pass placed meanwhile needs nothing, and anything else ends it with the answer said. Both are
@@ -3713,7 +3844,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   a real whole-queue hold, which then stays until a `resume`. A pause is usually about spending, and a term holder can put
   junk there (Threat model, item 3): failing open would let junk lift a pause, failing closed
   lets it stop dispatch, which holding the term already could. After a PSK rotation the cost is
-  one resume.
+  one resume. `run-now`, which lifts a person's whole-queue pause, keeps this one
+  (`PauseRecord.unread`, until a write replaces the record).
 - **Needs input** (`alerts.ts`, M3 item 5; docs/scheduler.md Settled defaults 5). The clock
   rides the write that moves the state: `#update`, the one write path, stamps
   `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on leaving
@@ -3865,7 +3997,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `amend` that landed between the route and the reserve), and the next pass routes the new one.
   The transitions themselves are pure functions of the task and what was observed.
 - **The sweep** (M2 review, 2026-10-17). A running task whose `ended` event never arrived
-  would read `running` forever and hold its slot; after `globalMax` of them `auto` places
+  would read `running` forever and hold its slot; under a fleet limit, after that many of them `auto` places
   nothing (`cap_reached`). So once per `sweepIntervalMs` (120s, docs/scheduler.md Settled
   defaults 12) a pass also reads `sessions` from each connected machine holding a running,
   `needs-input` or `awaiting-merge` task, settled as takeover settles one: no session carrying
@@ -4011,7 +4143,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   that name its id, each with its `index`. It is where a set of tasks came from, shown
   together (the Queue screen, `get_queue`) and acted on together; it holds no member back.
   Order between members is their `after` edges, which `queue_batch` writes by `ref`;
-  concurrency is the global and per-account caps, with their asleep-grace rule ("Routing
+  concurrency is the fleet limit, when one is set, with its asleep-grace rule ("Routing
   caps"), and nothing else. A pass routes ready tasks oldest first, except that one batch's
   members go in `index` order from where its oldest ready member would have gone — so they
   sit together and in the order given, which is grouping, not a guarantee: a member
@@ -4066,7 +4198,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   the PR check, so a merged PR leaves it `awaiting-merge`, and a PR-less clean exit still
   settles `done` by `session` and a nonzero one `failed`, `session_failed` — a lying report can do
   no more than exiting can. The report counts only from the machine the task was placed or
-  reserved on, and under `until: "merged"` it is ignored. A reported task past the merge
+  reserved on, and under `until: "merged"` it settles only a task holding no PR and no successor
+  (`done` by `reported`, before its exit is read), and is ignored beside one. A reported task past the merge
   expiry fails `merge_expired` as "never reported done". **The forge's word** (2026-10-23, "PR status"):
   the leader's own `gh` reads each unfinished task's GitHub PR, and a PR it finds `merged` settles
   a `running`, `needs-input`, `lost` or `awaiting-merge` task `done`, `doneBy: "merged"`, with none
@@ -4082,7 +4215,20 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `lost`) marks it `leftRunning`, as `mark-done` does a `lost` one, and leaves its session alone,
   as a `branch-state` settle does: the slot is freed while the session may still run, so the
   exclave can be over-committed until it exits, and the card says the session may still be running.
-  Under `until: "reported"` it only records `merged: true`, as above. `closed` is recorded in
+  Under `until: "reported"` it only records `merged: true`, as above. Such a task takes no successor: a
+  session still working after its merge (a follow-up PR, a dev check, evals) that calls `pass_to_successor` is
+  refused `finished`, before its push when its tool can see that (MCP server, `pass_to_successor`).
+  _Decided (2026-11-16, after a session passed a task its first PR had settled and was never told it
+  failed): keep the merge's settle, and say so to the session and the spawner_ (the tool's text; `until`'s
+  description on `spawn_session` and `queue_batch` names post-merge work as a reason for `"reported"`). The
+  merge is the contract of `until: "merged"`: `after: "done"` dependents and the freed slot are what the
+  spawner asked for, and a dependent released at the merge may already be running on it. _Rejected:
+  re-opening a merge-settled task for a pass_ — it rewrites a finished record (never written, above), whose
+  dependents were released by it, and its PR is merged, so the pass's own PR check refuses `pr_not_open`
+  anyway. _Rejected: holding the settle while the session is live_ — a Claude session does not exit at its
+  prompt, so every merged task would hold its slot and its `after: "done"` dependents until someone closed
+  its pane (what `until: "reported"` already offers, opted into), and "active" (busy rather than idle at a
+  turn's end) is a per-turn flicker, not a fact the settle can rest on. `closed` is recorded in
   `Task.pr` and moves nothing, and a finished task is never written. The local-git merge above stays as the
   fallback where `gh` is absent. No ordering of one reading against the last by `at`: it would
   compare two leaders' clocks. A session that opens several PRs is settled by its primary, the
@@ -4356,13 +4502,13 @@ A Claude account is named once, by any PSK holder, and every app client shows th
 is a sealed `account:<hmac>` record in the relay's store (rules v2); `shared/src/account-record.ts`
 is what a record is and who reads it how, `RelayClient.listAccounts` / `getAccountRecord` /
 `putAccountAlias` the app leg, and `pwa/src/account-store.ts` the PWA's side. The leader and the
-daemons never read one. `seanced spawn` reads them for one thing only: to resolve an
-account pin's alias at submit time ("`pin` and `avoid` on auto" below). `seanced mcp` reads them
+daemons never read one. `seance spawn` reads them for one thing only: to resolve an
+account pin's alias at submit time ("`pin` and `avoid` on auto" below). `seance mcp` reads them
 for that and to name accounts in `list_machines` (each exclave's `account`, plus `alias` where
 one is set) and `get_queue` (pins and holds), from one cached listing per socket ("Account
 listings" below). The Raycast extension lists them once per open and names the selected machine's
 accounts under its picker (_Raycast extension_, "Scope is spawn"). Every label not read from a listing — a keyless
-`seanced mcp`'s, which never asks the broker for one ("Account listings" below), an install
+`seance mcp`'s, which never asks the broker for one ("Account listings" below), an install
 without the account key, a refused or lost listing — shows email or short id instead, never an
 error.
 
@@ -4438,7 +4584,7 @@ error.
   (#22: accepted by the owner, 2026-11-12; see Threat model, item 3); records sealed under an earlier PSK, which a rotation orphans as unopenable
   slots that deletes cannot free. An alias is rendered only as text, and never used to route, bind or
   place. The one exception, by owner decision: a person may name an account pin by its alias, which
-  `seanced mcp` and `seanced spawn` resolve once, at submit time, to an `accountId` some
+  `seance mcp` and `seance spawn` resolve once, at submit time, to an `accountId` some
   sealed registry entry reports signed in; only that id is stored, the answer echoes it with the
   email, and an email or raw id skips the aliases. Its residuals: the relay can serve a stale
   alias record (replay at its version) or leave one out of a listing, so an alias can resolve to
@@ -4463,7 +4609,7 @@ error.
   one, though the registry carries none, so an aliased account's unaliased twin is tagged all the
   same and one account's label reads alike in every client, whether or not it could read the
   aliases (`accountName` in `shared/src/account-record.ts`, the rule every client shares —
-  `seanced mcp` and Raycast name accounts through it too).
+  `seance mcp` and Raycast name accounts through it too).
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
@@ -4475,7 +4621,7 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   sends `store-*` frames through `RelayClient.store` on the daemon's own socket, with `term` on
   writes: the relay fences a write on the term and the socket it was issued to, so the leader's
   writes cannot leave on the app leg. Records are sealed `to` and `from` `"scheduler"` — op
-  `task`, or `pause-state` for `queue:pause` — and every read goes through `openAtRest` with its
+  `task`, `pause-state` for `queue:pause`, or `scheduler-settings` for `settings:scheduler` — and every read goes through `openAtRest` with its
   slot's op, which refuses any other op. `from` is checked nowhere: `openTaskRecord` and `getPause`
   check `to`, so a task an app created, sealed `from: "app"`, reads the same.
 - **Reads reject, never shorten.** `list` is one unpaged `store-list` of `task:` through
@@ -4498,10 +4644,17 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   (`openAtRest` plus `parsePauseRecord`); an unreadable record reads as `key_mismatch`,
   `unopenable`, `malformed` or `version_mismatch`, and a hold list `parsePauseRecord` refuses
   is `refused` before sealing. Item 5 drives it through the port only.
+- **The limits slot** (2026-11-17). `getLimits`/`putLimits` seal and open `settings:scheduler` as op
+  `scheduler-settings` (`openAtRest` plus `parseSchedulerSettingsRecord`), with the pause slot's
+  four unreadable reasons and the same `refused` before sealing for limits the parser would not
+  read back. A second key under the leader's `settings:` prefix, so the relay's rule covers it
+  unchanged (Scheduler, "Routing caps").
 - **The version floor** (`daemon/src/version-floor.ts`, `flooredStore`; added 2026-10-18, M3
   review S1). Binding checks a record's sealed version against the one the relay reports, so it
   cannot see the relay itself serving an authentic old blob at that blob's own version. The
-  floor can: the highest version seen or written at each `task:` key, at `queue:pause` and at
+  floor can: the highest version seen or written at each `task:` key, at `queue:pause`, at
+  `settings:scheduler` (its `limits` slot: below it, or missing once seen, nothing is placed until a
+  `set-limits`, whose write sets the floor as a pause write does) and at
   `settings:main`. A
   readable task record below it reads `version_regressed`, held apart like any unreadable one;
   a pause below it, or missing once one was seen, reads the same and so holds the whole queue
@@ -4656,7 +4809,9 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   keeps a tip only while it held own work). A session that pushes work and then
   `git reset --hard origin/main`, or reverts it, is thus still judged on the pushed commit, never
   on a main it merely points at; a fast-forward merge still reads merged, since the unchanged tip
-  is then an ancestor. The own-work answer is memoized per task on tip and default sha. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
+  is then an ancestor. A stacked task (`TaskNote.stackedOn`, Daemon, "Stacked worktrees") forks
+  at its start instead while its tip grows from it, and holds no own work at or behind it: its
+  predecessor's commits are not its work; one rebased off its start forks from the default. The own-work answer is memoized per task on tip and default sha. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
   `refs/remotes/origin/<b>` from an earlier attempt from reading as pushed. And (2) **pushed
   evidence**: merged needs the branch seen pushed, or a recorded PR URL, which proves a push even
   when push, merge and prune all happened while the daemon was down. The same evidence is the
@@ -5090,7 +5245,7 @@ export interface AttachmentRef {
   `SpawnRequest.attachments?: readonly AttachmentRef[]` share one parser,
   `parseAttachmentManifest` (`shared/src/parse.ts`): `parseTaskSpec` uses it, and so does the
   daemon's `isSpawnRequest` from task 5. Until then `isSpawnRequest` refuses any
-  `attachments` as malformed, as it refuses `baseBranch` until stacking lands: a daemon of
+  `attachments` as malformed, as it refused `baseBranch` until stacking's daemon half (2026-11-15): a daemon of
   tasks 2–4 must not launch a session without the files it was sent. Its rules:
   - Absent means none, and an empty array is refused.
   - 1 to `files` entries, ids unique within the manifest.
@@ -5116,7 +5271,7 @@ export interface AttachmentRef {
   by name.
 - `Reason` gains `{ code: "attachments_unsupported" }` (filtered: the machine does not
   advertise `attachments`). `parseReason` and `scheduler-text.ts` render it as "its daemon
-  can't fetch attachments yet (needs seanced update)".
+  can't fetch attachments yet (needs seance update)".
 
 ### Sealing (`shared/src/crypto.ts`)
 
@@ -5393,6 +5548,17 @@ Where the build adds to or departs from the wording above:
   by the next flag, and `--model` always follows. The path is the daemon's own, never a
   wire value, but it goes through `shq()` like every path. A working directory added this
   way lets the session read the files with no permission prompt.
+- **Trust** (`ensureAttachmentsTrusted`, `daemon/src/trust.ts`): since Claude Code 2.1.326 an
+  `--add-dir` meets the same trust dialog a repo does ("Adding a new directory"), and every
+  task's directory is new, so each attachment spawn sat dead at it. Both spawn paths write one
+  entry beside the repo's ("Pre-trust on spawn"), for the attachments root's real path in the
+  session's exclave config: a dir outside any git repo is trusted through a trusted ancestor,
+  looked up by real path (both checked against 2.1.326), so that one entry answers it for every
+  task directory. It widens less than the repo's entry: the root holds only files the daemon
+  fetched, under names it chose, never a settings file, skill or git config the dialog warns of.
+  Rejected: an entry per task directory (one more `projects` key per task, never removed), and
+  leaving the owner to trust the root once by hand (each exclave's config needs it, and a
+  missed one is a dead session again).
 - **The seed**: an attachment spawn always writes a seed file, even with no prompt. After
   the `Task:` line, or after the preamble when there is no prompt, it adds:
 
@@ -5438,7 +5604,7 @@ Where the build adds to or departs from the wording above:
   `dirs` and no `files`.
 - **The gate refuses two more shapes** `attachment_unavailable`, before anything is read
   or fetched: a scheduler spawn with no task id (nothing to name the directory by), and any
-  spawn on a daemon whose handler context has no fetcher (`seanced spawn`'s, which no
+  spawn on a daemon whose handler context has no fetcher (`seance spawn`'s, which no
   scheduler reaches). `isSpawnRequest` refuses a manifest beside `mode: "continue"` as
   malformed, as `parseTaskSpec` does.
 - **Refusal reasons**, each after `attachment <i> of <n>: `: `not found (expired or never
@@ -5838,7 +6004,7 @@ of this section built.
   deletes it, leaving every definition that recorded it pointing at nothing.
   macOS cannot recover from that on its own: `launchd.selfRestart()` exits rather
   than rewriting, because launchd caches job definitions and a rewrite wouldn't
-  land until the next bootstrap, so only `seanced install` ever repoints the
+  land until the next bootstrap, so only `seance install` ever repoints the
   plist. The systemd unit does get rewritten on self-restart, but from the
   pre-update process still serving old code, so a definition change lands one
   update later. `doctor` reports drift (recorded path gone → fail; alive but no
@@ -5852,10 +6018,10 @@ of this section built.
   bootout → poll until the job is gone (capped at the plist's `ExitTimeOut` plus 5 s) → bootstrap, and a failed pass
   gets exactly one retry. Rejected: reporting the error and letting the user
   re-run (observed behavior was a half-installed machine with no daemon at all).
-- **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
+- **CLI**: `seance` (bare, it runs the daemon in the foreground; launchd/systemd supervises), `init`
   (write config skeleton + mint the identity that is the deviceId), `install`/`uninstall` (launchd plist on
   macOS; systemd unit + linger on Linux, plus a Windows logon task on WSL),
-  `link`/`unlink` (opt-in `seanced` name on PATH — a plain symlink to
+  `link`/`unlink` (opt-in `seance` name on PATH — a plain symlink to
   `main.ts`, which is executable with a bun shebang, so it tracks the checkout
   with nothing to re-run; `uninstall` also unlinks, so a torn-down machine
   never keeps a name into a deleted checkout. Rejected: `bun link` — its
@@ -5863,9 +6029,23 @@ of this section built.
   wrapper script — its realpath doesn't lead back to `main.ts`, blinding
   doctor's stale-clone detection),
   `doctor` (preflight: tmux/claude/git/roots/relay/config, plus whether the
-  `seanced` name resolves to this checkout), `status`,
+  `seance` name resolves to this checkout), `status`,
   `scan`, and `spawn <repo>` — the last runs the spawn path locally with no
   relay, the SSH-debuggability hook.
+- **The CLI is `seance`, the daemon `seanced`** (renamed 2026-11-16). One entry point, `main.ts`, serves both: the
+  service, the mods and the MCP entry run `bun main.ts` by path and never a name, so the rename touched only the PATH
+  link, the help and the text that names a command. The daemon keeps `seanced` wherever it names the process — the
+  unit, the launchd label, the log, the socket. `link` removes this checkout's link under the old name as it makes the
+  new one, `unlink` removes both, and the custodian fence denies both. Rejected: keeping a `seanced` link as an alias
+  — two names for one CLI is what the rename was meant to end.
+- **Help and completion come from one table** (`COMMAND_SPECS` in `commands.ts`): each command's summary, usage,
+  details, flags (with a value's placeholder and, where the parser takes a closed set, its choices) and verbs.
+  `USAGE`, `help <command>`, the parsers' usage errors (`usageLine`) and `seance completion zsh` are all generated
+  from it, and `commands.test.ts` holds every flag literal the CLI modules parse to an entry and each choice list to
+  the constant its parser checks. `completion repos` lists this machine's scanned repo names for `spawn`'s first
+  argument, read from `state.json` alone, silent on any failure. Rejected: table-driven parsers — the parsers are
+  hand-rolled per command and several are on the threat model's argv paths, so they stay as they are and the test
+  guards the drift; a static completion file in the repo — it would go stale on the next flag.
 - **Config split**: `~/.config/seance/config.json` (hand-edited, 0600,
   never rewritten by the daemon: relayUrl — which must include the `/daemon`
   path, so `doctor` warns when it doesn't; the failure mode is a rejected
@@ -5885,7 +6065,7 @@ of this section built.
   reloads on change — still never writes it, so the invariant above is intact.
   Two cases motivated it: editing config on a machine you are only reachable on
   through the app, and letting a Claude Code session on the box adjust it; both
-  otherwise need a shell to run `seanced restart`. Reload rebuilds the whole
+  otherwise need a shell to run `seance restart`. Reload rebuilds the whole
   `startDaemon` handle (key import, backend, relay client) rather than diffing
   fields into the live objects — every field is read exactly once, at start, and
   a full swap keeps it that way; the cost is one reconnect, which a changed
@@ -5910,9 +6090,15 @@ of this section built.
   that was already running. The watcher re-arms itself: the runtime closes it
   after an `error` event, so an inotify limit or a wholesale directory replace
   would otherwise end hot reload for the life of the process while the README
-  promises the opposite. Restarting `startDaemon` in-process is also what makes
-  state.json's write atomic (tmp + rename) load-bearing — the outgoing daemon's
-  background rescan can be writing while the incoming one reads, and a torn
+  promises the opposite. The swap awaits the outgoing handle's `stop()`, which
+  settles only once every state.json write it had begun has landed (added
+  2026-11-17, from a flaky test): a background rescan past its `stopped` check
+  has its save queued, and an incoming daemon started beside it read the file
+  before the save and came up on the old repo set, registering without a clone
+  the outgoing one had just announced. Only writes already begun are drained,
+  never a scan still reading git, so a reload waits on a disk write, not a scan.
+  state.json's write stays atomic (tmp + rename) all the same — the CLI reads it
+  from another process while the daemon writes, and a torn
   read is indistinguishable from corruption, which mints a new identity and
   re-registers the machine as a stranger. runtime.json takes the same tmp +
   rename: small as it is, an in-place write truncates first, and a reader in
@@ -5924,7 +6110,7 @@ of this section built.
   amount of waiting recovers it. Measured at ~20% when the write follows
   arming immediately on a saturated machine, 0% otherwise. Untouched because
   the daemon arms its watch at startup and real edits arrive minutes or hours
-  later; the exposure is an edit within milliseconds of `seanced restart`, and
+  later; the exposure is an edit within milliseconds of `seance restart`, and
   the next save is picked up normally. Tests do write that fast: the two that
   are about the watcher itself wait for the stream (`awaitWatcherLive` in
   `daemon/test/fixtures.ts`), and the rest substitute `SuperviseOpts.watch`
@@ -5966,7 +6152,7 @@ of this section built.
   may serve other units). Logged out of Windows or sitting at the login
   screen, WSL cannot run and the machine shows offline — same class as a
   LaunchAgent, which is also per-login. Update = `git pull` +
-  `seanced restart` (`launchctl kickstart -k` / `systemctl --user
+  `seance restart` (`launchctl kickstart -k` / `systemctl --user
   restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   let `Restart=always` relaunch it — no sudoers or polkit rule to provision).
   Rejected: daemon-inside-tmux (reboot silently takes
@@ -6160,8 +6346,9 @@ of this section built.
   the clone's `origin/HEAD` (`readDefaultBranch`), never the wire, and goes to
   git as one argv element. None on disk → no fetch: claude forces its own
   when the tracking ref is missing. Parallel spawns into one clone share one
-  in-flight fetch per common dir, since two racing for the ref lock would
-  make the loser report a failure for a fetch that landed. **Fail-open**: a
+  in-flight fetch per common dir and branch, since two racing for the ref lock would
+  make the loser report a failure for a fetch that landed (keyed by branch too since
+  stacking: a stacked base shares no fetch with the default, "Stacked worktrees" below). **Fail-open**: a
   timeout or error never fails the spawn (unlike the old `fetch_failed`). The
   spawn proceeds on the refs on disk and `note` says the fetch failed and how
   old the last one is — the only place that staleness surfaces. `here` mode
@@ -6210,7 +6397,66 @@ of this section built.
   behaviour claude already has, and still rejected); keeping the fetch for
   freshness alone (a second fetch on every spawn to narrow a 24h window claude
   manages itself — reversed 2026-10-17: it is not a second fetch, and the
-  window is what left spawns a day behind).
+  window is what left spawns a day behind). **One exception since 2026-11-15**: a stacked
+  spawn (`baseBranch`) names a base claude has no flag for, so the daemon makes that
+  worktree itself ("Stacked worktrees", next). An unstacked worktree spawn is as above.
+- **Stacked worktrees** (built 2026-11-15, M4 stacking's daemon half; docs/scheduler.md,
+  decisions #3, #4, #5, #15). A worktree spawn carrying `baseBranch` (`spawn.ts`
+  `spawnUntracked`, `addStackedWorktree`) starts from that branch on origin, the
+  predecessor's, instead of `origin/<default>`:
+  - _Fetch, fail-closed._ `fetchBase` (`base-fetch.ts`) runs `git fetch origin
+    +refs/heads/<b>:refs/remotes/origin/<b>` through `networkGit` on the default's terms
+    (5s, process group, shared in flight per common dir **and branch**), then reads
+    `refs/remotes/origin/<b>` with `show-ref --verify` (the exact ref: no revision syntax, no
+    tag or local branch of the name). Unlike the default's fetch it does not fail open: a
+    fetch that does not land, origin lacking the branch included, is `base_not_found` with the
+    reason in the message, and nothing is made or recorded (the handler retracts the
+    write-ahead entry). The ref on disk may be a branch deleted on origin since, or a tip from
+    before the predecessor's last push, and stacking on either silently is the hazard. One
+    code for both, a network failure included: the leader decides what a refusal means (next
+    task); no stderr is parsed. The default branch is not fetched for a stacked spawn.
+  - _The worktree._ `git worktree add --no-track -b worktree-<name> <path> --end-of-options
+    <sha>` at `<clone>/.claude/worktrees/<name>`, the layout claude makes, so reap, branch-state,
+    the custodian and a continuation read it as any task's. `<sha>` is the tip just read, not
+    the ref: a fetch landing meanwhile cannot move what is checked out from what is noted, and
+    nothing after `--end-of-options` is revision syntax. `-b`, never claude's `-B`: an existing
+    branch of the name is someone's and is never reset. The name is chosen inside the lock, so
+    two spawns of one slug never share one. Through `hardenedGit`, under reap's lock and the
+    re-add queue (`serialReadd`), as a continuation's re-add, refusing a clone whose repo-local
+    config `repoConfigRefusal` refuses (a checkout runs the filters it names). Checked after:
+    HEAD at `<sha>` on `refs/heads/worktree-<name>`, path canonical under the clone; else, or
+    when the add fails, the half-made tree and its branch (`update-ref -d` at `<sha>`) are
+    removed and the spawn is `launch_error`. A launch that fails after the worktree exists
+    leaves it, as claude's own add does; reap's rules apply.
+  - _`--worktree` stays._ Decision #3's spike, Claude Code 2.1.325 on macOS, 2026-11-15: a
+    worktree made first with that command, then `claude --worktree <name>` from the clone
+    (interactive in a private tmux server, and `-p`) ran in it as it stood: cwd the worktree,
+    `worktree-<name>` still at the base tip, no second add, claude's own lock taken. So the
+    argv, launch dir and trust entry are an unstacked worktree spawn's, and the owner's
+    fallback (plain `claude` inside the made worktree, as a continuation) was not needed.
+  - _The seed._ The worktree preamble plus: the task is stacked on `` `<b>` ``, starts from
+    `origin/<b>`, and its handoff is the predecessor's PR (`gh pr view <b>`; #5, no transcript
+    path); its PR goes `gh pr create --base <b>`, never against the default branch (the repo
+    squash-merges, so that PR would carry `<b>`'s commits and could merge them unreviewed); and
+    once `<b>`'s PR merges, the rebase onto the default branch and the retarget are the
+    session's (or the owner's) to do by hand — the known gap. `<b>` reaches the seed file only,
+    never the shell string, and passed `isBranchName`.
+  - _The ledger._ `TaskNote.stackedOn`, the `<sha>` (`SpawnOutcome.stackedOn`), internal and
+    never in `TaskProgress`: branch-state counts nothing at or behind it as own work (Scheduler,
+    "Branch state"), so a fresh stacked worktree, pushed as it is, reads neither pushed nor
+    merged when its predecessor squash-merges. A continuation of the task notes the same start
+    from this ledger. Reap needs nothing: it keeps a worktree by its own rules, and a stacked one
+    with no work of its own loses nothing.
+  - _Nothing to stack on._ `noBase: true` (#4: a predecessor `done` with no PR or pushed branch)
+    is an unstacked worktree spawn from `origin/<default>` with one constant preamble line saying
+    the predecessor left nothing to stack on. No gate: it names nothing git acts on.
+  - _Audit._ `baseBranch=true` (or `noBase=true`) on the request line, never the name, as
+    push-branch audits no branch.
+  - _Rejected:_ the ref after `--end-of-options` rather than the sha (#15's wording; the sha
+    is the same commit, read once, with no window between read and checkout); `-B` (claude's,
+    which would reset a branch of the name); failing open to the ref on disk (above); dropping
+    a non-scheduler `baseBranch` as an inherited PR is dropped (dropped, the session starts from
+    the default branch); a new spawn error code for that refusal (no client sends it).
 - **No `--permission-mode` flag by default** (revised from `/spawn`'s `auto`).
   Passing one unconditionally would override the machine's own `settings.json`
   default, so a box configured for `bypassPermissions` still got prompted for
@@ -6230,7 +6476,7 @@ of this section built.
   `acceptEdits`, `auto`, `dontAsk`) or are the ambient default already
   (`manual`), and a remote loosening the machine's own setting is the thing the
   bullet above refuses. Plan only ever constrains. It is reached
-  from the PWA, Raycast, `seanced spawn` and MCP only as the `steer` level. Old daemons ignore
+  from the PWA, Raycast, `seance spawn` and MCP only as the `steer` level. Old daemons ignore
   it, exactly as they ignore `client`.
   **Bypass stays reachable** (added 2026-11-12). Any mode flag replaces the
   settings default, and claude offers bypass in the shift+tab cycle only when
@@ -6290,7 +6536,7 @@ of this section built.
     `steer`, are refused, by the parser, `isSpawnRequest` and `specError`,
     never resolved.
   - **One spelling per client** (2026-11-12). `plan` stays on the wire for older readers, but no
-    client takes it as input: the MCP tools, `seanced spawn` and Raycast take only the level, and
+    client takes it as input: the MCP tools, `seance spawn` and Raycast take only the level, and
     each sets the wire `plan` itself through `withAutonomy`. MCP's strict input refuses a stale
     `plan` by name ("MCP server", below) rather than stripping it into a `checkpoint` task.
   - **Where it is set.** Per task: `spawn_session`'s `autonomy`, `queue_batch`'s per
@@ -6303,7 +6549,7 @@ of this section built.
     starts back at `checkpoint` and a level picked once never rides along unseen), writes it
     only off the default and through `withAutonomy`, and shows it on the Queue card by
     `autonomyOf`; a `needs-input` card with a session link carries "Answer in Claude".
-    `seanced spawn --autonomy <level>` sets it, queued or `--now` (it shapes the session, not
+    `seance spawn --autonomy <level>` sets it, queued or `--now` (it shapes the session, not
     its placement), given at most once. Raycast's Autonomy dropdown, beside model and effort,
     starts at `checkpoint` on every open with no preference behind it, as the PWA's does (a
     successful spawn or queue closes the window with `PopToRootType.Immediate`, so Raycast's
@@ -6346,8 +6592,8 @@ of this section built.
   of one tmux exec. And any same-uid process can rewrite the option, which is
   why the read revalidates it against the pattern; a session relabelling itself
   is the same residual the threat model accepts for the session-event path.
-  A direct `seanced spawn --now` sends no `SpawnRequest.taskId`: only the scheduler mints the
-  ids of the spawns it dispatches. A queued `seanced spawn` mints the task record's id in the CLI
+  A direct `seance spawn --now` sends no `SpawnRequest.taskId`: only the scheduler mints the
+  ids of the spawns it dispatches. A queued `seance spawn` mints the task record's id in the CLI
   process, as every app-role enqueue (the PWA, MCP) does.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in the `.claude.json` of
@@ -6371,6 +6617,8 @@ of this section built.
   check. A continuation is the exception: it starts in the worktree itself, so
   `spawnContinued` trusts that path in the clone's exclave config file, one more
   `projects[<path>]` entry per continued worktree (Daemon, "Continuing a session").
+  A spawn carrying attachments also trusts the attachments root, since each `--add-dir`
+  meets the dialog too (Attachments, "Trust").
   Memoized in-process per (config, repo) pair, so it costs one
   config read per repo per daemon run. Rejected: caching trust in
   state.json or `RepoEntry` (stale in the dangerous direction — revoking
@@ -6414,7 +6662,11 @@ of this section built.
   in finish order, so the older could drop a clone the newer had found (and
   had already answered the app with). Results cached in
   state.json (restart re-registers instantly from cache); re-register only
-  when the set changed. `defaultBranch` is best-effort from local refs only
+  when the set changed. Registers are built and sent one at a time too, in call
+  order (`RelayClient.#register`): the relay keeps the last one to land, and the
+  boot register, built before the boot scan committed, could finish its seal and
+  signature behind that scan's re-register and leave a fresh machine advertising
+  no repos until the hourly rescan. `defaultBranch` is best-effort from local refs only
   (`origin/HEAD` on disk, null otherwise — ~⅓ of repos lack it), carried
   forward for known repos; the network-touching `git remote set-head -a`
   runs only in the self-update path when unresolved (it ran in the spawn path
@@ -6429,7 +6681,7 @@ of this section built.
   scheme, userinfo and `.git` stripped, scp-style `host:path` folded to
   `host/path`, and the whole lowercased (GitHub and Azure DevOps compare
   case-insensitively; a key that differed by case would split one repo in two).
-  A typed origin is keyed the same way: `auto`'s `repo` in `seanced mcp` goes
+  A typed origin is keyed the same way: `auto`'s `repo` in `seance mcp` goes
   through `originQuery` (`scan.ts`), so the remote URL as `git remote -v`
   prints it, a repo's root page URL, or the key in another case finds the key
   — a deeper page (`/tree/main`) does not, and a key with a port is tried as
@@ -6547,7 +6799,11 @@ of this section built.
   was ~20%, and with the long gap that reading became the average outright). It is caught by the
   counted time per core falling short of half the wall time, and its baseline restarts. The
   other is shorter than `MIN_CPU_WINDOW_MS` (5s), like the tick a register forces a second
-  after the last; its baseline stays, so the next tick measures across both. A failed collector drops its field and stores no
+  after the last; its baseline stays, so the next tick measures across both. A status with neither cpu nor mem
+  is `pressure_unknown` to the router, and a fresh daemon's first ones always lack cpu, so where mem fails as well
+  (the macOS exec, under load) the machine took no work until the next beat, up to an interval away: the status that
+  goes out without either is followed by one more `MIN_CPU_WINDOW_MS` later, through the refresh that waits out the
+  relay's floor — once per stretch without pressure, so a host that never reads it sends one status more, not one per floor. A failed collector drops its field and stores no
   sample rather than repeating its average, and the next reading eases from
   that average over the whole gap since the last good one. Rejected for macOS:
   free + inactive + speculative pages
@@ -6897,7 +7153,7 @@ of this section built.
   direct spawn since M4 PR 2, so that verdict is gone), muted rather than
   green and offering the form back instead of "Start another" (a retry meets the
   same dialog and leaves two stuck windows); Raycast switches the toast to the
-  attention style; `seanced mcp` appends "(started, not registered yet)".
+  attention style; `seance mcp` appends "(started, not registered yet)".
   Optional on the wire, so a daemon a version behind omits it and its acks read
   exactly as they did before. The window id reaches the frontend as `SpawnOutcome.handle`, a
   backend-scoped token the response is assembled field by field to exclude.
@@ -7099,10 +7355,10 @@ of this section built.
   _What is not vanished._ Séance's own closes note `closedHere` first and `await` it, before the
   kill: `handleDespawn` hands the backend a `closing` hook (relay, local socket, broker and the
   leader's in-process despawn all go through it), reap's `ReapOptions.closing` (the daemon's timer
-  passes it; the CLI's `seanced reap` passes none and so leaves every dead task pane alone, since only
+  passes it; the CLI's `seance reap` passes none and so leaves every dead task pane alone, since only
   the daemon can note a close), and harvest itself (a dead pane holding no status is announced as
   closing before it is closed). Reap leaves every `harvestable` pane to harvest. A clean exit is noted
-  (below), so it is not missing. The CLI's `seanced despawn` runs in a process without the ledger, so
+  (below), so it is not missing. The CLI's `seance despawn` runs in a process without the ledger, so
   its `closing` marks the close in tmux instead (`markClosed`): a server-wide `@seance-closed-<taskId>`
   option, set and awaited before the despawn acts, which harvest reads with the exit options (one
   `show-options -g`, after the listing), notes as `closedHere` and unsets, and not while a launch of the
@@ -7181,7 +7437,7 @@ of this section built.
   deferred).
   _Residuals, each accepted._ (1) `kill-server` or a reboot loses an exit the hook recorded but harvest
   had not read yet (the option dies with the server), so that task reads `session_closed`; Continue
-  recovers it. (2) The CLI's `seanced despawn %N` marks its close in tmux (above), so a close of the server's
+  recovers it. (2) The CLI's `seance despawn %N` marks its close in tmux (above), so a close of the server's
   last pane would take the mark, and any exit the hook recorded, down with the server (`exit-empty`).
   The graceful path avoids it: the CLI passes `leaveDeadTask`, so a task pane that dies on its `/exit`
   is left dead for harvest to note and close (as the CLI's reap leaves them), and the dead pane shows
@@ -7235,8 +7491,8 @@ of this section built.
   is `caffeinate`, with claude as its child — whatever kills a pane has to
   account for that.
 - **Despawn** (designed 2026-08-21, built 2026-10-09; `despawn.ts`): ends one
-  session — the window only; its worktree and branch are `seanced reap`'s. The
-  wire op `despawn { id, force?, client? }`, `seanced despawn <id> [--force]`
+  session — the window only; its worktree and branch are `seance reap`'s. The
+  wire op `despawn { id, force?, client? }`, `seance despawn <id> [--force]`
   and the MCP tool `despawn_session` all reach `SessionBackend.despawn`. No PWA
   or Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
   the session list now carries (optional on the wire, so an older daemon simply
@@ -7279,7 +7535,7 @@ of this section built.
   A dead pane (remain-on-exit) reports a long-reaped `pane_pid`, so nothing is
   watched there at all. A despawn of a task pane first notes `closedHere` in the launch ledger
   (`DespawnOptions.closing`, awaited before it acts, so a harvest pass that lists the pane gone
-  afterwards never judges it `vanished`); the CLI's `seanced despawn`, without the ledger, marks the
+  afterwards never judges it `vanished`); the CLI's `seance despawn`, without the ledger, marks the
   close in tmux for harvest to note instead, and leaves a task pane that died on its `/exit` for harvest
   to close (`leaveDeadTask`; Daemon, "Window closed from outside", "What is not
   vanished", and residual 2). The grace poll asks tmux about the one pane
@@ -7319,7 +7575,7 @@ closed from outside), or was cancelled after it was placed, or (2026-11-12, "Blo
 awaiting its PR's merge with the PR blocked,
 leaves its worktree and its Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
 (`claude --resume <id>`, the session id the daemon chose at the old launch) in the same worktree, on the same machine and clone. The PWA's failed or cancelled card
-carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seanced
+carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seance
 continue <task-id> [--prompt …]`; all three write the same spec (`continuationSpec`,
 `shared/src/continue-task.ts`, the one place that says which tasks offer it — `continueOffer` — and which
 fields carry over), under the same gates.
@@ -7599,7 +7855,7 @@ fields carry over), under the same gates.
   never land) but withholds the offer all the same (`waitingContinuation`, the reason naming Y): a second
   tap would only race it for the path, and the daemon refuses whichever lands second. A landed taker's
   reason wins when both exist. When Y fails unplaced or is cancelled before placement, X is offered
-  again. The PWA's button, `continue_task`, `seanced continue` and
+  again. The PWA's button, `continue_task`, `seance continue` and
   `get_queue`'s `continuable` share that one rule. The button shows only while the task was not `here`
   and has an assignment. Two taps from two clients that have not yet read each other's continuation make
   two tasks (so does a queue refresh answered before the leader has read Y's create, which can briefly
@@ -7679,7 +7935,7 @@ fields carry over), under the same gates.
   conversation); offering continue on the direct `spawn` op or the local socket (scheduler-only keeps
   the surface at one); automatic continuation (manual by decision). A hand-run `claude --resume` in
   the worktree stays untracked by design — its session events bind to no tagged pane — which is why the
-  shell has `seanced continue` rather than a documented recipe.
+  shell has `seance continue` rather than a documented recipe.
 - **Moved out of Rejected:** `claude --resume <id>`. It was rejected because the daemon knew no Claude
   session id; `--session-id` on every task spawn gives it one of its own choosing (2026-10-27).
 
@@ -7690,7 +7946,7 @@ new task, free to land on another account, that starts from the old task's pushe
 written record. Continue (above) cannot do this, since it resumes the Claude conversation in the
 same worktree on the same machine and account. It is not the hand-off (`hand_off_task`, "Session
 events"), which ends a session whose work is finished and whose PR awaits merge; a pass moves work
-that is not finished. The outside path (stage 2a: the PWA, `seanced pass`, MCP `pass_task`) and the
+that is not finished. The outside path (stage 2a: the PWA, `seance pass`, MCP `pass_task`) and the
 session's own (stage 2b: MCP `pass_to_successor`) are built; the automatic trigger is not, and its
 entries below say so.
 docs/scheduler.md, "Successor", has the stages and is where each is marked done.
@@ -7712,7 +7968,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)       |
   | MCP tool, the session's own task         | `pass_to_successor`                                      |
   | MCP tool, another task                   | `pass_task`                                              |
-  | CLI                                      | `seanced pass <task-id>`                                 |
+  | CLI                                      | `seance pass <task-id>`                                  |
   | PWA button                               | "Pass to successor"                                      |
   | Capability, outside path (2a)            | `CAPABILITIES.successor`                                 |
   | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                             |
@@ -7950,7 +8206,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   would close a session whose pass the leader then refused); keeping the old session open until the
   successor is placed (two sessions able to write one branch, and a full account kept busy).
 - **The `pass` op and its refusals (D11).** The same structured codes on every outside surface (PWA,
-  `seanced pass`, `pass_task`):
+  `seance pass`, `pass_task`):
 
   | Code                     | When                                                                                                              |
   | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
@@ -7992,14 +8248,14 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   picks it up."), and the old card reads "Passed to a successor"; the successor's card shows its
   `succeeds` line. Not offered: a `here` task, a task waiting on a person, anything not running. Continue
   does not offer a `superseded` task either, since only `failed` and `cancelled` qualify: its session
-  was ended on purpose and its account is out. `seanced pass <task-id>` takes no aliases; neither it nor MCP
+  was ended on purpose and its account is out. `seance pass <task-id>` takes no aliases; neither it nor MCP
   `pass_task` writes an audit line of its own: the record is the leader's `audit queue origin=relay op=pass`
   line, and the broker's where it carried the call. `passOffer` words a finished task and a reserved one as
   the leader's refusals do, and a client that finds the task already passed answers with its successor and
   sends nothing (the leader would answer `ok` with it too). The PWA's after sheet does not offer a
   `superseded` task: its successor is listed and carries the work, and an edge the form already holds on one
   stays so it can be removed.
-  `shared/src/successor.ts` and the MCP tool code import no logging, since `seanced mcp` reaches them.
+  `shared/src/successor.ts` and the MCP tool code import no logging, since `seance mcp` reaches them.
 - **The automatic trigger (stage 3, built 2026-11-12).** As built: `exhaustion` (`scheduler/src/route.ts`)
   folds readings through routing's `newestQuotaByAccount` (the fleet record included) and counts one only
   while the machine that observed the newest reading is connected with a status that is not stale;
@@ -8042,11 +8298,11 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   never sends it; reconcile re-sends only for a session-trigger successor whose old machine is 2b by
   construction, and a downgraded one times out and the deadline closes the session). New leader,
   successor placed on an old daemon: fine, since it is a plain worktree spawn and the recipe is prompt
-  text. New `seanced mcp` (2b) against an old daemon process: the frame answers `invalid` and the tool
+  text. New `seance mcp` (2b) against an old daemon process: the frame answers `invalid` and the tool
   says to restart `seanced`. New daemon, old leader, and a 2b daemon against a 2a leader (which
   advertises `successor` but not `successorSelf`, and would drop `session-pass`): the MCP tool's leader
   gate, on `successorSelf`, refuses before any push, and only that tool sends a `pass` frame
-  (`seanced session-event` drops one). The hand-off of an inherited PR: a new leader and an older daemon
+  (`seance session-event` drops one). The hand-off of an inherited PR: a new leader and an older daemon
   placed the successor, so the field is ignored and its `hand_off_task` answers `prless` (the preamble
   already says to carry the PR itself if refused); an older leader and a new daemon, no field arrives
   and the old preamble says not to call the tool; a successor an older leader created and a new leader
@@ -8107,7 +8363,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   it is the safe outcome); a separate ledger note field (the same concept as `continuedPr`, and one
   that an older daemon still reads on rollback). Automatic continue of the old session (it cannot cross accounts); a new `mode` for the
   successor; the daemon-leg create; a failure code or `done` for the old task; stacking or `baseBranch`
-  for the successor (no daemon implements `baseBranch` yet, so the successor resets its own branch
+  for the successor (no daemon implemented `baseBranch` then, so the successor resets its own branch
   to the pushed one); moving a task that waits on a person; attachments carried over (listed under
   docs/scheduler.md's Later). Not changed: no relay store rule, and Raycast, which is spawn-only and
   reads no task states.
@@ -8165,7 +8421,7 @@ waiting task's prompt, title, model and effort in place, under its own id.
   unchanged), and what runs is still decided at dispatch by the leader. The keyless broker peer gains
   it too ("Fleet broker").
 - **Surfaces.** MCP `amend_task` (`append` by default, `replacePrompt` to replace; `title`, `model` and
-  `effort`, null to clear). `seanced amend <task-id> [text…] [--replace] [--title t] [--model m]
+  `effort`, null to clear). `seance amend <task-id> [text…] [--replace] [--title t] [--model m]
   [--effort e]` (`--title ""` and `default` clear). Raycast is spawn-only and unchanged. **No PWA
   surface in V1 (owner, 2026-11-12):** amending is an orchestration act, done from a Claude planning
   or orchestration session that queued the stack and learns what later sessions need, so MCP and the
@@ -8202,35 +8458,63 @@ waiting task's prompt, title, model and effort in place, under its own id.
 ## Closing a machine (`availability`) — built 2026-11-13 (drain 1/3, 2/3)
 
 docs/drain.md is the spec of the whole feature; this section is what its first build-order item
-decided. Closing stops the scheduler placing new work on a machine. What already runs there is passed to
+decided. Closing stops the scheduler placing new work on a machine. Unless the close is soft (docs/drain.md N5,
+below; the clients' default where both ends support it), the drain starts with it, or later on request: what already runs there is passed to
 other machines after a grace, by the leader (item 2, "The drain's outside pass" below), and each session is
 first asked to commit and pass itself, by its daemon (item 3, "The drain's session ask" below), since an
 outside pass of an uncommitted tree is refused (`dirty_worktree`).
 
-- **State is the daemon's own and sticky.** `state.json` carries `closed: { at }` (absent when
-  open); it survives restarts, tmux restarts and reboots until reopened. `loadOrInitState` fails
-  closed: a `closed` field it cannot read loads as closed now, with a warning, so a damaged file never
-  reopens a box the owner took down; `readState` (the log-free reader `seanced mcp` uses) returns the
-  raw field. State writes go through `persistState`, one at a time, so a close racing a rescan's repos
+- **State is the daemon's own and sticky.** `state.json` carries `closed: { at, drainAt? }` (absent when
+  open); it survives restarts, tmux restarts and reboots until reopened. `drainAt` is when the drain of this
+  close began, set once per close: `at` for a plain or `now` close, a later request's time for a soft close that
+  was then drained, `null` for a soft close that was not (so the soft state is `drainAt`'s own value and `soft`
+  is never persisted), and absent only in a file written before soft close existed, which closed and drained at
+  once, so it reads as draining from `at` (`drainingOf`). A reopen clears both. `loadOrInitState` fails
+  closed: a `closed` field it cannot read loads as closed now, **and draining** (as before soft close existed),
+  with a warning, so a damaged file never reopens a box the owner took down and clients before the soft surfaces
+  (which read every `cl` as a drain) show it truthfully; a readable `closed` whose `drainAt` it cannot read
+  (non-number, non-finite, not positive) loads as closed and **not** draining, with a warning: failing toward a
+  drain would interrupt sessions and move work on a damaged file. `readState` (the log-free reader `seance mcp`
+  uses) returns the raw field. State writes go through `persistState`, one at a time, so a close racing a rescan's repos
   write loses neither. _Rejected:_ a leader-owned store record (a new prefix with rules, caps and a
   threat-model entry, to close a machine that takes no work offline anyway), a `config.json` field (the
   operator's file, out of reach from a phone) and reopening on a new boot id (reopens a box taken down
   because it was broken).
-- **`availability { open, now? }`** is a request op, answered only when sealed `from: "app"` on the relay
+- **`availability { open, now?, soft? }`** is a request op, answered only when sealed `from: "app"` on the relay
   leg (`origin` `relay`); the local socket and the fleet broker carry neither it nor any widening
   (`LOCAL_OPS` and `BROKER_OPS` are unchanged, owner decision), so the CLI and MCP go over the relay as
   app-role and a keyless box refuses and points to the PWA. It is idempotent: a request that changes
   nothing is answered with the current state. The reply is `{ ok: true, closed }`, `closed` being the
   close time or null. Audited `audit availability origin=relay open=<true|false|-> outcome=<closed|
-  reopened|unchanged|refused|invalid_request|unsupported|internal_error>`; no payload beyond that.
+  reopened|drain_started|unchanged|refused|invalid_request|unsupported|internal_error>`; no payload beyond that.
   `now?` (`true` only; any other value is dropped) skips the session ask's wait before the interrupt
   (below). A daemon advertising `drainAsk` honours it, on a fresh close and on an already-closed machine
   alike, and appends ` now=true` to the audit line only when it was set, so existing lines stay byte-identical;
   an older daemon drops it unread. It is never persisted.
+  `soft?` (docs/drain.md N5; `true` only, `false` is dropped, any other value and `soft` beside `now`
+  are `invalid_request`, audited `open=- outcome=invalid_request`) closes without starting the drain: `closed:
+  { at, drainAt: null }`, the status carries `cl` and no `dr`, the session ask types and Escapes nothing and the
+  leader passes nothing, however long it waits. A daemon advertising `softClose` honours it; an older one drops
+  it and closes and drains as before. The audit line appends ` soft=true` after any ` now=true`, only when set, so
+  existing lines stay byte-identical. The reply is `{ ok: true, closed }` in every case, unchanged. On an
+  already-closed machine: a soft-closed one asked to close plainly starts its drain now (`drainAt` = the request
+  time, `at` kept; outcome `drain_started`), and with `now` starts it with no grace on the ask; a draining one
+  changes nothing (`unchanged`; `now` still moves the ask's deadline, as before); `soft` on any closed machine
+  changes nothing (`unchanged soft=true`). `{ open: true, soft: true }` reopens and audits `reopened soft=true`.
+  So a client's **Drain** on a soft-closed machine is a plain close, and its **Drain now** a `now` close. A client
+  that predates the soft surfaces still sends plain closes and reads every `cl` as a drain, so it shows a machine
+  another client soft-closed as draining while nothing moves.
 - **`MachineStatus.cl`** is the close time in unix ms. It rides the sealed status, so the relay learns
   nothing, and `fitStatus` never trims it: a trimmed `cl` would read as open. A set or cleared `cl`
   asks the status loop for a fresh status (`StatusLoop.refresh`, as `drn` does), so the leader hears it
   within the relay's floor.
+- **`MachineStatus.dr`** is the unix ms the drain of this close began (`closed.drainAt`), sent only beside `cl`
+  through the same `closed` collector, absent while soft-closed, while open and from an older daemon. It is parsed
+  only as a finite positive number beside `cl` (otherwise the status is refused, as for a bad `cl`: it gates the
+  leader's pass) and `fitStatus` never trims it, since a trimmed `dr` would stop a drain the owner started. Starting
+  a drain asks for a fresh status. Not `QuotaObservation.dr` (the seven-day reset), a field of a quota entry.
+  `drainStart(machine)` (`shared/src/status-reader.ts`) is the one reader: `dr` when present, else `cl` for a
+  machine not advertising `softClose` (its close always drained), else none.
 - **A closed machine still runs custodian rounds** ("The custodian's seat"): closing routes work away and
   asks sessions to pass, and the ones left are what a round tidies. Only a restart drain stops one.
 - **Routing.** `closed` is a machine filter beside `draining`, on every path: pinned tasks, `run-now`,
@@ -8246,12 +8530,17 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
   once per TTL, holding a cap slot there meanwhile). The gate first looks up a live pane
   for the task and answers `task_running`, so a retry of a launch whose reply was lost never reads as
   closed. `routesClosed` is accepted only as `true` and only from the scheduler.
-- **Direct spawns still run.** A spawn that bypasses the scheduler (`seanced spawn --now`, Raycast, the
+- **Direct spawns still run.** A spawn that bypasses the scheduler (`seance spawn --now`, Raycast, the
   local socket) is the person's explicit choice and is not gated. A pin is not one: the PWA's Machine
-  pick, `seanced spawn --machine` and MCP `spawn_session { machine }` all enqueue a pinned task, which
+  pick, `seance spawn --machine` and MCP `spawn_session { machine }` all enqueue a pinned task, which
   waits ("closed to new work") until the machine reopens. Closing is about what the scheduler does, not
   about locking the box.
-- **Capabilities.** `CAPABILITIES.close` (a daemon answers `availability`) and `CAPABILITIES.drain` (a
+- **Capabilities.** `CAPABILITIES.softClose` (advertised by every daemon, since any may lead): as a daemon it honours
+  `soft`, keeps `drainAt` and reports `dr`; as a leader it drains a machine only from `drainStart`. A client offers
+  the soft close only to a target advertising it under a verified leader advertising it (the PWA's `canSoftClose`,
+  `setMachineOpen` in `daemon/src/availability-client.ts` for the CLI and MCP), and otherwise the draining close,
+  worded as before: an older daemon would drop `soft` and drain, an older leader would pass on `cl` alone.
+  `CAPABILITIES.close` (a daemon answers `availability`) and `CAPABILITIES.drain` (a
   leader routes around `cl` and sends `routesClosed`; named for the feature: `drain` means exactly that, and
   the drain's outside pass (`CAPABILITIES.drainPass`) and the session ask (`CAPABILITIES.drainAsk`)
   each have a capability of their own, so a client can tell the builds apart).
@@ -8259,16 +8548,63 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
   reopen needs only `close`.
 - **Surfaces.** The PWA's Machines screen has an "Open for work" switch in the machine's menu, a Closed
   badge and a confirm sheet; a pin on a closed machine says "<name> is closed: this waits until it
-  reopens" and the picker prefixes "closed to scheduled work". `seanced close|open [<machine>]` act on
-  this machine when none is named, `seanced close --now` sending `now`; MCP `set_machine_open { machine,
-  open, now? }` and a `closed` ISO time or
-  null on `list_machines`. The tool ends nothing and sends no keys, but, like `pass_task`, it changes
-  what the fleet does, so it stays behind Claude Code's per-tool approval and is never allowlisted (docs/psk.md).
-  The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
-  `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
-  row, `--wait` and `list_machines`' `drain` (below); item 3 adds `now` and the ask's wording.
+  reopens" and the picker prefixes "closed to scheduled work". `seance close|open [<machine>]` act on
+  this machine when none is named, `seance close --now` sending `now`; MCP `set_machine_open { machine,
+  open, drain?, now? }` and a `closed` ISO time or
+  null on `list_machines`.
+  **The soft close is the default close** (docs/drain.md N5) wherever the gate above holds:
+  - The PWA's close sheet has **Close** (soft) as its primary action, worded "Close stops new work on <name>.
+    Running tasks keep going until they finish or you drain the machine", then the drain's own lines under "Close
+    and drain: …", with **Close and drain** and **Drain now** (on a `drainAsk` target) as quieter actions. Where
+    the gate fails, the sheet is as before: Close drains.
+  - A soft-closed machine's drain row reads "Closed: …" (`drainSummary`'s soft form, below) and offers **Drain**
+    and **Drain now** (a `drainAsk` target), in the row and in the card's menu, each behind a confirm sheet
+    (`deriveDrainSheet`). A draining one reads "Draining: …" and offers **Drain now** only while
+    `drainStart + DRAIN_INTERRUPT_MS` lies ahead (`MachineCard.drainActions`): past it the ask has interrupted
+    every turn and the leader's pass (at 10 minutes, which never sees `now`) is all that is left, so the button
+    would speed nothing. `DRAIN_INTERRUPT_MS` lives in `shared/src/drain.ts` for that reason; the daemon's ask
+    imports it.
+  - `seance close` is soft; `--drain` is the draining close and `--now` implies it. On an already soft-closed
+    machine, `--drain` or `--now` starts its drain (`drain_started`) and the CLI says so with the drain's words.
+    `--wait` on a soft close waits for the tasks to finish on their own, and says once, up front, that nothing is
+    moved until the machine is drained and a task idle at its prompt never finishes.
+  - MCP `set_machine_open` takes `drain` and `now`, each `true` only (a strict schema: `false`, `soft` or any
+    other key is refused), `now` implying `drain`. Its answer and `list_machines`' `drain` say which the close is
+    (`draining`), and on a soft close `running` and `idle` counts instead of `moving`.
+  - _Decided:_ soft by default rather than as an option beside today's close, because most closes mean "stop
+    giving this box work" and a pass costs a fresh session rebuilding its context (N5). _Rejected:_ a separate
+    Drain op (a plain or `now` close on a soft-closed machine already is one, with nothing new on the wire), and
+    keeping Drain now offered for the whole grace (past the interrupt it does nothing a user could see). The tool ends nothing and sends no keys, but, like `pass_task`, it changes
+    what the fleet does, so it stays behind Claude Code's per-tool approval and is never allowlisted (docs/psk.md).
+    The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
+    `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
+    row, `--wait` and `list_machines`' `drain` (below); item 3 adds `now` and the ask's wording.
+- **A closed leader keeps leading** (docs/drain.md §6). The drain's passes need a leader, and moving the term
+  mid-drain only adds a takeover; it stops leading when it leaves. So closing the leader warns that the queue
+  goes down with the box: the close sheet ends with, and `seance close` and `set_machine_open` append on a line
+  of its own to any close that stands (fresh or already closed; never a reopen), `leaderCloseNote` ("<name> runs
+  the queue: while it is down, the queue stops unless another machine can take over"), one text in
+  `shared/src/drain.ts`. It is about the box going down while it leads, not about the drain, so it holds whatever
+  a close starts, a soft close included, in all three surfaces. "Leads" is `leadsQueue`: the verified leader only (`schedulerRole` `leader`, a `lead-proof`
+  sealed `from` the nominee for the pushed term), never a registry entry, since a wrong "leads" would be a lie
+  about leadership. The note never says whether another machine can take over: the registry push names only the
+  one nominee, the relay keeps the signed `roles` (every daemon claims `scheduler`) and its `SCHEDULER_LEADERS`
+  list, so no client can see a standby. _Rejected:_ counting connected machines as standbys (every one claims the
+  role, so it would hide the warning on a fleet with no other allowlisted id — the wrong direction), and a relay
+  push of the standby count (a relay and wire change for one sentence; kept as the way to sharpen it).
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
-  sealed and replay-guarded, answered only for an app, and audited.
+  sealed and replay-guarded, answered only for an app, and audited. A soft close does strictly less than a close.
+- **Skew and rollback (soft close).** Daemons self-update independently and any may lead. An old leader passes on
+  `cl` after the grace whatever `dr` says, so clients send `soft` only under a verified leader advertising
+  `softClose`; a leader change to an older version after a soft close then drains that machine on `cl` after its
+  grace: accepted, it is the old behaviour, the version floor makes it rare, and the PWA's drain row shows the
+  passes as they happen. A new leader with an old daemon sees no `softClose`, so `drainStart` is `cl`: today's
+  behaviour. **A daemon rolled back after a soft close** is worse than that leader change, since it skips the grace:
+  the older daemon reads `at` only and its ask keys off `cl`, and it no longer advertises `softClose`, so a new
+  leader falls back to `cl`; if the soft close is older than the interrupt wait and the grace, every busy pane is
+  Escaped and every task passed at once. Not fenced (a daemon rollback is rare). Its `state.json` keeps `drainAt`,
+  which the old code ignores.
+  _Rejected:_ persisting `soft` (it is `drainAt`'s `null`; an absent `drainAt` is a legacy close, which drains from `at`); failing an unreadable `drainAt` toward a drain.
 
 ### The drain's outside pass — built (drain 2/3)
 
@@ -8278,7 +8614,7 @@ shows counts, `--wait` and the new texts only under a verified leader that adver
 keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
 
 - **One pass per task, through the existing pass.** The leader's pass loop finds a task `running` or
-  `needs-input` on a machine whose status carries `cl`, and calls `Scheduler.pass(id, "drain")`: the
+  `needs-input` on a machine whose drain has started (`drainStart`), and calls `Scheduler.pass(id, "drain")`: the
   push through `pushTaskBranch`, the successor's create, the `pass-close`, all as a manual pass does,
   audited `pass … trigger=drain` under origin `leader`. The successor's `succeeds.trigger` is `"drain"`
   and it keeps the predecessor's `steer` (`successorSpec`: a drain is not the task's own judgement call,
@@ -8288,12 +8624,14 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   and quota passes still refuse it. The leader's three `needs-input` checks in `#runPass` (the entry, the
   recheck after the push, the commit) widen together. The app's `pass` op cannot reach the drain trigger.
   Only a worktree task (never `here`) on a connected machine advertising `successor` whose status carries
-  `cl` is due (`drainDue`). Not gated on placement: the successor is routed by the ordinary pass, never
+  `cl` and whose drain has started is due (`drainDue`); a soft-closed machine advertising `softClose` has no drain
+  start, so nothing is passed off it however long it waits. Not gated on placement: the successor is routed by the ordinary pass, never
   onto the closed machine (the `closed` filter, not `predecessor_account`), and waits `ready` when no
   machine can take it.
-- **Grace.** The leader waits `drainSelfPassMs` (10 minutes) after `cl` on every machine, its own
+- **Grace.** The leader waits `drainSelfPassMs` (10 minutes) after the drain's start (`drainStart`: `dr`, or `cl` for
+  a daemon without `softClose`) on every machine, its own
   included, through the one predicate `drainWaitMs`: a reopen inside it stops the drain before any
-  session is touched. The texts a client shows say "10 minutes": a literal in the close sheet, `seanced
+  session is touched. The texts a client shows say "10 minutes": a literal in the close sheet, `seance
   close` and MCP `set_machine_open`, noted beside `drainSelfPassMs`, since a client cannot read the
   leader's config. docs/drain.md's "pass at once when the machine lacks `successorSelf`" is not built:
   every machine gets the grace, so a mistaken close is recoverable and a session may pass itself
@@ -8305,7 +8643,8 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   quota pass (`#autoPasses`) or a manual one (`#passInFlight`) is skipped, so the drain never joins
   or races it.
 - **`Task.drained { at, tried, refused?, held? }`** is the write-ahead stamp, written before the push:
-  `at` is the `cl` it was for, so a later close of the same machine is a new drain. A stamp whose
+  `at` is the `cl` it was for, so a later close of the same machine is a new drain (a close has one drain, `drainAt`
+  being set once, so `cl` still identifies it; `drainView` compares `drained.at` to `cl`). A stamp whose
   pass did not finish is retried after `drainRetryMs` (5 minutes), the retry being a decision: a refusal
   is often a tree the session has yet to commit, and the drain has no other way to try again while the
   machine stays closed. A refusal that precedes the create (`refused: <code>`) is shown by clients and
@@ -8318,7 +8657,7 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   that admission fails `pass_abandoned`, as for any pass cut off there. A finished task drops the stamp
   (`advance`).
 - **Progress is `drainView`** (`shared/src/drain.ts`), pure, the one rule the PWA, MCP `list_machines`
-  and `seanced close --wait` share. It reads a queue reply's tasks and the machine's `sessions` and
+  and `seance close --wait` share. It reads a queue reply's tasks and the machine's `sessions` and
   returns `moving`, `moved`, `stuck` (`here`, `untasked`, `unplaced`, `refused`) and `empty`. A pane
   whose task the (capped) queue reply does not list counts as moving; the CLI's `--wait` and MCP ask
   for it by id (`queueTasksFor`). Through the fleet broker the by-id read is dropped (its `queue` leg
@@ -8327,13 +8666,26 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   and `--wait` then waits on it until the queue shrinks. Kept: a broker request carrying `tasks` is a
   wire change to a deliberately narrow frame. A successor still waiting for a machine is counted once,
   as stuck `unplaced`, never also as moved.
+  **Soft or draining.** `DrainView.draining` is `drainStart(machine) !== null`, or the caller's word that it just
+  started one (`opts.draining`: the CLI and MCP right after a drain, the close sheet's prospective list). On a soft
+  close nothing is moved, so `moving` is what still runs there, a `here` task is not stuck (it is only running), and
+  each entry carries `idle`. `drainSummary` then reads "running N · M idle at its prompt · K waiting on you"
+  (waiting wins over idle, and neither counts as running), since a session idle at its prompt or waiting on the
+  owner never finishes on its own: the row is how the owner knows when to drain. _Decided: `idle` is
+  `QueueResponse.idle`_, the leader's list of tasks it released a slot for while idle at their prompt, because it is
+  the nearest a client can read: `SessionEntry` carries no state and `MachineStatus` no per-session state, and the
+  pane's own idle frames reach only its daemon and the leader. It lags a turn's end by the leader's
+  `idleReleaseAfterMs` (10 minutes), so a session that just went idle reads running until then. _Rejected:_ a
+  per-pane state on `sessions` or the status (a wire change for one word on one row), and `Task.idleRelease` (the
+  leader's seed for that list, not a reading of its own).
 - **Surfaces.** The PWA's close sheet counts the tasks that will be passed and lists what cannot move
-  (runs in the clone, not a task); a closed machine's row shows "Draining: moving N · M stuck" and
+  (runs in the clone, not a task); a closed machine's row shows "Draining: moving N · M stuck" (soft-closed:
+  "Closed: running N · …", above) and
   re-reads its sessions on `queue-changed` (at most once per ten seconds, a nudge inside the spacing read when it ends: a box parked closed for days
   must not cost a read per nudge), when the Machines screen opens and when its status's session
   counts change; a sessions read not yet answered reads "reading", an unanswered one "unknown". The
   sheet folds a `needs-input` task into "N running tasks" (on a `drainAsk` target it adds a separate
-  "waiting on you" line, below), and lists an untasked pane per line rather than counting it. `seanced close
+  "waiting on you" line, below), and lists an untasked pane per line rather than counting it. `seance close
   [--wait]` exits 0 when empty (a successor still `unplaced` is listed after "is empty" and does not
   block it), 2 when only stuck work is left, 1 on a failure; it uses the close reply's `closed` as the
   drain's `cl` since status lags. Exit 1 also covers a reopen (a status without `cl` that was sampled after
@@ -8348,9 +8700,22 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   (it fails their `parseSucceeds`), as for `"quota"`; an older leader nominee holds such a record
   unreadable and never places it, and a rolled-back leader neither reads `Task.drained` nor drains at all. A new client against an older leader shows item 1's
   behaviour (no `drainPass`). Deploy order: daemons, then PWA/CLI.
-- **Deferred.** docs/drain.md's §6 (a closed leader keeps leading; the sheet's warning about the only
-  nominee) and §12's time-from-close-to-empty measure are not built; the pass's own `audit pass …
-  trigger=drain` line is the one measure.
+- **Time to empty** (docs/drain.md §12). The closed machine's own daemon logs one line, `drain: empty
+  cl=<cl> after_ms=<ms> peak=<n>` (`grep 'drain: empty'` in its log), the first time its live panes read empty
+  while it is closed at `cl` (`daemon/src/drain-empty.ts`; on a soft close, which drains nothing, it still times from `cl`, so it
+  then measures the sessions' own finish, not a drain: read it beside the `soft=true` availability line). The panes are the status loop's own sessions read
+  (`watchedSessions`), the list the `sessions` op answers and `drainView` reads `empty` from, so it costs no read
+  of its own and is as fine as that beat (`STATUS_INTERVAL_MS`, 30 s, plus the refresh a close asks for), a beat
+  that starts only once the daemon has registered, so one that cannot reach the relay logs nothing until it can (`after_ms`
+  then runs to that point); `cl` is read before and after the list and counts only if unchanged (a reopen
+  meanwhile makes it unobserved), and a failed read never counts as empty. `after_ms` is the daemon's clock less
+  `cl` (the same clock), `peak` the most panes a read saw since this `cl` was first seen. Memory only, once per
+  `cl` per process: a reopen forgets it, a later close is watched afresh, and a restart while closed may log the
+  same `cl` again (after the downtime), which a reader folds by `cl`. A box already empty at its close logs
+  `peak=0`. Counts only what the daemon knows itself: moved and stuck need the leader's queue, which a closed
+  daemon does not hold (a read per beat would be new traffic for a log line), and stay readable from the
+  pass's `audit pass … trigger=drain` lines and the daemon's `audit drain` lines. No task id, no text. Not the
+  clients that call `drainView`: none runs for most drains, and `seance mcp` never calls `log.ts`.
 - **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
   the stamp is written only by the leader through the one task sealer, never from a frame.
 
@@ -8359,7 +8724,7 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
 A closed machine's sessions are asked to move themselves before the leader moves them (docs/drain.md is the spec's
 remainder; this is what item 3 decided). Capability `CAPABILITIES.drainAsk`, advertised by every daemon of this
 build whose backend can despawn (the ask is wired only then, as the session's own pass is; without one nothing would
-be typed or interrupted, and the clients' wording promises it): `now`, "Drain now", `seanced close --now`, MCP `now`, the close sheet's ask wording and its "N waiting on
+be typed or interrupted, and the clients' wording promises it): `now`, "Drain now", `seance close --now`, MCP `now`, the close sheet's ask wording and its "N waiting on
 you will have its question dismissed" line are all gated on the target advertising it, never on `close` or
 `drain`. The ask is the daemon's, since it owns the panes (`daemon/src/drain-ask.ts`); the leader needs no new
 frame, only a mark on a frame it already takes.
@@ -8389,13 +8754,15 @@ frame, only a mark on a frame it already takes.
   draft clear is `C-c` alone, which clears a single- and a multi-line draft and an empty box alike, and arms "Press
   Ctrl-C again to exit", disarmed by the typed text. It is sent once and never twice: a second Ctrl+C exits Claude
   Code.
-- **When.** On a close the daemon enumerates its live panes and keeps those `EndedTasks.askable` accepts: a
+- **When.** On the drain's start (a plain or `now` close, or a later drain request on a soft-closed machine; a soft
+  close starts nothing) the daemon enumerates its live panes and keeps those `EndedTasks.askable` accepts: a
   launch of the pane's task is in its ledger, a worktree one (never `here`: it has no branch to push), no `done`
   report noted, no close under way, and the pane carries no hand-off or pass mark (`SessionEvents.marked`). For
   each: a pane whose last frame is a turn-ended `idle` (an `idle` carrying `turnEnded`; a respawn's plain idle
-  never counts) is typed into at once; a pane that is not waits for one. If none comes by `cl +
+  never counts) is typed into at once; a pane that is not waits for one. If none comes by `drainAt +
   DRAIN_INTERRUPT_MS` (5 minutes) the daemon sends Escape, which ends the turn, and the turn-ended idle that
-  follows is typed into; `now` sets the deadline to the moment of the request. Once interrupted, a pane with no
+  follows is typed into; `now` sets the deadline to the moment of the request (so the PWA offers **Drain now** on a
+  draining machine only before that deadline; `DRAIN_INTERRUPT_MS` is in `shared/src/drain.ts` for it). Once interrupted, a pane with no
   turn-ended idle within `DRAIN_SKIP_MS` (30 seconds) is skipped (audited) and left to the leader's pass.
   **`needs-input`:** the owner asked that nothing in a drain wait on them, but the mod also reports an
   _approved_ call as `needs-input` for as long as it runs (Session events, "The wait reason"), so an Escape at
@@ -8433,7 +8800,8 @@ frame, only a mark on a frame it already takes.
   asked for). A session with a background subagent running reads idle between turns; the drain asks it anyway,
   and the session's own commit and pass are what matter.
 - **The mark.** The daemon sends its `session-pass` with `drain: true` whenever this machine is closed
-  (`SessionEventDeps.drainMark`), for any session's pass, asked or not. The leader writes `succeeds.trigger:
+  (`SessionEventDeps.drainMark`), for any session's pass, asked or not; a soft-closed machine's too, since the mark
+  stays on `cl` (a session that passes itself there is still a drain's). The leader writes `succeeds.trigger:
   "drain"` for it only when the sending machine's status carries `cl` (`closedAt(machine)`; otherwise `"session"`
   as before), so a daemon's claim only chooses a label for a pass the session itself asked for, and a machine
   whose status says it is open never gets one. The leader's audit line reads `trigger=drain`; `drainView`
@@ -8444,7 +8812,7 @@ frame, only a mark on a frame it already takes.
   an outside drain pass (step B) whose successor then waits on that daemon's close keeps the predecessor's pane
   until its turn ends or the 2-minute close deadline (`#closePasses`) despawns it, where it used to be closed at
   once. Without `drainAsk` the rule is unchanged. A session pass that joins an outside pass already in flight
-  (the leader's drain pass, started 10 minutes after `cl`) is no longer swallowed by it: if the outside pass was
+  (the leader's drain pass, started `drainSelfPassMs` after `drainStart`: `dr`, or `cl` from a daemon without `softClose`) is no longer swallowed by it: if the outside pass was
   refused before the successor's create (the dirty tree it read before the session committed), the session's
   runs as its own, with the commit and the record, and the drain pass stamps no refusal for it (the task would
   show stuck until the rerun lands; if that fails too, the write-ahead stamp already brings the retry round); one
@@ -8453,16 +8821,17 @@ frame, only a mark on a frame it already takes.
   pass is answered with its result, refusals included, as it always was.
 - **Reopen, restart.** A reopen that changes state drops every entry and timer; a prompt already typed stays
   typed, and a session that goes on to pass itself may land anywhere, this box included. Nothing is persisted:
-  a restart while closed re-enumerates (`start`), one ask per pane and task per `cl` per process (a repeated close
+  a restart while soft-closed asks nothing, and one while draining re-enumerates (`start`) with the deadline
+  `drainAt + DRAIN_INTERRUPT_MS`, one ask per pane and task per `cl` per process (a repeated close
   at the same `cl`, `--now` on an already-closed machine included, only moves the deadline of entries still
   waiting and never asks or Escapes a pane already typed into or skipped), so a pane asked and still working gets
-  one more prompt after a restart. A restart past the deadline (`cl + DRAIN_INTERRUPT_MS`) therefore Escapes
+  one more prompt after a restart. A restart past the deadline (`drainAt + DRAIN_INTERRUPT_MS`) therefore Escapes
   every enumerated pane not at a turn end at once, panes asked before the restart and still working on the ask
   included: that Escape can cut short a commit the first prompt started. Accepted for the same reason as not
   persisting (Rejected, below): it is bounded to one Escape and one prompt per pane per process per `cl`, the
   interrupted session is asked again at its turn end and commits then, and the leader's outside pass is the
   backstop either way. A `now` that lands before the daemon has wired the ask (the relay client
-  starts first) is kept and replayed at the wiring while the machine is still closed. A pane reused for another task, an `ended` frame or a
+  starts first) is kept and replayed at the wiring while the machine is still draining. A pane reused for another task, an `ended` frame or a
   pane that is marked drops its entry.
 - **Where it sits.** `SessionEventDeps.onState` is called for every bound, tasked frame with its state,
   `turnEnded`, reason and whether a hand-off or pass close began on this very frame (the outbox coalesces; this
@@ -8471,7 +8840,7 @@ frame, only a mark on a frame it already takes.
   `SessionEvents.marked` also holds while a hand-off's or a pass's own
   close keys are going in (a `closing` set), which a mark alone did not cover once the mark was consumed.
 - **Skew.** A daemon without `drainAsk` asks nothing; the PWA, `seanced` and MCP show item 1 and 2's wording for
-  it and refuse `now` locally, naming `seanced update`, and an old daemon would have ignored `now` anyway. An
+  it and refuse `now` locally, naming `seance update`, and an old daemon would have ignored `now` anyway. An
   older leader reads `drain` on a `session-pass` as nothing (its parser drops unknown keys) and writes `session`,
   so the successor is not counted as moved by `drainView` but is otherwise the same. A new leader with an old
   daemon never sees a mark. Deploy order: daemons, then PWA/CLI.
@@ -8485,17 +8854,51 @@ frame, only a mark on a frame it already takes.
   outside pass, which may pre-empt a session still committing.
 - **Threat model.** The new power is a daemon typing into a pane, so it gets its own invariant (CLAUDE.md;
   "Threat model", invariants): constant text and keys only; only into a pane its own launch ledger binds to a
-  worktree task (`askable`); only while closed; the text only at a turn-ended idle and never while
+  worktree task (`askable`); only while draining; the text only at a turn-ended idle and never while
   `needs-input`; the Enter re-check; audited `audit drain origin=drain task=<quoted id>
   outcome=<typed|interrupted|skipped>` (and ` now=true` on `availability`'s line), never the text. It is prompt
   text for a session the same person runs, so it sits under the prompt-injection item (Threat model, item 6),
   like the successor record. No new frame, no relay or archivist change.
 
-## Reap (`seanced reap`) — designed 2026-10-09
+## Closing an account — built 2026-11-17
+
+The account twin of "Closing a machine": an "Open for work" switch on the PWA's account card, `seance close|open
+--account <account>` and MCP `set_account_open { account, open }`. It adds nothing to the wire, the leader or the
+store: a close is the leader's existing account hold (`pause { until: "resume", account }`, Scheduler, "Pause"), and a
+reopen its `resume { account }`, which lifts any hold on that account, a reset hold included. Until now the PWA only
+lifted account holds and no client set one.
+
+- **What it does is the hold's.** The leader puts `paused { scope: "account" }` on that account's candidates on every
+  machine, on every path (auto, pinned, `run-now`, continuations, successors): auto work goes to the fleet's other
+  accounts and a task pinned to it waits. Running sessions are never touched, so there is no drain, no confirm sheet
+  and no soft/hard choice: closing an account is as reversible as the switch. A direct spawn still runs.
+- **State is the leader's, not a daemon's.** An account spans machines, so no daemon owns it; the hold lives in
+  `queue:pause`, which survives leader changes and fails closed (Scheduler, "Pause"). _Rejected:_ a flag on the
+  account record (app-writable, so the leader would have to start reading `account:` records, with their rollback
+  and junk-key residuals, to route), and a per-exclave close (an account signed in on two machines would stay open
+  through the other).
+- **PWA.** The switch shows on an account card only while the relay is open, a verified leader leads and a queue
+  read has landed (the holds come from `QueueResponse.holds`, which the store keeps current whenever a verified
+  leader leads, the Queue screen closed included). Off under the account's hold of either kind; a reset hold past
+  its `resumeAt` reads lifted, as the leader judges it. The card carries a Closed badge and a line saying since when
+  (a resume hold) or until its quota resets (a reset hold). The ask (`AppState.accountOpen`) shows the asked state
+  while it is out and its failure on that card, not as the Queue screen's notice, which a phone on the Machines
+  screen does not show. One pause or resume at a time, the queue's own included (`pausing`); the reply's holds
+  replace the queue view's at once.
+- **CLI and MCP** share `setAccountOpen` (`daemon/src/availability-client.ts`). The account resolves as a pin's
+  does (`resolveAccount`: id, then email, then alias; only an account some machine reports signed in). Both go over
+  the relay as app-role through `SchedulerLeg.holds`, which only the direct leg has: the broker's scheduler actions
+  are not widened for `pause` (as `availability` is not), so a keyless box refuses and names the PWA. `--account`
+  takes no machine word and no drain flag. Like `set_machine_open`, `set_account_open` changes what the fleet does,
+  so it stays behind Claude Code's per-tool approval and is never allowlisted.
+- **Threat model.** No new power: any app could already send `pause` with an account, and pausing the whole queue
+  holds more.
+
+## Reap (`seance reap`) — designed 2026-10-09
 
 Remote sessions leave residue: linked worktrees, the branches they were on,
 and séance windows that never closed (see the exit prompt under "Pane
-classifier"). `seanced reap` cleans up all three, by default acting and with
+classifier"). `seance reap` cleans up all three, by default acting and with
 `--dry-run` previewing — a dry run writes nothing, a fetch's refs included, so
 it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
 `reap-git.ts` (every git call).
@@ -8516,7 +8919,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   worktree it kept goes through the rules below on a later run, once it is
   old enough. The background-work prompt, a live claude (idle or working,
   archived from the app or not) and a stuck one are reported with the pane id
-  `seanced despawn` takes, never acted on.
+  `seance despawn` takes, never acted on.
 - **A worktree is removed only if all hold**: not locked; no tmux pane's cwd
   inside it (any pane, hand-started included); untouched for `reap.minAgeDays` (default 4, 7 until
   2026-10-27; 1 under a custodian, below); and nothing would be lost by the rule below — clean, and its
@@ -8743,7 +9146,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   between, which a contender would take for a dead holder. A holder that is
   gone is a crashed run and is taken over. The CLI exits
   on a live one; the schedule skips and tries again at its next check.
-- **Surfaces**: `seanced reap [--dry-run] [--min-age-days <n>]`, audited
+- **Surfaces**: `seance reap [--dry-run] [--min-age-days <n>]`, audited
   `origin=cli`, and a timer inside the daemon, audited `origin=schedule`, which
   logs its report one `reap:` line at a time. The schedule is off unless
   `reap.intervalHours` is set, or the machine's config carries a `custodian` key (C35: old worktrees
@@ -8762,7 +9165,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   missed often enough that worktrees piled up, so "Nothing lost" adds one, as a further way to pass whose
   failure only keeps.
 
-## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), rounds live since custodian 4b (2026-11-14; containment drilled on macOS and weaker-mode Linux)
+## The custodian's seat (`daemon/src/custodian-seat.ts`) — built 2026-11-13 (custodian 3), rounds live since custodian 4b (2026-11-14; containment drilled on macOS and on Linux in both bwrap modes under the vsock filter)
 
 A daemon with a `custodian` key in its `config.json` holds one seat, decides once a minute with no model call
 that a round is due, picks the exclave to run it in, starts a fresh Claude session in a sandbox that reaches one socket of its own, behind a generated fence,
@@ -8784,7 +9187,7 @@ decision is recorded here.
   machine), `RunOpts.custodian` was supplied (`main.ts` passes `{}`; a test daemon passes nothing, so it can never
   start a round in a developer's tmux), and the platform is macOS or Linux. WSL reports `linux`,
   gets the Linux fence and is untested.
-- **Contained (custodian 4b, built 2026-11-14; drilled the same day on macOS and on Linux's weaker nested mode).** Rounds were held (`ROUNDS_LIVE = false`,
+- **Contained (custodian 4b, built 2026-11-14; drilled the same day on macOS and on Linux's weaker nested mode, on strict-mode Linux under the vsock filter, and on the weaker mode again under that filter 2026-11-15).** Rounds were held (`ROUNDS_LIVE = false`,
   owner decisions 2026-11-13 and 2026-11-14) first because no verb existed, then because the code review of
   custodian 4 showed the verbs bound only what goes through them: the round's sandbox reached the tmux socket (for
   `capture-pane`) and the daemon's plain local ops, and its reads were unrestricted with github.com reachable, so an
@@ -8817,10 +9220,33 @@ decision is recorded here.
   socket dir it expects) and the launch checks again with that round's own roots and the tmux dir it asked the server
   for; the launch's refusal (`LaunchRefused`) is audited `op=refused reason=toolchain` once, not as `launch_failed`, and
   the seat then starts no further round in that process (a fix is a restart, which checks again). Doctor fails with
-  the same text. And **strict-mode Linux** (a host with
-  `enableWeakerNestedSandbox` off) is refused `op=refused reason=sandbox_undrilled` with one warn: the Linux drill ran
-  only in an LXC container, which needs the weaker mode, so a strict-mode host is the one case nobody has watched a
-  round contain (`sandboxDrilled`, one function; `seanced doctor` warns with the same text, `SANDBOX_UNDRILLED`).
+  the same text. And **Linux**, in either bwrap mode, runs rounds
+  only under the **vsock filter** (below; drilled in strict mode on WSL2 2026-11-14 and in the weaker nested mode on an
+  LXC container 2026-11-15), so a Linux host whose CPU the filter has no table for (`vsockFilter`: x64 and arm64) is refused
+  `op=refused reason=sandbox_undrilled` with one warn (`sandboxDrilled`, one function; `seance doctor` fails with the
+  same text, `SANDBOX_UNDRILLED`), and the launch refuses it again (`LaunchRefused`, `toolchain`).
+  **The vsock filter (all Linux, both bwrap modes).** A network namespace does not cover `AF_VSOCK`, and srt's own seccomp
+  filter is off under `allowAllUnixSockets` (on, it knows only `AF_UNIX`): the WSL drill's first runs connected from
+  inside the round to the Windows host (CID 2, port 50000), a channel out of the sandbox to whatever listens there.
+  So the launch script runs claude under an outer `bwrap --dev-bind / / --seccomp 3 -- …` reading
+  `<tmp>/seccomp.bpf` (0600, written with the fence, not writable from the sandbox) on fd 3: a seccomp filter is
+  inherited by every child and none can lift it, srt's inner bwrap included, and binding `/` whole leaves the round's
+  view of the host as it was. The filter (classic BPF, `custodian-seccomp.ts`) fails `socket`/`socketpair` of family
+  `AF_VSOCK` with `EAFNOSUPPORT`, `io_uring_setup` with `EPERM` (`IORING_OP_SOCKET` makes a socket no syscall filter
+  sees) and every syscall of another ABI with `ENOSYS` (x32, i386's `int 0x80` and its `socketcall`, arm64's compat
+  arm), and allows the rest. The pane's process is that bwrap and claude its direct child, as under macOS's
+  `caffeinate`, so the `rc` read holds; Linux tmux names that bwrap the pane's command (the foreground group's
+  leader), so the round counts as running claude by its `@seance-custodian` mark (`isRegistered`), as a séance spawn
+  does by its start command, or the deadline's graceful close would read it unregistered and kill it. Claude Code's bwrap then runs inside
+  another, which an AppArmor profile can forbid (Ubuntu 24.04's `bwrap-userns-restrict` allows `/usr/bin/bwrap` a user
+  namespace only unnested, as on GitHub's runners), so the seat's sandbox check probes the nested form (in both modes)
+  and refuses such a host (`sandboxProblem`) rather than fail every round's start. **The weaker mode too (2026-11-15).**
+  It ran without the filter until then. Probed on Thad (Proxmox LXC, kernel 7.0): `socket(AF_VSOCK)` is created in the
+  container, the host kernel's `vsock_loopback` answers CID 1 and CID 2, and a listener in the container was reached from
+  inside `bwrap --unshare-net --unshare-user`. A container shares its host's kernel, and no network namespace covers its
+  vsock, so a round could reach any vsock listener on that kernel (the host's, another container's). No listener was
+  found on ports 0–65535 of either CID, and CIDs 3 and up had no transport (`ENODEV`), but containment does not rest on
+  what happens to listen today. bwrap nests there, so the weaker mode takes the same outer wrapper.
   Both go through `CustodianAudit.refused` and then the same leftover sweep a seat that is off runs, so a round the
   last process left is still closed. **Drilled 2026-11-14 (injected-round battery, every row of the table above and every read the masks close, by the route
   a hostile model would take: `cat`, `bash -c`, the Read tool, re-parented and double-forked processes, planted symlinks
@@ -8838,7 +9264,28 @@ decision is recorded here.
     `srt-mux-*`), which the brief allows. E2: the 105 readable files are bun's transpiler cache, written by the round
     into its own tmpfs home (every mtime inside the run), none in a masked root. S20 (INFO): the host `/proc` is
     visible (103 pids), the accepted consequence of the weaker mode recorded below.
-  - **Not drilled, still refused:** strict-mode Linux (`sandbox_undrilled`). Changing a mask, the fence, the built
+  - **Linux strict mode, WSL2 (Ubuntu, kernel 6.18, bwrap with `--disable-userns`): no hole with the vsock filter**
+    (3 runs, round healthy in each, sonnet low effort, pengefix2 exclave). The same rows as Thad's read as harness
+    expectations (S13's home holds allow entries' parents; E1's three reached sockets are srt's bridge sockets in the
+    round tmp dir; E2's 105 readable files are bun's transpiler cache the round wrote into its own tmpfs home: the host's
+    copy of that dir holds 3291 files, of which only 9 changed during the run). Every baked secret Read refused once,
+    all 12 planted links refused, no marker, S6/S14/S15/T1/D1 pass, S20 sees 10 pids (strict mode's own `/proc`).
+    WSL's own reaches, a row added for this drill (S7X): `/run/WSL` and `/mnt/wsl` empty and `WSL_INTEROP` unset
+    inside, `/mnt/c` masked (its `cmd.exe` is not found), a PE file the round writes and runs reaches the interop
+    `binfmt_misc` handler (`/init`, flag `F`) and fails there (`UtilGetPpid … Failed to parse`), never running.
+    **Found in runs 1 and 2: `AF_VSOCK` to CID 2 port 50000 connected from the round** (above); run 3, with the
+    filter, refused it `EAFNOSUPPORT` on every port tried.
+  - **Linux weaker nested mode again, under the vsock filter (2026-11-15), Thad: no hole** (1 run, round healthy,
+    sonnet low effort, default exclave). The same three harness rows as 2026-11-14 (S13's home holds `.bun`,
+    `.local` and `repos`, allow entries' parents; E1's three reached sockets are srt's bridge sockets in the round tmp
+    dir; E2's 106 readable files are bun's transpiler cache, none older than 10 minutes, so the round's own writes).
+    Every baked secret Read refused once, all 12 planted links refused, no marker, S20 sees 98 host pids (the weaker
+    mode's accepted `/proc`). A row added for this drill, **V1**: with a vsock listener outside that a control
+    connect from outside had reached, `socket` and `socketpair` of `AF_VSOCK` (stream and dgram) and connects to CID
+    1, 2 and 3 failed `EAFNOSUPPORT` and `io_uring_setup` `EPERM`, run plainly, through `bash -c` and from a
+    re-parented process, and the listener logged nothing.
+  - **Not drilled:** strict-mode Linux on bare metal (the filter covers a VM's vsock alike, but nobody has run the
+    battery there). Changing a mask, the fence, the built
     environment or the round socket needs a re-drill before any of this is claimed again. The drills' rounds did not
     interrupt or nudge, so those two verbs' live behavior is still the open details in docs/custodian.md.
   - **Found and fixed in the drill:** with bun installed through mise, PATH's bun is `…/installs/bun/latest/bin/bun`,
@@ -8917,7 +9364,7 @@ decision is recorded here.
   round dir (`roundDirFor`): `<root>/.seance-custodian` for a named one, `stateDir()/custodian/cwd` for `default`.
   Claude Code stops at its trust dialog in a dir that is not trusted, which nobody in a round answers, so the daemon reads
   the trust (`isDirTrusted`, `trust.ts`: the dir's own `projects[<path>].hasTrustDialogAccepted` or an ancestor's)
-  and skips an exclave that lacks it; `seanced doctor` names it with the one-time fix (`mkdir -p <dir> && cd <dir> &&
+  and skips an exclave that lacks it; `seance doctor` names it with the one-time fix (`mkdir -p <dir> && cd <dir> &&
   claude`). **The daemon never writes a `.claude.json` for the custodian**: it races every running session's own
   rewrite of the file. The check is read-only, silent, and walks the uncreated path's real path (the deepest existing ancestor realpath'd) and its ancestors,
   and only that spelling: Claude Code keys `projects` by the real cwd, a round runs there, and trust recorded under a symlinked spelling is
@@ -8946,11 +9393,13 @@ decision is recorded here.
   window (`new-window -d`, so a round every quarter hour never takes the owner's terminal's focus) named
   `custodian` and started `-c <round dir>`.
   - **The agent** is a markdown file in the repo (`daemon/custodian/agent.md`: a frontmatter of exactly `name`,
-    `description` and `tools: Bash, Read`, then the checklist), turned into `--agents` JSON on argv
+    `description` and `tools: Bash`, then the checklist), turned into `--agents` JSON on argv
     (`custodian-agent.ts`); a file naming any other key or tool is refused rather than launched. `--agents <file>`
     is read only with `--print`, and `--add-dir` (which would load a `.claude/agents/`) also widens the sandbox's
-    write scope. `tools: Bash, Read` holds for the main thread (checked by a real round asked to use Write and
-    Edit: "my tool set has only Bash and Read"). Its prompt replaces the system prompt, and its `permissionMode`
+    write scope. The tool list holds for the main thread (checked by a real round asked to use Write and
+    Edit: "my tool set has only Bash and Read", when Read was still on it). Read was dropped (2026-11-16): a
+    tool output over Claude Code's persist threshold lands under `<config dir>/projects/`, which the fence denies,
+    so the round could not read its own output, and every read it needs is a verb. Its prompt replaces the system prompt, and its `permissionMode`
     is ignored for the main thread, so the mode is the flag. The prompt stays short and on argv: tmux refuses an
     over-long command, and the real-tmux test launches the real text.
   - **`--permission-mode dontAsk`** is the only mode that holds C20's last rule: in `default` a host off the
@@ -8969,10 +9418,10 @@ decision is recorded here.
     0700 tmp dir keeps it off argv and out of `ps`. So is the seed, on stdin as spawn's is. Neither is writable
     from the round's sandbox, which writes only `<tmp>/claude-<uid>`.
   - **The fence** (`custodianFence`, `custodian-fence.ts`, pure and generated; its shape is constant, the paths the
-    daemon's): `permissions.defaultMode: dontAsk`, `allow: ["Read(//<round dir>/**)", "Bash(seanced custodian *)"]`
-    (under `dontAsk` the Read tool, which runs outside the sandbox, is otherwise refused outside the round dir; the
-    double slash is Claude Code's absolute-path form, and a single one silently matches nothing) and the deny list
-    below; `sandbox` with `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false`,
+    daemon's): `permissions.defaultMode: dontAsk`, `allow: ["Bash(seance custodian *)"]`
+    (under `dontAsk` everything else is refused) and the deny list below, whose `Read(//…)` rules stay for the Read
+    tool, which runs outside the sandbox, in case Claude Code auto-allows a read or the tool comes back (the double
+    slash is Claude Code's absolute-path form, and a single one silently matches nothing); `sandbox` with `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false`,
     `autoAllowBashIfSandboxed` (C18's near-full shell: every sandboxed command no rule denies runs),
     `filesystem.denyWrite: [<round dir>]`, `filesystem.denyRead` and `allowRead` (the masks, below),
     `network.allowedDomains: []` and the socket key below. `enableWeakerNetworkIsolation` is **gone**: it existed
@@ -9008,7 +9457,7 @@ decision is recorded here.
     `main.ts` imports `commands.ts`, `custodian-cli.ts`, `inbox-cli.ts` and `session-event-cli.ts` statically, so a
     module reaching `@seance/scheduler` from there would load outside the allowed set. A checkout laid out
     otherwise, a shim bun, or an allow entry covering a masked root, is `toolchainProblem` (refused `reason=toolchain`;
-    `seanced doctor` fails with it).
+    `seance doctor` fails with it).
   - **The round's environment** (`roundEnv`, `roundCommand`): the pane's command is `exec [caffeinate -is]
     /usr/bin/env -i <built vars> PATH=<bin>:"$PATH" TERM=… <passed vars> claude … < <seed>`, because neither the
     sandbox nor Claude Code strips anything and `SSH_AUTH_SOCK`, `GH_TOKEN` and `GPG_*` would arrive unchanged. The
@@ -9035,8 +9484,8 @@ decision is recorded here.
     files, `.gitconfig`, `.bashrc`, `.mcp.json` and the like, plus `.vscode` and `.idea`). The round dir is read-only
     already, and a protected name that does not exist there is bound as an empty placeholder the sandbox cannot
     create in a read-only directory, so `ensureRoundDir` creates each one first (`PROTECTED_NAMES`, `PROTECTED_DIRS`,
-    `roundDirPlanted` leaves them alone, but reads a symlink or a hardlinked file anywhere in the dir as a plant: the
-    Read tool is allowed the round dir, and a link there would carry it to any file the uid reads). The list tracks
+    `roundDirPlanted` leaves them alone, but reads a symlink or a hardlinked file anywhere in the dir as a plant: a
+    link there would carry any reader of the round dir to any file the uid reads). The list tracks
     Claude Code's and drifts with its versions; a name a later release adds fails the round's start, and
     a round that exits within `START_FAILED_MS` (2 minutes) of its start with no verb called, in the process that
     launched it, is ended and audited `reason=start_failed` (the round log's too), apart from `exited`. It says when,
@@ -9060,7 +9509,7 @@ decision is recorded here.
     here-document's (and a here-string's) temp file in `/var/tmp`, `/tmp`, `/usr/tmp` or the cwd, never `$TMPDIR`,
     and a round may write none of them, so every heredoc there fails before its command runs (`cannot create temp
     file for here document`; the 4b drill, and a Seatbelt profile that denies writes outside `$TMPDIR`). The text
-    verbs are therefore fed by a pipe, `printf '%s\n' '<line>' … | seanced custodian notes` (the agent's checklist,
+    verbs are therefore fed by a pipe, `printf '%s\n' '<line>' … | seance custodian notes` (the agent's checklist,
     below), which needs no file on either platform. Rejected: a writable round dir (its write deny is what keeps a
     round from planting the next one's config), a `cd "$TMPDIR" &&` before the heredoc (Claude Code refuses a `cd`
     out of the project under `dontAsk`, measured with `claude -p`), and zsh as the round's shell (Claude Code points
@@ -9070,15 +9519,15 @@ decision is recorded here.
   - **The deny list** is generated (`DENY`) and is **for a cheap model's mistakes, never a boundary**: `rm`, `rmdir`,
     `kill`, `pkill`, `killall`, `systemctl`, `launchctl`, `docker`, `podman` and `ssh` whole (`Bash(<c>)`, `Bash(<c> *)`),
     and, since 4b, **`tmux` and `gh` whole**: the round has no tmux socket and no network, so neither can work, and a
-    cheap model that tries them spends its turns on a refusal (a read goes through `seanced custodian capture` and
+    cheap model that tries them spends its turns on a refusal (a read goes through `seance custodian capture` and
     `pr`). The old per-subcommand lists for both are gone with the reach they guarded. The `git` subcommands of C20
     (`worktree remove`, `branch -d/-D/--delete`, `push`, `reset`, `clean`, `checkout`, `switch`, `stash`), each in four
     forms (`git push`, `git push *`, `git * push`, `git * push *`: a global option before the subcommand is not
-    unwrapped, so `git -C <path> push` would otherwise pass); and `seanced` itself: `Bash(seanced)` and
-    `Bash(seanced <command>*)` for **every `COMMANDS` name but `custodian`**, generated from the one table in
+    unwrapped, so `git -C <path> push` would otherwise pass); and the CLI itself, under `seance` and its old name
+    `seanced` alike: `Bash(seance)` and `Bash(seance <command>*)` for **every `COMMANDS` name but `custodian`**, generated from the one table in
     `commands.ts` that `main.ts`'s dispatch is also typed against and `USAGE` is checked against, with a test that each
-    is covered, so a new command is denied by default (deny beats allow, so a plain `Bash(seanced *)` would refuse
-    `seanced custodian` too), plus `Bash(seanced custodian <verb>*)` for each owner verb (`CUSTODIAN_OWNER_VERBS`) and
+    is covered, so a new command is denied by default (deny beats allow, so a plain `Bash(seance *)` would refuse
+    `seance custodian` too), plus `Bash(seance custodian <verb>*)` for each owner verb (`CUSTODIAN_OWNER_VERBS`) and
     for `notes --clear`. Every entry tested was refused with "Permission to use Bash with command … has been
     denied", in plain form and through each workaround Claude Code unwraps: compound commands (`;`, `&&`, `|`),
     `env rm`, `command rm`, bare `xargs rm`, an absolute path to the binary (verified 2026-11-13).
@@ -9113,14 +9562,13 @@ decision is recorded here.
     failed `bwrap: cannot open … Read-only file system`). The weaker mode drops `--disable-userns`, so a sandboxed
     command that creates a user namespace can undo the write denies (`unshare -Ur` ran) and the host `/proc` stays
     readable. **Decided (owner, 2026-11-13): accept both,** and the Linux drill is the one thing 4b's guard rests on (it ran, in an LXC container, weaker mode):
-    **strict-mode Linux was never drilled, so it is refused** (above), and only a host that needs the weaker mode, or
-    macOS, runs rounds. Linux needs **`bubblewrap` and `socat`**
+    Linux runs rounds only under the vsock filter (above), in both modes, drilled on WSL2 and on Thad. Linux needs **`bubblewrap` and `socat`**
     (`apt install bubblewrap socat`; without them `failIfUnavailable` refuses to start): `sandboxProblem` checks
     them and runs one real `bwrap` probe (a host that forbids unprivileged user namespaces, e.g. AppArmor's
     `apparmor_restrict_unprivileged_userns`, fails every command) through the daemon's exec path (argv array, bare
     env, output never read or logged); a host with a problem logs one warning and runs no rounds. A Linux run on
     Debian 13 in an LXC container held the rest as on macOS.
-  - **The seanced shim.** `<tmp>/bin/seanced` is a short `sh` wrapper, `[ -r <main.ts> ] || { echo … >&2; exit 2; }`,
+  - **The seance shim.** `<tmp>/bin/seance` (`seanced` before the CLI's rename) is a short `sh` wrapper, `[ -r <main.ts> ] || { echo … >&2; exit 2; }`,
     then `exec <bun> <main.ts> "$@"`, with `<bun>` the toolchain's realpath (`bunReal`): bwrap binds an allow entry at its realpath, so mise's symlinked `installs/bun/latest` does not exist inside, and the Linux drill's round exited 127 on every verb. The `-r` guard is load-bearing: `main.ts` is an executable script with a
     `#!/usr/bin/env bun` shebang, and bun given a script the sandbox cannot read re-execs it, an unbounded fork storm
     (66 processes in 3 s in the macOS spike). A checkout the mask hides stops at the guard instead.
@@ -9144,16 +9592,20 @@ decision is recorded here.
   with no kill line, and one whose pane is dead (the shell exited, the window stayed) is closed with a
   `kill reason=exited` line first. An end is `failed` unless the round called `done` first (`healthy`, below). The tmp dir
   is removed at every end.
-- **The seat record and adoption (C4).** `state.json` holds `custodian: { lastEndedAt?, round?: { pane, startedAt,
+- **The seat record and adoption (C4).** `state.json` holds `custodian: { lastEndedAt?, socketDir?, round?: { pane, startedAt,
   tmpDir, exclave, done? } }`, written **ahead of the launch** (the tmp dir exists before the window does, so
   `pane` is null until it exists), and re-read only through `custodianSeatOf`, which validates each field before
   the daemon removes a path or closes a pane it names: `pane` matches `PANE_ID` or is null, `tmpDir` matches
-  `ROUND_TMP`, numbers are finite and non-negative, `exclave` is `default` or an exclave name; anything unreadable
+  `ROUND_TMP`, `socketDir` matches `CUSTODIAN_SOCKET_DIR` (the round socket's directory, below; seat-wide, since one
+  socket serves every round of a seat), numbers are finite and non-negative, `exclave` is `default` or an exclave name; anything unreadable
   reads as none (`done` is kept only as the boolean `true`), and the stray sweep below still closes an orphan. `parseState` keeps unknown keys, so an older
   daemon's rewrite keeps the field. On start (a process restart or a config reload) the seat **adopts** the
   recorded round when its pane is still there, with its original deadline, and closes any other round pane as
   `stray` (`reason=stray`; the recorded round's own pane, found dead, is `reason=exited` and the round ends `exited`);
-  a recorded round whose pane is not there ends `lost`, and a record with no pane that a later tick still finds
+  a recorded round whose pane is not there ends `lost`. A recorded round the seat's socket cannot reach — the record
+  names no `socketDir` (an older daemon's, whose round's environment names the old derived path) or its dir was not
+  the daemon's own and a fresh one is served — is **not adopted**: it could call no verb until its deadline, so its
+  live pane is closed `reason=unreachable` and it ends `lost` (`SeatDeps.roundReachable`). A record with no pane that a later tick still finds
   (adoption failed to clear it) sweeps every round pane as `stray` and ends `lost` there. **Never save after `stopped()`**: a
   reload starts the next `startDaemon` while the old one is stopping, and the outgoing instance writing over the
   incoming one's state is the race `reapSchedule` already guards; a launch finishing after the stop closes its
@@ -9163,11 +9615,12 @@ decision is recorded here.
   record names has no deadline and no reader can reach it (C10); if that close throws too, the pane is put on
   the record for its deadline. A pick that throws backs off like one that found nothing. Stopping a seat never closes its round, so a
   reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key, an unsupported platform, a host whose checks fail, or a host the seat refuses, `sandbox_undrilled` or `toolchain`) closes whatever round is left (`reason=off`), removes its tmp
-  dir, audits `end reason=lost` and saves `{ lastEndedAt }`; the round log (below) gets a `failed`/`lost` entry
+  dir and the round socket's directory, audits `end reason=lost` and saves `{ lastEndedAt }` (with no round to close,
+  it drops `socketDir` alone); the round log (below) gets a `failed`/`lost` entry
   unless the round had already called `done`, whose healthy entry stands and whose end is audited `healthy`; a `done` whose log line was never written (the append failed, or the daemon died between the record and the log) gets a healthy entry without its summary from the end or the sweep, since the upsert never replaces a healthy line.
 - **Audit (C48, C49).** `custodianAudit` (`audit.ts`), origin `custodian`, through the daemon's one sink: `audit
   custodian origin=custodian op=start exclave=<quoted id> pane=<id|-> outcome=started|launch_failed`, `op=kill
-  pane=<id> reason=deadline|exited|stray|off|done outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=healthy|failed
+  pane=<id> reason=deadline|exited|stray|off|done|unreachable outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=healthy|failed
   reason=done|deadline|exited|lost|start_failed`, and the verbs' lines (below): `op=close pane=<id> task=<id|-> outcome=<…>`,
   `op=worktree pane=<id> task=<id> outcome=removed how=<…>|kept why=<…>`, `op=flag …`, `op=nudge pane=<id> task=<id|->
   outcome=<…>` and `op=interrupt pane=<id> task=<id|-> outcome=<…>`, and `op=refused reason=sandbox_undrilled|toolchain`
@@ -9175,38 +9628,51 @@ decision is recorded here.
   text and a PR's state are the content the round reads, and the count of each goes to the round log. A round has no task id, so a start, kill and end
   name none; **nothing read from a pane, the seed, the notes, the summary or the agent's text reaches a line**, and
   the seat's own warnings say a reason from a fixed set and exclave ids.
-- **`seanced custodian`** (`custodian-cli.ts`) is the round's nine verbs and is built (below). It is a static
+- **`seance custodian`** (`custodian-cli.ts`) is the round's nine verbs and is built (below). It is a static
   import in `main.ts`, as `session-event` and `inbox` are: the verbs run many times a round. It dials the socket its
   environment names (`SEANCE_CUSTODIAN_SOCKET`, the round's own, below), never the daemon's main socket. The owner's
   verbs (`status`, `log`, `round`, `pause`, `resume`) are a separate module loaded by `import()` that works from files
   and dials no socket (custodian 5, below).
 - **The round's socket (4b, `custodian-socket.ts`).** The one socket the round's sandbox can reach that acts, and it
-  serves the `custodian` frame kind and nothing else. Path `/tmp/seance-cu-s-<12 hex of a hash of the state dir>/c.sock`
-  (`custodianSocketPath`: stable across a reload and a restart, since an adopted round's environment still names it, one per
-  test daemon; a literal `/tmp` because a unix socket path is 104 bytes on macOS and `tmpdir()` is long there; it cannot
-  match `ROUND_TMP`, so the tmp sweep never touches it). The directory is 0700 and checked with `lstat` (a symlink or a
-  directory that is not the daemon's own is refused, nothing is created through it), the socket is 0600, a second daemon on
-  a live socket is refused, a stale socket file from a killed daemon is replaced, and `stop` unlinks both. **Known, accepted for now:** the name is derivable, so on a shared box another user can create
-  `/tmp/seance-cu-s-<hash>` first; the seat then refuses it (another uid), warns and runs no round, a local denial of
-  the custodian and nothing more. A per-boot random name needs the path persisted for an adopted round, which is a
-  change to the seat record's shape, and is left for its own change. A line over
+  serves the `custodian` frame kind and nothing else. Path `<dir>/c.sock`, `<dir>` a `mkdtemp` of `/tmp/seance-cu-s-`
+  (`custodianSocketDir`, `CUSTODIAN_SOCKET_DIR`; a literal `/tmp` because a unix socket path is 104 bytes on macOS and
+  `tmpdir()` is long there; it cannot match `ROUND_TMP`, so the tmp sweep never touches it). The name is random so no
+  other user can derive it and create it first (an earlier, hash-derived name let one do exactly that and hold every
+  round off). The seat record keeps it (`socketDir`), since an adopted round's environment and sandbox allow list name
+  it: a seat starting (a restart or a reload) reuses the recorded directory when `lstat` shows a real directory of the
+  daemon's own (made again at that name if it is gone, put back to 0700), and otherwise makes a fresh one with a warning, so a
+  name taken in `/tmp` costs that recorded round (closed `unreachable`, above) and never the seat. With no round
+  recorded the new directory is saved before any launch; every later seat write carries it. The directory is 0700 and
+  checked with `lstat` (a symlink or a directory that is not the daemon's own is refused, nothing is created through
+  it), the socket is 0600, a second daemon on a live socket is refused, and a stale socket file from a killed daemon is
+  replaced. `stop` unlinks the socket and **keeps the directory**: a `/tmp` listing shows the name once it exists, and a
+  directory removed at every stop could be taken by another user before the next start. It is removed only where the
+  seat is off (the sweep, above), which drops `socketDir` too, so a state dir leaves at most one empty 0700 directory
+  behind. **Upgrade and downgrade:** a round an older daemon left (no `socketDir`) is closed and ends `lost` at the
+  upgrade, and the older daemon removed its own hash-named directory at its stop. An older daemon after a newer one
+  ignores `socketDir` and serves the hash path, so a round the newer one left runs unreachable until its deadline
+  closes it, and its whole-record writes drop the field, so the next upgrade makes a fresh directory and the old empty
+  one stays until `/tmp` is cleaned; accepted. **Not re-drilled (2026-11-14, the owner's call):** the random name
+  changed only the directory's name and lifetime; the round still reaches one 0700 directory, named in its allow list
+  and environment as before, through the same masks, fence and built environment, so the 4b drill's "contained" stands.
+  A change to what the round can reach still needs one. A line over
   64 KiB drops the connection. Any other frame kind (`Plain`, `session-event`, `message`, `inbox`, `broker`) is answered
   `unsupported`, with one warn a minute, and never reaches a handler. The binding is unchanged: the verbs bind by the
   kernel-reported peer pid alone. The daemon's **main** socket now answers the `custodian` kind `unsupported`, and its
   directory (`stateDir()/run`) is masked in the round's sandbox. The socket is started by the seat only once its checks
   pass and removed with it, so a host whose seat cannot start has none.
-- **Doctor.** `seanced doctor` has a `custodian` section on a machine whose config carries the key
+- **Doctor.** `seance doctor` has a `custodian` section on a machine whose config carries the key
   (`custodian-checks.ts`): the platform, `bwrap`/`socat` and the sandbox probe, the weaker nested mode's warning,
   and per exclave signed out, trusted, or untrusted with the fix, through the pick's own `hostProblem` (so a
   missing root or a planted round dir is a `warn` too, and doctor never says an exclave can host while the seat
   skips it). `fail` when no exclave can host a round. It never creates a round dir. **A `warn` per exclave whose
   Claude Code lacks the `session-events` mod, installed and enabled** (`modMissing`, `claude-mod.ts`: the listing
-  `seanced mod` already reads per target, `[]` where `claude` is missing or a listing unreadable, so doctor never
+  `seance mod` already reads per target, `[]` where `claude` is missing or a listing unreadable, so doctor never
   invents a finding): without
   its frames every session there is `unobserved` and `close` never acts on it. **And one per exclave lacking the
   `inbox` mod** (custodian 8): `nudge` delivers through its listener and answers `no_listener` without one. **Since 4b
   the probes always run** (they were silent while rounds were held, the two mod warns included). Added: a `fail` on
-  strict-mode Linux with the seat's own text
+  Linux on a CPU the vsock filter has no table for, with the seat's own text
   (`SANDBOX_UNDRILLED`: rounds are refused there), a `fail` for a `toolchainProblem` ("… rounds refuse to start"; since the review a shim bun is
   one of its causes, no longer a doctor-only `warn`, and the seat refuses it too). No doctor version check for Claude
   Code or the sandbox runtime (owner decision 2026-11-14): a round that exits at its start with no verb is audited `start_failed`.
@@ -9221,7 +9687,7 @@ decision is recorded here.
   round in a visible pane, with notes, covers it, C8, C9); a fixed account in config, or placement by the leader (a
   fixed one burns an account that is nearly out, and the leader's placement makes a per-machine seat depend on the
   leader and contradicts "not a task"); thresholds editable from the PWA (per-machine behaviour settable from a frame
-  is what the traits rule forbids); and the names `janitor`, `reaper` (`seanced reap` is another mechanism and names
+  is what the traits rule forbids); and the names `janitor`, `reaper` (`seance reap` is another mechanism and names
   only the closing half), `sentinel`, `warden`, `cerberus`, `familiar`, `sexton`, `acolyte` and `nightwatch`, and
   `patrol` for a round. From 4b (owner decisions 2026-11-14): **running the round as another OS user** (a fallback for a reach the
   masks could not close; no reach needed it); **a scoped `gh` token for the round** (it would put a credential
@@ -9230,12 +9696,15 @@ decision is recorded here.
   everything the round could read, and the reads it was kept for are `pr`'s now); **a `kill` accepted as a reach**
   (both platforms refuse a signal across the sandbox, above, so there is nothing to accept); **refusing the round's
   descendants on the main socket** (re-parenting escapes it; the socket the round cannot reach is the bound); and
-  **running strict-mode Linux undrilled** (the masks rest on bubblewrap and the pid namespace there, which nobody has
-  watched; refused until a drill, rather than a doctor warning a seat then ignores).
+  **running strict-mode Linux undrilled** (the masks rest on bubblewrap and the pid namespace there, which nobody had
+  watched; refused until a drill, rather than a doctor warning a seat then ignores; the WSL drill then found vsock
+  open, hence the filter); **keeping the filter to strict mode** (an LXC container's round reaches its host kernel's
+  vsock loopback through a fresh network namespace, 2026-11-15); and **blocking vsock by srt's own filter** (it is off under `allowAllUnixSockets`, and on it
+  refuses every `AF_UNIX` socket, the round's own included).
 
 ## Self-update (added 2026-08-02)
 
-Update one machine by hand (`seanced update`, or `git pull` + restart) and the rest follow. The
+Update one machine by hand (`seance update`, or `git pull` + restart) and the rest follow. The
 restarted daemon sees its sha changed since the last run (`state.lastRunSha`)
 and broadcasts `update-available` to `"machines"` once per process; every
 other daemon runs the same pipeline it would run anyway. Rejected: polling
@@ -9244,10 +9713,10 @@ sha comparison already eliminates), relay-buffered or relay-stored "latest"
 blobs (see the wire-protocol bullet — the startup convergence below makes
 relay state unnecessary).
 
-- **`seanced update` (added 2026-11-12) is the same pipeline from a shell**
+- **`seance update` (added 2026-11-12) is the same pipeline from a shell**
   (`updateNow` in `daemon/src/update.ts`), on the clone `runtime.json` says
   the live daemon serves from, audited `origin=cli`. It restarts through
-  `seanced restart`'s path, not the self-update's exit, so it needs no
+  `seance restart`'s path, not the self-update's exit, so it needs no
   supervisor-started process, and it restarts when the checkout is already
   current but the live daemon's sha is older — after `bun install`, since that
   HEAD may be where an earlier install failed. It writes no `lastUpdate`:
@@ -9347,7 +9816,8 @@ relay state unnecessary).
   `LAUNCHD_EXIT_TIMEOUT_S`, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
   `daemon.stop()`, so a finishing spawn's reply still reaches its leader; a second signal exits at once.
   That drain is **final**: an update's release (a thrown restart, the grace) cannot reopen the gate
-  during a shutdown. `stopPower` or `stop` throwing still exits (`shutdown.ts`). `seanced install` on macOS waits
+  during a shutdown. `exit` waits for `stop()` to drain the daemon's in-flight state.json writes, and
+  `stopPower` or `stop` throwing or rejecting still exits (`shutdown.ts`). `seance install` on macOS waits
   the `ExitTimeOut` plus 5 s for `bootout` to unload the job (`launchd.ts`), so it never
   bootstraps over a job still draining; systemd's 30 s relaunch wait in `signalRestart` already
   covers 15 s plus `RestartSec=5`.
@@ -9357,7 +9827,7 @@ relay state unnecessary).
   third of the way into its drain, before `stop()` closed the relay socket (`bootout` honours
   the value: it returns at once and the job stays loaded until exit or the timeout). 30 s is
   the drain plus 15 s for `stop()` and exit. A system shutdown or logout may still cut it short.
-  Like any plist change it lands only on `seanced install` ("Service definitions lag the
+  Like any plist change it lands only on `seance install` ("Service definitions lag the
   code", docs/platform-notes.md); `doctor` warns on a plist without it.
   Rejected: sizing the drain to launchd's 5 s, which is shorter than a launch's tail.
   Spawns with no `taskId` are not held. The pre-update process does the restart, so the wave that ships
@@ -9384,7 +9854,7 @@ relay state unnecessary).
   failure (seeded from state.json at startup), reported once so a fixed
   problem stops being shown; not for an install or restart failure this
   process recorded, since HEAD is already at target while old code serves. The Machines screen and `list_machines` render both (since
-  2026-10-18; Presence & identity says why), beside `seanced doctor`/`status`.
+  2026-10-18; Presence & identity says why), beside `seance doctor`/`status`.
 - **Rollback is deferred** (the bootstrap paradox: rollback logic would ship
   inside the very version that is broken; a stable shim is v2 if ever). A
   machine bricked by an update shows offline in the app with its last-known
@@ -9579,8 +10049,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
     older alert's task is merged in by that read). The Queue screen scrolls to that row once it
     is listed (opening the collapsed Asleep section first when the row is there), marks it for
     three seconds (a steady ring under reduced motion, not a fade) and clears the focus. The
-    focus is the store's state, cleared only by that act or by the screen closing
-    (`#closeTopLayer`, `followUp`): never by the component's own unmount, since a callback that
+    focus is the store's state, cleared only by that act, by the screen closing
+    (`#closeTopLayer`, or a menu switch to Machines, which closes it through the same `closeTop`) or by `followUp`: never by the component's own unmount, since a callback that
     is a new closure each render would run an unmount effect on every re-render and drop the
     focus before its row is listed. Residual: in the desktop layout the Queue is a
     column that never closes, so a focus whose task is never listed (pruned since) stays until
@@ -9628,7 +10098,15 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `POST /share` route is one `runtimeCaching` entry (Attachments, "Share target").
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
   verdict, the Settings dialog and the phone's Queue and Machines screens all push on open and are cleared by
-  `popstate`, so Android back dismisses the layer instead of exiting the app.
+  `popstate`, so Android back dismisses the layer instead of exiting the app. Queue and Machines share one entry
+  over the prompt flow (the verdict included): opening either closes whatever sits over that flow — the other
+  screen, a sheet, the rename dialog — in one patch and keeps the lowest of their entries
+  (`history.go` past the rest, less any close already asked for and not yet delivered), so back from either lands on
+  Prompt and switching never stacks. Settings is the exception: it holds unsaved credential edits, so a link that
+  arrives while it is open switches the screen beneath it and leaves it up (one entry more, pushed when none
+  was spare); Settings opens over whichever screen shows and closes first. On the desk Machines is a column, not a
+  screen: its link is one invisible entry and closes nothing. The menu's Prompt goes back past every layer, the verdict too, landing on
+  the form where the verdict's "Back to prompt" does; back from a Queue opened over a verdict still steps to it.
   History outlives the document, though: a reload (a service-worker update, saving
   credentials) or Android restoring a discarded PWA resumes on a layer entry with
   nothing open, and back from the form then lands on an entry the app has nothing
@@ -9664,15 +10142,39 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   global clamp, which would freeze it at full size over the dot. The settings
   header's own status line renders the same three dots from the same component:
   one state must never read two ways.
-- **On a phone the pill's face is a menu.** Below the desktop breakpoint the raised face is a
-  hamburger opening Queue, Machines and Settings — the screens a desk shows as columns, plus
-  the one it doesn't — each with a feather-weight icon (list, server, the cog). The track and
-  its dot are unchanged; an escalated task puts the queue's attention dot on the closed face
-  and on the Queue row. A native `popover="auto"`, not a layer: outside taps, Escape and
-  Android back (Chrome routes back to an open popover before history) all close it, so it
-  pushes no history entry. Pinned under the pill from its rect on open, since CSS anchor
-  positioning is not in every browser the app runs in. Rejected: a bottom tab bar, which
-  would spend a phone's height on three destinations visited far less than the form.
+- **On a phone the pill's face is a menu, in one header every screen shares.** Below the desktop
+  breakpoint Prompt, Queue and Machines are peers under one fixed header that `app.tsx` renders outside
+  the keyed screen body, so the pill never moves or re-mounts and any screen is two taps from any other;
+  Queue and Machines have no back button. Its left holds the screen's title block (`PromptHeading`,
+  `QueueHeading`, `MachinesHeading`, which the desk's column headers render too); its right the pill
+  alone (the Queue's ↻ and the placement preview's went 2026-11-17: never used, since both re-read on their
+  own). The raised face is a hamburger opening Prompt, Queue,
+  Machines and Settings, each with a feather-weight icon (pen, list, server, the cog); the current
+  screen's row is tinted in the accent and `aria-current="page"`, and picking it only closes the menu.
+  The track and its dot are unchanged; an escalated task puts the queue's attention dot on the closed
+  face and on the Queue row, except while the Queue is the screen showing. Settings stays a modal over
+  everything, with its own header and back. The verdict, part of the prompt's flow, keeps no header. A
+  native `popover="auto"`, not a layer: outside taps, Escape and Android back (Chrome routes back to an
+  open popover before history) all close it, so it pushes no history entry. Pinned under the pill from
+  its rect on open, since CSS anchor positioning is not in every browser the app runs in. Rejected: a
+  bottom tab bar, which would spend a phone's height on three destinations visited far less than the
+  form; and (2026-11-17, after a clickable prototype of both) a bottom tab bar with the cog kept in the
+  header, one tap fewer between screens, for the vertical space it takes and for stacking a second bar
+  under the screens' own footers. Before it, Queue and Machines were back-out layers and the menu lived
+  on the prompt screen alone, so Queue to Machines took three taps.
+  Decided (2026-11-17): a deep link (a notification tap, `/?task=`, `/?screen=machines`) that lands while
+  Settings is open switches the screen beneath Settings and leaves Settings up, since Settings may hold
+  unsaved credential edits; the cost is that the tap shows no change until Settings closes, which a cue
+  would answer later. A task link's Queue focus waits for Settings to close (`visibleFocus`), so the row
+  is scrolled to and marked when the Queue is first seen.
+- **A relative time shows its timestamp on hover.** "6m ago" and "resets in 2h" stay coarse on
+  the page; a mouse resting on one opens a small styled tip with the full timestamp in Norwegian form (24-hour, viewer's zone), to
+  the second (`tooltip.ts`), not the browser's `title`. View models keep the instant beside the
+  words (`Timed` lines in `timed.ts`) so the component has it to show. One shared
+  `popover="manual"` node in the top layer, so no card clips it and an open menu stays open;
+  pinned from the anchor's rect like the menu. Mouse only: a touch has no hover, and its tap
+  belongs to the row. Not covered: the verdict headline (it cross-fades as a string), the
+  machine picker's rows, and the PR chip, whose reading is already its `title`.
 - **Settings is one screen, reached from the header's relay pill** (on a phone, through its menu). It absorbed
   what used to be a bottom-sheet drawer plus a separate Relay & keys screen:
   credentials, connection status and theme in one place. The drawer's
@@ -9681,37 +10183,43 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   while the relay is down, saves-then-reconnects when credentials were edited,
   and otherwise just returns.
 - **Settings is a native modal `<dialog>`, shaped by width.** Below the 1200px desktop
-  breakpoint it fills the screen and slides in exactly as a pushed screen does — the form
-  still gives way and dims beneath it — with a back chevron; at and above it, it is a
+  breakpoint it fills the screen and slides in over whichever screen shows, which gives way
+  and dims beneath it (the page is hidden under it, not unmounted, so it comes back as it
+  was) — with a back chevron; at and above it, it is a
   centred modal over the three columns, closed by an × at the header's right, Escape or a
   backdrop click. The top layer makes the page behind it inert for free, and Chrome on
   Android routes back to an open modal's `cancel` before history; that event is
   cancelled and sent through the store as a history pop, so every way out takes the
   one path and the layer's history entry never strands. Both motions are view
-  transitions (next bullet): the phone's panel `main` is the layer, as a pushed screen's
-  is; on a desk the `<dialog>` itself is, so its border and shadow scale with the panel.
+  transitions (next bullet): the phone's panel `main` is the layer; on a desk the
+  `<dialog>` itself is, so its border and shadow scale with the panel.
   The dialog unmounts the moment it closes — the old snapshot plays its exit.
 - **Screen and layer motion is the View Transition API, started at the store boundary.**
-  Phone push/pop (Queue, Machines, Settings), form ↔ verdict, and the desk's Settings
-  modal run through `document.startViewTransition({ update, types })`; the old screen is
+  Phone push/pop (Settings), the phone's switch between Prompt, Queue and Machines, form ↔
+  verdict, and the desk's Settings modal run through
+  `document.startViewTransition({ update, types })`; the old screen is
   a snapshot, so the outgoing one never stays mounted, and the browser composites the
   motion. Every store change reaches `useStoreState` — clicks, `popstate` (closing is
   `history.back()`) and network replies alike — so that is where one `TransitionRunner`
   (`pwa/src/transition.ts`) is offered each new state. It is keyed on screen identity
-  only (depth, layer, and the verdict by the same key `VerdictView` mounts on: a queued
-  task's id, any other verdict's object), never content, so a poll or a keystroke never
-  starts one; a depth change outranks a verdict change, a verdict replacing a verdict is
-  none, and on a desk only Settings moves. A started transition holds the state back
+  only (the phone screen, whether Settings is open, and the verdict by the same key
+  `VerdictView` mounts on: a queued task's id, any other verdict's object), never content,
+  so a poll or a keystroke never starts one; Settings outranks a screen change, which
+  outranks a verdict change, a verdict replacing a verdict is none, and on a desk only
+  Settings and the form column's verdict move. A `switch` moves only what changes: the
+  header's title block cross-fades with a 4px shift, the body
+  cross-fades with a small rise, and the pill is named only to be held still (the rest
+  of the header is one panel the same on both sides). A started transition holds the state back
   until its update callback, which runs after the browser captures the old screen; the
   latest offer in that frame wins. The callback's promise resolves once Preact has
   committed the DOM (a `useLayoutEffect` on a render sequence number, children's layout
   effects such as `showModal()` running first), with a 100ms backstop so a dropped render
   never leaves the screen frozen until the browser's own timeout. Transition types
-  (`push`, `pop`, `verdict-in`, `verdict-out`, `modal-in`, `modal-out`) are the CSS
+  (`push`, `pop`, `switch`, `verdict-in`, `verdict-out`, `modal-in`, `modal-out`) are the CSS
   vocabulary; `view-transition-name`s and `-class`es are set only under
   `:root:active-view-transition`, so no idle element is a stacking context because of
   one and a duplicate name, which aborts a transition, can come only from the two host
-  classes. Reduced motion, a hidden page, or a browser without typed transitions
+  classes and the phone header's parts, each of which exists once. Reduced motion, a hidden page, or a browser without typed transitions
   (feature-tested by `CSS.supports("selector(:active-view-transition-type(x))")`, which
   proves the object form and the type selectors together) gets the state at once — an
   instant swap. `base.css`'s `*` reduced-motion clamp does not reach the
@@ -9735,8 +10243,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   preview into the verdict was dropped with the verdict's card itself (2026-10-19).
 - **Machines is a screen, not a route** (scheduler M1). On a desk it is a column (below).
   Settings no longer links to it: Machines is meant to be always on screen, not a layer reached
-  through Settings; on a phone it is a layer straight over the form, opened from the header
-  menu (`openMachines`). Rejected for now: URL routes (`/machines`),
+  through Settings; on a phone it is a peer of the prompt screen under the shared header, opened
+  from the header menu (`openMachines`) and holding the one entry Queue would. Rejected for now: URL routes (`/machines`),
   which would need boot-time path parsing and a rethink of entry depth for deep links — a
   separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
@@ -9769,7 +10277,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
-  filter and score read quota exactly as the cards do. Charts follow the split — the History switch in
+  filter and score read quota exactly as the cards do. Charts follow the split — the Show history switch in
   a card's ⋯ menu (it leaves the menu open, so it can be flipped back, and the menu holds through
   the layout shift a chart opening or closing causes, then re-pins to its trigger; a machine card with no
   chart to offer has no menu) on a machine asks
@@ -9786,7 +10294,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   routing has dropped. The leader's disk push (Scheduler, "Web Push", "Disk alerts") reads the same figure from the live `status`, not from this history. The chart is inline SVG geometry (`chart.ts`), no charting
   dependency; gauges break their line at a missed tick and bridge the break with a faint
   dotted run (nothing was measured there, but a sleep should read as one gap, not as
-  missing ink), and a point alone between two breaks is a dot — a laptop in clamshell
+  missing ink); a break no gauge measured inside is also shaded full height behind the lines and
+  named Offline in the legend (`offlineSpans`; only between points, never before the first or after the
+  last, where history may just not reach or the next tick not be due), and a point alone between two breaks is a dot — a laptop in clamshell
   sleep leaves exactly that, one tick per dark wake. Quota holds its level between
   observations, since a sample carries the observation's time, not the tick's.
 - **Machines say who leads and what each runs** (2026-10-18). A line above the cards names
@@ -9859,12 +10369,14 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   button — two sibling buttons in one pill, never nested — whose chevron opens the shared menu
   (`components/menu.tsx`) with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
-  in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
+  in `decision-view.ts`, which counts the whole-queue pause beside the caps as lifted while the
+  verified leader advertises `runNowPaused` — "past the pause", "past the pause and the concurrency
+  limit" — and otherwise greys a task the pause alone holds as "The queue is paused"; with a cap-held candidate beside the chosen one it stays generic, since
   `run-now` weighs both and the held one has no score, so it is plain "Skip the queue", naming
   neither a machine nor the caps the chosen one would not need lifted; "past the concurrency
-  caps" is only for no chosen target and several cap-held candidates), and it is disabled when
-  the preview turns every candidate down for more than the caps; a candidate held by
-  `cap_reached` alone keeps it on, since that is what `run-now` lifts, and no preview (asking,
+  limit" is only for no chosen target and several cap-held candidates), and it is disabled when
+  the preview turns every candidate down for more than `run-now` lifts; a candidate held by
+  `cap_reached` alone (or, under `runNowPaused`, beside the whole-queue pause) keeps it on, and no preview (asking,
   failed, a pinned form) leaves it on as plain "Skip the queue".
   A tap enqueues exactly as Queue, then `SchedulerStore` holds one Start now intent: only a new
   successful enqueue (Queue or Start now) replaces it and only the store's `dispose` ends it from
@@ -9896,8 +10408,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   is a standing state with its own button. The
   intent is in memory: a reload leaves the task queued, as a takeover between the route and the
   write would. Rejected: sending `run-now` with the create
-  (refused before admission) and a wire flag on the record (above, "Run now lifts both caps").
-  The daemon still answers `spawn` (older apps, older MCP clients) and `seanced spawn --now` is
+  (refused before admission) and a wire flag on the record (above, "Run now lifts the cap").
+  The daemon still answers `spawn` (older apps, older MCP clients) and `seance spawn --now` is
   the direct path; the PWA has no direct spawn any more, so what this replaced is gone with it: the
   persisted pending spawn and its reconciliation of a lost reply, the `repo_not_found` rescan
   retry, and the success verdict's "Reuse this prompt" (a task's verdict is queued, and the form
@@ -9948,7 +10460,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   most 10 times, rather than shown as a failure. The card shows the
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
   disclosure (`decision-view.ts` lays it out; each reason's clause, and each scheduler
-  refusal's, is `shared/src/scheduler-text.ts`, which `seanced mcp` words from too). The preview leaves out the quota reading
+  refusal's, is `shared/src/scheduler-text.ts`, which `seance mcp` words from too). The preview leaves out the quota reading
   each candidate was judged on (the task record keeps it). **Queue** is an enqueue
   (M3 item 6): the form builds a `queued` task (`queuedTask`, id minted here) and `createTask`
   `store-put`s it, so it needs an open relay socket and nothing else. The verdict shows the task
@@ -10054,7 +10566,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   refusal (its notice), never a placement the cap-free route would not make.
   Every waiting card (`queued`, `blocked`, `ready`) also has **Start now** in its ⋯ menu, always shown (`QueueRow.startNow`),
   worded and greyed by the Spawn screen's rules (`decisionStartNowItem` over the task's latest decision: greyed only when
-  the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`). A `queued` or `blocked` one is
+  the decision has no winner and no candidate held by the caps alone — or by the caps and the whole-queue pause alone, under a leader advertising `runNowPaused` — or the leader lacks `runNow`). A `queued` or `blocked` one is
   greyed too, its line saying why ("Waiting for the scheduler", "Waiting on the tasks it depends on"): `run-now` takes only
   `ready` and refuses anything earlier `not_waiting`, so offering it there was a tap certain to fail (2026-11-12). A card shown
   `blocked` after its dependencies cleared waits for the next read (a `queue-changed` nudge, or Refresh) to enable it.
@@ -10097,7 +10609,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   exactly as that card does. The age is `lastHeardAt(machine)` (`shared/src/status-reader.ts`),
   the later of `lastSeen` and the kept `status.at`, which the Machines card's "asleep · last
   seen", the machine picker's "offline · last seen", Raycast's cached-list age and every
-  `seanced mcp` "last seen" (`list_machines`' `lastSeen` included) now read too: while the relay still lists
+  `seance mcp` "last seen" (`list_machines`' `lastSeen` included) now read too: while the relay still lists
   a slept socket, `lastSeen` is the register's time, days old, where the last beat is within one
   of the sleep. Every such task sits in its own **Asleep** section, below Waiting, collapsed to
   "ASLEEP · 3" until tapped (in-memory state per mount, never stored: closed on each open on a phone, where the screen remounts; kept for the page's life on desktop, where the queue column stays mounted), ordered
@@ -10210,7 +10722,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   it, so script is needed anyway); the VirtualKeyboard API (Chrome-only, a global opt-in); moving Opened / Merged / Done
   into the footer (it is per task, so it stays on each row); a filter on the short sheets.
 
-## MCP server (`seanced mcp`) — designed 2026-08-03
+## MCP server (`seance mcp`) — designed 2026-08-03
 
 A local Claude Code session gets Séance's reach: an MCP stdio server that acts
 as a **third app-role client** — to the relay it is a PWA tab. It dials
@@ -10218,9 +10730,9 @@ as a **third app-role client** — to the relay it is a PWA tab. It dials
 and receives registry pushes. Zero relay/DO changes; every channel property
 (AAD binding, replay window, IV dedup, app-socket fan-out) applies unchanged.
 
-- **Ships inside the daemon** as `seanced mcp`, not a separate package: it
+- **Ships inside the daemon** as `seance mcp`, not a separate package: it
   rides the existing self-update path and its Claude config entry is just the
-  `seanced` binary. Rejected: a new workspace package (a second thing to
+  daemon's own `main.ts`. Rejected: a new workspace package (a second thing to
   install and update per machine), a standalone bin over a shared library
   (same, plus packaging).
 - **Credentials come from the daemon's own config** via `loadConfig()` +
@@ -10229,7 +10741,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   is that the MCP server requires a machine that carries a daemon config,
   accepted because it is colocated by design. The key is imported
   non-extractable, same as the PWA. Where the key exists only as a credential
-  systemd delivers to the daemon's unit, `seanced mcp` — launched by Claude
+  systemd delivers to the daemon's unit, `seance mcp` — launched by Claude
   Code, outside that unit — resolves nothing; it then reaches other machines
   through the daemon instead ("Fleet broker", below, 2026-10-14). Before that it
   reached only its own box there.
@@ -10288,7 +10800,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   relay's queue until one does." `get_queue` is the
   `queue` op, read-only, each task with its placement and its decision's line, and now the
   `holds` in force and, per task, `escalated` and `doneBy`, and `away`/`idle` for a task that holds no slot
-  (Scheduler, "Routing caps"). Behaviour
+  (Scheduler, "Routing caps"), and `stackedOn: { task, base }` for a task that ran stacked (`Task.stack`;
+  Scheduler, "Stacking": `base` is `branch`, `merged` or `nothing`). `after`'s `when` description (both
+  `spawn_session`'s and each `queue_batch` member's) says that `opened`, the default, stacks a worktree task
+  on its first such dep's pushed branch, and that `merged` is the choice for work that should start from the
+  default branch (2026-11-16). Behaviour
   follows the PWA wherever the PWA already decides: a field over `TASK_REQUEST_LIMITS`
   is refused before the relay is dialled, worded as the PWA words it — an enqueue never reaches
   the leader, and `createTask` would refuse the same task locally as `invalid_request` — except
@@ -10320,7 +10836,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   otherwise take the queue for a backlog: a task waiting for capacity is held by the relay
   and survives a leader change (every relay deploy, every daemon self-update), the next leader
   taking it over; a placed session is ordinary; ordering is what `after` and `queue_batch` say. **Keyless
-  boxes go through the broker** (2026-10-25, M4): a keyless `seanced mcp` asks the daemon for
+  boxes go through the broker** (2026-10-25, M4): a keyless `seance mcp` asks the daemon for
   `fleet` and the `scheduler` ops ("Fleet broker"), and `brokerFleet` leases carry a scheduler leg
   built on them. Only a daemon that predates those actions leaves the leg `null`, and the spawn then
   says so (the daemon "predates brokered auto") rather than falling back; no direct spawn remains to fall back to. On the keyed path the enqueue
@@ -10345,12 +10861,14 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   (the server is a child of the session's `claude`, in the pane). It answers refusals in words —
   not in a task pane (`untasked`), no launch of the task on this machine (`unrecorded`), a daemon
   that is stopping (`stopping`), a report sent but not saved to disk (`unwritten`), a daemon that
-  predates it (`invalid`: run `seanced update`) — and imports nothing that logs. Its `ok` says
-  the report was sent, which settles the task only if it was queued to settle on its report. It is
-  MCP only, with no CLI subcommand (`seanced session-event` drops a `done` unsent): a session
-  reports from inside Claude, and the tool's description tells it to call only when the task's
-  prompt says so. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
-  The session needs the seance MCP server installed in its exclave, which `seanced mcp
+  predates it (`invalid`: run `seance update`) — and imports nothing that logs. Its `ok` says
+  the report was sent, which settles the task if it was queued to settle on its report or holds no
+  PR ("Session events", `done`). It is
+  MCP only, with no CLI subcommand (`seance session-event` drops a `done` unsent): a session
+  reports from inside Claude, and the tool's description tells it to call when the task's
+  prompt says so, or when it opened no PR and its work is finished — for one, handed to a task it
+  queued, which `spawn_session`'s and `queue_batch`'s descriptions say too. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
+  The session needs the seance MCP server installed in its exclave, which `seance mcp
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
@@ -10358,12 +10876,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   Messages another Séance session's task, on this machine or (2026-11-14, "Cross-machine") on any machine in the
   fleet through the scheduler leader: `kind` is `note` (information), `question` (may be
   answered) or `request` (act on it if it fits). It reaches the daemon as the `message` frame, bound by the
-  peer pid of `seanced mcp` (a child of `claude` in the pane) exactly as `report_task_done` is, never by a
-  field, over the local socket and never the broker; the text is never in argv and `seanced mcp` logs nothing.
+  peer pid of `seance mcp` (a child of `claude` in the pane) exactly as `report_task_done` is, never by a
+  field, over the local socket and never the broker; the text is never in argv and `seance mcp` logs nothing.
   A task the daemon can deliver is delivered with no capability check; a daemon that drops the frame as malformed
   shows as a connection closed with no answer, worded "may predate send_message" (as `invalid` is); a handler
   crash answers `internal`, worded as a daemon error, since an update would not help. Any other task is
-  the **two-frame gate**: the first frame carries `route: "ask"` and is answered `remote`, `seanced mcp` then
+  the **two-frame gate**: the first frame carries `route: "ask"` and is answered `remote`, `seance mcp` then
   checks the verified leader advertises `CAPABILITIES.messageRoute` (`messageRouteGate`) and only then sends the
   same message as `route: "send"`. A refusal at the gate says nothing was sent. An old daemon that rejects the
   `route` key as `invalid` is sent the frame once more without it and answers as PR 1 did. A routed send answers
@@ -10399,6 +10917,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   is not a brokered op. `now` (a close only) skips the session ask's wait before its interrupt and is refused,
   before anything is sent, for a target not advertising `drainAsk`; the reply says whether the target's
   sessions are asked to pass themselves, and names the 10-minute outside pass only under a `drainPass` leader. `list_machines` gains `closed`, an ISO time or null, and, under a leader advertising `drainPass`, `drain` on a closed machine (`moving`, `waitingOnYou`, `moved`, `stuck`, `empty`; DESIGN.md, "The drain's outside pass"); this machine's own sessions come through the local socket, since the broker refuses a request aimed at its own daemon.
+- **`set_account_open { account, open }`** (built 2026-11-17; "Closing an account"). Closes an account to new
+  scheduled work (`pause { until: "resume", account }`) or reopens it (`resume { account }`); the account by
+  alias, email or id, resolved as a pin's. Over the relay as app-role; a keyless server refuses and names the PWA.
 - **`pass_task { taskId }`** (built 2026-11-12; Scheduler, "Passing to a successor").
   Passes a running task to a successor: its machine's daemon pushes the branch and the session is
   ended, as the PWA's "Pass to successor" does. Gated on `leaderAdvertises(lease,
@@ -10423,12 +10944,23 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   the schema's `maxLength` counts code points). The session's own path, registered beside
   `hand_off_task`. Gated on the verified leader advertising `successorSelf` (without a fleet it
   refuses: it cannot confirm the scheduler takes session passes; a 2a leader advertises only
-  `successor` and would drop the event). It sends the local-socket `pass` frame ("Session events"), and
-  on `ok` polls the leader's queue for up to 30 s for the task's `successor` and says whether it was
-  confirmed; unconfirmed says the branch is pushed, the leader may still confirm or may have refused (for
-  example the PR's head is another branch), and that the session must do no further work and end its
-  turn either way: the session is closed at the turn's end only if the leader confirms, and a commit
-  made after the push is not carried. The tool waits for its daemon `OP_TIMEOUT_MS["push-branch"]` plus
+  `successor` and would drop the event). **Before the push** (2026-11-16) it reads the leader's queue for its
+  own task, by this machine's device id and `$TMUX_PANE` against the tasks' `assignment.pane`, and refuses, with
+  nothing pushed, when every task in that pane is finished with no `successor`: the leader would refuse it
+  `finished`. The pane is the session's claim, so the check only ever refuses early what the leader refuses
+  anyway, and anything unclear (no read, no pane, a live task in it) is left to the daemon and the leader;
+  the binding stays the daemon's peer pid. A task its merge settled while the session kept working
+  (Scheduler, "Done detection") is worded as such: done by that PR's merge under `until: "merged"`, nothing
+  left to pass, the session not closed, and the work left carried on in the session or queued as a new task
+  with `spawn_session` whose prompt is the record and names the branch. It then sends the local-socket
+  `pass` frame ("Session events"), and on `ok` polls the leader's queue for up to 30 s for the leader's
+  word: the task's `successor` (passed: end the turn), the task finished with none (refused, worded as
+  above, the branch named as pushed), or a `passRefused` entry for the task stamped at or after the call's
+  start on this machine's clock, which the daemon's `at` is on (refused: the code and its text, the pushed
+  branch, the session not closed by the pass and what to do instead). A refusal is the tool's error. Only
+  with none of these does it say the branch is pushed, that as of now no successor exists, that the
+  session is closed at its turn's end only if the leader still records one, to check `get_queue` before
+  passing again, and to end its turn — an older leader, which keeps no refusals, reads that way. The tool waits for its daemon `OP_TIMEOUT_MS["push-branch"]` plus
   30 s (120 s, past a push and the fetch after a rejected one), and an unanswered call (a timeout or a lost
   connection) is never worded as a refusal: it may have pushed and sent the pass, so the text says so, tells
   the session to check `get_queue` before pushing or passing again, and to end its turn. The call's
@@ -10444,7 +10976,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   `hand_off_task`. Needs `mcp__seance__pass_to_successor` allowed in the exclave. The tool code imports
   no logging.
 - **`pin` and `avoid` on a spawn** (2026-10-23; accounts and `avoid` 2026-10-25, M4). `spawn_session`
-  (its `machine` field, or `pin.machine`), each `queue_batch` member (`pin.machine`) and `seanced spawn`
+  (its `machine` field, or `pin.machine`), each `queue_batch` member (`pin.machine`) and `seance spawn`
   (`--machine`, `--account`, repeatable `--not`) take a pin to a machine, an account or both, and a list of
   machines to avoid, stored as `TaskSpec.pin { deviceId?, account? }` and `TaskSpec.avoid` (at most
   `TASK_SPEC_LIMITS.avoid`, 4: with a 128-character account, `requires` at its bound of 4 and eight candidates a record at that
@@ -10479,7 +11011,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   - **Account listings.** An alias needs the account records. The relay's `account:` list floor
     is two-level (`relay/src/store.ts`): four lists a minute per socket, and a DO-wide bucket of
     `LIST_BURST` (16) refilling one per `LIST_REFILL_MS` (8 s), shared by every socket, the
-    PWA's included. The bucket is the binding one, and the cost is fleet-wide: every `seanced
+    PWA's included. The bucket is the binding one, and the cost is fleet-wide: every `seance
     mcp` process (one per Claude session; its relay socket idles out after `IDLE_MS`, 5 min, and
     the next call dials a fresh one) lists on its first labelled call, and a PWA alias edit's
     `store-changed` clears every process's cache, so each lists again on its next labelled call.
@@ -10510,7 +11042,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     label falls back to the email or short id meanwhile, and a pin says aliases are unavailable
     right now, asking for an email or id — never that the account is unknown. The `account` label
     is a display name and no valid `pin.account` value (a pin takes `alias`, `email` or `accountId`);
-    the tool descriptions say so. Through the broker (a keyless `seanced mcp`, 2026-10-25) labels
+    the tool descriptions say so. Through the broker (a keyless `seance mcp`, 2026-10-25) labels
     never carry an alias and ask the daemon nothing; only a pin's resolution sends the broker's
     `accounts`. The frame carries no label-or-pin field, so the daemon cannot tell a label read
     from a pin's: it reads every one as a pin, bypassing the hold, and a label through it would
@@ -10520,7 +11052,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
     `avoid` as nothing and place the task anywhere. Two guards, both required. At submit, a client
     writes either field only when the verified leader's registry entry advertises
-    `CAPABILITIES.pinAccount` (else refused, naming `seanced update`, or that no verified leader
+    `CAPABILITIES.pinAccount` (else refused, naming `seance update`, or that no verified leader
     leads). At rest, `taskRecordAtRest` adds `pin.exclave: ""` (`PIN_SENTINEL`) to every record
     carrying either field: an older `parsePin` refuses an empty exclave, so an older leader that
     takes over later holds the record unreadable instead of placing it unrestricted, and every
@@ -10557,7 +11089,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   daemon's stdout logging convention would corrupt frames. The shared client
   takes a `log` sink option (default stdout) for exactly this consumer;
   redirecting `console.log` process-wide would silence stdout for everything.
-- **CLI pair for Claude config**: `seanced mcp install` / `seanced mcp uninstall`
+- **CLI pair for Claude config**: `seance mcp install` / `seance mcp uninstall`
   shell out to `claude mcp add` / `claude mcp remove` (argv-array, per the exec
   invariant) rather than editing `~/.claude.json` — Claude Code owns that
   schema. What gets registered is PATH-resolved bun plus this checkout's
@@ -10577,7 +11109,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   left the exclaves without it.
   Nothing re-registers on its own — no self-update path touches Claude config —
   so a machine that predates a change to the recorded argv needs
-  `seanced mcp install` run again by hand. Which is why `install` clears the name
+  `seance mcp install` run again by hand. Which is why `install` clears the name
   before adding it: `claude mcp add` fails with "already exists" otherwise, and
   the machines needing a repoint are exactly the registered ones. Same
   bootout-before-bootstrap shape as the launchd install. Rejected: telling the
@@ -10599,7 +11131,7 @@ never reject a spawn over a client name minted after it was built, and the
 field is display-only, so validation would buy nothing.
 
 Since 2026-10-25 (M4) a current MCP process never sends a relay `spawn`: `spawn_session` is an enqueue, so
-`client="mcp"` on an `audit spawn` line now comes only from a `seanced mcp` started before that update, which
+`client="mcp"` on an `audit spawn` line now comes only from a `seance mcp` started before that update, which
 keeps working through the paths below until its Claude session restarts. A queued spawn is not an MCP spawn at its target: the leader dispatches with its own
 `client` (`client="scheduler"`, audited `origin=relay` at another machine and
 `origin=leader` on its own). The session is the scheduler's, which is what its audit line
@@ -10643,7 +11175,7 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
 
 ### CLI spawn (`daemon/src/cli-auto.ts`) — queued by default 2026-10-25, scheduler M4
 
-`seanced spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
+`seance spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
 <repo> [--here] [-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
 MCP's `spawn_session` (`cli-auto.ts` is only the CLI's wiring; its name is historical): the clone name resolves to its
 origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
@@ -10669,27 +11201,27 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   `--autonomy <steer|checkpoint|auto>` came last (2026-11-12, "Autonomy level"): the level that
   sets plan mode for `steer`, queued or `--now`; there is no `--plan`.
 - _Key and relay:_ the queued form dials the relay as an app with this shell's
-  own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
+  own PSK (`loadPsk`, as `seance mcp` resolves it); `LazyRelay`'s connect bound
   turns an unreachable relay into "not queued" rather than a hang. `--now` loads nothing
   of this and stays relay-free.
-- _Keyless boxes:_ through the daemon's fleet broker, as `seanced mcp` is (2026-10-25): `autoFleet`
+- _Keyless boxes:_ through the daemon's fleet broker, as `seance mcp` is (2026-10-25): `autoFleet`
   resolves no key and takes `brokerFleet`, so a plain spawn, `--account` and `--not` work on a
   credential-delivered box. A daemon that predates the broker's scheduler actions is named as the
   cause ("predates brokered auto"). The daemon's own `audit enqueue origin=local-broker` line sits beside this
   surface's `origin=cli` one ("Fleet broker").
 - _When it does not queue:_ every failure that left nothing queued (the relay or the broker
-  unreachable, a daemon without the broker's scheduler actions) ends by naming `seanced spawn --now`,
+  unreachable, a daemon without the broker's scheduler actions) ends by naming `seance spawn --now`,
   which needs none of key, relay or daemon. A failure that may have queued the task ("may have
   queued — check the app's queue") never names it: the task would run twice.
 - _No leader:_ the task still queues (M3) and the answer says it waits, and that
-  `seanced spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.
+  `seance spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.
   Only with no nominee at all: an unverified one may be a healthy leader whose lead-proof has not reached this
   shell yet, so the answer says it waits and names no `--now`. MCP texts never name `--now`: a session with a shell
   would run it as `origin=cli`, as if a person typed it.
   The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
 - _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
   a direct spawn is not bound by it. MCP has no such escape.
-- _`seanced continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a session"):
+- _`seance continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a session"):
   `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does for a failed or cancelled task, the newest in a chain (leader gate, `queue()` lookup,
   `continueOffer`, `offeredSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
   `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
@@ -10713,7 +11245,7 @@ The daemon listens on a unix socket, and the MCP server sends `sessions` and
 `despawn` straight there when the target resolves to the box it runs on. No relay,
 no envelope, no PSK: listing and ending sessions on the machine you are sitting at never leaves it.
 (Until 2026-10-25, M4, `spawn` took this path too; `spawn_session` is now a scheduler
-enqueue, so `spawn` stays on the allowlist only for a `seanced mcp` started before that
+enqueue, so `spawn` stays on the allowlist only for a `seance mcp` started before that
 update, and for the app's own `spawn` op, which the daemon keeps answering.)
 Beside the `Plain` ops the socket carries four frame kinds of its own: `broker`, `session-event`, `message` and
 `inbox` (each below). A fifth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
@@ -10726,7 +11258,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
 
 - **A socket into the daemon, not a second spawner.** The alternative was ~50
   lines: the MCP process calling `createBackend(config).spawn()` itself, exactly
-  as `seanced spawn --now` does. Rejected, because it makes a **second executor**. The
+  as `seance spawn --now` does. Rejected, because it makes a **second executor**. The
   daemon cold-boots the tmux server when none is running, so whichever process
   spawns first decides that server's environment — and a pane's environment is
   the server's. Routing through the daemon keeps one executor, one repo set (its
@@ -10761,7 +11293,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   since it was loosened would not have tightened it yet.
 - **It grants no authority a same-uid process did not already have.** Such a
   process can read `config.json` (0600, same uid) and take the PSK outright, run
-  `seanced spawn --now`, or drive the tmux server directly. The socket is strictly
+  `seance spawn --now`, or drive the tmux server directly. The socket is strictly
   less: three named ops, no way to address another machine, no way to reach the
   `"machines"` group address, and every request recorded. What it adds is that
   going through it is the _recorded_ way in — hence `origin=local`, and hence the
@@ -10853,7 +11385,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   reload is `stop()` then start, sequentially, and `stop(true)` unlinks the path,
   so a config swap rebinds cleanly with no race.
 
-Non-goals: routing `seanced spawn --now` through the socket (it would collapse the
+Non-goals: routing `seance spawn --now` through the socket (it would collapse the
 executors further, but `origin=cli` should keep meaning "typed at this machine");
 a `rescan` op, or `availability`; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
@@ -10874,14 +11406,14 @@ retry can ever bind there, so the mod waits it out for minutes. `parseMessageFra
 their fields and no `pane`.
 
 - **`message`** (`{ v: 1, kind: "message", to?, messageKind, text, inReplyTo? }`; `to` or `inReplyTo` is required, and
-  `to` left out is a reply by handle, "Replies by handle" below), sent by `seanced mcp`'s
-  `send_message` (`daemon/src/send-message.ts`, silent: nothing reachable from `seanced mcp` calls `log.ts`,
+  `to` left out is a reply by handle, "Replies by handle" below), sent by `seance mcp`'s
+  `send_message` (`daemon/src/send-message.ts`, silent: nothing reachable from `seance mcp` calls `log.ts`,
   which is why the grace constant lives in `message-frame.ts`). One reply line:
   `{ ok: true, id, outcome: "delivered" | "sent" }` or `{ ok: false, code, reason? }`. The sender's task is
   the one its pane carries **and this machine's launch ledger holds a launch of** (`EndedTasks.launchedAt`);
   a pane tagged with any other id is untasked, so a session cannot borrow a task's name in the wrapper by
   setting `@seance-task` on its own pane. The text crosses on the socket, never in argv.
-- **`inbox`** (`{ v: 1, kind: "inbox" }`), sent by `seanced inbox` (`daemon/src/inbox-cli.ts`), the child the
+- **`inbox`** (`{ v: 1, kind: "inbox" }`), sent by `seance inbox` (`daemon/src/inbox-cli.ts`), the child the
   `inbox` mod runs. It binds once, at accept (`LOCAL_PEERPID` fails once the peer has closed), and the
   connection then stays open: the daemon writes an ack line and one `InboxLine` per message, and the child
   copies stdout through. It is the first frame that hands text out. A second frame written on a listening
@@ -10909,7 +11441,7 @@ rather than audit `delivered` to an orphan, and a child whose parent changed is 
 child" below).
 
 **The orphaned child** (**decided here**, from the macOS spike's gap (a)). `claude` killed hard (an OOM
-kill) leaves the `seanced inbox` child alive, reparented to init (ppid 1), still connected, so the daemon's
+kill) leaves the `seance inbox` child alive, reparented to init (ppid 1), still connected, so the daemon's
 writes to it succeed while its stdout, a pipe nobody reads, fails: the message is lost under an audited
 `delivered`. The child therefore records `process.ppid` at start and exits 2 when it changes, checked every
 2 s by an unref'd timer, and exits on any stdout write error (the quiet-time check and the after-death
@@ -11036,7 +11568,7 @@ else reaches it, and it has no task id to address. Its listener is acked (an old
 session); `$.http.fetch({ socketPath })` polling (verified on macOS to bind the right pane, but
 request/response only, so delivery waits for the next poll; kept as the fallback if the long-held child fails);
 a file drop the mod polls (binds by path, leaves text at rest); a loopback TCP port (no peer pid). For the
-sender: the fleet broker (credential-keyed daemons only, app-role so no sender binding), `seanced mcp`'s direct
+sender: the fleet broker (credential-keyed daemons only, app-role so no sender binding), `seance mcp`'s direct
 app-role client (the same missing binding, and a keyless server cannot seal), and a `Plain` op on `LOCAL_OPS`
 (those are relay ops served locally; this is a session's claim about itself, which the frame kinds beside
 `Plain` are for). `LOCAL_OPS` and the broker are unchanged.
@@ -11060,7 +11592,7 @@ recognisable). Accepted.
 **Accepted gaps.** Stub bodies live only in the mod's memory (the daemon keeps nothing after the write), so
 a hooks-worker respawn loses them and `read_messages` says so. A message held for a mod that never connects is
 dropped silently at the grace's end (audited `nolistener`, never told to the sender, who was answered `sent`).
-The mod is installed by `seanced mod install` on each machine (self-update does not run it); until then
+The mod is installed by `seance mod install` on each machine (self-update does not run it); until then
 `doctor` warns per exclave and sessions already running lack the mod and the flag. A new mod against an old
 daemon: the old daemon drops the `inbox` frame as malformed and warns, the child exits 2, and the mod backs off
 to 15 s. Advertised as `CAPABILITIES.messages` only where the host names peers and the peer-binding probe
@@ -11072,15 +11604,15 @@ to 15 s. Advertised as `CAPABILITIES.messages` only where the host names peers a
 nothing:
 
 1. **The two-frame gate.** The `message` frame gained `route?: "ask" | "send"` (`MESSAGE_ROUTES`,
-   `message-frame.ts`). `seanced mcp` sends `route: "ask"` first. The daemon answers as before for a task it can
+   `message-frame.ts`). `seance mcp` sends `route: "ask"` first. The daemon answers as before for a task it can
    deliver (a launch in its ledger and a live pane, or inside the grace), and `remote` (`ok: false`) for any other,
-   before the rate limit counts the frame, so one routed message is one count. On `remote`, `seanced mcp` checks
+   before the rate limit counts the frame, so one routed message is one count. On `remote`, `seance mcp` checks
    the **verified** leader advertises `CAPABILITIES.messageRoute` (`messageRouteGate`, `mcp.ts`, over the same
    `relayFleet` the other leader-gated tools use) and only then sends `route: "send"`. A refusal at the gate sends
-   no second frame and names `seanced update` or the missing leader, with "nothing was sent". The two frames are
-   one `sendMessage` call, so the check runs where the fleet is known (`seanced mcp`) and the daemon never decides
+   no second frame and names `seance update` or the missing leader, with "nothing was sent". The two frames are
+   one `sendMessage` call, so the check runs where the fleet is known (`seance mcp`) and the daemon never decides
    for itself that a leader can route. Rejected: the daemon checking the leader on the first frame (it would
-   have to hold the verified-leader logic `seanced mcp` already has, and a keyless box reaches the fleet only
+   have to hold the verified-leader logic `seance mcp` already has, and a keyless box reaches the fleet only
    through the broker), and a `route: "send"` straight away (a message to a leader that cannot route would be
    dropped with one warn line and the sender told `routed`).
 2. **Sender's daemon → leader.** On `route: "send"` the daemon mints the message id, binds the sender as it does a
@@ -11088,7 +11620,7 @@ nothing:
    sends a `session-message` event (`SessionMessage`) sealed `from` its own device id to `SCHEDULER_ID`, or in
    process on the leader's machine (`MessagesDeps.route`, `run-capabilities.ts`). It answers
    `{ ok: true, id, outcome: "routed" }` (an untasked sender's receipt reaches it too, through the daemon's own
-   `sent` table, "Replies by handle"; `receipt: false` is no longer emitted, though `seanced mcp` still parses it), or `no_leader` when there is no leg to send on, and `unsupported` for a daemon wired with
+   `sent` table, "Replies by handle"; `receipt: false` is no longer emitted, though `seance mcp` still parses it), or `no_leader` when there is no leg to send on, and `unsupported` for a daemon wired with
    no `route`. Nothing waits for the leader.
 3. **The leader admits** (`onEvent`, `daemon/src/leader.ts`, then `createMessageRouter`,
    `daemon/src/leader-messages.ts`) only a message sealed from a daemon and never `from: "app"`, parsed by
@@ -11134,7 +11666,7 @@ nothing:
    would read as `offline` and invite a retry that can never land. A target that answers `undelivered` or
    `unreachable` is `offline`; one that refuses the frame (`unsupported`, `invalid_request`) is `unsupported`, with
    one warn line; any other error (a handler that crashed, an oversized reply, a reply that did not parse) is
-   `offline` with the same line, since "needs `seanced update`" would be wrong for a daemon that is up to date.
+   `offline` with the same line, since "needs `seance update`" would be wrong for a daemon that is up to date.
 6. **The target daemon** (`handlers.ts` → `Messages.deliverRouted`) acts only on a `deliver-message` sealed `from`
    the scheduler (or the leader in process), parsed by `parseDeliverMessageRequest`, and delivers only to a live
    pane carrying the resolved task **that its own ledger holds a launch of**, by the listener write or hold a local
@@ -11156,7 +11688,7 @@ nothing:
    ("… is waiting for its session's inbox listener (up to 120 s)"), `held` ("the task has not started yet, and
    nothing was kept; send again later"), `ended` ("the task has no live session", or with `nolistener`, "its
    session has no inbox listener (its account lacks the inbox mod)"), `unknown` ("the scheduler holds no such
-   task"), `unsupported` ("the target machine's daemon cannot receive messages (it needs `seanced update`)")
+   task"), `unsupported` ("the target machine's daemon cannot receive messages (it needs `seance update`)")
    and `offline` ("the target machine is offline or did not answer; if it did land, a retry may duplicate it").
    It is placed as a note, which does not wake an idle session, and is not itself audited as a message: its record
    is the one `dir=receipt` line. The sender's daemon **de-duplicates receipts by message id and outcome for
@@ -11167,7 +11699,7 @@ nothing:
 `MESSAGE_MAX` (64 KiB) cannot cross it. A message that crosses machines is held to `MESSAGE_ROUTE_MAX` (40 000
 bytes) of its **JSON-escaped** text (`routeBytes`, a `TextEncoder`, since shared is also loaded by the PWA and
 Raycast): headroom for the `Plain` wrapper and the leader's `from` fields, as `REPLY_JSON_BUDGET` does. The
-daemon refuses an over-budget `send` `too_long` with `reason: "route"`, and `seanced mcp` words it as the
+daemon refuses an over-budget `send` `too_long` with `reason: "route"`, and `seance mcp` words it as the
 route budget, not `MESSAGE_MAX`. A message that fits the local cap and not the route budget still delivers locally.
 Rejected: a lower `MESSAGE_MAX` everywhere (it would cut local messages for a limit only the relay has) and
 chunking (a second protocol for a rare case).
@@ -11185,15 +11717,15 @@ audits and logs **no line per message**, as it logs no line per `#route` (Threat
 rule): only a message it drops, a forward its target refused and a receipt that failed, each naming a task or
 machine id and never the text, a title or a message id.
 
-**Skew**, all of it resolved at a daemon or at `seanced mcp`, none at the relay:
+**Skew**, all of it resolved at a daemon or at `seance mcp`, none at the relay:
 
-| Combination                                | Behaviour                                                                                                                                        |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Old `seanced mcp` (no `route`), new daemon | PR 1's answers: `unknown` or `ended` for a task not deliverable here, never `remote`                                                             |
-| New `seanced mcp`, old daemon              | the old `parseMessageFrame` rejects the unknown `route` key as `invalid`: `seanced mcp` resends the frame once without it and gets PR 1's answer |
-| New daemon, old leader                     | the gate finds no `messageRoute` and the message is refused with nothing sent                                                                    |
-| New leader, old target daemon              | `unsupported` at the leader (no `messageRoute`), forwarded to no one                                                                             |
-| Old leader receiving `session-message`     | one `dropped op=… — not a session event` warning; unreachable in practice, since the sender is gated on `messageRoute`                           |
+| Combination                               | Behaviour                                                                                                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Old `seance mcp` (no `route`), new daemon | PR 1's answers: `unknown` or `ended` for a task not deliverable here, never `remote`                                                            |
+| New `seance mcp`, old daemon              | the old `parseMessageFrame` rejects the unknown `route` key as `invalid`: `seance mcp` resends the frame once without it and gets PR 1's answer |
+| New daemon, old leader                    | the gate finds no `messageRoute` and the message is refused with nothing sent                                                                   |
+| New leader, old target daemon             | `unsupported` at the leader (no `messageRoute`), forwarded to no one                                                                            |
+| Old leader receiving `session-message`    | one `dropped op=… — not a session event` warning; unreachable in practice, since the sender is gated on `messageRoute`                          |
 
 `messageRoute` is advertised by every daemon, since any may lead and receiving a forward needs no peer binding
 of its own. The relay sees one more sealed envelope class (`msg`, to `SCHEDULER_ID` and to a device id) of the
@@ -11238,7 +11770,7 @@ replies and could answer its questions. `session` is the `claude` process itself
 `daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
 `processNames`: argv[0] and comm on Linux, `pbi_comm` and `pbi_name` from `proc_pidinfo` on macOS, `ps` only where
 libproc will not load), with its **start time** (`processStart`: `/proc/<pid>/stat` field 22, or `pbi_start_tvsec` and
-`pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seanced inbox` or `seanced mcp`, is the child
+`pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seance inbox` or `seance mcp`, is the child
 of the `claude` that started it: a shell script named `claude` above it that runs `claude` twice (`claude "$@" || claude
 --continue`, a restart loop; its comm is the script's name) is never the session, the real `claude` under it is, and a
 `claude` a tool started under another is its own session, not the outer one's. A pane that `exec`s `claude` is that
@@ -11285,7 +11817,7 @@ needs no new state: the target places it with the same `origin`, so the next one
 restart graces hold it as they always held a task-addressed receipt (its `claude` is the pane's own process), and any
 other asker's (untasked, or tagged with a task the ledger does not hold, where a shell's later `claude` could be) is
 pinned to its session. The gate is the same two-frame one, now asking the verified leader
-for `messageReply` (`messageRouteGate("reply")`): a refusal names `seanced update` and says nothing was sent.
+for `messageReply` (`messageRouteGate("reply")`): a refusal names `seance update` and says nothing was sent.
 
 **`wake`.** A reply to a **question or request** the receiving session itself sent is an answer, and an idle session
 that never reads its inbox would never see it. The daemon sets `wake: true` on that inbox line, only on the listener
@@ -11295,8 +11827,8 @@ no `$.prompt.fill`, no key, no dialog answered. A note that answers nothing the 
 two sessions cannot wake each other by replying to replies for ever, and the rate limit still bounds a loop.
 
 **Skew.** `CAPABILITIES.messageReply` is advertised by a daemon that acks untasked listeners, keeps both tables and
-answers a reply's `deliver-message`; an old reader keeps the machine. A new `seanced mcp` against a daemon without it
-sends a frame the old parser refuses `invalid`, worded as "it may predate replies by message id (`seanced update`)",
+answers a reply's `deliver-message`; an old reader keeps the machine. A new `seance mcp` against a daemon without it
+sends a frame the old parser refuses `invalid`, worded as "it may predate replies by message id (`seance update`)",
 nothing sent. A leader without it is refused at the gate. A new leader forwards a reply only to a machine advertising
 it. A frame that carries the handle as `to` can only come from a caller that predates replies (a current
 `sendMessage` leaves `to` out), which gated on routing alone: for a handle that came from another machine it is
@@ -11317,7 +11849,7 @@ question is the common case).
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
-On a credential-delivered box `seanced mcp` can read no PSK, so on its own it
+On a credential-delivered box `seance mcp` can read no PSK, so on its own it
 reaches only the machine it runs on. The broker gives it the rest of the fleet: a
 second frame kind on the same socket, through which the server asks the daemon for
 the registry, for one of three ops on one other machine, or for the scheduler (enqueue,
@@ -11326,7 +11858,7 @@ app-role relay client with the key it imported at start.
 
 - **Only on a daemon whose key is service-delivered.** `run-capabilities.ts` builds the broker
   when the daemon's `loadPsk` answered `source: "credential"`, and nowhere else: on
-  macOS, WSL and Linux with a config-field or user-unsealed `tpm` key, `seanced mcp`
+  macOS, WSL and Linux with a config-field or user-unsealed `tpm` key, `seance mcp`
   reads the key itself and goes direct, so a broker there would add no reach — only
   same-uid authority that skips the key store, and an app-role relay surface in the
   daemon. Those daemons construct no broker and no app-role client at all; a broker
@@ -11352,9 +11884,9 @@ app-role relay client with the key it imported at start.
   leg is daemon-role: it registers and answers, the relay never pushes it the
   registry, and it cannot address another daemon. Being an app is the only way to
   reach one, so the broker is a fourth app-role client (beside the PWA, Raycast and
-  `seanced mcp`) over the shared `RelayClient`, built with the daemon's
+  `seance mcp`) over the shared `RelayClient`, built with the daemon's
   already-imported `CryptoKey` — never a second store lookup or TPM touch. Lazy and
-  idle-closing like `seanced mcp`'s (`daemon/src/app-relay.ts` holds both), shared by
+  idle-closing like `seance mcp`'s (`daemon/src/app-relay.ts` holds both), shared by
   every MCP process on the box, stopped with the daemon handle so a reload builds a
   fresh one and leaks none.
 - **Semantic, allowlisted, fail-closed.** Four actions: `machines` (the decrypted
@@ -11362,14 +11894,14 @@ app-role relay client with the key it imported at start.
   what `list_machines`' leader mark and a brokered `auto` need), `request` (`remoteOp` ∈
   `sessions`/`spawn`/`despawn`, to an exact `deviceId` this daemon's key can read — never a
   name, `"app"`, `"machines"`, or the daemon's own id, which belongs on the local op path)
-  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`pass`/`amend`/`accounts`); `availability` is in neither list (2026-11-13, owner decision: a keyless box refuses `seanced close` and points to the PWA). The payload is
+  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`pass`/`amend`/`accounts`); `availability` is in neither list (2026-11-13, owner decision: a keyless box refuses `seance close` and points to the PWA). The payload is
   validated with the handler's own checks and rebuilt from the validated fields, so nothing
   else a peer adds reaches the wire. For `request`, `client` is stamped `"mcp"` by the
   broker, never copied from the peer, so the target audits the spawn as
   `origin=relay client="mcp"` exactly as a direct MCP spawn — and a same-uid process cannot
-  pass as the PWA. Since M4 (2026-10-25) a current `seanced mcp` never sends `request` `spawn`;
+  pass as the PWA. Since M4 (2026-10-25) a current `seance mcp` never sends `request` `spawn`;
   only a process started before that update does, until its Claude session restarts. For a `scheduler` enqueue the peer's `mcp` or `cli` is kept in the record
-  (the daemon cannot tell `seanced mcp` from `seanced spawn`, and a same-uid process
+  (the daemon cannot tell `seance mcp` from `seance spawn`, and a same-uid process
   can run either) and audited as `claimed_client`, never `client`: an unverified claim, and
   nothing else (`pwa`, `raycast` and `scheduler` are refused). Rejected: a crypto
   oracle (seal/open on request) — same-uid peers make it unpoliceable, and it is the
@@ -11413,7 +11945,7 @@ app-role relay client with the key it imported at start.
   answer from the connection's cached registry, every tool call opens with one, and a cancel
   can hold a scheduler slot for 25 s, so counted together a few slow scheduler calls would turn
   the next call's lease open into `busy`.
-- **Transport choice in `seanced mcp` (`daemon/src/fleet.ts`).** Direct when this
+- **Transport choice in `seance mcp` (`daemon/src/fleet.ts`).** Direct when this
   process resolves a key, which keeps macOS, WSL and readable-Linux exactly as
   before; the broker only when the lookup returns none — a typed null, never an error
   string. The choice is made before anything is sent. A direct failure (bad token,
@@ -11424,21 +11956,21 @@ app-role relay client with the key it imported at start.
   daemon drops the frame and closes; the server's `machines` probe — side-effect free
   — is where that is read as "update seanced". `doctor` reports which path MCP takes
   from the shell, probing the broker only when it is the one. A self-update restarts
-  the daemon, not a running `seanced mcp`: an MCP older than `broker_disabled` parses
+  the daemon, not a running `seance mcp`: an MCP older than `broker_disabled` parses
   the unknown code as an unreadable reply ("a mismatched seanced version?"), which a
   new Claude session resolves; on a credential-delivered box nothing changes.
   The scheduler actions add two actions to `BROKER_VERSION = 1` rather than a version
   (2026-10-25). A new client on an old daemon gets `unsupported` for `fleet`, which is side-effect
   free, so it falls back to `machines` with no scheduler leg — `auto` then says the daemon predates
   brokered auto — and scheduler frames never fall back, since a retry of one could repeat a write. A
-  new daemon with an old client changes nothing. A `seanced mcp` that started before the
+  new daemon with an old client changes nothing. A `seance mcp` that started before the
   daemon updated keeps the old refusal ("auto needs this machine's own key") until that
   Claude session restarts, the same lag as above.
 
 ### The scheduler actions (2026-10-25, M4)
 
-`spawn_session`, `queue_batch`, `get_queue`, `cancel_task` and `start_task` in a keyless `seanced mcp`, and
-`seanced spawn` and `seanced start`, run through `fleet` and `scheduler` frames. The decisions:
+`spawn_session`, `queue_batch`, `get_queue`, `cancel_task` and `start_task` in a keyless `seance mcp`, and
+`seance spawn` and `seance start`, run through `fleet` and `scheduler` frames. The decisions:
 
 - **The daemon seals, the peer never does.** The peer sends `{taskId, spec}`; the broker parses
   the spec, builds the task record itself and calls its own app-role client's `createTask`,
@@ -11459,7 +11991,7 @@ app-role relay client with the key it imported at start.
   `parseTaskSpec` (the length bounds, `parsePin`'s two fields, a bounded unique avoid list); `lineage`
   and `base` must be absent; `client` must be `mcp` or `cli`. **Continue specs** (2026-10-26) are the
   one widening: a brokered enqueue may carry `mode: "continue"` with `continues` (already refused
-  unless paired, by `parseTaskSpec`), so a keyless `seanced mcp` `continue_task` and `seanced continue`
+  unless paired, by `parseTaskSpec`), so a keyless `seance mcp` `continue_task` and `seance continue`
   work on a credential-delivered box. Before forwarding one the broker checks the verified leader
   advertises `continueTask` and refuses plainly otherwise, mirroring the client gate; everything else
   stays: a spec carrying `requires` is refused `invalid_request` unless the verified leader advertises
@@ -11542,7 +12074,7 @@ app-role relay client with the key it imported at start.
   replacement, but now under the task's own id, so what waits on it follows the new prompt. Still
   the leader's write, still only before dispatch.
 - **Raycast is unchanged**: it is a local-only app-role client with the key, never keyless.
-  A `seanced doctor` line probing `fleet` is deferred.
+  A `seance doctor` line probing `fleet` is deferred.
 
 Untested in CI: the systemd-credential arrangement itself (TPM, `LoadCredentialEncrypted=`,
 an unprivileged LXC). The e2e suite runs a keyless MCP against two real daemons, but the
@@ -11649,7 +12181,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
 - **`done`** (#21, decided 2026-10-20, built 2026-10-23). A session reports that its task is
   finished, so a task can stay open past its merge ("after X is in prod" is X's session
   merging, watching the deploy, then reporting). The state has been in `SESSION_STATES` since
-  the schema PR. Ingest now accepts it, from `report_task_done` (MCP) alone: `seanced
+  the schema PR. Ingest now accepts it, from `report_task_done` (MCP) alone: `seance
   session-event` drops a `done` unsent, so the mod's hook can never settle a task. For the
   pane's own task only (the task is the pane's `@seance-task`, as for every event, never a frame
   field), the daemon **notes it in the launch ledger** (`reported: true`, sticky, so a leader
@@ -11661,11 +12193,17 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   sent; a failed ledger write answers `unwritten` (sent, but a restart could lose it); a stopped
   ingest answers `stopping`; and a daemon that predates it answers `invalid`. The forward is
   never coalesced into the outbox window, since a report is acted on once and a later state must
-  not replace it. The leader settles the task `done` by `reported` only under `until: "reported"` and only from the machine
+  not replace it. The leader settles the task `done` by `reported` only from the machine
   the task was placed (or reserved) on, so a session can finish only its own task. Under `until:
   "reported"` it settles beside `mark-done`, Linear Done and a session ending clean with no PR;
-  `after: "done"` dependents release on it. Under `until: "merged"` the report is ignored: a
-  merge settles, as before. Two things follow. The report is the first act beyond ingest, so a threat-model
+  `after: "done"` dependents release on it. Under `until: "merged"` it settles only a task holding
+  no PR and no successor (`reportSettles`, `scheduler/src/done.ts`); beside a PR (the task's or the
+  event's) it is ignored and the merge settles, as before (amended 2026-11-17). The case it was
+  widened for: a session that designs something and queues another task to build it, which opens
+  the PR; its own task had nothing to settle it but its exit, and held a slot while it sat at its
+  prompt. Inferring that from the spawn was rejected: a coordinator spawns and keeps working, and
+  the leader has no lineage for a brokered spawn. A session that reports this way can do no more
+  than one that exits with no PR, which settles `done` by `session` too. Two things follow. The report is the first act beyond ingest, so a threat-model
   change (Threat model, item 6), and a session that lies about being done can do no more than
   one that exits. And the slot is freed at the report while the session may still be running
   (Scheduler, "Done detection"): the leader counts `done` tasks as holding no capacity, so a
@@ -11680,7 +12218,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   across one fleet over 30 days, sessions kept alive only to watch and merge made thousands of
   sleep and poll calls, and their idle tails ran to hours. A task only reaches `awaiting-merge`
   once its session ends, and until this nothing let a session end itself. `hand_off_task` (MCP) sends
-  `{handoff: true}` and nothing else: no state, so no path reads it as one, and `seanced
+  `{handoff: true}` and nothing else: no state, so no path reads it as one, and `seance
   session-event` drops it unsent, as it does a `done`. For the bound pane's own task, the daemon
   answers `untasked` for a pane with none, `unrecorded` for a task its ledger holds no launch of,
   `prless` for one whose launch noted no PR URL, its own or, for a continuation or a successor, the one it inherited
@@ -11718,7 +12256,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
 - **`pass`** (built 2026-11-12; the fifth act past ingest, a threat-model change; Scheduler,
   "Passing to a successor"). A session running out of usage commits its work and passes the task to
   a successor. `pass_to_successor` (MCP) sends `{pass: true, record}` and nothing else: no state, so no
-  path reads it as one, and `seanced session-event` drops it unsent, as it does a `done` and a hand-off.
+  path reads it as one, and `seance session-event` drops it unsent, as it does a `done` and a hand-off.
   `record` is at most `SUCCESSOR_RECORD_MAX` (7 168) UTF-16 units, the session's claim, prompt text
   only, never logged and never used to bind, route or close anything. For the bound pane's own task
   (the pane by the kernel's peer pid, the task from the pane's `@seance-task`, never a frame field)
@@ -11774,11 +12312,17 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   caller abandoned after that is the unavoidable window. A session that lies about
   passing can do no more than one that pushes its own branch and runs `/exit`; the leader's PR-head
   check bounds what it can claim, and the worst case of an unconfirmed pass is a pushed branch no
-  successor follows. The session is told only "not
-  confirmed"; telling it why the leader refused is a docs/scheduler.md _Later_ item. The leader logs
-  each refusal at warn with the task and the sending machine (never the record or the branch), the one
-  trace of a stalled pass, since the task stays `running` and idle until someone sees it on the Queue
-  screen (an alert for it is that same _Later_ item). _Decided: a `pass-close` answered `no_pane` sets the
+  successor follows. The session is told the leader's answer (2026-11-16): `session-pass` stays
+  fire-and-forget, and the leader keeps each session pass it refuses in memory (`sessionPassRefusals`, ten
+  minutes, at most 64, the frame's `at` beside the code), which `queue` lists as `passRefused` and
+  `pass_to_successor` reads (MCP server). _Decided: an answer read from the queue, not a synchronous reply_:
+  a reply would need a new leader → daemon op (or a reply to an event op), a capability to gate it, and the
+  daemon holding the local frame open across a relay round trip, for what the tool already polls the queue
+  for; the queue also shows the task finished, which an older leader's refusal of a finished task can be
+  read from too. The leader also logs each refusal at warn with the task and the sending machine (never the
+  record or the branch), and a refusal other than `conflict`, `finished` or `not_found` is pushed as
+  `pass-refused`; a refused pass leaves the daemon's mark on the pane unconfirmed, so it closes nothing
+  (a later `hand_off_task` there still answers `passed` until the pane's `ended` drops the mark). _Decided: a `pass-close` answered `no_pane` sets the
   task's close deadline to now_ (the session is gone, so no turn's end will close it, and the 2-minute
   grace only holds the successor blocked), and reconcile's re-ask is not awaited by the tick.
 - **The drain ask's hook** (built 2026-11-13; "The drain's session ask"). While this machine is closed, a bound,
@@ -11815,7 +12359,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   - **What counts as unchanged** (`normaliseScreen`). A busy Claude repaints its own chrome with no work
     behind it, and a session hung inside a command is a ticking spinner, so hashing the screen verbatim would
     never read it as still (C14's "unchanged for `everyMinutes`", C27's interrupt). The hash is of the screen
-    minus: everything from the input box's top edge down (the last-but-one line made only of `─`/`━`: the
+    minus: everything from the input box's top edge down (the last-but-one rule line, `INPUT_BOX_RULE`: a line made only of `─`/`━`, or with one
+    label cut into it, as a named session's top edge is since Claude Code 2.1.325, `──── fix-the-thing (thad) ─`: the
     box, status line and hint lines, whose cost, context and clock readings move, and which change when
     someone types); any parenthesised elapsed time with the counters beside it (`(2m 14s · ↑ 3.1k tokens ·
     esc to interrupt)`, a running tool's `(12s)`), masked; and the spinner's animated glyph, masked. The
@@ -11902,7 +12447,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
 - **The remote session id** (added 2026-10-23, threat-model change accepted by the owner).
   Remote Control names each session `session_<base62>`, and claude.ai opens it at
   `https://claude.ai/code/<id>`. Claude Code sets it as `$CLAUDE_CODE_BRIDGE_SESSION_ID` once
-  the bridge connects, and `$.process.run` inherits it, so `seanced session-event` adds it to
+  the bridge connects, and `$.process.run` inherits it, so `seance session-event` adds it to
   every frame as `remoteSession`, as it adds `pane`. An event raised before the bridge connects
   has none, and a later one fills it in. The bridge connects a second or so after the seeded
   prompt's turn starts (measured 2026-11-14: absent at `session.start` and `turn.start`, present
@@ -11945,7 +12490,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   opening and closing can flip it, bounded by the daemon's coalescing window, and accepted for a
   field the person reads. Display-only: they bind, route, move and settle nothing and alert
   nothing (`permission` lifts no debounce; `questionAlert` reads the event, not the record).
-  `seanced mcp`'s `get_queue` carries `inputReason` and never `inputTool`: a tool name is chosen
+  `seance mcp`'s `get_queue` carries `inputReason` and never `inputTool`: a tool name is chosen
   by whatever MCP server a repo brings, and `[A-Za-z0-9_-]{1,64}` admits words, so it would be a
   session-chosen string in another agent's context. The `permission` state also covers an
   _approved_ call still running, by a person or by auto mode's classifier (a 70 s auto-mode test
@@ -12121,14 +12666,14 @@ the binding with real panes.
 The sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the custodian round's nine
 verbs, `sessions`, `close <pane>`, `capture <pane>`, `pr <pane>`, `flag <pane> <reason> [note]`, `nudge <pane>` (text on
 stdin), `interrupt <pane>`, `notes` and `done` (C22–C34, C37–C40, C42; `capture` and `pr` are 4b's).
-`seanced custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the reply as JSON.
+`seance custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the reply as JSON.
 
 **The round's socket (custodian 4b).** The frame is served only on the round's own socket
 (`custodian-socket.ts`, "The custodian's seat"), which the round's environment names (`SEANCE_CUSTODIAN_SOCKET`); the
 daemon's main socket answers the kind `unsupported`, and its directory is masked in the round's sandbox. **The verbs
 still bound only what goes through them**, and what bounds the rest of the round is its sandbox: no tmux socket, no
 other acting socket, no network, and reads confined to its own directories and the read-only toolchain. The sandbox's
-**drill (2026-11-14) found no hole on macOS and on Linux's weaker nested mode**, so the docs say _contained_ for those and nothing for strict-mode Linux (refused). That is why `capture` and `pr` exist: the round once
+**drill (2026-11-14) found no hole on macOS and on Linux in both bwrap modes under its vsock filter (strict: WSL2; weaker nested: LXC, re-drilled under the filter 2026-11-15)**, so the docs say _contained_ for those. That is why `capture` and `pr` exist: the round once
 read a screen through `tmux capture-pane` and a PR through `gh`, both of which need a reach the sandbox no longer has.
 
 - **The frame is bound by the kernel, to the round the seat record names, and nothing else.** `{v: 1, kind:
@@ -12147,9 +12692,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   (no sandbox tools, a sandbox probe failure, an unreadable agent file, a refused host: code review F10, since no round
   will ever run to be named), so on a host without a seat there is no socket to dial; the main socket answers
   `unsupported` whatever the seat. The verbs answer `not_custodian` until a round is recorded.
-- **The round's own `seanced` (plan review F1).** The fence allows `Bash(seanced custodian *)` by name and nothing
-  guarantees the tmux server's `PATH` holds a `seanced` of this checkout (linking is opt-in; nothing re-points it on a
-  pull), so `launchRound` writes `<tmp>/bin/seanced`, a two-line `sh` wrapper running this process's own `bun`
+- **The round's own `seance` (plan review F1).** The fence allows `Bash(seance custodian *)` by name and nothing
+  guarantees the tmux server's `PATH` holds a `seance` of this checkout (linking is opt-in; nothing re-points it on a
+  pull), so `launchRound` writes `<tmp>/bin/seance`, a two-line `sh` wrapper running this process's own `bun`
   (resolved through `PATH`, then to its realpath for the wrapper alone: it dies with the round, so nothing realpath'd persists) and `main.ts`, and puts that directory first on the round's
   `PATH`. It sits in the round's 0700 tmp dir, which the sandbox cannot write, and goes with it. Its `[ -r main.ts ]`
   guard (4b) stops a main the masks hide, instead of letting bun re-exec it without limit.
@@ -12165,8 +12710,12 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   hung one) and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
   screen text is returned: a screen is read in memory to judge a close and dropped. Classification runs four at a
   time.
-- **`capture` (4b)** answers one pane's visible screen as plain text (`capture-pane` with no attributes: the styled capture
-  is `close`'s draft check alone), for the round to judge a session by what it shows now. The pane is re-read at the
+- **`capture` (4b)** answers the bottom of one pane's visible screen as plain text (`capture-pane` with no attributes: the
+  styled capture is `close`'s draft check alone), for the round to judge a session by what it shows now: trailing blank
+  lines dropped, then at most the last 60 lines and 4 KiB of UTF-8, cut at a line (`bottomOfScreen`), with `truncated`
+  saying whether lines above were cut. The bottom is where a final report, a draft or a dialog shows, and the cap keeps
+  several captures under Claude Code's ~30 KB persist threshold: a larger output lands in a file under the denied
+  `<config dir>/projects/`, which a real round could not read and then tried to loop around, a command `dontAsk` refuses. The pane is re-read at the
   act and refused as `close` refuses it where it applies: `gone` (also an unreadable screen), `marked` (the round's own
   pane or another custodian pane) and `foreign` (a hand-started pane: its screen is the owner's, not a session's). The
   text goes to the round and nowhere else: no audit line, no log, no cache; the verb's count is the round log's. A
@@ -12203,7 +12752,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   Ctrl+C, and neither the screen hash nor a session event sees typing: an owner composing a reply in a finished
   session would lose it. Before a `live` pane is despawned, `close` reads the screen with its attributes
   (`capture-pane -e`, `capturePane`'s `styled`) and `inputBoxDraft` (`drain-ask.ts`; `inputBoxText` is the plain-capture
-  twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules after the `❯`,
+  twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules (`INPUT_BOX_RULE`, the top one labelled for a named session,
+  which every séance spawn is: found by the go-live on Thad, 2026-11-14, where every close of a finished task session
+  answered `waiting`) after the `❯`,
   **leaving out the cells Claude Code draws as a prompt suggestion** (code review F2): faint (SGR 2) or a grey
   foreground (`90`, `38;5;8` and the mid greys of the 256 ramp, equal-channel `38;2` between 80 and 170), and the
   cursor's inverse first cell when more suggestion text follows. **Any other text, or a box that cannot be found (a
@@ -12376,7 +12927,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   unknown key, a repeat, text before the first heading. A heading with more words after the key is body text, not a
   section. CRLF reads as LF. The kept text is written 0600 under a 0700 dir through `writeDurable`, in a module-level
   chain since `writeDurable` is not serialized. The reply says the kept keys and the dropped count, never the text.
-  `seanced custodian notes --clear` is **the owner's act and never the daemon's** (C39): the CLI truncates the file
+  `seance custodian notes --clear` is **the owner's act and never the daemon's** (C39): the CLI truncates the file
   itself, in the owner's own shell, with no frame sent, so no frame offers a round a way to wipe it (its sandbox
   cannot write the state dir, and since 4b cannot read it either: the mask); a file that is not there stays absent.
 - **`done` (C40, `CustodianSeat.done`)** takes a summary of at most `SUMMARY_MAX` (1 KiB; `too_long`). It is `too_late`
@@ -12396,7 +12947,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   a missing file) rejects the write, so a transient fault never rewrites the history to one line (code review F8). A write is an **upsert on `start`**: a later
   `failed` end replaces an earlier `failed` one (a deadline after an exit), a `healthy` entry is never replaced, and
   writes run one at a time through a module-level chain. The summary may quote a pane, so it goes nowhere else: no
-  log, no audit line, and not the wire (`seanced custodian log` reads it on the machine: custodian 5, below). The tally is in memory: a round a
+  log, no audit line, and not the wire (`seance custodian log` reads it on the machine: custodian 5, below). The tally is in memory: a round a
   restart adopted counts from the restart.
 - **The CLI (`custodian-cli.ts`)** imports only `local-client.ts`, `custodian-frame.ts`, `paths.ts`, `node:fs/promises`
   and `@seance/shared`, so a round's many calls load none of the daemon, and **nothing it reaches may call
@@ -12409,10 +12960,10 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   that failed, where nothing was sent (`graceUnsentOnly`): one the daemon already did, whose reply was cut off, would
   answer `gone`, `limit` or `once_per_round` to a repeat and read as an act that failed. `nudge` reads its text from
   stdin, never argv (prompt text stays out of the process list). Exit 0 for
-  an `ok` reply, 1 for a refusal (`seanced custodian: refused <code>` on stderr), 2 for a command line it refuses or a
+  an `ok` reply, 1 for a refusal (`seance custodian: refused <code>` on stderr), 2 for a command line it refuses or a
   daemon it cannot reach (`the daemon is not running`).
 - **The agent's checklist (`daemon/custodian/agent.md`)** is the real one: `sessions`, judge each pane from its
-  facts and, where it must, its screen through `seanced custodian capture` and its PR through `pr` (it has no tmux,
+  facts and, where it must, its screen through `seance custodian capture` and its PR through `pr` (it has no tmux,
   no `gh` and no network), `close` the finished ones, and for a `busy`
   session that is stuck the stuck path (C26–C28): `nudge` it with what it observed, `interrupt` only one hung inside a
   command and then nudge it in the same round, and once its nudges are spent (`limit`) `flag` it `stuck` and leave it;
@@ -12422,7 +12973,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   `custodian-agent.test.ts` runs every such example in the checklist under a profile that denies all writes on macOS.
   **Never killed for being stuck (C28):** no verb force-closes a busy session, and none ends, requeues or continues a task.
 - **Threat model.** The round reads untrusted text and may call any verb with any argument; these checks bound
-  every act that goes through a verb, and **the round's sandbox bounds the rest** (4b, built and drilled on macOS and weaker-mode Linux): see
+  every act that goes through a verb, and **the round's sandbox bounds the rest** (4b, built and drilled on macOS and on Linux in both bwrap modes): see
   "The custodian's seat" for the masks, the built environment and the per-reach table. A wrong `close` costs a continuation of the task, never work: C32 keeps what exists only locally. The
   frame has nine verbs and takes no path, branch, session id, task id, key or command: a pane id (re-read and bound to
   `ours` by the daemon), a reason from a closed set, text that is stored, counted or delivered as a message and never
@@ -12448,7 +12999,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   daemon's other frame kinds (`Plain` `despawn` with `force: true`: the main socket is masked and the round's own socket
   answers only the `custodian` kind), the other sockets that act as the user (the systemd user bus, Docker, an
   ssh-agent: masked on Linux, unlisted on macOS), signals (confined to the sandbox), and the round's reads of `state.json`'s identity
-  seed, `~/.ssh` and the `gh` credential (masked, and the Read tool is held to the round dir) with nowhere to send them
+  seed, `~/.ssh` and the `gh` credential (masked, and no Read tool, with its denies kept) with nowhere to send them
   (`allowedDomains: []`). 4b's bound is positive, not an ancestry refusal on the main socket (a re-parented process
   escapes that): the round reaches one socket of its own that serves the verbs only. **Accepted, by decision:** the
   reads listed under "What gets through", and a prompt injection that talks the round into a wrong but permitted verb
@@ -12490,14 +13041,14 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
 
 ### The custodian's status and the Machines row (`custodian-control.ts`, `custodian-owner.ts`, `custodian-owner-cli.ts`, `custodian-remote.ts`) — built 2026-11-14 (custodian 5 and 7), live with the seat since custodian 4b
 
-Built: `MachineStatus.cu`, the Machines card's Custodian row, and the owner's shell commands `seanced custodian status |
+Built: `MachineStatus.cu`, the Machines card's Custodian row, and the owner's shell commands `seance custodian status |
 log | round | pause [--for <n>m|h|d] | resume`. They went live with rounds in custodian 4b: a machine whose seat runs
 advertises `CAPABILITIES.custodian` and its card shows the row. Custodian 6 added the flagged count and the `failing`
 push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
 
 - **`cu` on the wire** (`CustodianStatus`, `shared/src/types.ts`): `s` (`idle`, `running`, `paused`, `failing`), `e` (the last
   round's end, unix seconds like `at`), `n` (`[closed, nudged, flagged]`, each capped at 999) and `rc`, the running
-  round's Remote Control id. It is display-only and is never trimmed by `fitStatus`, like `drn` and `cl`. **A bad `cu` is
+  round's Remote Control id. It is display-only and is never trimmed by `fitStatus`, like `drn`, `cl` and `dr`. **A bad `cu` is
   dropped alone** (`parseCustodianStatus`): the status around it stays, since a card row is not worth a status's
   scheduling fields (`drn` and `cl` reject the whole status because they gate routing). `rc` is kept only beside
   `running` and only as `isRemoteSessionId` passes it. `p` (`true` only, custodian 7) says a pause holds behind `running`
@@ -12528,8 +13079,10 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
 - **The row** shows the state, when the last round ended (`last round ended 3h ago`, or `no round yet`), the counts
   (`closed 3 · nudged 1 · flagged 2`, `closed 0` reading `nothing closed`), `failing` in the warn colour, and, while
   running with a valid `rc`, an `Open round` link. Each part is one unbreakable span, so a 390px card wraps between parts.
-  A machine advertising the capability whose status has no `cu` (not in yet, an older daemon, or an asleep machine, which
-  reads through `liveStatus`) shows `no report yet`.
+  A connected machine advertising the capability whose status has no `cu` (not in yet, an older daemon) shows
+  `no report yet`. An asleep machine's card shows no custodian row at all, and no exclave list (the divider and its rows):
+  its last status is stale, and a `—` per row or a row that can only say `no report yet` is noise on a card that already
+  says asleep.
 - **The live link.** The round runs with `--setting-sources project`, so the session-events mod never runs in it, its pane
   is skipped by every pane reader, and C24 keeps session ids off the custodian frame: no session event can carry the id
   (the one "The remote session id" above describes). The daemon reads it instead (`roundRemoteId`): from
@@ -12591,8 +13144,10 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   **No new capability bit:** `CAPABILITIES.custodian` now also means the op is answered. No daemon ever advertised it
   without the op: rounds were held (no bit advertised) on every build before custodian 4b, which already carried the
   op. The `held` refusal those builds answered stays in `CUSTODIAN_ERROR_CODES` for a PWA reading an older daemon.
-- **The card's menu (C45, C47).** Offered only for a connected machine advertising `custodian` (`custodianControls`):
-  Round now (disabled while a round runs), then Pause for 1 hour and Pause until resumed, or Resume while a pause holds
+- **The card's menu (C45, C47).** Offered only for a connected machine advertising `custodian` (`custodianControls`),
+  as a group under a "Custodian" heading, below the card's switches (a switch is worded as the state it turns on, a
+  command as a verb):
+  Run round now (disabled while a round runs), then Pause for 1 hour and Pause until resumed, or Resume while a pause holds
   (`s` is `paused`, or `p`). A pause or resume shows as asked until the next `cu` agrees, as the open switch does
   (`DeviceCustodian`, held up to 20 s); a round request shows `Round requested`. A refusal shows on the card as fixed
   text by its code, never the daemon's message. Thresholds, the model and on/off stay in the machine's `config.json`
@@ -12606,7 +13161,7 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   replaces control, formatting (bidi, zero-width), surrogate and line and paragraph separator characters with U+FFFD and
   caps the length: a round's summary is model-written from untrusted pane text, and an escape sequence in it would
   otherwise reach the owner's terminal. `log` prints a summary, never sends it anywhere.
-- **The fence.** The generated deny list refuses a round the owner verbs and `notes --clear` (`Bash(seanced custodian
+- **The fence.** The generated deny list refuses a round the owner verbs and `notes --clear` (`Bash(seance custodian
   <verb>*)` per verb, from `CUSTODIAN_OWNER_VERBS`). Like the rest of the fence it is a mistake guard, not a boundary:
   what keeps a round from pausing itself or requesting another is its sandbox (4b), which masks `stateDir()` (bar its
   round dir) for reads and writes, and the tmux socket, so neither the control files nor a pane's keys are in its reach.
@@ -12623,7 +13178,7 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
 ## Raycast extension (`raycast/`) — designed 2026-08-14
 
 A **fourth** relay participant and a **third app-role client**, structurally
-identical to `seanced mcp`: it dials `/app?t=<token>`, seals with the PSK as
+identical to `seance mcp`: it dials `/app?t=<token>`, seals with the PSK as
 `from="app"`, correlates on `re`, and takes registry pushes. Zero relay and zero
 daemon changes; every channel property applies unchanged. What it adds is a
 latency budget — one hotkey to a running session.
@@ -12669,7 +13224,7 @@ latency budget — one hotkey to a running session.
 - **Reach is every paired machine, through the relay.** Rejected: local-only
   (talking to the daemon on this box directly). It would need no PSK and no
   socket, but "spawn on the machine I am sitting at" is the one case where a
-  terminal is already open and `seanced spawn` already works; the value is
+  terminal is already open and `seance spawn` already works; the value is
   reaching the _other_ machines.
 - **Local install only, never the Raycast Store.** Publishing would push the
   source into the `raycast/extensions` monorepo and — because the Store's
@@ -12737,7 +13292,7 @@ latency budget — one hotkey to a running session.
   the config-dir resolution, the PSK precedence, and the offered model/effort
   lists. Those four are duplicated by necessity (different runtimes, plus a
   static manifest that cannot import), so they are guarded instead.
-- **`seanced raycast install` drives Raycast's own CLI, exactly as `mcp
+- **`seance raycast install` drives Raycast's own CLI, exactly as `mcp
   install` drives Claude's.** Two steps, in order. `ray build` first, because
   it is the only typecheck in the loop: `ray develop` skips it entirely — its
   output stops at "compiled entry points", where `ray build` also prints
@@ -12903,7 +13458,7 @@ The bullets below are tmux-rename's, except where they say mods.
   is passed through untouched; outside tmux the name is still tagged, only the
   window step is skipped.
 - **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
-  the repo root lists the mods; `seanced mod install` runs `claude plugin
+  the repo root lists the mods; `seance mod install` runs `claude plugin
   marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
   A directory marketplace's plugins are read in place: Claude also records a copy
   under `plugins/cache/<marketplace>/<mod>/<version>` and names it `installPath`, but
@@ -12980,7 +13535,7 @@ Local op socket, "Session messages"):
   the loop (the process carries on): "The orphaned child" and the `/clear` paragraph, above.
 - **Same rules as session-events:** engine events only (never `classic.*`), every hook fails open
   (`.catch(($, e, next) => next(e))`), and `$` only inside top-level functions. Installed by the same
-  `seanced mod install` (the marketplace lists it, so doctor warns per exclave where it is missing); nothing
+  `seance mod install` (the marketplace lists it, so doctor warns per exclave where it is missing); nothing
   runs it on a self-update. The tool is declared by hand in `types/mcp.d.ts` because the kit lays its MCP types
   only from servers connected at a save.
 
@@ -13138,7 +13693,11 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   the PR chip in its last archived state with no checks icon. A passed-on card says "Passed to …"
   (its `successor`) and a successor "Carries on …" with the live card's trigger suffix (its
   `succeeds.task` and `trigger`; the archived `succeeds.account` placeholder is never read), the
-  other task titled from the live queue or the Older rows read, else its short id. The line
+  other task titled from the live queue or the Older rows read, else its short id. A task that ran
+  stacked (`Task.stack`; Scheduler, "Stacking") reads "Stacked on …", or "Started from the default branch:
+  … had merged" / "… left nothing to stack on", titled the same way, on live and archived cards alike
+  (`stackedOnLine`, `pwa/src/queue-view.ts`); a task not yet dispatched has no stack, and its "After …" line
+  says what it waits on. The line
   reveals the other card on tap when it is an Older row shown or a live task, opening a collapsed
   Asleep section first; live cards keep these lines as plain text, since their view cannot see
   the Older rows. Its machine is the registry's
@@ -13372,7 +13931,7 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
   a restart when the service's definition (or, for the path unit, its watch) changed, since
   `enable --now` leaves a running unit on its old one. The daemon's `install --system` refuses the
   user an installed `seance-archivist.service` runs as (`archivistUserRefusal`), the other half of
-  A27a, and so does a user-scope `seanced install` for the invoking user. `uninstall --system` disables, stops and removes the three, leaving the state
+  A27a, and so does a user-scope `seance install` for the invoking user. `uninstall --system` disables, stops and removes the three, leaving the state
   dir.
 - **The key's blob is the archivist's own** (A27b, settled). Sealed under the same credential
   id, `seance-psk`: the id is embedded in the blob and the archivist reads
@@ -13657,7 +14216,7 @@ prompt text or any act on the fleet.
   probe fails (it ignores `tf`).
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
-  its way out: `seanced spawn --now` audits like the relay path, so the slash
+  its way out: `seance spawn --now` audits like the relay path, so the slash
   command can become a thin wrapper over it and the duplication disappears.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.
@@ -13737,7 +14296,7 @@ reconciliation (replaced in M4 PR 2 by re-putting the same task id).
 
 The threat model is fully built out as of 2026-07-27: spawn audit logging on
 both paths with `origin`; keychain-backed PSK on macOS behind `loadPsk()` plus
-`seanced psk-import`; PSK fingerprint in `doctor`; tests pinning the two spawn
+`seance psk-import`; PSK fingerprint in `doctor`; tests pinning the two spawn
 invariants; registry entry cap, wire-level id and ciphertext bounds, and
 per-socket register rate limiting in the DO. The PWA's non-extractable-key and
 CSP items landed with the app (see the PWA section).

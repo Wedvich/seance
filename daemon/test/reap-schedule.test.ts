@@ -114,7 +114,7 @@ describe("the reap schedule", () => {
       expect(await branchExists("untouched")).toBe(true);
       expect(logged()).not.toContain("audit reap");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       await git("branch", "-D", "untouched");
     }
   });
@@ -131,7 +131,7 @@ describe("the reap schedule", () => {
       expect(logged()).toContain('audit reap origin=schedule deleted-branch repo="myrepo" branch="merged-already"');
       await pollUntil(async () => (await readState())?.lastReapAt !== undefined, "lastReapAt saved");
     } finally {
-      daemon.stop();
+      await daemon.stop();
     }
   });
 
@@ -143,7 +143,7 @@ describe("the reap schedule", () => {
       expect(await branchExists("merged-later")).toBe(true);
       expect(logged()).not.toContain("audit reap");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       await git("branch", "-D", "merged-later");
     }
   });

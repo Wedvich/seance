@@ -406,6 +406,60 @@ describe("queue-changed", () => {
     }
   });
 
+  test("a session's pass refused for a task its merge settled is listed by queue with the daemon's stamp, so the session can learn of it", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    // Settled by its merge while the session kept working: finished, so takeover asks `b` about no session.
+    await store.put(
+      "t-m",
+      0,
+      task("t-m", {
+        state: "done",
+        doneBy: "merged",
+        leftRunning: true,
+        assignment: { deviceId: "b", ...target, pane: "%3" },
+      }),
+    );
+    const { leader, replies } = leaderOver(relay, store);
+    const listed = async (): Promise<QueueResponse["passRefused"]> => {
+      leader.deliver(await appRequest("queue"));
+      return queueReply((await replies.next()).response.payload).passRefused;
+    };
+    try {
+      leader.lead(1);
+      await leader.settled();
+      expect(await listed()).toBeUndefined();
+      const at = Date.now();
+      const payload = {
+        session: "%3",
+        taskId: "t-m",
+        exclave: "default",
+        remoteBranch: "feature/x",
+        tip: "a".repeat(40),
+        record: "r",
+        at,
+      };
+      leader.deliver(
+        await seal(
+          key,
+          { to: SCHEDULER_ID, from: "b" },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "session-pass", payload },
+        ),
+      );
+      let refused: QueueResponse["passRefused"];
+      await pollUntil(async () => {
+        refused = await listed();
+        return refused !== undefined;
+      }, "the refusal to be listed");
+      expect(refused).toEqual([{ taskId: "t-m", code: "finished", sentAt: at }]);
+      expect((await store.get("t-m"))?.body).toMatchObject({ state: "done", doneBy: "merged" });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
   test("an idle release whose stamp the store refuses is still named in a nudge and listed: the release is the clock's, not the write's", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
@@ -870,6 +924,59 @@ describe("leader requests", () => {
     expect(audits).toContainEqual(expect.stringContaining(`op=resume id="${ids["resume"]}" ok`));
   });
 
+  test("set-limits holds dispatch at the fleet limit and queue shows it; lifting it places the rest; each is audited", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store, 50);
+    const ids: Record<string, string> = {};
+    const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
+      const request = await appRequest(op, payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        relay.setRegistry([await routableEntry("b")]);
+        // No record: no limit, and the queue reply names none.
+        expect(queueReply(await ask("free", "queue", {}))).not.toHaveProperty("globalMax");
+
+        expect(await ask("set", "set-limits", { fleet: 1 })).toEqual({ limits: { fleet: 1 } });
+        expect(await ask("zero", "set-limits", { fleet: 0 })).toMatchObject({ ok: false, code: "invalid_request" });
+        expect(await store.getLimits()).toEqual({ version: 1, limits: { fleet: 1 } });
+
+        const spec = { repo: "github.com/acme/app", mode: "worktree" } as const;
+        await enqueueQueued(store, leader, "first", { spec });
+        const first = await nextRequest(relay, 5_000);
+        expect((await open(key, first.env)).payload).toMatchObject({ taskId: "first" });
+        await enqueueQueued(store, leader, "second", { spec });
+        // Ticks every 50ms: a limit that leaked would have dispatched by now.
+        await Bun.sleep(300);
+        expect(await queuedRequests(relay)).toEqual([]);
+        const shown = queueReply(await ask("queue", "queue", {}));
+        expect(shown.globalMax).toBe(1);
+        expect(shown.tasks.find((t) => t.id === "second")?.decision?.candidates[0]?.rejected).toContainEqual({
+          code: "cap_reached",
+          inFlight: 1,
+          max: 1,
+        });
+
+        expect(await ask("lift", "set-limits", { fleet: null })).toEqual({ limits: {} });
+        const second = await nextRequest(relay, 5_000);
+        expect((await open(key, second.env)).payload).toMatchObject({ taskId: "second" });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits).toContainEqual(expect.stringContaining(`op=set-limits id="${ids["set"]}" fleet=1 ok`));
+    expect(audits).toContainEqual(expect.stringContaining(`op=set-limits id="${ids["lift"]}" fleet=none ok`));
+  });
+
   test("a pause past the hold limit is invalid_request, and a revoked store is not_leader and ends the term", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
@@ -928,6 +1035,8 @@ describe("leader requests", () => {
       delete: (id, version) => inner.delete(id, version),
       getPause: () => inner.getPause(),
       putPause: (version, holds) => inner.putPause(version, holds),
+      getLimits: () => inner.getLimits(),
+      putLimits: (version, limits) => inner.putLimits(version, limits),
     };
     const { leader, replies } = leaderOver(relay, slow);
     try {
@@ -960,6 +1069,8 @@ describe("leader requests", () => {
       delete: (id, version) => inner.delete(id, version),
       getPause: () => inner.getPause(),
       putPause: (version, holds) => inner.putPause(version, holds),
+      getLimits: () => inner.getLimits(),
+      putLimits: (version, limits) => inner.putLimits(version, limits),
     };
     const pass = {
       session: "%3",
@@ -2060,6 +2171,8 @@ describe("leader push", () => {
       delete: (id, version) => store.delete(id, version),
       getPause: () => store.getPause(),
       putPause: (version, holds) => store.putPause(version, holds),
+      getLimits: () => store.getLimits(),
+      putLimits: (version, limits) => store.putLimits(version, limits),
     };
     const { leader } = leaderOver(relay, faulty);
     await captureLog(async () => {
@@ -2427,6 +2540,8 @@ describe("leader lifecycle", () => {
       delete: (id, version) => inner.delete(id, version),
       getPause: () => inner.getPause(),
       putPause: (version, holds) => inner.putPause(version, holds),
+      getLimits: () => inner.getLimits(),
+      putLimits: (version, limits) => inner.putLimits(version, limits),
     };
     const { leader } = leaderOver(relay, flaky, 50);
     try {
@@ -2542,7 +2657,7 @@ describe("leader in the daemon", () => {
         await pollUntil(() => relay.openAppCount() === 0, "the leader's leg closing on follow");
         expect(daemon.leader.term()).toBeNull();
       } finally {
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2589,7 +2704,7 @@ describe("leader in the daemon", () => {
       });
       expect((await store.get("on-self"))?.body?.state).toBe("ready");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2638,7 +2753,7 @@ describe("leader in the daemon", () => {
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", ended) }));
       await pollUntil(async () => (await store.get("t-b"))?.body?.state === "done", "the ended event to land");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2675,7 +2790,7 @@ describe("leader in the daemon", () => {
         await pollUntil(() => droppedSoFar() >= 3, "the malformed, app and sentinel branch-states to drop");
       } finally {
         console.log = capture;
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2694,12 +2809,17 @@ describe("leader in the daemon", () => {
       tip: "a".repeat(40),
       at: 1,
     };
-    expect(sessionPassInput(pass, "a")).toEqual({ from: "a", pushed: { remoteBranch: "feature/x", tip: pass.tip } });
+    expect(sessionPassInput(pass, "a")).toEqual({
+      from: "a",
+      pushed: { remoteBranch: "feature/x", tip: pass.tip },
+      sentAt: 1,
+    });
     expect(sessionPassInput({ ...pass, record: "r", drain: true }, "a")).toEqual({
       from: "a",
       pushed: { remoteBranch: "feature/x", tip: pass.tip },
       record: "r",
       drain: true,
+      sentAt: 1,
     });
   });
 
@@ -2747,7 +2867,7 @@ describe("leader in the daemon", () => {
         }, "the leader to handle a valid pass");
       } finally {
         console.log = capture;
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2794,7 +2914,7 @@ describe("leader in the daemon", () => {
           return (await store.get("t-1"))?.body?.flag?.reason === "look";
         }, "the leader to write the flag");
       } finally {
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2824,7 +2944,7 @@ describe("leader in the daemon", () => {
       await Bun.sleep(100);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2869,7 +2989,7 @@ describe("leader in the daemon", () => {
       }
       expect(redialed.frame.roles).toEqual(["scheduler"]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2920,7 +3040,7 @@ describe("leader in the daemon", () => {
       expect(await store.list()).toHaveLength(1);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2971,7 +3091,7 @@ describe("leader in the daemon", () => {
       expect(lines.filter((l) => l.includes("op=amend") && l.includes(" ok"))).toHaveLength(1);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2988,7 +3108,7 @@ describe("leader in the daemon", () => {
       await pollUntil(() => relay.openAppCount() === 0, "the leader's leg closing on socket loss", 10_000);
       expect(daemon.leader.term()).toBeNull();
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });

@@ -123,6 +123,17 @@ function settlesOnReport(task: Task): boolean {
   return task.spec.until === "reported";
 }
 
+/**
+ * Whether the session's own report settles `task`: always under `until: "reported"`; under
+ * `until: "merged"` only while it holds no PR and no successor — a session whose work went to
+ * another task, say, which would otherwise hold its slot until it exits. One holding a PR waits on
+ * the merge, and a pass in flight on its successor. No stronger than a PR-less exit, which settles
+ * `done` too.
+ */
+export function reportSettles(task: Task): boolean {
+  return settlesOnReport(task) || (task.prUrl === undefined && task.successor === undefined);
+}
+
 /** A believed merge recorded on a task it does not settle; the same object when already recorded. */
 function mergedOpen(task: Task): Task {
   return task.merged === true ? task : { ...task, merged: true };
@@ -133,16 +144,20 @@ function mergedOpen(task: Task): Task {
  * and a believed merge making it `done` (`doneBy: "merged"`) — a session still
  * running included, since what it was for has landed. Under `until: "reported"`
  * a merge is only recorded (`Task.merged`), and the session's report
- * (`entry.reported`) settles it `done` by `reported`; a report under
- * `until: "merged"` is ignored. Unchanged (the same object) when `entry` says
- * nothing new.
+ * (`entry.reported`) settles it `done` by `reported`; under `until: "merged"`
+ * a report settles only a placed task `reportSettles` passes. Unchanged (the
+ * same object) when `entry` says nothing new.
  */
 export function progressed(task: Task, entry: Progress | undefined): Task {
   if (entry === undefined) return task;
   const seen = trusted(task, entry);
   const next = absorb(task, seen);
   const merged = seen.merged === true && hasWork(next);
-  if (!settlesOnReport(next)) return merged ? advance(next, "done", { doneBy: "merged" }) : next;
+  if (!settlesOnReport(next)) {
+    if (merged) return advance(next, "done", { doneBy: "merged" });
+    const prless = seen.reported === true && PLACED.includes(next.state) && reportSettles(next);
+    return prless ? advance(next, "done", { doneBy: "reported" }) : next;
+  }
   const settleable = PLACED.includes(next.state) || next.state === "awaiting-merge";
   if (seen.reported === true && settleable) return advance(next, "done", { doneBy: "reported" });
   return merged ? mergedOpen(next) : next;
@@ -161,7 +176,8 @@ export function progressed(task: Task, entry: Progress | undefined): Task {
  * `until: "reported"` the session's report comes first (`done` by `reported`),
  * and a merge is recorded and falls through to the PR check instead of
  * settling; a PR-less exit still settles as above, since a lying report can do
- * no more than exiting can.
+ * no more than exiting can. Under `until: "merged"` a report settles a task
+ * `reportSettles` passes `done` by `reported`, before its exit is read.
  */
 export function ended(task: Task, entry: Progress | undefined, fields: TaskFields = {}): Task {
   const view: Task = { ...task, ...fields };
@@ -175,6 +191,7 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
   // work lives on in the successor, which holds the PR. A merge and the session's own report won above.
   if (open.successor !== undefined) return advance(open, "superseded");
   if (open.prUrl !== undefined) return advance(open, "awaiting-merge");
+  if (seen?.reported === true) return advance(open, "done", { doneBy: "reported" });
   const exit = seen?.exit;
   if (exit !== undefined && exit !== 0) {
     const missing = settlesOnReport(known) ? "did not report done" : "reported no pull request";

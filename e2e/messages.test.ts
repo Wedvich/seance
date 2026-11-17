@@ -19,8 +19,8 @@ import { fixtureOrigin, q, startSuite, type Suite } from "./suite.ts";
 
 /**
  * Cross-machine session messages with every part real but the session: the leader's resolution and forward, the
- * target daemon's delivery into a pane's real `seanced inbox` listener, the receipt back to the sender's own pane, and
- * the sender's `sendMessage` with the route gate built exactly as `seanced mcp` builds it (`messageRouteGate`) over a
+ * target daemon's delivery into a pane's real `seance inbox` listener, the receipt back to the sender's own pane, and
+ * the sender's `sendMessage` with the route gate built exactly as `seance mcp` builds it (`messageRouteGate`) over a
  * real fleet. A stand-in "session" is a script in each task's stub pane.
  */
 
@@ -77,7 +77,7 @@ beforeAll(async () => {
     createdAt: Date.now(),
   });
   await stack.restartDaemon();
-  await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+  await stack.waitForLead("the suite's daemon to lead");
   await stack.daemon.leader.settled();
   second = await bootBox();
   app = startApp(stack);
@@ -193,8 +193,8 @@ interface Session {
 type Launch = (command: string) => Promise<string>;
 
 /**
- * The stand-in session for a task: in its pane, a `seanced inbox` listener against its machine's daemon (what the inbox
- * mod runs) and a sender that calls `sendMessage` with the gate `seanced mcp` builds, fed by files so one pane sends
+ * The stand-in session for a task: in its pane, a `seance inbox` listener against its machine's daemon (what the inbox
+ * mod runs) and a sender that calls `sendMessage` with the gate `seance mcp` builds, fed by files so one pane sends
  * as often as a test needs. Every command is a separate bun process in the pane, as a session's tools are.
  */
 async function session(taskId: string, box: "suite" | "box"): Promise<Session> {
@@ -208,7 +208,7 @@ async function session(taskId: string, box: "suite" | "box"): Promise<Session> {
 /**
  * A session with no task: a window in the box's tmux session running a shell, whose child is a process named `claude`
  * (the daemon finds a session by that name) with the listener and the sender as its own children, as a hand-started
- * session's `seanced inbox` and `seanced mcp` are. Bound to the process under the pane's, not the pane's own.
+ * session's `seance inbox` and `seance mcp` are. Bound to the process under the pane's, not the pane's own.
  */
 async function untaskedSession(label: string, box: "suite" | "box"): Promise<Session> {
   const tmuxSession = box === "suite" ? stack.config.tmuxSession : (second?.tmuxSession ?? "");

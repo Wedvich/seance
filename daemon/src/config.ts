@@ -32,7 +32,7 @@ export interface Config {
    */
   readonly machineTag?: string;
   /**
-   * `seanced reap`'s settings; absent means the defaults, with the schedule off. Always set under `custodian`, whose
+   * `seance reap`'s settings; absent means the defaults, with the schedule off. Always set under `custodian`, whose
    * defaults (`CUSTODIAN_REAP_DEFAULTS`) fill the fields the key leaves out.
    */
   readonly reap?: ReapConfig;
@@ -373,7 +373,7 @@ function requireString(raw: Record<string, unknown>, key: string, path: string):
 export async function loadConfig(path: string = configPath()): Promise<Config> {
   const file = Bun.file(path);
   if (!(await file.exists())) {
-    throw new Error(`no config at ${path} — run \`seanced init\` first`);
+    throw new Error(`no config at ${path} — run \`seance init\` first`);
   }
   let raw: unknown;
   try {

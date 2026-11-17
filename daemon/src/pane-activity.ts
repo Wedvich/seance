@@ -81,8 +81,13 @@ export interface PaneActivityTracker {
 
 export const SAMPLE_INTERVAL_MS = 60_000;
 
-/** A run of 10+ box-drawing rule characters alone on its line: the top and bottom edge of Claude's input box. */
-const RULE = /^\s*[─━]{10,}\s*$/u;
+/**
+ * An edge of Claude's input box: a run of 8+ box-drawing rule characters alone on its line, or with one label cut
+ * into it (a named session's top edge reads `──── fix-the-thing (thad) ─`, Claude Code 2.1.325). The drain ask and
+ * the custodian's `close` find the box by it too (`drain-ask.ts`).
+ */
+export const INPUT_BOX_RULE = /^\s*(?:[─━]{8,}(?: [^─━]+ [─━]+)?|[─━]+ [^─━]+ [─━]{8,})\s*$/u;
+const RULE = INPUT_BOX_RULE;
 /** A parenthesised elapsed time, with or without counters after it: `(2m 14s · ↑ 3.1k tokens · esc to interrupt)`. */
 const TIMER = /\(\s*(?:\d+[hms]\s*)+(?:·[^)]*)?\)/gu;
 /** The spinner's animated glyph at the start of its line; the word after it stays, it is fixed per turn. */

@@ -1,5 +1,5 @@
 import { CAPABILITIES, withAutonomy, type AmendDraft } from "@seance/shared";
-import { setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
+import { setAccountOpen, setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
@@ -39,12 +39,12 @@ import {
 } from "./fleet.ts";
 import type { PskStore } from "./psk-store.ts";
 
-// `seanced spawn`: queue the spawn for the scheduler as an app-role
-// client, as `seanced mcp`'s `spawn_session` does — a sealed task `store-put` at
+// `seance spawn`: queue the spawn for the scheduler as an app-role
+// client, as `seance mcp`'s `spawn_session` does — a sealed task `store-put` at
 // `expect: 0`, so it queues with no leader up. A shell that can read the PSK
 // dials the relay itself; one that cannot (a credential-delivered box, where
 // only the service sees the key) asks the daemon's broker, which seals and
-// sends it. `seanced spawn --now` stays relay-free.
+// sends it. `seance spawn --now` stays relay-free.
 
 export interface AutoFleetOpts {
   /** Tests point these at stores that cannot exist. */
@@ -200,7 +200,7 @@ export async function spawnAuto(
 }
 
 /**
- * `seanced continue`: the same gates and enqueue as MCP's `continue_task` (`continueAuto`), under
+ * `seance continue`: the same gates and enqueue as MCP's `continue_task` (`continueAuto`), under
  * this shell's own origin. A continuation is a scheduler task or nothing, so there is no `--now`.
  */
 export async function continueTaskAuto(
@@ -234,7 +234,7 @@ export async function continueTaskAuto(
   }
 }
 
-/** `seanced start`: MCP's `start_task` (`startAuto`) from this shell, through its key or the daemon's broker. */
+/** `seance start`: MCP's `start_task` (`startAuto`) from this shell, through its key or the daemon's broker. */
 export async function startTaskAuto(
   args: StartCliArgs,
   fleet: Fleet,
@@ -259,7 +259,7 @@ export async function startTaskAuto(
   }
 }
 
-/** `seanced pass`: MCP's `pass_task` (`passAuto`) from this shell, through its key or the daemon's broker. */
+/** `seance pass`: MCP's `pass_task` (`passAuto`) from this shell, through its key or the daemon's broker. */
 export async function passTaskAuto(
   args: PassCliArgs,
   fleet: Fleet,
@@ -284,7 +284,7 @@ export async function passTaskAuto(
   }
 }
 
-/** `seanced amend`: MCP's `amend_task` (`amendAuto`) from this shell, through its key or the daemon's broker. */
+/** `seance amend`: MCP's `amend_task` (`amendAuto`) from this shell, through its key or the daemon's broker. */
 export async function amendTaskAuto(
   draft: AmendDraft,
   fleet: Fleet,
@@ -321,7 +321,7 @@ export async function cmdAmendAuto(draft: AmendDraft): Promise<void> {
   process.exit(0);
 }
 
-/** `seanced close` / `seanced open`: always through the relay as app-role (`setMachineOpen`), so a keyless box refuses. */
+/** `seance close` / `seance open`: always through the relay as app-role (`setMachineOpen`), so a keyless box refuses. */
 export async function availabilityViaFleet(
   machine: string | null,
   open: boolean,
@@ -329,6 +329,7 @@ export async function availabilityViaFleet(
   fleet: Fleet,
   self: () => Promise<string | null> = ownDeviceId,
   wait = false,
+  drain = false,
 ): Promise<AvailabilityOutcome> {
   const verb = open ? "open" : "close";
   let lease: FleetLease;
@@ -348,10 +349,41 @@ export async function availabilityViaFleet(
       return failed(NO_WAIT_TEXT);
     }
     if (wait && lease.scheduler === null) return failed(NO_WAIT_TEXT);
-    return await setMachineOpen({ ref: machine, selfId: machine === null ? await self() : null, open, now, lease });
+    return await setMachineOpen({
+      ref: machine,
+      selfId: machine === null ? await self() : null,
+      open,
+      now,
+      drain,
+      lease,
+    });
   } finally {
     lease.release();
   }
+}
+
+/** `seance close|open --account`: over the relay as app-role (`setAccountOpen`), so a keyless box refuses. */
+export async function accountAvailabilityViaFleet(account: string, open: boolean, fleet: Fleet): Promise<AutoEnqueued> {
+  let lease: FleetLease;
+  try {
+    lease = await fleet.open();
+  } catch (err) {
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(`${open ? "open" : "close"}: not sent — ${why}`);
+  }
+  try {
+    return await setAccountOpen({ ref: account, open, lease });
+  } finally {
+    lease.release();
+  }
+}
+
+export async function cmdAccountAvailabilityAuto(account: string, open: boolean): Promise<void> {
+  const config = await loadConfig();
+  const built = await autoFleet(config);
+  const outcome = await accountAvailabilityViaFleet(account, open, built.fleet).finally(() => built.fleet.stop());
+  (outcome.ok ? console.log : console.error)(outcome.text);
+  process.exit(outcome.ok ? 0 : 1);
 }
 
 const NO_WAIT_TEXT =
@@ -362,13 +394,16 @@ export async function cmdAvailabilityAuto(
   open: boolean,
   now: boolean,
   wait: boolean,
+  drain: boolean,
 ): Promise<void> {
   const config = await loadConfig();
   const built = await autoFleet(config);
-  const outcome = await availabilityViaFleet(machine, open, now, built.fleet, undefined, wait).catch((err: unknown) => {
-    built.fleet.stop();
-    throw err;
-  });
+  const outcome = await availabilityViaFleet(machine, open, now, built.fleet, undefined, wait, drain).catch(
+    (err: unknown) => {
+      built.fleet.stop();
+      throw err;
+    },
+  );
   if (!outcome.ok) {
     built.fleet.stop();
     console.error(outcome.text);
@@ -383,6 +418,7 @@ export async function cmdAvailabilityAuto(
     fleet: built.fleet,
     deviceId: outcome.closed.deviceId,
     closedAt: outcome.closed.at,
+    draining: outcome.closed.draining,
     print: (line) => console.log(line),
   }).finally(() => built.fleet.stop());
   (drained.code === 0 ? console.log : console.error)(drained.text);
@@ -438,6 +474,6 @@ export async function cmdSpawnAuto(args: SpawnCliArgs): Promise<void> {
     process.exit(1);
   }
   console.log(outcome.text);
-  // As `seanced mcp` exits explicitly: a socket stuck closing must not hold the shell.
+  // As `seance mcp` exits explicitly: a socket stuck closing must not hold the shell.
   process.exit(0);
 }

@@ -1,12 +1,10 @@
-import { createHash } from "node:crypto";
-import { rmdirSync } from "node:fs";
-import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, lstat, mkdir, mkdtemp, rmdir, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import { isCustodianFrameKind, type CustodianReply } from "./custodian-frame.ts";
 import { localSocketReachable } from "./local-client.ts";
-import { stateDir } from "./paths.ts";
 import { peerPid, socketFd } from "./peer.ts";
+import { CUSTODIAN_SOCKET_DIR, CUSTODIAN_SOCKET_DIR_PREFIX } from "./seat-record.ts";
 import { EMPTY, flush, sendLine } from "./socket-lines.ts";
 
 /**
@@ -16,20 +14,56 @@ import { EMPTY, flush, sendLine } from "./socket-lines.ts";
  * peer pid, in the verbs; this file only keeps the surface to one kind.
  *
  * It sits under a literal `/tmp`, outside `stateDir()` and every path the round may write: `tmpdir()` is long on
- * macOS and a unix socket path is 104 bytes there.
+ * macOS and a unix socket path is 104 bytes there. Its directory's name is random (`custodianSocketDir`) and the
+ * seat record keeps it, so no other user can derive and pre-create it, and an adopted round still finds it.
  */
 
 /** Notes are at most `NOTES_MAX` (8192 bytes) and a summary 1024: far under this. Past it the connection is dropped. */
 const MAX_INBOUND_BYTES = 65_536;
 const WARN_EVERY_MS = 60_000;
 
+export const CUSTODIAN_SOCKET_NAME = "c.sock";
+
+/** `rejected` is why a recorded dir was not kept: a local IO error reads differently in the log from a planted name. */
+export type SocketDirChoice =
+  | { readonly dir: string; readonly reused: true }
+  | { readonly dir: string; readonly reused: false; readonly rejected?: string }
+  | { readonly problem: string };
+
 /**
- * Where this daemon's round socket is, a function of its state dir: stable across a reload and a restart (an adopted
- * round's env still names it), and one per test daemon. Never matches `ROUND_TMP` (`seance-cu-s-…` has a `-` where its
- * six characters are alphanumeric), so the round-tmp sweep never touches it.
+ * The directory this seat's socket lives in: the recorded one when it is still this daemon's own (made again if
+ * missing, never through a link or another user's directory), else a fresh `mkdtemp`. A name another user took is
+ * never waited on, so it cannot hold rounds off; `reused` says whether a recorded round's environment names this one.
  */
-export function custodianSocketPath(state: string = stateDir()): string {
-  return `/tmp/seance-cu-s-${createHash("sha256").update(state).digest("hex").slice(0, 12)}/c.sock`;
+export async function custodianSocketDir(recorded: string | undefined): Promise<SocketDirChoice> {
+  let rejected: string | undefined;
+  if (recorded !== undefined) {
+    rejected = CUSTODIAN_SOCKET_DIR.test(recorded)
+      ? ((await prepareDir(recorded)) ?? undefined)
+      : "not of the expected form";
+    if (rejected === undefined) return { dir: recorded, reused: true };
+  }
+  try {
+    // `mkdtemp` makes it 0700 and exclusively: nothing can be there first.
+    const dir = await mkdtemp(CUSTODIAN_SOCKET_DIR_PREFIX);
+    return rejected === undefined ? { dir, reused: false } : { dir, reused: false, rejected };
+  } catch (err) {
+    return { problem: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Removes a socket directory when the seat is off: only one of this shape, a real directory of this daemon's own, and
+ * only its socket within it. Never throws: a directory left behind is an empty 0700 one.
+ */
+export async function removeCustodianSocketDir(dir: string): Promise<void> {
+  if (!CUSTODIAN_SOCKET_DIR.test(dir)) return;
+  const info = await lstat(dir).catch(() => null);
+  if (info === null || info.isSymbolicLink() || !info.isDirectory()) return;
+  const uid = process.getuid?.();
+  if (uid !== undefined && info.uid !== uid) return;
+  await unlink(join(dir, CUSTODIAN_SOCKET_NAME)).catch(() => {});
+  await rmdir(dir).catch(() => {});
 }
 
 export interface CustodianSocketOpts {
@@ -48,8 +82,8 @@ interface Conn {
 }
 
 /**
- * Prepares the socket's directory: made 0700 without following anything, then `lstat`ed (a predictable `/tmp` name is
- * one another user could have planted a symlink at, which `stat` would follow). Returns the problem, or null.
+ * Prepares the socket's directory: made 0700 without following anything, then `lstat`ed (a `/tmp` name is one another
+ * user could have planted a symlink at, which `stat` would follow). Returns the problem, or null.
  */
 async function prepareDir(dir: string): Promise<string | null> {
   try {
@@ -165,14 +199,10 @@ export async function startCustodianSocket(o: CustodianSocketOpts): Promise<Cust
 
   return {
     path: o.path,
-    // Synchronous, as a capability's `stop` is. `stop(true)` unlinks the socket; the directory goes if it is empty.
+    // Synchronous, as a capability's `stop` is. `stop(true)` unlinks the socket. The directory stays, so the next
+    // instance (a reload, a restart) serves the same path, and nobody can take its name in between.
     stop: (): void => {
       server.stop(true);
-      try {
-        rmdirSync(dir);
-      } catch {
-        // Not empty or already gone: nothing of ours is left in it either way.
-      }
     },
   };
 }

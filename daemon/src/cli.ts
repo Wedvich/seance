@@ -1,7 +1,6 @@
 import { chmod, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import {
-  AUTONOMY_LEVELS,
   DAEMON_PATH,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
@@ -18,6 +17,7 @@ import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./
 import { createBackend } from "./backend-default.ts";
 import {
   cmdAmendAuto,
+  cmdAccountAvailabilityAuto,
   cmdAvailabilityAuto,
   cmdContinueAuto,
   cmdPassAuto,
@@ -30,6 +30,7 @@ import { configSkeleton, loadConfig, loadPsk, REAP_DEFAULTS, type Config } from 
 import { bearerTokenWarnings, pskFingerprint, runnableProblems } from "./config-checks.ts";
 import type { Check } from "./check.ts";
 import { custodianChecks } from "./custodian-checks.ts";
+import { CLI_NAME, LEGACY_CLI_NAME, usageLine } from "./commands.ts";
 import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
@@ -89,7 +90,7 @@ export async function cmdInit(): Promise<void> {
   console.log("       openssl rand -base64 32");
   console.log("  2. fill in relayUrl, repoRoots, and a bearerToken shared with the relay:");
   console.log("       openssl rand -base64 32 | tr '+/' '-_' | tr -d '='");
-  console.log("  3. run `seanced doctor`, then `seanced install`");
+  console.log("  3. run `seance doctor`, then `seance install`");
 }
 
 /**
@@ -111,7 +112,7 @@ export async function cmdScan(): Promise<void> {
   console.log(`\n${repos.length} repos`);
   if (daemonPid !== null) {
     console.log(
-      `cache untouched — daemon pid ${daemonPid} owns it. Refresh from the app to rescan, or \`seanced restart\` if you edited repoRoots.`,
+      `cache untouched — daemon pid ${daemonPid} owns it. Refresh from the app to rescan, or \`seance restart\` if you edited repoRoots.`,
     );
   }
 }
@@ -131,13 +132,13 @@ export interface SpawnCliArgs {
   readonly not?: readonly string[];
   /** Queued spawn only (refused with `--now`): traits the machine must declare, each given by one `--requires`; present only when given. */
   readonly requires?: readonly string[];
-  /** Queued spawn only (refused with `--now`): start it past the concurrency cap once admitted, as `seanced start`; present only when given. */
+  /** Queued spawn only (refused with `--now`): start it past the concurrency limit and a paused queue once admitted, as `seance start`; present only when given. */
   readonly start?: true;
   /** The task's autonomy level, queued or `--now`; present only when given. */
   readonly autonomy?: AutonomyLevel;
 }
 
-const SPAWN_USAGE = `usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]... [--requires <trait>]...] [--autonomy <${AUTONOMY_LEVELS.join("|")}>] <repo> [--here] [-t <title>] [[-p] <task>]`;
+const SPAWN_USAGE = usageLine("spawn");
 
 /** The flags that take a value, and the field each fills. */
 const SPAWN_VALUE_FLAGS = {
@@ -232,7 +233,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   }
   if (now && start) {
     throw new Error(
-      `--now spawns here directly; --start starts a queued spawn past the scheduler's cap — give one\n${SPAWN_USAGE}`,
+      `--now spawns here directly; --start starts a queued spawn past the scheduler's limit — give one\n${SPAWN_USAGE}`,
     );
   }
   const prompt = promptParts.join(" ");
@@ -299,7 +300,7 @@ export interface ContinueCliArgs {
   readonly prompt?: string;
 }
 
-const CONTINUE_USAGE = "usage: seanced continue <task-id> [-p|--prompt <note>]";
+const CONTINUE_USAGE = usageLine("continue");
 
 /** Exported for tests. */
 export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
@@ -329,7 +330,7 @@ export interface StartCliArgs {
   readonly taskId: string;
 }
 
-const START_USAGE = "usage: seanced start <task-id>";
+const START_USAGE = usageLine("start");
 
 /** Exported for tests. */
 export function parseStartArgs(argv: readonly string[]): StartCliArgs {
@@ -338,7 +339,7 @@ export function parseStartArgs(argv: readonly string[]): StartCliArgs {
   return { taskId };
 }
 
-/** Starts a queued task now, past the concurrency cap (`cli-auto.ts`) — the app's Start now. */
+/** Starts a queued task now, past the concurrency limit and a paused queue (`cli-auto.ts`) — the app's Start now. */
 export async function cmdStart(argv: readonly string[]): Promise<void> {
   return cmdStartAuto(parseStartArgs(argv));
 }
@@ -347,7 +348,7 @@ export interface PassCliArgs {
   readonly taskId: string;
 }
 
-const PASS_USAGE = "usage: seanced pass <task-id>";
+const PASS_USAGE = usageLine("pass");
 
 /** Exported for tests. */
 export function parsePassArgs(argv: readonly string[]): PassCliArgs {
@@ -363,36 +364,56 @@ export async function cmdPass(argv: readonly string[]): Promise<void> {
 
 /**
  * Exported for tests. `close` and `open` take at most the one machine they act on; none means this one.
- * `close` alone takes `--wait` (block until the machine is empty) and `--now` (interrupt its sessions at once).
+ * `close` alone takes `--wait` (block until the machine is empty), `--drain` (start the drain: the close before soft
+ * close existed) and `--now` (interrupt its sessions at once; implies `--drain`).
  */
 export function parseAvailabilityArgs(
   argv: readonly string[],
   verb: "close" | "open",
-): { readonly machine: string | null; readonly wait: boolean; readonly now: boolean } {
-  const usage =
-    verb === "close" ? "usage: seanced close [<machine>] [--now] [--wait]" : "usage: seanced open [<machine>]";
-  const flags = verb === "close" ? ["--wait", "--now"] : [];
+): { readonly machine: string | null; readonly wait: boolean; readonly now: boolean; readonly drain: boolean } {
+  const usage = usageLine(verb);
+  const flags = verb === "close" ? ["--wait", "--now", "--drain"] : [];
   const wait = argv.includes("--wait") && verb === "close";
   const now = argv.includes("--now") && verb === "close";
+  const drain = now || (argv.includes("--drain") && verb === "close");
   const words = argv.filter((arg) => !flags.includes(arg));
   const [machine] = words;
   if (words.length > 1 || machine?.startsWith("-") === true) throw new Error(usage);
-  return { machine: machine ?? null, wait, now };
+  return { machine: machine ?? null, wait, now, drain };
 }
 
-/** Closes a machine to new scheduled work (default: this one); the scheduler passes its running tasks on, and `--wait` blocks until it is empty. Over the relay (`cli-auto.ts`). */
+/**
+ * Exported for tests. `close --account <account>` and `open --account <account>`: the account named, null without the
+ * flag. The account form takes nothing else, since a machine word or a drain flag would mean the other command.
+ */
+export function parseAccountArg(argv: readonly string[], verb: "close" | "open"): string | null {
+  if (!argv.includes("--account")) return null;
+  const [flag, account, ...rest] = argv;
+  if (flag !== "--account" || account === undefined || account.startsWith("-") || rest.length > 0) {
+    throw new Error(usageLine(verb));
+  }
+  return account;
+}
+
+/**
+ * Closes a machine to new scheduled work (default: this one): soft where it and the leader support it (running tasks
+ * finish where they are), `--drain` to pass them on, `--wait` to block until it is empty. Over the relay (`cli-auto.ts`).
+ */
 export async function cmdClose(argv: readonly string[]): Promise<void> {
-  const { machine, wait, now } = parseAvailabilityArgs(argv, "close");
-  return cmdAvailabilityAuto(machine, false, now, wait);
+  const account = parseAccountArg(argv, "close");
+  if (account !== null) return cmdAccountAvailabilityAuto(account, false);
+  const { machine, wait, now, drain } = parseAvailabilityArgs(argv, "close");
+  return cmdAvailabilityAuto(machine, false, now, wait, drain);
 }
 
-/** Reopens a closed machine. */
+/** Reopens a closed machine, or with `--account` a closed account. */
 export async function cmdOpen(argv: readonly string[]): Promise<void> {
-  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false);
+  const account = parseAccountArg(argv, "open");
+  if (account !== null) return cmdAccountAvailabilityAuto(account, true);
+  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false, false);
 }
 
-const AMEND_USAGE =
-  'usage: seanced amend <task-id> [--replace] [--title <title>] [--model <model>] [--effort <effort>] [text…]  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default)';
+const AMEND_USAGE = `${usageLine("amend")}  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default)`;
 
 /** Exported for tests. Bare words after the task id are the text, as `spawn`'s are its prompt. */
 export function parseAmendArgs(argv: readonly string[]): AmendDraft {
@@ -447,7 +468,7 @@ export interface DespawnCliArgs {
   readonly force: boolean;
 }
 
-const DESPAWN_USAGE = "usage: seanced despawn <session id, e.g. %12> [--force]";
+const DESPAWN_USAGE = usageLine("despawn");
 
 /** Exported for tests. */
 export function parseDespawnArgs(argv: readonly string[]): DespawnCliArgs {
@@ -506,7 +527,7 @@ export interface ReapCliArgs {
   readonly minAgeDays?: number;
 }
 
-const REAP_USAGE = "usage: seanced reap [--dry-run] [--min-age-days <n>]";
+const REAP_USAGE = usageLine("reap");
 
 /** Exported for tests. */
 export function parseReapArgs(argv: readonly string[]): ReapCliArgs {
@@ -648,7 +669,7 @@ export async function cmdDoctor(): Promise<void> {
 
   console.log("config");
   let config;
-  // Whether this shell holds a key decides how `seanced mcp` reaches the fleet,
+  // Whether this shell holds a key decides how `seance mcp` reaches the fleet,
   // reported under "service" once the socket is known. Null when config failed.
   let keyReadable: boolean | null = null;
   try {
@@ -684,7 +705,7 @@ export async function cmdDoctor(): Promise<void> {
         const store = resolved.source === "config" ? await availablePskStore() : null;
         if (store !== null) {
           warn(
-            `psk sits in config.json, readable by anything running as you — \`seanced psk-import\` moves it to ${store.nag}`,
+            `psk sits in config.json, readable by anything running as you — \`seance psk-import\` moves it to ${store.nag}`,
           );
         }
       }
@@ -767,7 +788,7 @@ export async function cmdDoctor(): Promise<void> {
 }
 
 export const INSTALL_USAGE =
-  'usage: seanced install [--system [--user <name>] [--state-dir <path>] [--path "$PATH"]]\n' +
+  `${usageLine("install")}\n` +
   "  --system  install the root-owned system unit that systemd delivers the TPM-sealed PSK to\n" +
   "            (systemd >= 256; needs sudo — see docs/psk.md)";
 
@@ -828,7 +849,7 @@ export async function cmdInstall(argv: readonly string[] = []): Promise<void> {
   for (const note of result.notes) console.log(`note: ${note}`);
   // The service embeds the absolute main.ts path, so it never needs the name —
   // but every follow-up this CLI prints does, so say so now rather than let
-  // `seanced restart` be the first discovery.
+  // `seance restart` be the first discovery.
   const onPath = await cliOnPath();
   if (onPath.level !== "ok") console.log(`note: ${onPath.message}`);
   console.log(`logs: ${logPath()}`);
@@ -906,7 +927,10 @@ export async function cmdLink(argv: readonly string[]): Promise<void> {
   if (result.status === "already") console.log(`already linked: ${result.file} → ${main}`);
   else if (result.status === "repointed") console.log(`repointed ${result.file}: was ${result.previous}, now ${main}`);
   else console.log(`linked ${result.file} → ${main}`);
-  if (Bun.which("seanced") === null) {
+  // The CLI was `seanced` before the rename; its link to this checkout would linger as a second name.
+  const legacy = await removeLinks(process.env.PATH ?? "", main, [LEGACY_CLI_NAME]);
+  for (const file of legacy.removed) console.log(`removed ${file} (the CLI's old name)`);
+  if (Bun.which(CLI_NAME) === null) {
     console.log(`note: ${result.file} still doesn't resolve — is its dir actually on PATH in this shell?`);
   }
 }
@@ -926,10 +950,10 @@ export async function cmdRestart(): Promise<void> {
 /**
  * What an announce does, from a shell: fast-forward the clone the live daemon serves from (this
  * one when none runs), install, restart. The same refusals hold — a dirty, re-branched or diverged
- * checkout is left alone — and the restart is `seanced restart`'s, not the self-update's exit.
+ * checkout is left alone — and the restart is `seance restart`'s, not the self-update's exit.
  */
 export async function cmdUpdate(argv: readonly string[]): Promise<void> {
-  if (argv.length > 0) throw new Error("usage: seanced update");
+  if (argv.length > 0) throw new Error(usageLine("update"));
   const runtime = await readRuntime();
   const alive = runtime !== null && pidAlive(runtime.pid);
   const root = servingRoot(runtime, alive) ?? trimRoot(checkoutRoot());
@@ -962,7 +986,7 @@ export async function cmdSessions(): Promise<void> {
   const backend = createBackend(await loadConfig(), { home: homedir() });
   const state = await loadOrInitState();
   const sessions = await backend.sessions(state.repos);
-  // The id first: it is what `seanced despawn` takes.
+  // The id first: it is what `seance despawn` takes.
   for (const s of sessions) {
     console.log(`${(s.id ?? "-").padEnd(6)} ${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
   }
@@ -1042,7 +1066,7 @@ async function runPskImport(store: PskStore): Promise<void> {
     process.exit(1);
   }
   console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
-  console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seanced restart\``);
+  console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seance restart\``);
 }
 
 export async function cmdPskImport(): Promise<void> {
@@ -1065,7 +1089,7 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
   const [sub] = rest;
   if (sub === undefined) return runMcpServer();
   if (sub !== "install" && sub !== "uninstall") {
-    throw new Error(`unknown mcp subcommand "${sub}" — expected \`seanced mcp\`, \`mcp install\` or \`mcp uninstall\``);
+    throw new Error(`unknown mcp subcommand "${sub}" — expected \`seance mcp\`, \`mcp install\` or \`mcp uninstall\``);
   }
   const claude = Bun.which("claude");
   if (claude === null) throw new Error("claude not on PATH — install Claude Code first");
@@ -1106,12 +1130,12 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
   );
 }
 
-export const MOD_USAGE = "usage: seanced mod install | seanced mod uninstall";
+export const MOD_USAGE = usageLine("mod");
 
 /** Same shape as `parseRaycastArgs`. Exported for tests. */
 export function parseModArgs(argv: readonly string[]): "install" | "uninstall" {
   const [sub, ...extra] = argv;
-  if (sub === undefined) throw new Error(`seanced mod needs a subcommand\n${MOD_USAGE}`);
+  if (sub === undefined) throw new Error(`seance mod needs a subcommand\n${MOD_USAGE}`);
   if (sub !== "install" && sub !== "uninstall") throw new Error(`unknown mod subcommand "${sub}"\n${MOD_USAGE}`);
   if (extra.length > 0) throw new Error(`mod ${sub} takes no arguments\n${MOD_USAGE}`);
   return sub;
@@ -1127,7 +1151,7 @@ export async function cmdMod(argv: readonly string[]): Promise<void> {
   await uninstallMods((line) => console.log(line));
 }
 
-export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast uninstall";
+export const RAYCAST_USAGE = usageLine("raycast");
 
 /**
  * Allow-listed like `mcp`'s, but with no bare-invocation mode: `mcp` alone
@@ -1136,7 +1160,7 @@ export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast u
  */
 export function parseRaycastArgs(argv: readonly string[]): "install" | "uninstall" {
   const [sub, ...extra] = argv;
-  if (sub === undefined) throw new Error(`seanced raycast needs a subcommand\n${RAYCAST_USAGE}`);
+  if (sub === undefined) throw new Error(`seance raycast needs a subcommand\n${RAYCAST_USAGE}`);
   if (sub !== "install" && sub !== "uninstall") {
     throw new Error(`unknown raycast subcommand "${sub}"\n${RAYCAST_USAGE}`);
   }

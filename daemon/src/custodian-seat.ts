@@ -9,6 +9,7 @@ import {
 } from "@seance/shared";
 import type { Config, CustodianConfig } from "./config.ts";
 import type { CustodianVerb } from "./custodian-frame.ts";
+import { vsockFilter } from "./custodian-seccomp.ts";
 import { pausedAt, ROUND_REQUEST_MIN_GAP_MS, type PauseRead, type RoundRequest } from "./custodian-control.ts";
 import { countedVerb, emptyCounts, verbsUsed, type RoundEntry } from "./custodian-rounds.ts";
 import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
@@ -29,23 +30,24 @@ export interface CustodianSeatOpts {
   readonly graceMs?: number;
   readonly sandboxProblem?: () => Promise<string | null>;
   readonly weakerNested?: () => Promise<boolean>;
-  /** Tests: whether the sandbox mode was drilled (`sandboxDrilled`); a CI runner's strict mode never was. */
-  readonly sandboxDrilled?: (platform: "darwin" | "linux", weakerNested: boolean) => boolean;
+  /** Tests: whether this host's sandbox was drilled (`sandboxDrilled`). */
+  readonly sandboxDrilled?: (platform: "darwin" | "linux") => boolean;
 }
 
 /**
- * Whether the round's sandbox has been drilled in this host's mode (docs/custodian.md item 4b; DESIGN.md, "The
- * custodian's seat"): macOS, and Linux where `/proc/sys` is read-only and bwrap runs in its weaker nested mode (an LXC
- * container). Linux's strict mode (`--proc /proc`, `--disable-userns`: bare metal or a VM) was never observed, so no
- * round runs there until a drill has proven it; lifting that is a change to this one function.
+ * Whether the round's sandbox has been drilled on this host (docs/custodian.md item 4b; DESIGN.md, "The custodian's
+ * seat"): macOS, and Linux in both of bwrap's modes — strict (bare metal or a VM, drilled on WSL2) and weaker nested
+ * (`/proc/sys` read-only: an LXC container) — only under the outer seccomp filter (`vsockFilter`), which this host's
+ * arch must have: without it the WSL drill reached the Windows host over vsock, and an LXC container reaches its host
+ * kernel's vsock loopback through a fresh network namespace. Lifting any other case is a change to this one function.
  */
-export function sandboxDrilled(platform: "darwin" | "linux", weakerNested: boolean): boolean {
-  return platform === "darwin" || weakerNested;
+export function sandboxDrilled(platform: "darwin" | "linux", arch: string = process.arch): boolean {
+  return platform === "darwin" || vsockFilter(arch) !== null;
 }
 
-/** The one text the seat's warning and `seanced doctor` give for a host in an undrilled sandbox mode. */
+/** The one text the seat's warning and `seance doctor` give for a host in an undrilled sandbox mode. */
 export const SANDBOX_UNDRILLED =
-  "bwrap would run in its strict mode here (/proc/sys is writable: bare metal or a VM), which the round's containment was never drilled in — no rounds on this host";
+  "every Linux round runs under a vsock filter, which has no table for this CPU (x64 and arm64 only) — no rounds on this host";
 
 export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux" | null {
   return platform === "darwin" || platform === "linux" ? platform : null;
@@ -86,7 +88,7 @@ export class LaunchRefused extends Error {
 /**
  * C14 and C45: some tracked pane has stood `idle` since a turn's end for `everyMs`; the last round ended at least that
  * long ago; none is running; the daemon is not draining for a restart; the owner has not paused the seat. The owner's
- * request (`seanced custodian round`, `requested`) skips the interval, the last round's age, the quiet condition and
+ * request (`seance custodian round`, `requested`) skips the interval, the last round's age, the quiet condition and
  * the pause, never a running round or a drain. A pane counts only when a built verb
  * could act on it, else it would keep a round due every `everyMinutes` that closes nothing (DESIGN.md records the
  * narrowing): C7's exclusions (a last state of `needs-input`, or a drain, hand-off or pass mark: `untouchable`), a
@@ -189,7 +191,7 @@ export type HostProblem =
   | "round dir holds settings, agents or a link";
 
 /**
- * Why a signed-in exclave's round dir cannot host a round, null when it can: the one rule the pick and `seanced
+ * Why a signed-in exclave's round dir cannot host a round, null when it can: the one rule the pick and `seance
  * doctor` share, so doctor never says an exclave can host while the seat skips it.
  */
 export async function hostProblem(
@@ -264,6 +266,12 @@ export interface SeatDeps {
   /** The capability was stopped: nothing is saved, and a late launch closes its own pane. */
   readonly stopped: () => boolean;
   readonly record: () => SeatRecord;
+  /**
+   * False when the recorded round was launched against a socket this seat does not serve (an older daemon's record, or
+   * a recorded socket dir found unusable): it could call no verb until its deadline, so adoption closes it, `lost`.
+   * Absent, true.
+   */
+  readonly roundReachable?: boolean;
   readonly save: (record: SeatRecord) => Promise<void>;
   readonly pick: () => Promise<PickResult>;
   readonly launch: (
@@ -498,7 +506,10 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     await persist({ lastEndedAt: d.now() });
   };
 
-  /** Closes every round pane but `kept`; the recorded round's own dead pane is `exited`, any other is stray. */
+  /**
+   * Closes every round pane but `kept`; the recorded round's own dead pane is `exited`, its live one `unreachable`
+   * (kept only when reachable), any other is stray.
+   */
   const sweep = async (
     panes: readonly { readonly pane: string; readonly dead: boolean }[],
     recorded: string | null,
@@ -506,24 +517,28 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   ): Promise<void> => {
     for (const pane of panes) {
       if (pane.pane === kept) continue;
-      const reason = pane.pane === recorded ? "exited" : "stray";
+      const reason = pane.pane !== recorded ? "stray" : pane.dead ? "exited" : "unreachable";
       // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
       await d.audit.kill(pane.pane, reason, await d.close(pane.pane));
     }
   };
 
-  /** C4: the round a restart or reload left is adopted with its original deadline; any other round pane is stray. */
+  /**
+   * C4: the round a restart or reload left is adopted with its original deadline; any other round pane is stray. One
+   * launched against a socket this seat does not serve is closed and lost instead: adopted, it would run blind.
+   */
   const adopt = async (): Promise<void> => {
     const round = d.record().round;
     const panes = await d.listRounds();
     const recordedPane = round?.pane ?? null;
     const recorded = recordedPane === null ? undefined : panes.find((pane) => pane.pane === recordedPane);
-    const kept = recorded !== undefined && !recorded.dead ? recorded.pane : null;
+    const reachable = d.roundReachable ?? true;
+    const kept = reachable && recorded !== undefined && !recorded.dead ? recorded.pane : null;
     await sweep(panes, recordedPane, kept);
     if (kept !== null) countsKnown = false;
     if (round === undefined || kept !== null) return;
     if (round.done === true) return finish(round, "done");
-    await finish(round, recorded === undefined ? "lost" : "exited");
+    await finish(round, recorded?.dead === true ? "exited" : "lost");
   };
 
   const closeStray = async (launched: { readonly pane: string; readonly tmpDir: string }): Promise<void> => {
@@ -620,7 +635,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     else if (!unreadableWarned) {
       unreadableWarned = true;
       d.warn(
-        "custodian: custodian/state.json is unreadable; the seat is paused until it is fixed or `seanced custodian resume` rewrites it",
+        "custodian: custodian/state.json is unreadable; the seat is paused until it is fixed or `seance custodian resume` rewrites it",
       );
     }
     let request = await d.peekRoundRequest(now);

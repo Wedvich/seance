@@ -49,7 +49,7 @@ describe("a queued verdict's stage track", () => {
   test("an unqueued verdict has no track, and offers a retry only when it carries one", () => {
     const lost = describeVerdict({ kind: "unqueued", message: "no answer.", mayHaveLanded: true }, [], {}, NOW, null);
     expect(lost.stage).toBeNull();
-    expect(lost.primary.onClick).toBe("back");
+    expect(lost.primary).toEqual({ label: "Back to prompt", onClick: "back" });
     const retry = describeVerdict(
       { kind: "unqueued", message: "no answer.", mayHaveLanded: true, retry: task("queued") },
       [],
@@ -60,7 +60,7 @@ describe("a queued verdict's stage track", () => {
     expect(retry.primary.onClick).toBe("retry");
   });
 
-  test("each verdict offers one way back to the form: a separate back only beside a retry", () => {
+  test("each verdict offers one way back to prompt: a separate back only beside a retry", () => {
     for (const state of ["queued", "running", "done", "failed"] as const) {
       const queued = verdictOf(task(state, { assignment: at }));
       expect(queued.primary.onClick).toBe("another");
@@ -135,7 +135,7 @@ describe("a queued verdict's body", () => {
 });
 
 describe("a Start now refusal on the queued verdict", () => {
-  const refusal = { taskId: "t", message: "Something besides the concurrency caps keeps it from every machine." };
+  const refusal = { taskId: "t", message: "Something besides the concurrency limit keeps it from every machine." };
   const body = (t: Task, r: typeof refusal | null): string =>
     describeVerdict({ kind: "queued", task: t }, [], {}, NOW, null, r).body;
 

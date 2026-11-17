@@ -19,7 +19,7 @@ export function attachmentUrl(relayUrl: string, id: string): string {
 
 /**
  * The config's relayUrl is the daemon endpoint; app-role clients dial `/app`.
- * Shared because both non-browser app-role clients (`seanced mcp`, the Raycast
+ * Shared because both non-browser app-role clients (`seance mcp`, the Raycast
  * extension) read the same daemon config and need the identical swap — the PWA
  * is configured with an app URL directly and never calls this.
  */

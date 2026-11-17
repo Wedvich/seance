@@ -35,11 +35,11 @@ describe("DENY", () => {
 
   test("the owner's custodian verbs and `notes --clear` are denied to the round, bare and with arguments; the round's verbs are not", () => {
     for (const verb of CUSTODIAN_OWNER_VERBS) {
-      expect(denied(`seanced custodian ${verb}`)).toBe(true);
-      expect(denied(`seanced custodian ${verb} --for 1h`)).toBe(true);
+      expect(denied(`seance custodian ${verb}`)).toBe(true);
+      expect(denied(`seance custodian ${verb} --for 1h`)).toBe(true);
     }
-    expect(denied("seanced custodian notes --clear")).toBe(true);
-    expect(denied("seanced custodian notes --clear --x")).toBe(true);
+    expect(denied("seance custodian notes --clear")).toBe(true);
+    expect(denied("seance custodian notes --clear --x")).toBe(true);
     for (const allowed of [
       "sessions",
       "close %3",
@@ -52,18 +52,22 @@ describe("DENY", () => {
       "notes",
       "done",
     ]) {
-      expect(denied(`seanced custodian ${allowed}`)).toBe(false);
+      expect(denied(`seance custodian ${allowed}`)).toBe(false);
     }
   });
 
-  test("every seanced command but custodian is denied, plain and with an argument; custodian's verbs are not", () => {
-    for (const name of COMMANDS.filter((command) => command !== "custodian")) {
-      expect(denied(`seanced ${name}`)).toBe(true);
-      expect(denied(`seanced ${name} --x`)).toBe(true);
+  test("every CLI command but custodian is denied under both names, plain and with an argument; custodian's verbs are not", () => {
+    for (const cli of ["seance", "seanced"]) {
+      for (const name of COMMANDS.filter((command) => command !== "custodian")) {
+        expect(denied(`${cli} ${name}`)).toBe(true);
+        expect(denied(`${cli} ${name} --x`)).toBe(true);
+      }
+      expect(denied(cli)).toBe(true);
+      expect(denied(`${cli} custodian pause`)).toBe(true);
+      expect(denied(`${cli} custodian notes --clear`)).toBe(true);
     }
-    expect(denied("seanced")).toBe(true);
-    expect(denied("seanced custodian sessions")).toBe(false);
-    expect(denied("seanced custodian done")).toBe(false);
+    expect(denied("seance custodian sessions")).toBe(false);
+    expect(denied("seance custodian done")).toBe(false);
   });
 
   test("tmux and gh are denied whole: a round reads through the verbs", () => {
@@ -81,9 +85,9 @@ describe("DENY", () => {
 
   test("the verbs and plain reads a round needs are not denied", () => {
     for (const command of [
-      "seanced custodian capture %1",
-      "seanced custodian pr %1",
-      "seanced custodian sessions",
+      "seance custodian capture %1",
+      "seance custodian pr %1",
+      "seance custodian sessions",
       "git log -1",
       "git status",
       "git -C /x log --oneline",
@@ -176,7 +180,7 @@ describe("custodianFence", () => {
     }
   });
 
-  test("the shared shape: one denied write dir, dontAsk, Read narrowed to the round dir, the verbs allowed", () => {
+  test("the shared shape: one denied write dir, dontAsk, only the verbs allowed", () => {
     for (const platform of ["darwin", "linux"] as const) {
       const fence = custodianFence({ ...base, platform, weakerNested: false });
       expect(fence.sandbox.filesystem).toEqual({
@@ -185,7 +189,7 @@ describe("custodianFence", () => {
         allowRead: base.allowRead,
       });
       expect(fence.permissions.defaultMode).toBe("dontAsk");
-      expect(fence.permissions.allow).toEqual([`Read(/${base.roundDir}/**)`, "Bash(seanced custodian *)"]);
+      expect(fence.permissions.allow).toEqual(["Bash(seance custodian *)"]);
       expect(fence.sandbox).toMatchObject({
         enabled: true,
         failIfUnavailable: true,

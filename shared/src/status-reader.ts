@@ -53,6 +53,18 @@ export function closedAt(machine: Pick<Machine, "status">): number | null {
   return machine.status?.cl ?? null;
 }
 
+/**
+ * When a closed machine's drain began (ms): the one predicate for the leader's outside pass (the PWA's soft state reads
+ * it next). `dr` when sent; else `cl` for a daemon without `softClose` (its close always drained); else null, a soft close.
+ */
+export function drainStart(machine: Pick<Machine, "status" | "capabilities">): number | null {
+  const cl = closedAt(machine);
+  if (cl === null) return null;
+  const dr = machine.status?.dr;
+  if (dr !== undefined) return dr;
+  return machine.capabilities?.includes(CAPABILITIES.softClose) === true ? null : cl;
+}
+
 /** The custodian seat's view from a status, null when none was sent: display only. */
 export function custodianOf(status: MachineStatus | null | undefined): CustodianStatus | null {
   return status?.cu ?? null;

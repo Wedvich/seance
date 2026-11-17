@@ -22,6 +22,7 @@ import {
   type ExclaveInfo,
   type Machine,
   type MachineStatus,
+  type QueueResponse,
   type RequestOp,
   type Task,
   type TaskSpec,
@@ -85,6 +86,7 @@ async function connectedClient(
   passOwnTask?: typeof passToSuccessor,
   passPoll?: PassPoll,
   sendMsg?: typeof sendMessage,
+  ownPane: () => string | undefined = () => undefined,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -96,7 +98,7 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg), {
+  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane), {
     transport: serverTransport,
   });
   await client.connect(clientTransport);
@@ -175,7 +177,7 @@ describe("mcpScriptCheck", () => {
     expect(check?.message).toContain("(pengefix2)");
     expect(check?.message).toContain(other);
     expect(check?.message).toContain(main);
-    expect(check?.message).toContain("`seanced mcp install` repoints it");
+    expect(check?.message).toContain("`seance mcp install` repoints it");
   });
 
   test("no parsable script is no finding", async () => {
@@ -536,7 +538,7 @@ describe("the local short circuit", () => {
     // The remediation is attached here, not baked into the thrown message, so it
     // reads the same for a socket that closed mid-request as for one never there.
     expect(toolText(result)).toContain("no daemon listening at /run/seanced.sock (ENOENT)");
-    expect(toolText(result)).toContain("is seanced running? try `seanced status`");
+    expect(toolText(result)).toContain("is seanced running? try `seance status`");
     expect(fake.requests).toHaveLength(0);
     lazy.stop();
   });
@@ -660,7 +662,7 @@ describe("the local short circuit", () => {
     expect(listed.note).toContain("no daemon listening");
     expect(listed.note).toContain("fail too");
     // The advice already names the fix; the note must not say it twice.
-    expect(listed.note.split("seanced status").length).toBe(2);
+    expect(listed.note.split("seance status").length).toBe(2);
   });
 
   test("list_machines takes the broker's word on the local daemon rather than probing it again", async () => {
@@ -755,6 +757,78 @@ describe("despawn_session", () => {
   });
 });
 
+describe("set_account_open", () => {
+  const WORK = "org-1:acct-work";
+  const HOST = machine({
+    exclaves: [
+      { id: "work", accountId: WORK, email: "me@work.example", extraUsageEnabled: null, authOk: true, skills: [] },
+    ],
+  });
+  const LEADS = { kind: "ready", deviceId: "device-1", term: 3 } as const;
+
+  async function call(fake: FakeRelay, args: Record<string, unknown>): Promise<{ text: string; error: boolean }> {
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, fakeLocal());
+    const result = await client.callTool({ name: "set_account_open", arguments: args });
+    lazy.stop();
+    return { text: toolText(result), error: result.isError === true };
+  }
+
+  test("a close pauses that account until resumed, by alias; a reopen resumes it, by email", async () => {
+    const fake = fakeRelay([HOST], (op, payload) =>
+      op === "pause" ? { holds: [{ ...(isRecord(payload) ? payload : {}), at: 1 }] } : { holds: [] },
+    );
+    fake.setState({ scheduler: LEADS });
+    fake.accounts = [{ version: 1, accountId: WORK, alias: "work" }];
+    const closed = await call(fake, { account: "work", open: false });
+    expect(closed.error).toBe(false);
+    expect(closed.text).toStartWith(`work (${WORK}) is closed to new scheduled work`);
+    expect(closed.text).toContain("running sessions keep going");
+    const opened = await call(fake, { account: "ME@work.example", open: true });
+    expect(opened.text).toBe(`work (${WORK}) is open for work`);
+    expect(fake.requests.map(({ deviceId, op, payload }) => ({ deviceId, op, payload }))).toEqual([
+      { deviceId: SCHEDULER_ID, op: "pause", payload: { until: "resume", account: WORK } },
+      { deviceId: SCHEDULER_ID, op: "resume", payload: { account: WORK } },
+    ]);
+  });
+
+  test("an account no machine reports, no leader, or a refusal is an error, and the first two send nothing", async () => {
+    const fake = fakeRelay([HOST], () => ({ ok: false, code: "conflict", message: "kept changing" }));
+    expect((await call(fake, { account: "nobody", open: false })).text).toContain('no account "nobody"');
+    const leaderless = await call(fake, { account: WORK, open: false });
+    expect(leaderless.error).toBe(true);
+    expect(fake.requests).toEqual([]);
+    fake.setState({ scheduler: LEADS });
+    const refused = await call(fake, { account: WORK, open: false });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toStartWith("close failed (conflict)");
+  });
+
+  test("a keyless box (the broker) refuses, points to the PWA, and sends nothing", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "fleet"
+        ? brokerOk(id, { machines: [HOST], scheduler: LEADS })
+        : brokerFail(id, "unsupported", "not in this double"),
+    );
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        broker: brokerFleet({ path: double.path }, () => Promise.resolve("device-1")),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const result = await client.callTool({ name: "set_account_open", arguments: { account: WORK, open: false } });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("PWA");
+      expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
+    } finally {
+      await double.stop();
+    }
+  });
+});
+
 describe("set_machine_open", () => {
   const LEADER = machine({ capabilities: ["drain"] });
   const TARGET = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close"] });
@@ -762,7 +836,7 @@ describe("set_machine_open", () => {
 
   async function call(
     fake: FakeRelay,
-    args: { machine: string; open: boolean; now?: boolean },
+    args: { machine: string; open: boolean; now?: unknown; drain?: unknown; [key: string]: unknown },
   ): Promise<{ readonly text: string; readonly error: boolean }> {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, fakeLocal());
@@ -778,6 +852,29 @@ describe("set_machine_open", () => {
     expect(error).toBe(false);
     expect(text).toBe("homelab is closed to new work; running work finishes where it is");
     expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: false } }]);
+  });
+
+  test("closing the verified leader adds the leader note on its own line, fresh or already closed; a reopen does not", async () => {
+    const leading = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close", "drain"] });
+    const note = "homelab runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const fake = fakeRelay([LEADER, leading], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    const { text } = await call(fake, { machine: "homelab", open: false });
+    expect(text).toBe(`homelab is closed to new work; running work finishes where it is\n${note}`);
+
+    const already = machine({
+      deviceId: "device-2",
+      name: "homelab",
+      capabilities: ["close", "drain"],
+      status: { at: 1, scan: 1, cl: 1_763_000_000_000 },
+    });
+    const again = fakeRelay([LEADER, already], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    again.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    expect((await call(again, { machine: "homelab", open: false })).text.endsWith(`\n${note}`)).toBe(true);
+
+    const reopen = fakeRelay([LEADER, leading], () => ({ ok: true, closed: null }));
+    reopen.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+    expect((await call(reopen, { machine: "homelab", open: true })).text).toBe("homelab is open for work");
   });
 
   describe("the drain's session ask", () => {
@@ -812,7 +909,7 @@ describe("set_machine_open", () => {
       fake.setState({ scheduler: LEADS });
       const refused = await call(fake, { machine: "homelab", open: false, now: true });
       expect(refused.error).toBe(true);
-      expect(refused.text).toBe("homelab cannot drain now yet — its daemon needs `seanced update`");
+      expect(refused.text).toBe("homelab cannot drain now yet — its daemon needs `seance update`");
       expect(fake.requests).toEqual([]);
       const plain = await call(fake, { machine: "homelab", open: false });
       expect(plain.text).toBe("homelab is closed to new work; running work finishes where it is");
@@ -852,6 +949,69 @@ describe("set_machine_open", () => {
     });
   });
 
+  describe("the soft close", () => {
+    const SOFT = ["close", "drain", "drainAsk", "drainPass", "softClose"];
+    const SOFT_LEADER = machine({ capabilities: SOFT });
+    const SOFT_TARGET = machine({ deviceId: "device-2", name: "homelab", capabilities: SOFT });
+    const soft = (machines = [SOFT_LEADER, SOFT_TARGET]): FakeRelay => {
+      const fake = fakeRelay(machines, () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      return fake;
+    };
+
+    test("is the default under the gate, and says the tasks keep going", async () => {
+      const fake = soft();
+      const { text, error } = await call(fake, { machine: "homelab", open: false });
+      expect(error).toBe(false);
+      expect(text).toBe(
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+      );
+      expect(fake.requests).toEqual([
+        { deviceId: "device-2", op: "availability", payload: { open: false, soft: true } },
+      ]);
+    });
+
+    test("drain sends today's close; now implies drain", async () => {
+      const fake = soft();
+      await call(fake, { machine: "homelab", open: false, drain: true });
+      await call(fake, { machine: "homelab", open: false, now: true });
+      expect(fake.requests.map((r) => r.payload)).toEqual([{ open: false }, { open: false, now: true }]);
+    });
+
+    test("no soft close without softClose on the target or the leader", async () => {
+      const oldTarget = soft([SOFT_LEADER, { ...SOFT_TARGET, capabilities: ["close", "drainAsk"] }]);
+      await call(oldTarget, { machine: "homelab", open: false });
+      const oldLeader = soft([machine({ capabilities: ["drain", "drainPass"] }), SOFT_TARGET]);
+      await call(oldLeader, { machine: "homelab", open: false });
+      expect([...oldTarget.requests, ...oldLeader.requests].map((r) => r.payload)).toEqual([
+        { open: false },
+        { open: false },
+      ]);
+    });
+
+    test("drain and now are true only, and the input is strict", async () => {
+      const fake = soft();
+      for (const args of [
+        { machine: "homelab", open: false, drain: false },
+        { machine: "homelab", open: false, now: false },
+        { machine: "homelab", open: false, soft: true },
+      ]) {
+        expect((await call(fake, args)).error).toBe(true);
+      }
+      expect(fake.requests).toEqual([]);
+    });
+
+    test("closing the verified leader softly carries the leader note", async () => {
+      const fake = soft([SOFT_LEADER, SOFT_TARGET]);
+      fake.setState({ scheduler: { kind: "ready", deviceId: "device-2", term: 4 } });
+      const { text } = await call(fake, { machine: "homelab", open: false });
+      expect(text.split("\n")).toEqual([
+        "homelab is closed to new work; its running tasks keep going until they finish or you drain it",
+        "homelab runs the queue: while it is down, the queue stops unless another machine can take over.",
+      ]);
+    });
+  });
+
   test("a close without a leader that advertises drain is refused, and nothing is sent", async () => {
     const old = fakeRelay([machine({ capabilities: [] }), TARGET]);
     old.setState({ scheduler: LEADS });
@@ -877,7 +1037,7 @@ describe("set_machine_open", () => {
     fake.setState({ scheduler: LEADS });
     const { text, error } = await call(fake, { machine: "homelab", open: false });
     expect(error).toBe(true);
-    expect(text).toContain("needs `seanced update`");
+    expect(text).toContain("needs `seance update`");
     expect(fake.requests).toEqual([]);
   });
 
@@ -1161,7 +1321,7 @@ describe("spawn_session on auto", () => {
       ]);
       expect(text).toContain("get_queue shows where it lands and why");
       expect(text).not.toContain("No scheduler is leading");
-      // Nothing reachable from `seanced mcp` writes to stdout: it is the JSON-RPC channel.
+      // Nothing reachable from `seance mcp` writes to stdout: it is the JSON-RPC channel.
       expect(stdout).not.toHaveBeenCalled();
     } finally {
       stdout.mockRestore();
@@ -1849,7 +2009,7 @@ describe("resolvePlacement", () => {
     const old = [machine({ deviceId: "device-old", name: "Old" })];
     expect(await resolvePlacement(old, listed().accounts, { machine: "Old" })).toEqual({
       error:
-        "pin.machine: Old (device-old) reports no exclaves, so the scheduler cannot place there — its daemon needs `seanced update`",
+        "pin.machine: Old (device-old) reports no exclaves, so the scheduler cannot place there — its daemon needs `seance update`",
     });
     expect(await refused({ machine: "nope" })).toBe(
       'pin.machine: no machine named "nope" — known machines: Thad, WSL, Mac',
@@ -2922,7 +3082,7 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
-  test("shows a task's dependencies, batch, reported settle and Linear link", async () => {
+  test("shows a task's dependencies, stack, batch, reported settle and Linear link", async () => {
     const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
@@ -2939,8 +3099,8 @@ describe("get_queue", () => {
               linear: { issue: "ENG-9" },
             },
           }),
-          task({ id: "t-2", state: "running", merged: true }),
-          task({ id: "t-3", state: "done", doneBy: "reported" }),
+          task({ id: "t-2", state: "running", merged: true, stack: { task: "t-0", on: "branch" } }),
+          task({ id: "t-3", state: "done", doneBy: "reported", stack: { task: "t-0", on: "nothing" } }),
         ],
         at: 6_000,
       },
@@ -2955,6 +3115,10 @@ describe("get_queue", () => {
     });
     expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
+    // What its worktree started from: the predecessor's branch, or the default branch and why.
+    expect(tasks[1].stackedOn).toEqual({ task: "t-0", base: "branch" });
+    expect(tasks[2].stackedOn).toEqual({ task: "t-0", base: "nothing" });
+    expect(tasks[0]).not.toHaveProperty("stackedOn");
     expect(tasks[2].doneBy).toBe("reported");
     expect(tasks[2]).not.toHaveProperty("until");
     lazy.stop();
@@ -3061,7 +3225,9 @@ describe("report_task_done", () => {
     const { tools } = await client.listTools();
     const tool = tools.find((t) => t.name === "report_task_done");
     expect(tool?.annotations?.readOnlyHint).toBe(false);
-    expect(tool?.description).toContain("only when the task's prompt asks you to");
+    expect(tool?.description).toContain("when the task's prompt asks you to");
+    // A PR-less session whose work went to a task it queued is told to report too.
+    expect(tool?.description).toContain("opened no pull request");
     lazy.stop();
   });
 
@@ -3184,7 +3350,7 @@ describe("send_message", () => {
       const result = await gate([machine({ ...leader }), machine({ ...box })], true);
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.text).toContain("`seanced update`");
+        expect(result.text).toContain("`seance update`");
         expect(result.text).toContain("nothing was sent");
       }
     });
@@ -3195,7 +3361,7 @@ describe("send_message", () => {
       expect(routeOnly.ok).toBe(false);
       if (!routeOnly.ok) {
         expect(routeOnly.text).toContain("route replies");
-        expect(routeOnly.text).toContain("`seanced update`");
+        expect(routeOnly.text).toContain("`seance update`");
       }
       const both = [
         machine({ ...leader, capabilities: [CAPABILITIES.messageRoute, CAPABILITIES.messageReply] }),
@@ -3388,7 +3554,7 @@ describe("start_task", () => {
 
   test("a leader without runNow, or none, is refused with nothing sent", async () => {
     const old = await callStart(() => ({ task: reserved }), startingMachines(false));
-    expect(old).toMatchObject({ error: true, text: expect.stringContaining("its daemon needs `seanced update`") });
+    expect(old).toMatchObject({ error: true, text: expect.stringContaining("its daemon needs `seance update`") });
     expect(old.fake.requests).toEqual([]);
   });
 
@@ -3396,7 +3562,7 @@ describe("start_task", () => {
     const waiting = await callStart(() => ({ ok: false, code: "not_waiting", message: "not ready" }));
     expect(waiting).toMatchObject({ error: true, text: expect.stringContaining("start_task refused (not_waiting)") });
     const stuck = await callStart(() => ({ ok: false, code: "unplaceable", message: "held" }));
-    expect(stuck.text).toContain("something besides the concurrency cap");
+    expect(stuck.text).toContain("something besides the concurrency limit");
     const lost = await callStart(() => new RequestFailure("timeout", "no reply within 10000ms"));
     expect(lost).toMatchObject({
       error: true,
@@ -3502,7 +3668,7 @@ describe("pass_task", () => {
       [
         "a leader that predates it",
         { machines: passingMachines({ leader: false }) },
-        "its daemon needs `seanced update`",
+        "its daemon needs `seance update`",
       ],
       ["a box that predates it", { machines: passingMachines({ box: false }) }, "can't push for a successor yet"],
       ["a task waiting on a person", { tasks: [{ ...passing, state: "needs-input" }] }, "waiting for you"],
@@ -4038,6 +4204,10 @@ describe("pass_to_successor", () => {
       readonly queued?: (n: number) => readonly Task[];
       readonly machines?: readonly Machine[];
       readonly leading?: boolean;
+      /** The queue read number n carries these refused session passes. */
+      readonly refused?: (n: number) => QueueResponse["passRefused"];
+      /** This box (`device-2`, the task's) and the session's pane, for the check before the push. */
+      readonly pane?: string;
     } = {},
   ): Promise<{
     text: string;
@@ -4049,7 +4219,15 @@ describe("pass_to_successor", () => {
     let reads = 0;
     const signals: (AbortSignal | undefined)[] = [];
     const fake = fakeRelay(opts.machines ?? leaderMachines(), (op) => {
-      if (op === "queue") return { tasks: opts.queued?.(reads++) ?? [active], at: 6_000 };
+      if (op === "queue") {
+        const n = reads++;
+        const passRefused = opts.refused?.(n);
+        return {
+          tasks: opts.queued?.(n) ?? [active],
+          at: 6_000,
+          ...(passRefused === undefined ? {} : { passRefused }),
+        };
+      }
       return new Error(`unexpected ${op}`);
     });
     if (opts.leading !== false) fake.setState({ scheduler: LEADING });
@@ -4057,7 +4235,7 @@ describe("pass_to_successor", () => {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(
       lazy,
-      null,
+      opts.pane === undefined ? null : fakeLocal(undefined, { deviceId: AT.deviceId }),
       () => {},
       undefined,
       undefined,
@@ -4067,6 +4245,8 @@ describe("pass_to_successor", () => {
         return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
       },
       POLL,
+      undefined,
+      () => opts.pane,
     );
     // Faked only once connected, so the handshake runs on real time; the call's own timers then fire only
     // as the loop below moves the clock, one poll interval per step.
@@ -4137,7 +4317,7 @@ describe("pass_to_successor", () => {
   test("a leader that predates it, or none leading, refuses before the daemon pushes anything", async () => {
     const old = await callSelf({ machines: leaderMachines(false) });
     expect([old.error, old.passed]).toEqual([true, []]);
-    expect(old.text).toContain("needs `seanced update`");
+    expect(old.text).toContain("needs `seance update`");
     expect(old.text).toContain("Nothing was pushed");
     const none = await callSelf({ leading: false });
     expect([none.error, none.passed]).toEqual([true, []]);
@@ -4192,10 +4372,96 @@ describe("pass_to_successor", () => {
   test("no successor within the window is told as such, not as a failure, and still ends the turn", async () => {
     const result = await callSelf({ queued: () => [active] });
     expect(result.error).toBe(false);
-    expect(result.text).toContain("the branch is pushed but no successor was recorded yet");
+    expect(result.text).toContain("the branch is pushed (feature/x)");
+    expect(result.text).toContain("as of now no successor exists");
+    expect(result.text).toContain("check get_queue");
     expect(result.text).toContain("end your turn now");
     // One read at the start and one per interval through the window's last instant.
     expect(result.queueReads).toBe(31);
+  });
+
+  describe("a task its merge settled while this session kept working", () => {
+    const MERGED_PR = "https://github.com/m/seance/pull/186";
+    const settled: Task = {
+      ...active,
+      state: "done",
+      doneBy: "merged",
+      leftRunning: true,
+      prUrl: MERGED_PR,
+      assignment: { ...AT, window: "fix-it", pane: "%7" },
+    };
+
+    test("is refused before the daemon pushes anything, saying why and what to do instead", async () => {
+      const result = await callSelf({ pane: "%7", queued: () => [settled] });
+      expect(result.error).toBe(true);
+      expect(result.passed).toEqual([]);
+      expect(result.queueReads).toBe(1);
+      expect(result.text).toContain("pass_to_successor refused: no successor can be made");
+      expect(result.text).toContain(`Task t-1 is already done: its pull request ${MERGED_PR} merged`);
+      expect(result.text).toContain('until "merged"');
+      expect(result.text).toContain("Nothing was pushed");
+      expect(result.text).toContain("spawn_session");
+      expect(result.text).not.toContain("end your turn now");
+    });
+
+    test("is left to the daemon and the leader when the pane is another's, unknown, or carries a live task", async () => {
+      const elsewhere = await callSelf({ pane: "%8", queued: () => [settled] });
+      expect(elsewhere.passed).toHaveLength(1);
+      const unknown = await callSelf({ queued: () => [settled] });
+      expect(unknown.passed).toHaveLength(1);
+      // A continuation in the same pane: the live task is the one the pass is for.
+      const live: Task = { ...active, id: "t-2", createdAt: settled.createdAt + 1, assignment: settled.assignment };
+      const reused = await callSelf({ pane: "%7", queued: () => [settled, { ...live, successor: "t-3" }] });
+      expect(reused.passed).toHaveLength(1);
+    });
+
+    test("found finished after the push (the merge read landed in between) is a plain refusal, not 'not confirmed'", async () => {
+      const result = await callSelf({ queued: (n) => [n < 2 ? active : settled] });
+      expect(result.passed).toHaveLength(1);
+      expect(result.queueReads).toBe(3);
+      expect(result.error).toBe(true);
+      expect(result.text).toContain("pass_to_successor refused: no successor exists");
+      expect(result.text).toContain("is already done: its pull request");
+      expect(result.text).toContain("The branch was pushed (feature/x)");
+      expect(result.text).toContain("This session is not closed and stays open");
+      expect(result.text).not.toContain("end your turn now");
+    });
+  });
+
+  describe("the leader's refusal of the pass", () => {
+    test("reaches the session as an error naming the code, the pushed branch and what to do", async () => {
+      const result = await callSelf({
+        refused: (n) => (n < 1 ? undefined : [{ taskId: "t-1", code: "branch_mismatch", sentAt: Date.now() }]),
+      });
+      expect(result.queueReads).toBe(2);
+      expect(result.error).toBe(true);
+      expect(result.text).toContain("pass_to_successor refused: no successor exists — the scheduler refused the pass");
+      expect(result.text).toContain("(branch_mismatch)");
+      expect(result.text).toContain("push this work to the pull request's branch");
+      expect(result.text).toContain("The branch is pushed (feature/x)");
+      expect(result.text).toContain("not closed by the pass and stays open");
+      expect(result.text).not.toContain("nothing was pushed");
+    });
+
+    test("an earlier pass's refusal, or another task's, is not this one's", async () => {
+      const stale = await callSelf({ refused: () => [{ taskId: "t-1", code: "conflict", sentAt: 1 }] });
+      expect(stale.error).toBe(false);
+      expect(stale.text).toContain("as of now no successor exists");
+      const stampless = await callSelf({ refused: () => [{ taskId: "t-1", code: "conflict" }] });
+      expect(stampless.error).toBe(false);
+      const other = await callSelf({
+        refused: () => [{ taskId: "t-9", code: "conflict", sentAt: Date.now() + 60_000 }],
+      });
+      expect(other.error).toBe(false);
+    });
+
+    test("a successor in the same read wins over a refusal", async () => {
+      const result = await callSelf({
+        queued: () => [{ ...active, successor: "t-2" }],
+        refused: () => [{ taskId: "t-1", code: "conflict", sentAt: Date.now() + 60_000 }],
+      });
+      expect(result.text).toContain("recorded successor t-2");
+    });
   });
 
   test("an ok with no ack has nothing to confirm and says only that it was sent", async () => {
@@ -4234,7 +4500,10 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
   interface Listed {
     readonly name: string;
     readonly drain?: {
-      readonly moving: number;
+      readonly draining: boolean;
+      readonly moving?: number;
+      readonly running?: number;
+      readonly idle?: number;
       readonly waitingOnYou: number;
       readonly moved: number;
       readonly stuck: readonly { readonly taskId?: string; readonly reason: string }[];
@@ -4278,6 +4547,7 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
     );
     const listed = await list(fake);
     expect(listed.find((m) => m.name === "homelab")?.drain).toEqual({
+      draining: true,
       moving: 2,
       waitingOnYou: 1,
       moved: 1,
@@ -4285,6 +4555,33 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
       empty: false,
     });
     expect(listed.find((m) => m.name === "MacBook Pro")).not.toHaveProperty("drain");
+  });
+
+  test("a soft-closed machine says it is not draining, and what still runs there, idle or not", async () => {
+    const soft = { ...closedBox, capabilities: ["close", "softClose"] };
+    const fake = drainRelay(
+      [LEADER, soft],
+      () => ({
+        tasks: [
+          mkTask("t1"),
+          mkTask("t2"),
+          mkTask("t3", { state: "needs-input" }),
+          mkTask("t4", { spec: { repo: "github.com/m/seance", mode: "here", prompt: "x" } }),
+        ],
+        at: 1,
+        idle: [{ taskId: "t2", since: 1 }],
+      }),
+      () => ({ sessions: [pane("t1"), pane("t2"), pane("t3"), pane("t4")], at: 1 }),
+    );
+    expect((await list(fake)).find((m) => m.name === "homelab")?.drain).toEqual({
+      draining: false,
+      running: 2,
+      idle: 1,
+      waitingOnYou: 1,
+      moved: 0,
+      stuck: [],
+      empty: false,
+    });
   });
 
   test("a closed machine whose sessions cannot be read says empty is unknown", async () => {

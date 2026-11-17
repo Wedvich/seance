@@ -10,20 +10,23 @@ import {
   type Machine,
   type MachineStatus,
   type MetricsSeries,
+  type PauseHold,
   type SchedulerAvailability,
   type SessionEntry,
   type Task,
 } from "@seance/shared";
-import { accountSeries, chartLines } from "../src/chart.ts";
+import { accountSeries, chartLines, offlineSpans } from "../src/chart.ts";
 import {
   accountDisplayName,
   deriveArchivist,
   deriveCloseSheet,
+  deriveDrainSheet,
   custodianMenu,
   deriveMachines,
   type CustodianRow,
   type DrainInputs,
 } from "../src/machines-view.ts";
+import { plain } from "../src/timed.ts";
 import { knownAccounts } from "@seance/shared";
 import { archiveCharts } from "../src/state.ts";
 
@@ -72,6 +75,44 @@ describe("the Open for work switch", () => {
   });
 });
 
+describe("an account's Open for work switch", () => {
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "dev-1", term: 1 };
+  const accountOf = (holds: readonly PauseHold[] | null, scheduler: SchedulerAvailability = ready, relayOpen = true) =>
+    deriveMachines([machine()], NOW, scheduler, {}, [], undefined, relayOpen, undefined, holds).accounts[0];
+
+  test("offered only with the holds read, the relay open and a verified leader", () => {
+    expect(accountOf([])).toMatchObject({ openSwitch: "on", hold: null });
+    expect(accountOf(null)?.openSwitch).toBeNull();
+    expect(accountOf([], NO_LEADER)?.openSwitch).toBeNull();
+    expect(accountOf([], { kind: "unverified", deviceId: "dev-1", term: 1 })?.openSwitch).toBeNull();
+    expect(accountOf([], ready, false)?.openSwitch).toBeNull();
+  });
+
+  test("off under the account's own hold, worded; another account's hold or the queue's leaves it on", () => {
+    const closed = accountOf([{ account: ACCOUNT, until: "resume", at: NOW - 5 * 60_000 }]);
+    expect(closed?.openSwitch).toBe("off");
+    expect(plain(closed?.hold ?? [])).toBe("Closed to new work 5m ago. Running sessions keep going.");
+    // Unknown holds still say why it is closed, with no switch to flip.
+    expect(plain(accountOf([{ account: ACCOUNT, until: "resume", at: NOW }], NO_LEADER)?.hold ?? [])).toStartWith(
+      "Closed to new work",
+    );
+    expect(
+      accountOf([
+        { until: "resume", at: NOW },
+        { account: "org-2:other", until: "resume", at: NOW },
+      ]),
+    ).toMatchObject({ openSwitch: "on", hold: null });
+  });
+
+  test("a reset hold reads closed until its resumeAt, then lifted, as the leader judges it", () => {
+    const reset = (resumeAt: number) => accountOf([{ account: ACCOUNT, until: "reset", at: NOW - 1000, resumeAt }]);
+    const held = reset(NOW + 3 * 3_600_000);
+    expect(held?.openSwitch).toBe("off");
+    expect(plain(held?.hold ?? [])).toBe("Closed to new work until its quota resets (in 3h)");
+    expect(reset(NOW - 1)).toMatchObject({ openSwitch: "on", hold: null });
+  });
+});
+
 describe("the drain row and the close sheet", () => {
   const CL = NOW - 60_000;
   const closed = machine({
@@ -102,6 +143,7 @@ describe("the drain row and the close sheet", () => {
 
   test("a closed machine's row says what is moving and lists what is stuck", () => {
     expect(draw(inputs())?.drain).toEqual({
+      draining: true,
       summary: "moving 1 · 2 stuck",
       stuck: ["t2: Can't move: runs in the clone", "Not a task: close it yourself"],
     });
@@ -146,6 +188,26 @@ describe("the drain row and the close sheet", () => {
       "Not a task: close it yourself",
     ]);
     expect(deriveCloseSheet(open, inputs({ tasks: null }))[1]).toContain("10 minutes");
+  });
+
+  test("closing the verified leader ends with the leader note, whatever the drain reads; an unverified nominee or another leader gets none", () => {
+    const open = machine({ capabilities: [CAPABILITIES.close] });
+    const note = "mac runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const leads = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
+    expect(deriveCloseSheet(open, inputs({ passes: false }), leads)).toEqual([
+      "Closing mac stops new work landing on it.",
+      "Running work finishes where it is.",
+      note,
+    ]);
+    expect(deriveCloseSheet(open, inputs(), leads).at(-1)).toBe(note);
+    expect(deriveCloseSheet(open, inputs({ tasks: null }), leads).at(-1)).toBe(note);
+    for (const scheduler of [
+      { kind: "unverified", deviceId: "dev-1", term: 4 },
+      { kind: "ready", deviceId: "dev-2", term: 4 },
+      { kind: "none" },
+    ] as const) {
+      expect(deriveCloseSheet(open, inputs(), scheduler)).not.toContain(note);
+    }
   });
 });
 
@@ -203,6 +265,96 @@ describe("the close sheet for a drainAsk machine", () => {
     expect(deriveCloseSheet(old, inputs([running("t1")]))[1]).toBe(
       "1 running task will be passed to other machines in 10 minutes unless you reopen it.",
     );
+  });
+});
+
+describe("the soft close", () => {
+  const SOFT = [CAPABILITIES.close, CAPABILITIES.softClose, CAPABILITIES.drainAsk];
+  const leader = machine({
+    deviceId: "lead",
+    name: "lead",
+    capabilities: [CAPABILITIES.drain, CAPABILITIES.drainPass, CAPABILITIES.softClose],
+  });
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "lead", term: 1 };
+  const CL = NOW - 60_000;
+  const running = (id: string, state: Task["state"] = "running"): Task => ({
+    id,
+    spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "x", title: id },
+    state,
+    createdAt: 1,
+    assignment: { deviceId: "dev-1", exclave: "default", clone: "seance" },
+  });
+  const pane = (taskId: string): SessionEntry => ({ window: "w", repo: "seance", path: "/x", taskId });
+  const inputs = (tasks: Task[], idle: string[] = []): DrainInputs => ({
+    passes: true,
+    tasks,
+    sessions: { "dev-1": { sessions: tasks.map((t) => pane(t.id)) } },
+    idle,
+  });
+  const cardOf = (m: Machine, others: readonly Machine[] = [leader], drains?: DrainInputs) =>
+    deriveMachines([m, ...others], NOW, ready, {}, [], undefined, true, drains).cards[0];
+
+  test("Close is soft only where the machine and the verified leader both advertise softClose", () => {
+    expect(cardOf(machine({ capabilities: SOFT }))?.softClose).toBe(true);
+    expect(cardOf(machine({ capabilities: [CAPABILITIES.close] }))?.softClose).toBe(false);
+    const oldLeader = { ...leader, capabilities: [CAPABILITIES.drain, CAPABILITIES.drainPass] };
+    expect(cardOf(machine({ capabilities: SOFT }), [oldLeader])?.softClose).toBe(false);
+    // A leader that only claims it, unverified, offers nothing soft.
+    const unverified = deriveMachines([machine({ capabilities: SOFT }), leader], NOW, {
+      kind: "unverified",
+      deviceId: "lead",
+      term: 1,
+    }).cards[0];
+    expect(unverified?.softClose).toBe(false);
+  });
+
+  test("the soft sheet leads with what Close leaves running, then the drain's lines under Close and drain", () => {
+    const open = machine({ capabilities: SOFT });
+    expect(deriveCloseSheet(open, inputs([running("t1")]), NO_LEADER, true)).toEqual([
+      "Close stops new work on mac. Running tasks keep going until they finish or you drain the machine.",
+      "Close and drain: 1 running task will be asked to pass itself at its next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
+    ]);
+    const note = "mac runs the queue: while it is down, the queue stops unless another machine can take over.";
+    const leads = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
+    expect(deriveCloseSheet(open, inputs([running("t1")]), leads, true).at(-1)).toBe(note);
+  });
+
+  test("a soft-closed machine's row says what still runs, and what is idle or waiting on you", () => {
+    const soft = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL } });
+    const tasks = [running("t1"), running("t2"), running("t3", "needs-input")];
+    expect(cardOf(soft, [leader], inputs(tasks, ["t2"]))?.drain).toEqual({
+      draining: false,
+      summary: "running 1 · 1 idle at its prompt · 1 waiting on you",
+      stuck: [],
+    });
+    const draining = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL, dr: CL } });
+    expect(cardOf(draining, [leader], inputs(tasks, ["t2"]))?.drain).toMatchObject({
+      draining: true,
+      summary: "moving 3",
+    });
+  });
+
+  test("Drain and Drain now on a soft close; Drain now alone while the ask's grace runs; none after it or while open", () => {
+    const at = (status: Partial<MachineStatus>, caps: readonly string[] = SOFT) =>
+      cardOf(machine({ capabilities: caps, status: { at: S - 5, scan: 1, ...status } }))?.drainActions;
+    expect(at({ cl: CL })).toEqual(["drain", "now"]);
+    expect(at({ cl: CL }, [CAPABILITIES.close, CAPABILITIES.softClose])).toEqual(["drain"]);
+    expect(at({ cl: CL, dr: NOW - 299_000 })).toEqual(["now"]);
+    expect(at({ cl: CL, dr: NOW - 300_000 })).toEqual([]);
+    // A daemon without softClose drained from `cl`.
+    expect(at({ cl: NOW - 60_000 }, [CAPABILITIES.close, CAPABILITIES.drainAsk])).toEqual(["now"]);
+    expect(at({})).toEqual([]);
+    // No close can be sent without a verified drain leader.
+    const closed = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL } });
+    expect(deriveMachines([closed], NOW, NO_LEADER).cards[0]?.drainActions).toEqual([]);
+  });
+
+  test("the Drain sheet says what the drain will do with what still runs there", () => {
+    const soft = machine({ capabilities: SOFT, status: { at: S - 5, scan: 1, cl: CL } });
+    expect(deriveDrainSheet(soft, inputs([running("t1")]))).toEqual([
+      "mac is closed. Draining it moves its running work off it.",
+      "1 running task will be asked to pass itself at its next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
+    ]);
   });
 });
 
@@ -341,18 +493,18 @@ describe("deriveMachines", () => {
       NOW,
       NO_LEADER,
     );
-    expect(cards[0]?.meta).toBe("asleep · last seen 17m ago");
+    expect(plain(cards[0]?.meta ?? [])).toBe("asleep · last seen 17m ago");
     expect(cards[0]?.gauges).toEqual([]);
     expect(cards[0]?.exclaves[0]?.sessions).toBeNull();
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([7]);
-    expect(accounts[0]?.observed).toEndWith("18m ago on mac, asleep");
+    expect(plain(accounts[0]?.observed ?? [])).toEndWith("18m ago on mac, asleep");
     // A socket the relay still listed when it slept: lastSeen is the register's, days old; the beat is the sleep.
     const listed = deriveMachines(
       [machine({ connected: false, lastSeen: NOW - 3 * 86_400_000, status })],
       NOW,
       NO_LEADER,
     );
-    expect(listed.cards[0]?.meta).toBe("asleep · last seen 17m ago");
+    expect(plain(listed.cards[0]?.meta ?? [])).toBe("asleep · last seen 17m ago");
   });
 
   test("an account across machines takes the newest observation; unsigned exclaves group nowhere", () => {
@@ -372,7 +524,7 @@ describe("deriveMachines", () => {
     expect(accounts).toHaveLength(1);
     expect(accounts[0]?.title).toBe("default · work");
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([50]);
-    expect(accounts[0]?.observed).toContain("on b");
+    expect(plain(accounts[0]?.observed ?? [])).toContain("on b");
     expect(accounts[0]?.historyFrom).toBe("b");
   });
 
@@ -381,8 +533,10 @@ describe("deriveMachines", () => {
     const fleet = [{ accountId: ACCOUNT, observer: "retired", reading: { h: 40, s: "cache", at: S - 120 } }] as const;
     const { accounts } = deriveMachines([unobserved], NOW, NO_LEADER, {}, fleet);
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([40]);
-    expect(accounts[0]?.observed).toBe("cache · 2m ago on a machine no longer listed");
-    expect(deriveMachines([unobserved], NOW, NO_LEADER).accounts[0]?.observed).toStartWith("No quota seen yet");
+    expect(plain(accounts[0]?.observed ?? [])).toBe("cache · 2m ago on a machine no longer listed");
+    expect(plain(deriveMachines([unobserved], NOW, NO_LEADER).accounts[0]?.observed ?? [])).toStartWith(
+      "No quota seen yet",
+    );
   });
 
   test("an account is named by the email any of its exclaves reports, else its short id", () => {
@@ -553,7 +707,9 @@ describe("deriveMachines", () => {
       },
     ];
     const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW, NO_LEADER).accounts;
-    expect(account?.bars.map((bar) => [bar.label, bar.pct, bar.level, bar.note])).toEqual([
+    expect(
+      account?.bars.map((bar) => [bar.label, bar.pct, bar.level, bar.note === null ? null : plain(bar.note)]),
+    ).toEqual([
       ["5h", 0, "ok", "reset"],
       ["7d", 43, "ok", "resets in 5d"],
       ["7d Fable", 0, "ok", "reset"],
@@ -676,12 +832,14 @@ describe("deriveMachines", () => {
     const source = { sha: "0123456789abcdef0123456789abcdef01234567", commitTs: NOW - 3 * 86_400_000, branch: "main" };
     const behind = machine({ source, lastUpdate: { at: NOW - 2 * 3_600_000, outcome: "skipped_dirty" } });
     const [card] = deriveMachines([behind], NOW, NO_LEADER).cards;
-    expect(card?.build).toBe("0123456789ab · committed 3d ago · main");
-    expect(card?.updateNote).toBe("Last update attempt 2h ago: skipped, working tree had uncommitted changes.");
+    expect(plain(card?.build ?? [])).toBe("0123456789ab · committed 3d ago · main");
+    expect(plain(card?.updateNote ?? [])).toBe(
+      "Last update attempt 2h ago: skipped, working tree had uncommitted changes.",
+    );
 
     const detached = machine({ source: { ...source, branch: null }, lastUpdate: { at: NOW, outcome: "ok" } });
     const [fine] = deriveMachines([detached], NOW, NO_LEADER).cards;
-    expect(fine?.build).toEndWith("· detached");
+    expect(plain(fine?.build ?? [])).toEndWith("· detached");
     expect(fine?.updateNote).toBeNull();
 
     const [old] = deriveMachines([machine()], NOW, NO_LEADER).cards;
@@ -746,6 +904,54 @@ describe("chartLines", () => {
       size,
     );
     expect([line?.d, line?.gaps]).toEqual(["M0 100H240V50", ""]);
+  });
+});
+
+describe("offlineSpans", () => {
+  const window = { from: 0, to: 300, step: 30 };
+
+  test("shades a break no gauge measured inside, between the points either side of it", () => {
+    const spans = offlineSpans(
+      [
+        series(METRIC_NAMES.cpu, [
+          [0, 1],
+          [30, 1],
+          [150, 1],
+          [180, 1],
+          [270, 1],
+        ]),
+        // Memory caught a tick cpu missed: no band there, and the 30–150 band narrows to 60–150.
+        series(METRIC_NAMES.mem, [
+          [60, 1],
+          [210, 1],
+          [240, 1],
+        ]),
+      ],
+      window,
+      300,
+    );
+    expect(spans).toEqual([{ x: 60, width: 90 }]);
+  });
+
+  test("no band before the first point, after the last, outside the window or from a quota series", () => {
+    expect(
+      offlineSpans(
+        [
+          series(METRIC_NAMES.cpu, [
+            [-300, 1],
+            [120, 1],
+            [150, 1],
+            [600, 1],
+          ]),
+          series(METRIC_NAMES.h, [
+            [0, 1],
+            [300, 1],
+          ]),
+        ],
+        window,
+        300,
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -829,11 +1035,11 @@ describe("deriveArchivist", () => {
     expect(card).toMatchObject({
       name: "Archivist",
       online: true,
-      meta: "linux · last ingest just now",
+      meta: ["linux · last ingest ", expect.objectContaining({ text: "just now" })],
       note: null,
       warnings: [],
     });
-    expect(card?.build).toBe(`${"a".repeat(12)} · committed 2h ago · main`);
+    expect(plain(card?.build ?? [])).toBe(`${"a".repeat(12)} · committed 2h ago · main`);
     expect(card?.rows).toEqual([
       { label: "Tasks", detail: "since 12 Nov 2026", value: "1,284", unit: "rows" },
       { label: "Samples", detail: "since 12 Nov 2026", value: "18.4M", unit: "rows" },
@@ -847,24 +1053,24 @@ describe("deriveArchivist", () => {
       deviceId: "arch-1",
       reply: { ...reply, lastIngest: { store: NOW - 5 * 60_000, registry: null, status: null, pull: null } },
     };
-    expect(deriveArchivist(entry, older, NOW)?.meta).toBe("linux · last ingest 5m ago");
+    expect(plain(deriveArchivist(entry, older, NOW)?.meta ?? [])).toBe("linux · last ingest 5m ago");
   });
 
   test("online without a reply, or with one for another device, has the platform and no rows", () => {
-    expect(deriveArchivist(entry, null, NOW)).toMatchObject({ meta: "linux", rows: [] });
-    expect(deriveArchivist(entry, { deviceId: "arch-2", reply }, NOW)).toMatchObject({ meta: "linux", rows: [] });
+    expect(deriveArchivist(entry, null, NOW)).toMatchObject({ meta: ["linux"], rows: [] });
+    expect(deriveArchivist(entry, { deviceId: "arch-2", reply }, NOW)).toMatchObject({ meta: ["linux"], rows: [] });
   });
 
   test("a reply with no ingest yet reads as the platform alone", () => {
     const fresh = { ...reply, lastIngest: { store: null, registry: null, status: null, pull: null } };
-    expect(deriveArchivist(entry, { deviceId: "arch-1", reply: fresh }, NOW)?.meta).toBe("linux");
+    expect(deriveArchivist(entry, { deviceId: "arch-1", reply: fresh }, NOW)?.meta).toEqual(["linux"]);
   });
 
   test("offline: last seen, no rows even with counts held, and the offline note", () => {
     const card = deriveArchivist({ ...entry, connected: false }, held, NOW);
     expect(card).toMatchObject({
       online: false,
-      meta: "offline · last seen 3h ago",
+      meta: ["offline · last seen ", expect.objectContaining({ text: "3h ago" })],
       rows: [],
       note: "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.",
       warnings: [],
@@ -884,7 +1090,7 @@ describe("deriveArchivist", () => {
         "Last task read from the relay store 3h ago. The archivist's journal says why.",
       ]);
       const card = deriveArchivist(entry, { deviceId: "arch-1", reply: { ...reply, lastIngest } }, NOW);
-      expect(card?.meta).toBe("linux · last ingest just now");
+      expect(plain(card?.meta ?? [])).toBe("linux · last ingest just now");
     });
 
     test("no store read an hour after coming online warns; within the hour, or with no onlineSince, it does not", () => {
@@ -988,11 +1194,20 @@ describe("the custodian row", () => {
     });
   });
 
-  test("idle with a last round: its age and counts", () => {
+  test("no row for an asleep machine, even one whose last status carried a cu", () => {
+    const asleep = machine({
+      capabilities: [CAPABILITIES.custodian],
+      connected: false,
+      status: { at: S - 5, scan: 1, cu: { s: "idle", e: S - 600 } },
+    });
+    expect(rowOf(asleep)).toBeNull();
+  });
+
+  test("idle with a last round: its age, kept with its instant for the hover, and counts", () => {
     expect(rowOf(seated({ s: "idle", e: S - 600, n: [3, 1, 2] }))).toEqual({
       state: "idle",
       paused: false,
-      ended: "last round ended 10m ago",
+      ended: ["last round ended ", { text: "10m ago", at: (S - 600) * 1000 }],
       counts: "closed 3 · nudged 1 · flagged 2",
       link: null,
       warn: false,
@@ -1000,7 +1215,7 @@ describe("the custodian row", () => {
   });
 
   test("no round yet when e is absent; zero parts are dropped but closed, and closed 0 alone reads as nothing closed", () => {
-    expect(rowOf(seated({ s: "idle" }))).toMatchObject({ ended: "no round yet", counts: null });
+    expect(rowOf(seated({ s: "idle" }))).toMatchObject({ ended: ["no round yet"], counts: null });
     expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 0, 0] }))?.counts).toBe("nothing closed");
     expect(rowOf(seated({ s: "idle", e: S - 60, n: [4, 0, 0] }))?.counts).toBe("closed 4");
     expect(rowOf(seated({ s: "idle", e: S - 60, n: [0, 2, 0] }))?.counts).toBe("closed 0 · nudged 2");

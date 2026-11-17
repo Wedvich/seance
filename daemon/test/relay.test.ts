@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import {
   METRIC_NAMES,
   open,
   parseBranchState,
+  parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
   parseSessionEvent,
@@ -35,6 +36,7 @@ import type { Config, TraitsConfig } from "../src/config.ts";
 import { MetricsStore, type Sample } from "../src/metrics-store.ts";
 import { RelayClient } from "../src/relay-client.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
+import { readState } from "../src/state.ts";
 import { tmux } from "../src/tmux.ts";
 import {
   makeClaudeStub,
@@ -214,7 +216,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.platform).toBe(process.platform);
       expect(info.repos[0]?.defaultBranch).toBe("main");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -227,7 +229,7 @@ describe("daemon ↔ relay integration", () => {
       // Stable once rejected: there is no accepted socket left to register over.
       expect(relay.registers.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -243,7 +245,7 @@ describe("daemon ↔ relay integration", () => {
       expect(response.re).toBe(id);
       expect(Array.isArray((response.payload as SessionsResponse).sessions)).toBe(true);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -263,7 +265,7 @@ describe("daemon ↔ relay integration", () => {
       const scheduler = (await open(appKey, sealed)).payload as SessionsResponse;
       expect(scheduler.ledgerSince).toEqual(expect.any(Number));
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -292,7 +294,7 @@ describe("daemon ↔ relay integration", () => {
       }
       await tmux(["kill-window", "-t", "main:From Phone"]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -308,7 +310,7 @@ describe("daemon ↔ relay integration", () => {
       expect(payload.ok).toBe(false);
       if (!payload.ok) expect(payload.code).toBe("internal_error");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -335,7 +337,7 @@ describe("daemon ↔ relay integration", () => {
       expect(lines.some((line) => line.includes("relay says follow"))).toBe(true);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -354,7 +356,7 @@ describe("daemon ↔ relay integration", () => {
       const response = await appReceive(relay);
       expect((response.payload as SessionsResponse).sessions).toBeDefined();
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -373,7 +375,7 @@ describe("daemon ↔ relay integration", () => {
       // set changed → an unprompted re-register carries the new list
       await registerWithRepo(relay, "newrepo");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
     }
@@ -413,10 +415,69 @@ describe("daemon ↔ relay integration", () => {
       expect(registers.at(-1)).toEqual(["myrepo", "newrepo", "slowrepo"]);
     } finally {
       await shim.release();
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       shim.dispose();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("a register built before the boot scan landed never leaves after the scan's own", async () => {
+    // The boot register is built from the state before any scan (no repos), the scan's re-register from the
+    // state after, and the relay keeps whichever lands last. Built side by side, the first could finish its
+    // signature behind the second (crypto completes on a threadpool, in any order) and the empty blob stood
+    // until the hourly rescan: e2e's second machine never showed its repos. Held here at its two boundaries:
+    // the scan at git, the boot register's signature by a spy until the scan has committed.
+    const dir = await mkdtemp(join(base, "reorder-"));
+    const stateDir = join(dir, "state");
+    process.env["SEANCE_STATE_DIR"] = stateDir;
+    const slowRoot = join(dir, "slow");
+    await mkdir(join(slowRoot, "slowrepo", ".git"), { recursive: true });
+    const shim = await holdGitInSlowrepo(dir);
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    const releaseFirst = Promise.withResolvers<void>();
+    let signs = 0;
+    let firstHeld = false;
+    const spy = spyOn(crypto.subtle, "sign").mockImplementation(async (algorithm, key, data) => {
+      const signature = await sign(algorithm, key, data);
+      signs += 1;
+      if (signs === 1) {
+        firstHeld = true;
+        await releaseFirst.promise;
+      }
+      return signature;
+    });
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url, { extraRoots: [slowRoot] });
+    try {
+      await pollUntil(() => existsSync(shim.heldMarker), "the boot rescan to reach git");
+      await pollUntil(() => firstHeld, "the boot register's signature to be held");
+      await shim.release();
+      await pollUntil(
+        async () => (await readState(join(stateDir, "state.json")))?.scannedAt !== undefined,
+        "the boot rescan to commit",
+      );
+      // Unordered, the scan's register leaves now, ahead of the held one; ordered, it waits behind it, and a
+      // non-event can't be polled, so the wait for it is bounded.
+      const deadline = Date.now() + 1_000;
+      while (relay.registers.size === 0 && Date.now() < deadline) await Bun.sleep(10);
+      releaseFirst.resolve();
+      const registers: (readonly string[] | undefined)[] = [];
+      for (const _ of [1, 2]) {
+        const info = parseMachineInfo((await open(appKey, (await relay.registers.next()).info)).payload);
+        registers.push(info?.repos.map((r) => r.name));
+      }
+      expect(registers.at(-1)).toContain("slowrepo");
+      // The hold took: the register signed first was built before the scan committed.
+      expect(registers[0]).toEqual([]);
+    } finally {
+      releaseFirst.resolve();
+      await shim.release();
+      spy.mockRestore();
+      daemon.stop();
+      relay.stop();
+      shim.dispose();
+      process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
   });
 
@@ -451,7 +512,7 @@ describe("daemon ↔ relay integration", () => {
         break;
       }
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
@@ -467,7 +528,7 @@ describe("daemon ↔ relay integration", () => {
     let daemon = await startTestDaemon(first.url);
     try {
       await registerWithRepo(first, "myrepo");
-      daemon.stop();
+      await daemon.stop();
       first.stop();
 
       const relay = startTestRelay(TOKEN);
@@ -481,7 +542,7 @@ describe("daemon ↔ relay integration", () => {
         relay.stop();
       }
     } finally {
-      daemon.stop();
+      await daemon.stop();
       first.stop();
       process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
@@ -771,7 +832,7 @@ describe("daemon ↔ relay integration", () => {
       }
       expect(info.capabilities).toContain("traits");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -783,7 +844,7 @@ describe("daemon ↔ relay integration", () => {
       const { info } = await registerWithRepo(relay, "myrepo");
       for (const exclave of info.exclaves ?? []) expect(exclave).not.toHaveProperty("traits");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -799,7 +860,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.capabilities).toContain("drain");
       expect(info.capabilities).not.toContain("drainAsk");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -812,6 +873,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.capabilities).toEqual([
         "metrics",
         "taskId",
+        "baseBranch",
         "exitStatus",
         "reportedDone",
         "pinAccount",
@@ -820,15 +882,18 @@ describe("daemon ↔ relay integration", () => {
         "continueSession",
         "continueHandoff",
         "runNow",
+        "runNowPaused",
         "attachments",
         "traits",
         "successor",
         "successorSelf",
         "successorAuto",
         "amend",
+        "limits",
         "close",
         "drain",
         "drainPass",
+        "softClose",
         "messageRoute",
         "messages",
         "messageReply",
@@ -851,7 +916,7 @@ describe("daemon ↔ relay integration", () => {
       expect(reply.series.length).toBeGreaterThan(0);
       for (const series of reply.series) expect(series.metric).toBe(METRIC_NAMES.sess);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -889,7 +954,7 @@ describe("daemon ↔ relay integration", () => {
       const reply = parseMetricsReply(fits.payload);
       expect(reply !== null && "series" in reply && reply.series).toHaveLength(2);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       process.env["SEANCE_STATE_DIR"] = shared;
     }
@@ -904,7 +969,7 @@ describe("daemon ↔ relay integration", () => {
       await pollUntil(async () => (await stat(file).catch(() => null)) !== null, "metrics.sqlite to exist");
       expect((await stat(file)).mode & 0o777).toBe(0o600);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -943,7 +1008,7 @@ describe("daemon ↔ relay integration", () => {
         skills: [],
       });
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
       await rm(home, { recursive: true, force: true });
     }
@@ -971,7 +1036,7 @@ describe("daemon ↔ relay integration", () => {
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -985,7 +1050,7 @@ describe("daemon ↔ relay integration", () => {
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1010,7 +1075,7 @@ describe("daemon ↔ relay integration", () => {
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1029,7 +1094,7 @@ describe("daemon ↔ relay integration", () => {
         relay2.stop();
       }
     } finally {
-      daemon.stop();
+      await daemon.stop();
     }
   });
 
@@ -1057,7 +1122,7 @@ describe("daemon ↔ relay integration", () => {
       );
     } finally {
       console.log = realWarn;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1081,7 +1146,7 @@ describe("daemon ↔ relay integration", () => {
       }
       expect(seen).toEqual([["scheduler"], undefined, ["scheduler"]]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1115,7 +1180,7 @@ describe("daemon ↔ relay integration", () => {
       expect(roles.every((claim) => claim?.length === 1 && claim[0] === "scheduler")).toBe(true);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1143,7 +1208,7 @@ describe("daemon ↔ relay integration", () => {
       relay.autoPong = true;
       expect(after.roles).toEqual(["scheduler"]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -1170,7 +1235,7 @@ describe("daemon ↔ relay integration", () => {
       expect(line).toContain("Failed to connect");
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
     }
   });
 
@@ -1184,7 +1249,7 @@ describe("daemon ↔ relay integration", () => {
       await relay.registers.next(3_000);
       expect(relay.connectionCount()).toBeGreaterThanOrEqual(2);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });

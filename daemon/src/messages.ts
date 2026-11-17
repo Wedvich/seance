@@ -40,7 +40,7 @@ import type { BoundPane } from "./session-events.ts";
 /**
  * Session messages on this machine (DESIGN.md, "Session messages"): the daemon side of the `message` and
  * `inbox` local-socket frames. A session's `send_message` is a `message` frame, bound to its pane by the
- * kernel-reported peer pid; the `inbox` mod's `seanced inbox` child is a long-lived `inbox` connection bound
+ * kernel-reported peer pid; the `inbox` mod's `seance inbox` child is a long-lived `inbox` connection bound
  * the same way. Neither binds by a field, and neither falls back to a claimed pane on a host that names no
  * peer: unlike a session event, which only claims a state, an `inbox` frame hands text out.
  *
@@ -352,7 +352,7 @@ export function createMessages(deps: MessagesDeps): Messages {
   /**
    * The `claude` process a peer belongs to, what a reply handle is bound to: the innermost process on the peer's chain,
    * peer first and the pane process last, whose name `CLAUDE_COMMAND` accepts, with its start time. Innermost, because
-   * the peer is the child of the `claude` that started it (`seanced inbox`, `seanced mcp`): a wrapper above it that
+   * the peer is the child of the `claude` that started it (`seance inbox`, `seance mcp`): a wrapper above it that
    * carries the name (a shell script called `claude` that runs `claude` twice) or a `claude` that started another in a
    * tool is never the peer's session, and the wrapper, which outlives every `claude` it runs, never holds a handle. A
    * pane that `exec`s `claude` is its own pane pid, a séance spawn too (`caffeinate` on macOS is the pane's process,

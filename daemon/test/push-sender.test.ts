@@ -127,7 +127,8 @@ describe("a send", () => {
       await pollUntil(() => store.record().version === 2, `the prune after a ${status}`);
       expect(store.record().subscriptions).toEqual([b]);
       expect(lines).toEqual([`push: pruned a subscription host=fcm.googleapis.com status=${status}`]);
-      expect(live.requests()).toHaveLength(1);
+      // The two sends are independent: the prune can land before the kept subscription's request does.
+      expect(await live.waitForRequests(1)).toHaveLength(1);
     }
   });
 

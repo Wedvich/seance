@@ -51,6 +51,7 @@ import {
   type RepoEntry,
   type RequestOp,
   type SchedulerAvailability,
+  TASK_PHASES,
   type DrainView,
   type SessionsResponse,
   type SpawnClient,
@@ -68,7 +69,7 @@ import {
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
-import { queueTasksFor, setMachineOpen } from "./availability-client.ts";
+import { queueTasksFor, setAccountOpen, setMachineOpen } from "./availability-client.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -136,7 +137,7 @@ export interface LocalMachine {
   readonly platform: string;
   /**
    * Re-read per call, not snapshotted: the daemon rewrites state.json on every
-   * rescan and `seanced mcp` outlives many of them. Its one user is the
+   * rescan and `seance mcp` outlives many of them. Its one user is the
    * list_machines fallback, which lists this machine's repos when the relay is
    * unreachable; a snapshot would miss a repo cloned since startup, or every repo
    * if the first scan hadn't landed.
@@ -278,7 +279,7 @@ async function accountAliases(lease: FleetLease, accountIds: readonly string[]):
     } catch (err) {
       // A bug, not a lost listing: the label still never fails, but the cache rethrows it on
       // purpose. stderr, never `log.ts`: stdout is the JSON-RPC channel.
-      if (!(err instanceof RequestFailure)) console.error("seanced mcp: account listing failed:", err);
+      if (!(err instanceof RequestFailure)) console.error("seance mcp: account listing failed:", err);
       return null;
     }
   })();
@@ -345,10 +346,13 @@ async function readDrains(
   const paneTaskIds = sessions.flatMap((reply) =>
     (reply?.sessions ?? []).flatMap((s) => (s.taskId === undefined ? [] : [s.taskId])),
   );
-  const tasks = await queueTasksFor(leg, paneTaskIds);
-  if (tasks === null) return views;
+  const queue = await queueTasksFor(leg, paneTaskIds);
+  if (queue === null) return views;
   closed.forEach((machine, index) => {
-    views.set(machine.deviceId, drainView(machine, tasks, sessions[index]?.sessions ?? null));
+    views.set(
+      machine.deviceId,
+      drainView(machine, queue.tasks, sessions[index]?.sessions ?? null, { idle: queue.idle }),
+    );
   });
   return views;
 }
@@ -407,7 +411,14 @@ function describeMachine(
       ? {}
       : {
           drain: {
-            moving: drain.moving.length,
+            draining: drain.draining,
+            // Soft-closed, nothing moves: `running`, `idle` and `waitingOnYou` are disjoint, as in the PWA and CLI summary.
+            ...(drain.draining
+              ? { moving: drain.moving.length }
+              : {
+                  running: drain.moving.filter((m) => !m.idle && !m.waitingOnYou).length,
+                  idle: drain.moving.filter((m) => m.idle && !m.waitingOnYou).length,
+                }),
             waitingOnYou: drain.moving.filter((m) => m.waitingOnYou).length,
             moved: drain.moved.length,
             stuck: drain.stuck.map((s) => ({
@@ -467,14 +478,14 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   const why = `the relay is unreachable (${failureText("connect", err)})`;
   return reachable
     ? `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay); get_sessions and despawn_session still work here, but spawn_session queues through the relay, so nothing can be spawned until it is back`
-    : `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay), and its daemon is not listening either, so no op on this machine works until seanced is running (\`seanced status\`)`;
+    : `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay), and its daemon is not listening either, so no op on this machine works until seanced is running (\`seance status\`)`;
 }
 
 /** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
 function localFailureText(op: string, err: unknown): string {
   const detail = err instanceof Error ? err.message : String(err);
   if (err instanceof LocalUnavailable) {
-    return `${op} failed: ${detail} — is seanced running? try \`seanced status\``;
+    return `${op} failed: ${detail} — is seanced running? try \`seance status\``;
   }
   return `${op} failed: ${detail}`;
 }
@@ -536,7 +547,7 @@ export function messageRouteGate(fleet: Fleet): RouteGate {
         ok: false,
         text:
           availability.kind === "ready"
-            ? `the scheduler's leader cannot route ${need === "reply" ? "replies" : "messages"} yet — its daemon needs \`seanced update\`; nothing was sent`
+            ? `the scheduler's leader cannot route ${need === "reply" ? "replies" : "messages"} yet — its daemon needs \`seance update\`; nothing was sent`
             : "no verified scheduler is leading, so a message to another machine cannot be routed — try again once one leads; nothing was sent",
       };
     } finally {
@@ -723,7 +734,7 @@ const AFTER_WHEN = z
   .enum(DEP_AFTER)
   .default("opened")
   .describe(
-    '"opened": the task has a PR and its branch is pushed (stacked work, the default). "merged": its branch merged. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
+    '"opened" (the default): the task has a PR and its branch is pushed. A worktree task\'s first "opened" entry is what it stacks on: its worktree starts from that task\'s pushed branch, not the default branch, so it builds on that work before it merges (from the default branch instead if that PR merged first, or if the task finished with nothing pushed). "merged": its branch merged, and the worktree starts from the default branch, which then holds the work: the choice for work that should not build on an unmerged branch. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
   );
 
 const LINEAR_FIELD = z
@@ -749,7 +760,7 @@ const UNTIL_FIELD = z
   .enum(TASK_UNTIL)
   .optional()
   .describe(
-    `What settles the task. "merged" (default): its PR merging, or its session ending. "reported": a merge settles nothing; the session settles it by calling ${REPORT_DONE_TOOL} when it is truly finished (a deploy watched, say), which lets dependents wait for that. It needs a prompt, to which the instruction to report is appended, and the session needs the seance MCP server installed in its exclave`,
+    `What settles the task. "merged" (default): its PR merging, or its session ending — the first merge settles it even while its session keeps working, after which it can no longer be passed to a successor. "reported": a merge settles nothing; the session settles it by calling ${REPORT_DONE_TOOL} when it is truly finished (a deploy watched, a follow-up PR, evals run after the merge, say), which lets dependents wait for that. It needs a prompt, to which the instruction to report is appended, and the session needs the seance MCP server installed in its exclave`,
   );
 
 const PIN_FIELD = z
@@ -791,7 +802,7 @@ const REQUIRES_FIELD = z
   );
 
 const REPORTED_GATE =
-  "spawn refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seanced update`";
+  "spawn refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seance update`";
 const REPORTED_UNKNOWN =
   "spawn refused: no verified scheduler is leading, so it cannot be confirmed to take until: reported / after: done — try again once one leads (list_machines shows it)";
 
@@ -930,6 +941,7 @@ function describeTask(
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
+    ...(task.stack === undefined ? {} : { stackedOn: { task: task.stack.task, base: task.stack.on } }),
     ...(spec.succeeds === undefined ? {} : { succeeds: spec.succeeds.task }),
     ...(task.successor === undefined ? {} : { passedTo: task.successor }),
     // The same offer the app's menu follows; `pass_task` still re-checks the leader.
@@ -986,7 +998,7 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
  * state, where every target is remote by definition.
  *
  * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): this process
- * records its own spawn enqueue in the audit log, as `seanced spawn` does —
+ * records its own spawn enqueue in the audit log, as `seance spawn` does —
  * never on stdout, the JSON-RPC channel. When the daemon's broker makes the
  * enqueue for a keyless process, the daemon adds its own `origin=local-broker`
  * line beside it.
@@ -1000,6 +1012,8 @@ export function buildMcpServer(
   passOwnTask: typeof passToSuccessor = passToSuccessor,
   passPoll: PassPoll = PASS_POLL,
   sendMsg: typeof sendMessage = sendMessage,
+  /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
+  ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1024,7 +1038,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `moving` tasks still being passed to other machines (`waitingOnYou` of them waiting on a person), `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `draining` false for a soft close, whose drain has not been started (nothing is moved: `running` tasks still working there, `idle` ones idle at their prompt, which never finish on their own and are what a drain is for (the leader counts one idle 10 minutes after its turn ended), and `waitingOnYou` ones waiting on a person), true once it has (`moving` tasks still being passed to other machines, `waitingOnYou` of them waiting on a person); then `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1093,7 +1107,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); a task that ran stacked carries \`stackedOn\` — the task whose work its worktree started from (after any pass, the successor holding it) and \`base\`: \`branch\` (that task's pushed branch), \`merged\` (the default branch, since that task's PR had merged) or \`nothing\` (the default branch, since that task finished with nothing pushed); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1174,7 +1188,7 @@ export function buildMcpServer(
     {
       title: "Start a queued scheduler task now",
       description:
-        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency cap — the app's Start now. Only the cap is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the cap like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
+        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency limit and a paused queue — the app's Start now. Only those are lifted (the queue stays paused for every other task): a paused account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the limit like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
       inputSchema: z.strictObject({ taskId: z.string().describe("The waiting task's id from get_queue") }),
       annotations: { readOnlyHint: false },
     },
@@ -1274,7 +1288,7 @@ export function buildMcpServer(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the in-flight caps, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the fleet limit when one is set, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. If this session is itself a scheduler task, opened no pull request and queued this one to carry its work on, call report_task_done once nothing of its own is left, or its task holds a slot until it exits. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.strictObject({
         machine: z
           .string()
@@ -1308,7 +1322,7 @@ export function buildMcpServer(
           .max(TASK_SPEC_LIMITS.deps)
           .optional()
           .describe(
-            "Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents",
+            'Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents. With when "opened" (the default), a worktree task is stacked: it starts from the first such task\'s pushed branch (get_queue\'s stackedOn says what it started from); use when "merged" for work that should start from the default branch',
           ),
         until: UNTIL_FIELD,
         linear: LINEAR_FIELD,
@@ -1319,7 +1333,7 @@ export function buildMcpServer(
           .boolean()
           .optional()
           .describe(
-            "Start it now, past the fleet's concurrency cap, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only the cap is lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
+            "Start it now, past the fleet's concurrency limit and a paused queue, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only those are lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
           ),
       }),
       annotations: { readOnlyHint: false },
@@ -1405,7 +1419,7 @@ export function buildMcpServer(
     "queue_batch",
     {
       title: "Queue a batch of tasks",
-      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
+      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's concurrency limit (none unless the owner set one) allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. As spawn_session's: a scheduler task's session that opened no pull request and queued these to carry its work on calls report_task_done once nothing of its own is left. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
       inputSchema: z.strictObject({
         // Retired, still listed: strict refuses them anyway, but the handler says what replaced them.
         strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
@@ -1439,7 +1453,9 @@ export function buildMcpServer(
                 )
                 .max(TASK_SPEC_LIMITS.deps)
                 .optional()
-                .describe("Each entry names exactly one of task and ref"),
+                .describe(
+                  'Each entry names exactly one of task and ref. As spawn_session\'s after: with when "opened" (the default) a worktree member stacks on the first such task\'s pushed branch; when "merged" starts it from the default branch',
+                ),
               until: UNTIL_FIELD,
               linear: LINEAR_FIELD,
               pin: PIN_FIELD,
@@ -1455,7 +1471,7 @@ export function buildMcpServer(
     async ({ strategy, max, autonomy, tasks }) => {
       if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
         return errorResult(
-          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
+          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is bounded by the fleet limit, when the owner set one",
         );
       }
       const batchId = crypto.randomUUID();
@@ -1647,28 +1663,54 @@ export function buildMcpServer(
     {
       title: "Close or reopen a machine",
       description:
-        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); the scheduler's leader passes its running tasks to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them), and a direct spawn still runs. Closing needs the scheduler's leader to support it. A machine whose daemon supports it also asks each running session to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes; `now` (closing only, a machine advertising drain-now) interrupts its sessions at once instead of after 5 minutes, and a session waiting on the person has its question dismissed. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
+        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations), and a direct spawn still runs. Where the machine and the scheduler's leader support it the close is soft: its running tasks keep going until they finish, and nothing is interrupted or moved until you drain it (`drain`, also on a machine already closed). A drain (or any close elsewhere) asks each running session, on a daemon that supports it, to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes, and has the leader pass what is left to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them). `now` (a machine advertising drain-now; implies `drain`) interrupts its sessions at once instead of after 5 minutes, and a session waiting on the person has its question dismissed. Closing needs the scheduler's leader to support it. Closing the machine that leads the queue is allowed and the reply says so: the queue runs only while that machine is up. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
       inputSchema: z.strictObject({
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),
-        now: z
-          .boolean()
+        drain: z
+          .literal(true)
           .optional()
           .describe(
-            "closing only: interrupt its sessions at once instead of after 5 minutes (a machine advertising drain-now)",
+            "closing only: start the drain (ask, then pass), not a soft close; on a soft-closed machine it starts its drain",
+          ),
+        now: z
+          .literal(true)
+          .optional()
+          .describe(
+            "closing only: drain, interrupting its sessions at once instead of after 5 minutes (a machine advertising drain-now)",
           ),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ machine, open, now }) =>
+    async ({ machine, open, drain, now }) =>
       withFleet(async (lease) => {
         const outcome = await setMachineOpen({
           ref: machine,
           selfId: null,
           open,
           ...(now === undefined ? {} : { now }),
+          ...(drain === undefined ? {} : { drain }),
           lease,
         });
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
+    "set_account_open",
+    {
+      title: "Close or reopen an account",
+      description:
+        "Close a Claude account to new scheduled work, or reopen it: the PWA's account Open for work switch. A closed account takes no new task from the scheduler on any machine: auto tasks are placed on the fleet's other accounts, and a task pinned to it waits until it reopens. Nothing running is touched: its sessions keep going, and a direct spawn still runs. Reopening also lifts a hold until the account's quota resets. Goes over the relay as an app-role client, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there. Needs a verified scheduler leader.",
+      inputSchema: z.strictObject({
+        account: z.string().describe("The account's alias, email or accountId, as list_machines names it"),
+        open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ account, open }) =>
+      withFleet(async (lease) => {
+        const outcome = await setAccountOpen({ ref: account, open, lease });
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );
@@ -1678,7 +1720,7 @@ export function buildMcpServer(
     {
       title: "Report this session's scheduler task done",
       description:
-        "Settle the scheduler task this session runs as done, releasing the tasks that wait on it. Call it only when the task's prompt asks you to, and only once the work is fully finished, a deploy you were watching included: it cannot be taken back. Outside a scheduler task it does nothing and says so. Goes to this machine's own daemon, which binds it to this session's tmux pane.",
+        "Settle the scheduler task this session runs as done, releasing the tasks that wait on it. Call it when the task's prompt asks you to, or when this session's work is finished and it opened no pull request — for one, when you queued another task (spawn_session, queue_batch) to carry the work on and nothing of your own is left; otherwise its task holds a slot until the session exits. Only once the work is fully finished, a deploy you were watching included: it cannot be taken back. A task holding a pull request waits for the merge instead, and the report changes nothing there unless the prompt asked for it (use hand_off_task). The session stays open; only the task settles. Outside a scheduler task it does nothing and says so. Goes to this machine's own daemon, which binds it to this session's tmux pane.",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
@@ -1707,7 +1749,7 @@ export function buildMcpServer(
     PASS_SELF_TOOL,
     {
       title: "Pass this session's task to a successor session",
-      description: `Pass this scheduler task to a successor session when this one is running out of usage, or the owner asks. Commit everything first: the daemon pushes this worktree's branch to its upstream and refuses a dirty tree (nothing is pushed then). \`record\` is the whole of what the successor knows besides the branch and the PR it reads itself: what is done, what is left, decisions taken and why, how to verify; at most ${SUCCESSOR_RECORD_MAX} characters. Call it last and end the turn with one line: this session is closed when the turn ends, and nothing done after the push is carried. To pass your own task use this; \`pass_task\` is for other tasks and closes the target session at once. Not \`hand_off_task\`, which leaves a finished PR to the scheduler. Needs a scheduler leader that takes session passes; the call is refused before anything is pushed when there is none. If the task has a PR whose branch this worktree does not track, it is refused and tells you what to push first.`,
+      description: `Pass this scheduler task to a successor session when this one is running out of usage, or the owner asks. Commit everything first: the daemon pushes this worktree's branch to its upstream and refuses a dirty tree (nothing is pushed then). \`record\` is the whole of what the successor knows besides the branch and the PR it reads itself: what is done, what is left, decisions taken and why, how to verify; at most ${SUCCESSOR_RECORD_MAX} characters. Call it last and end the turn with one line: this session is closed when the turn ends, and nothing done after the push is carried. To pass your own task use this; \`pass_task\` is for other tasks and closes the target session at once. Not \`hand_off_task\`, which leaves a finished PR to the scheduler. Needs a scheduler leader that takes session passes; the call is refused before anything is pushed when there is none. If the task has a PR whose branch this worktree does not track, it is refused and tells you what to push first. A task the scheduler already counts finished (its PR merged under until "merged", even while this session kept working) takes no successor: refused, nothing pushed, and it says what to do instead. The answer says whether the scheduler recorded the successor or refused the pass, and why; only a recorded pass closes this session.`,
       inputSchema: z.strictObject({
         record: z.string().min(1).describe("What the successor needs: done, left, decisions, how to verify"),
       }),
@@ -1731,11 +1773,21 @@ export function buildMcpServer(
           return errorResult(
             `${PASS_SELF_TOOL} refused: ${
               lease.scheduler.availability().kind === "ready"
-                ? "the scheduler's leader cannot take a session's pass yet — its daemon needs `seanced update`"
+                ? "the scheduler's leader cannot take a session's pass yet — its daemon needs `seance update`"
                 : "no verified scheduler is leading, so it cannot be confirmed to take a pass — try again once one leads"
             }. Nothing was pushed.`,
           );
         }
+        // Before the push: a task the scheduler already counts as finished (a merge settles `until: "merged"` while the
+        // session still runs) can have no successor, and the session must hear that, not "not confirmed".
+        const settled = local === null ? null : await ownSettledTask(lease.scheduler, local.deviceId, ownPane());
+        if (settled !== null) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: no successor can be made. ${settledText(settled)} Nothing was pushed. ${settledInstead(null)}`,
+          );
+        }
+        // The daemon stamps its `session-pass` with its own clock, this machine's: a refusal stamped earlier answers an earlier pass.
+        const sentSince = Date.now();
         // The cancellation closes the daemon's connection, which is what keeps an interrupted call from passing later.
         const result = await passOwnTask(record, { signal: ctx.mcpReq.signal });
         // No answer is not a refusal: the daemon may have pushed and sent the pass, and closes this session at its turn's end.
@@ -1745,17 +1797,28 @@ export function buildMcpServer(
           );
         }
         if (!result.ok) return errorResult(`${PASS_SELF_TOOL} refused: ${result.text}`);
-        const taskId = result.pass?.taskId;
-        if (taskId === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);
-        const successor = await successorOf(lease.scheduler, taskId, passPoll);
-        if (successor !== null) {
-          return textResult(
-            `passed: the scheduler recorded successor ${successor} for task ${taskId}; its branch is pushed. ${END_THE_TURN}`,
-          );
+        const ack = result.pass;
+        if (ack === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);
+        const { taskId, remoteBranch } = ack;
+        const verdict = await passVerdict(lease.scheduler, taskId, sentSince, passPoll);
+        switch (verdict.kind) {
+          case "passed":
+            return textResult(
+              `passed: the scheduler recorded successor ${verdict.successor} for task ${taskId}; its branch is pushed. ${END_THE_TURN}`,
+            );
+          case "finished":
+            return errorResult(
+              `${PASS_SELF_TOOL} refused: no successor exists. ${settledText(verdict.task)} The branch was pushed (${remoteBranch}) before the scheduler said so. ${settledInstead(remoteBranch)}`,
+            );
+          case "refused":
+            return errorResult(
+              `${PASS_SELF_TOOL} refused: no successor exists — the scheduler refused the pass: ${sessionPassRefusalText(verdict.code)} (${verdict.code}). The branch is pushed (${remoteBranch}). ${REFUSED_INSTEAD}`,
+            );
+          case "unconfirmed":
+            return textResult(
+              `${PASS_SELF_TOOL}: the branch is pushed (${remoteBranch}), but after ${Math.round(passPoll.windowMs / 1000)} s no successor is recorded for task ${taskId} and the scheduler gave no answer, so as of now no successor exists. If the leader still records one, this session closes when this turn ends; if it refused, the session stays open and is not closed by this pass. Before passing again, check get_queue: a successor on task ${taskId} means the pass stood. ${END_THE_TURN}`,
+            );
         }
-        return textResult(
-          `the branch is pushed but no successor was recorded yet; the leader may still confirm, or may have refused (for example the PR's head is another branch). ${END_THE_TURN}`,
-        );
       });
     },
   );
@@ -1804,23 +1867,103 @@ export function buildMcpServer(
  * could not be read, or the leader answered with an error. Never throws: the push has happened, and the
  * session is told what it knows.
  */
-async function successorOf(scheduler: SchedulerLeg, taskId: string, poll: PassPoll): Promise<string | null> {
+/** What `pass_to_successor` read of its pass from the leader's queue. */
+type PassVerdict =
+  | { readonly kind: "passed"; readonly successor: string }
+  /** The task is finished with no successor: none can come. */
+  | { readonly kind: "finished"; readonly task: Task }
+  /** The leader's refusal of this pass (`QueueResponse.passRefused`, stamped at or after `sentSince`). */
+  | { readonly kind: "refused"; readonly code: string }
+  | { readonly kind: "unconfirmed" };
+
+/**
+ * The leader's word on a session's own pass, read from its queue until the window closes: a successor, a finished
+ * task, or the refusal the leader keeps for it. `session-pass` is fire-and-forget, so this read is its only answer.
+ * An older leader keeps no refusals: its refusal reads `unconfirmed` unless the task is finished.
+ */
+async function passVerdict(
+  scheduler: SchedulerLeg,
+  taskId: string,
+  sentSince: number,
+  poll: PassPoll,
+): Promise<PassVerdict> {
   const until = Date.now() + poll.windowMs;
   for (;;) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- one read at a time, the leader's confirmation being what is waited for
       const queue = await scheduler.queue();
       if (queue !== null && !("ok" in queue)) {
-        const successor = queue.tasks.find((t) => t.id === taskId)?.successor;
-        if (successor !== undefined) return successor;
+        const task = queue.tasks.find((t) => t.id === taskId);
+        if (task?.successor !== undefined) return { kind: "passed", successor: task.successor };
+        if (task !== undefined && TASK_PHASES[task.state] === "finished") return { kind: "finished", task };
+        const refusal = queue.passRefused?.find(
+          (r) => r.taskId === taskId && r.sentAt !== undefined && r.sentAt >= sentSince,
+        );
+        if (refusal !== undefined) return { kind: "refused", code: refusal.code };
       }
     } catch {
-      return null;
+      return { kind: "unconfirmed" };
     }
-    if (Date.now() + poll.everyMs > until) return null;
+    if (Date.now() + poll.everyMs > until) return { kind: "unconfirmed" };
     // oxlint-disable-next-line no-await-in-loop -- see above
     await Bun.sleep(poll.everyMs);
   }
+}
+
+/**
+ * The calling session's task when the leader already counts it finished with no successor, else null. Found by
+ * this machine and `$TMUX_PANE` against the tasks' assignments: a claim, not a binding, which only ever refuses
+ * early what the leader would refuse anyway (`finished`); anything unclear (no read, no pane, a live task in the
+ * pane) is left to the daemon and the leader.
+ */
+async function ownSettledTask(
+  scheduler: SchedulerLeg,
+  deviceId: string,
+  pane: string | undefined,
+): Promise<Task | null> {
+  if (pane === undefined || pane === "") return null;
+  let queue: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+  try {
+    queue = await scheduler.queue();
+  } catch {
+    return null;
+  }
+  if (queue === null || "ok" in queue) return null;
+  const mine = queue.tasks.filter((t) => t.assignment?.deviceId === deviceId && t.assignment.pane === pane);
+  if (mine.some((t) => TASK_PHASES[t.state] !== "finished" || t.successor !== undefined)) return null;
+  return mine.toSorted((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+}
+
+/** Why a finished task takes no successor, in the session's terms. */
+function settledText(task: Task): string {
+  if (task.state === "done" && task.doneBy === "merged") {
+    const pr = task.prUrl === undefined ? "its pull request" : `its pull request ${task.prUrl}`;
+    return `Task ${task.id} is already done: ${pr} merged, and a task queued with until "merged" (the default) is settled by that merge even while its session keeps working, so the scheduler counts its work finished and has released what waited on it.`;
+  }
+  const by = task.state === "done" && task.doneBy !== undefined ? ` (by ${task.doneBy})` : "";
+  return `Task ${task.id} is already ${task.state}${by}, so the scheduler has nothing left to pass on.`;
+}
+
+/** What a session whose task is finished does with work left over. `branch`: what was pushed, when it was. */
+function settledInstead(branch: string | null): string {
+  const named = branch === null ? "this worktree's branch (push it first)" : `branch ${branch}`;
+  return `This session is not closed and stays open. Instead: carry the remaining work on here; or, if this session cannot go on, queue it as a new task with spawn_session, your record as its prompt, telling it to check out ${named} and carry on from there.`;
+}
+
+/** Said after any refusal of a pushed pass: nothing will close the session. */
+const REFUSED_INSTEAD =
+  "This session is not closed by the pass and stays open. Instead: fix the cause and call pass_to_successor again, or carry on here; if this session cannot go on, end the turn with a summary of what is left, so its owner can act.";
+
+/** A session pass's refusal, where the generic wording would mislead a session whose branch is already pushed. */
+const SESSION_PASS_REFUSED: Readonly<Record<string, string | undefined>> = {
+  pr_unreadable: "the scheduler could not read the task's pull request to check the pushed branch against it",
+  branch_mismatch:
+    "the pushed branch is not the task's pull request's branch, or the pull request is from a fork; push this work to the pull request's branch, then pass again",
+  conflict: "the task changed while the pass ran; call pass_to_successor again",
+};
+
+function sessionPassRefusalText(code: string): string {
+  return SESSION_PASS_REFUSED[code] ?? schedulerErrorText(code);
 }
 
 /**
@@ -1843,7 +1986,7 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
 }
 
 /**
- * The fleet as `seanced mcp` reaches it. The PSK is resolved on first remote
+ * The fleet as `seance mcp` reaches it. The PSK is resolved on first remote
  * use, not at startup, because local ops need no key at all; when this process
  * can read none — the key exists only as a credential systemd delivers to the
  * daemon's unit — remote ops go through the daemon's broker instead, and the
@@ -1865,7 +2008,7 @@ function mcpFleet(config: Config): Fleet {
   });
 }
 
-/** `seanced mcp` — serve MCP over stdio until the client hangs up. */
+/** `seance mcp` — serve MCP over stdio until the client hangs up. */
 export async function runMcpServer(): Promise<void> {
   const config = await loadConfig();
   const local = await localMachine(config);
@@ -1911,15 +2054,15 @@ export async function mcpScriptCheck(recorded: string | null, label: string, cur
   if (real === expected) return null;
   return {
     level: "warn",
-    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seanced mcp install\` repoints it`,
+    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seance mcp install\` repoints it`,
   };
 }
 
-/** Whether each exclave's Claude Code knows about `seanced mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
+/** Whether each exclave's Claude Code knows about `seance mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
 export async function mcpChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null) {
-    return [{ level: "warn", message: "claude not on PATH — `seanced mcp install` needs Claude Code" }];
+    return [{ level: "warn", message: "claude not on PATH — `seance mcp install` needs Claude Code" }];
   }
   const { present } = await userScopeTargets();
   const perTarget = await Promise.all(
@@ -1929,7 +2072,7 @@ export async function mcpChecks(): Promise<readonly Check[]> {
         return [
           {
             level: "warn",
-            message: `MCP server not registered with Claude Code in ${target.label} — run \`seanced mcp install\``,
+            message: `MCP server not registered with Claude Code in ${target.label} — run \`seance mcp install\``,
           },
         ];
       }
@@ -1938,7 +2081,7 @@ export async function mcpChecks(): Promise<readonly Check[]> {
       // this checkout's main.ts in Claude's config, and nothing rewrites that entry
       // on its own.
       const findings = await Promise.all([
-        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seanced mcp install"),
+        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seance mcp install"),
         mcpScriptCheck(mcpScriptPath(result.stdout), target.label),
       ]);
       return [registered].concat(findings.filter((check) => check !== null));
