@@ -1,7 +1,8 @@
 # Session messaging — spec
 
 **Status: PR 1 (local delivery) built 2026-11-13, PR 2 (cross-machine) and the reply by handle (D3, amended)
-built 2026-11-14; PR 3 (adapter seam) not built; §6 revised 2026-11-14.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
+built 2026-11-14; PR 3 (adapter seam) not built; §6 revised 2026-11-14, and again 2026-11-17 to build on docs/tags.md
+(draft PR #533: session identity, tags, the adapter subscription).** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
 Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
 macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
 pre-PR 1 checks on Linux and on macOS (`origin/worktree-messaging-spike-2-macos`, `spike/REPORT-macos-2.md`). Like docs/drain.md,
@@ -131,6 +132,10 @@ leader (DESIGN.md, "Cross-machine"). The audit gained `dir=receipt`.
   reply names the message it answers (`inReplyTo`, no `to`); the daemon that minted the id knows which session
   asked, and answers only to the pane, pid, task and **`claude` process** that did, for an hour. A task id stays the
   only address for anything that is not a reply. Built: DESIGN.md, "Session messages", "Replies by handle".
+  **Amended again 2026-11-17 (proposed, docs/tags.md §8):** "… or, by an adapter on its own machine, through the
+  subscription the session made by messaging that adapter", keyed by its verified conversation id (`agent.session`)
+  for the conversation's life. The hour bounds a reply handle because the handle is a bearer; a subscription is the
+  session's own act, usable only over that adapter's stdin, so the hour does not apply to it (§6.2).
   **Rejected**, each in §2's list: machine + pane id as a general address; a synthetic task id or queue entry for a
   hand-started session; a leader-held reply table; the Claude session id; replies on one machine only.
 - **D4. Wake by kind.** A question or request wakes an idle session; a note does not (§1). Built: a note is a
@@ -193,10 +198,12 @@ Rejected:
   metadata, to answer what the asker's own daemon already can: it minted the id.
 - **Replies on one machine only** (D3). The smoke test that raised this was cross-machine, and asking a task on
   another machine is the common case.
-- **The Claude session id.** It is stable across `--resume`, but it is the daemon's own choice
-  (`--session-id`), recorded only in the launch ledger of the machine that ran it. It is not in the
+- **The Claude session id, as a session-to-session address.** It is stable across `--resume`, but it is the daemon's
+  own choice (`--session-id`), recorded only in the launch ledger of the machine that ran it. It is not in the
   queue, so a sender could learn it only by asking that machine, and it is the very id the
-  continuation invariant forbids taking from a frame.
+  continuation invariant forbids taking from a frame. (Narrowed 2026-11-17: docs/tags.md §4 gives a **verified**
+  `agent.session`, one the daemon read itself, exactly one use, an adapter's delivery on that machine to a
+  conversation subscribed to it, §6.2. It is still no address between sessions, and replies stay by message id.)
 - **Freezing a message at its first target** (no chain). A pass moves the work exactly when one
   session runs out of usage, which is when a peer most needs to reach whoever carries it on.
 
@@ -247,6 +254,12 @@ Revised 2026-11-14 from the owner's brief for PR 3 and the 2026-11-13 memo; noth
   either. That is a different seam (docs/orchestrator.md §1, and open question 5 below), and this one is shaped so
   as not to foreclose it.
 
+**Built on docs/tags.md (2026-11-17).** That spec (draft PR #533) settles what this section needs and did not have:
+what "a session" is (pane, process and conversation, §1 there), the conversation id `agent.session` that the daemon
+verifies (§4 there), the `tags` map and its writers (`adapter.<name>.*` is this seam's namespace), and the adapter
+subscription that replaces the reply window for a tool's long-lived asks (§8 there). The review points against
+§6 as drafted on 2026-11-14 are settled below, in "Review points settled".
+
 **The shape, in one paragraph.** An adapter is a program the machine's owner installs and names in that machine's
 `config.json`. The daemon starts it as a supervised child, and the two speak newline-delimited JSON over the
 child's stdin and stdout, so there is no rendezvous for another process to claim. The daemon sends a snapshot of
@@ -276,33 +289,68 @@ copy at a protocol version. One frame per line, UTF-8, at most 256 KiB a line (a
 | -------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `snapshot`     | after the handshake, and on `resync`                                     | `{ sessions: Session[] }`: every live Claude pane this daemon binds, tasked or not                                                                                                                                                          |
 | `session`      | a session's state, task or PR changed (the `session-event` ingest's own) | `{ session: Session }`, the whole record, never a patch                                                                                                                                                                                     |
-| `session-gone` | the pane ended or stopped being a Claude session                         | `{ key }`                                                                                                                                                                                                                                   |
+| `session-gone` | the process ended, or stopped being this session                         | `{ key, reason: "exited" \| "closed" \| "replaced" }` (below)                                                                                                                                                                               |
 | `task`         | a task this machine launched moved                                       | `{ task, event: "launched" \| "done" \| "handoff" \| "pass" \| "ended", continues?, prUrl? }`, from the launch ledger and the session's own reports                                                                                         |
-| `message`      | a session sent this adapter a message (§6.2)                             | `{ id, messageKind, text, from: { key, task?, title? }, inReplyTo? }`                                                                                                                                                                       |
+| `message`      | a session sent this adapter a message (§6.2)                             | `{ id, messageKind, text, from: { key, session?, task?, title? }, inReplyTo?, subscribed }`; `session` is the sender's verified `agent.session`, present exactly when `subscribed`                                                          |
 | `result`       | answer to one `deliver`                                                  | `{ ref, id?, outcome, code? }`: `outcome` is the built set's (`delivered`, `sent`, `held`, `ended`, `unknown`, `too_long`, `rate_limited`, `unsupported`, `invalid`) plus `refused` (the adapter's config does not allow that kind or repo) |
 | `delivery`     | the fate of a delivery first answered `sent`                             | `{ id, outcome: "delivered" \| "dropped" \| "nolistener" \| "ended" }`                                                                                                                                                                      |
 
-`Session` is `{ key, task?: { id, title? }, exclave, repo?, branch?, state: "busy" | "idle" | "needs-input" |
-"unknown", turnEnded?, reason?, prUrl?, remoteSession?, since }`. `key` is stable for the life of one `claude`
-process (the `<pid>:<start time>` binding "Replies by handle" already reads), so a tool can tell a restarted
-session from the one before; a tasked session is better keyed by its task id, which survives restarts and
-continues through `continues` (a successor is a new task; a spawn does not name its predecessor today, so carrying `succeeds` is a spawn field PR 3a would add). `repo` is the task's repo name and `branch` the worktree's branch,
-for a tool that tracks who works where. `exclave` is the exclave's name, never an account id.
+`Session` is `{ key, session?: { id, verified: boolean, conflict?: true }, task?: { id, title?, ref? }, exclave,
+repo?, branch?, state: "busy" | "idle" | "needs-input" | "unknown", turnEnded?, reason?, prUrl?, since,
+name: { text, source }, tags }` (revised 2026-11-17 on docs/tags.md).
+
+- **Three ids, three lifetimes.** `key` is the process (`<pid>:<start time>`, the binding "Replies by handle" reads):
+  a `session` record and its `session-gone` are per process, so a tool can tell a restarted `claude` from the one
+  before. `session.id` is the conversation (`agent.session`, docs/tags.md §1): it survives a restart with `--resume`,
+  and **it is the id stable across `continue_task`**, which resumes the same conversation under a new task id; join on
+  it to keep one ticket across a restart or a continue chain. `task.id` is the work: stable while queued and across
+  nothing else (a continuation and a successor are new tasks; a spawn does not name its predecessor today, so carrying
+  `succeeds` is a spawn field PR 3a would add). A successor is a new task **and** a new conversation.
+- **`session` is absent** when the mod has not reported a conversation yet; **`verified: false`** is a claim the daemon
+  could not check (docs/tags.md §4.1), shown but never addressable; **`conflict`** marks an id two live panes claim,
+  which `toSession` refuses (`ambiguous`). A refuted claim is never sent.
+- `task.ref` is the dispatched `creator.ref`/`creator.ref-url` (docs/tags.md §6.1), which settles open question 11.
+- `name` is docs/tags.md §6.1's `displayName` (owner label > task title > `self.name` > window), `source` one of
+  `owner`, `task`, `self`, `window`, so an untasked session has a name a tool can show and says where it came from.
+- `tags` is the joined map as #526 shapes it (`{ "<full key>": { value, at, scope } }`), every namespace but other
+  adapters' `adapter.*` (docs/tags.md §6.2). `remoteSession` is gone from the record: it is `tags["agent.remote"]`.
+- **After a daemon restart** every `Session` in the new snapshot reads `state: "unknown"` and carries no process tags
+  until that session's next report (or, for its conversation, the daemon's own read of the agent's file). That is
+  expected, not a fault: the daemon keeps session state in memory only, and a tool should show "unknown" rather
+  than infer that the session ended.
+- `repo` is the scan-set name (`SessionEntry.repo`, `shared/src/types.ts`: the repo mapped from the pane's path,
+  a linked worktree's through its main clone), the same for a tasked and an untasked session, and absent outside
+  every known repo. `branch` is the worktree's branch. `exclave` is the exclave's name, never an account id.
+
+**`session-gone`'s `reason`**, aligned with the `task` events: `exited` (the process ended on its own: the pane's
+`ended`, a crash, `/exit`), `closed` (Séance closed it: a despawn, a hand-off's or a pass's close, a custodian `close`,
+the drain), `replaced` (the pane was re-tagged for another task under the same process, so the record a tool holds no
+longer describes it). A process that moves to another conversation by `/clear` or `/resume` is not gone: it is one
+`session` frame, the whole record, with the new `session.id`, and a tool keyed on the conversation sees the old one
+lose its process. Nothing in `reason` is a tool's to act on beyond its display; the `task` event is still what says
+the work ended.
 
 **Adapter to daemon:**
 
-| Frame     | Fields                                                                                                                                                                                                                                       |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deliver` | `{ ref, to?, inReplyTo?, messageKind: "note" \| "question" \| "request", text, wake?, from? }`; `to` (a task id) or `inReplyTo` (the id of a `message` frame it received) is required; `ref` is the adapter's own correlation id, ≤ 64 chars |
-| `resync`  | `{}`: send a `snapshot` again (the adapter lost its own state)                                                                                                                                                                               |
+| Frame     | Fields                                                                                                                                                                                                                                                                                                                       |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deliver` | `{ ref, to?, toSession?, inReplyTo?, messageKind: "note" \| "question" \| "request", text, wake?, from? }`; exactly one of `to` (a task id), `toSession` (a subscribed conversation's `agent.session`, §6.2) or `inReplyTo` (the id of a `message` frame it received); `ref` is the adapter's own correlation id, ≤ 64 chars |
+| `tag`     | `{ ref, session?, task?, key, value }`: one `adapter.<name>.*` tag (the bare suffix), on a subscribed conversation or a task's session it may deliver to (docs/tags.md §8.4); `""` clears it; answered by `result`                                                                                                           |
+| `resync`  | `{}`: send a `snapshot` again (the adapter lost its own state)                                                                                                                                                                                                                                                               |
 
 **Delivery** is the built local delivery (§1), with the adapter as the sender:
 
 - `to` is a task id resolved only locally: a live pane carrying a task this machine's launch ledger holds, else
   `held` (launched, no pane yet), `ended`, or `unknown` (not launched here: another machine's adapter is the one
   to ask). Nothing is routed through the leader.
+- `toSession` reaches the one live pane whose verified conversation it is, re-verified at the act, only while that
+  conversation is subscribed to this adapter (§6.2): `ambiguous` when two live panes claim it, `unverified` when the
+  daemon's own source now names another conversation, `ended` when no pane is live (nothing held, D2), `unknown` when
+  it is not subscribed. This is how a tool reaches a session, tasked or not, across restarts, `--resume` and a
+  continue chain.
 - `inReplyTo` answers a message a session sent this adapter, through the `sent` table "Replies by handle" built, so
-  it reaches exactly that `claude` process, an untasked one included, for the table's hour, and wakes it.
+  it reaches exactly that `claude` process, an untasked one included, for the table's hour, and wakes it. It stays
+  for a sender with no verified conversation, which cannot subscribe.
 - A note is a `$.session.append` row: seen within a running turn, or at the next turn of an idle session, which it
   does not wake. `wake: true` submits it as a turn (`$.prompt.submit`, which also waits out a running turn and any
   dialog), as a question or request always is. Nothing else decides timing. The `boundary` mode of the first draft
@@ -336,9 +384,34 @@ exactly their fields, as every Séance parser does.
 
 **A session addresses an adapter as `adapter:<name>`** in `send_message`'s `to`. Task ids are UUIDs, so the prefix
 cannot collide. The frame is bound by peer pid as every `message` is, the sender is tasked or untasked by the same
-rule, and the daemon gives the adapter the message's `id`, which is the handle the adapter replies by. So a
-hand-started session can join a tool by messaging its adapter, and is answerable from then on by reply, as D3
-(amended) allows and no further. Local only: `adapter:<name>` names the adapter on the sender's own machine.
+rule, and the daemon gives the adapter the message's `id`, which is the handle the adapter replies by. Local only:
+`adapter:<name>` names the adapter on the sender's own machine.
+
+**Messaging an adapter subscribes the sender's conversation to it** (docs/tags.md §8, amending D3 as above), when the
+daemon holds a verified `agent.session` for the sender's bound `claude` process (never one from the frame). From then
+on the adapter may deliver to that conversation by `toSession`, for the conversation's life: across a restart with
+`--resume`, a daemon restart (the subscription is kept at rest, `conversations.json`), and a `continue_task` chain. It
+ends when the conversation is not live for 30 days, when the adapter is removed or added again under its name, or when
+the session sends the adapter `leave: true`. A sender with no verified conversation reaches the adapter all the same,
+`subscribed: false`, and is answerable by reply for the hour. `send_message`'s result names the conversation id it
+subscribed (`session`), so the session knows the id the tool holds it under and can give it to the tool (below).
+
+**`repos` and `kinds` bound this direction too.** With `repos` set, a session whose `repo` is not listed (an untasked
+session outside every known repo included, whose `repo` is absent) is not in the snapshot or `session` frames, cannot
+be delivered to by any address, and its message to `adapter:<name>` is refused `refused`: not delivered, not
+subscribed. Without `repos`, every session on the machine is in scope. `kinds` bounds only deliveries in.
+
+**Structured acts go through the tool's own CLI, keyed by the conversation id** (review point 2). A tool's inbox has a
+lifecycle Séance's messages do not (seen, deferred with a note, declined, done, group replies, options), and a message
+to `adapter:<name>` has no addressing inside the tool. Séance does not model either. A session that needs them runs the
+tool's own command-line client, which the tool's README tells its user to install, naming its conversation id (the one
+`send_message` returned, and the one the adapter attached it under), so the tool joins the CLI's act to the session
+the adapter reports. Séance's part stays text in, text out and state out. The tool's CLI and its credentials are the
+tool's and its user's to install; Séance neither ships nor passes them, and the session's Bash could run any program
+of the owner's uid already. **Rejected:** an opaque `data` field on `message` and `deliver`, size-capped, never logged,
+passed through unread. Séance would carry bytes it cannot read into and out of a session's context, a channel no
+scrub or wrapper can bound, and every tool would grow its own schema inside Séance's protocol, which the brief keeps
+out. A `data` field read by the model is also prompt text that Séance's wrappers would no longer frame.
 
 **What never flows out**: a task's prompt, an attachment, a session-to-session message or its metadata, a
 transcript, the screen, the PSK or anything derived from it, an account id, an absolute path. Message text flows
@@ -364,6 +437,10 @@ What follows from that:
 - **The tool's credentials are the adapter's.** They live in the adapter's own config or keychain entry, are never
   in Séance's `config.json`, and are never passed by the daemon. A daemon with a service-delivered key never hands
   `CREDENTIALS_DIRECTORY` to an adapter, as it never does to a session or a probe.
+- **A subscription outlives the hour a reply handle had** (§6.2). It is bounded by the channel, not by time: only
+  that adapter, over its own stdin, on that machine, to a conversation that messaged it and that the daemon verified.
+  Anyone who can write into the tool can reach a subscribed session for as long as the subscription stands, within
+  `kinds` and the rate buckets; a session that no longer wants it sends `leave`.
 - **Integrity**: `seanced adapter add` records the adapter's git commit, when its directory is a git checkout, and
   `doctor` warns when the checkout moved since, as a reminder that new code is running, not as a refusal.
 
@@ -399,13 +476,15 @@ seanced adapter status                               # running, protocol, counts
   "<name>": {
     "argv": ["bun", "/Users/<owner>/src/seance-<tool>/src/main.ts"],
     "kinds": ["note", "question"],
-    "repos": ["github.com/<owner>/<repo>"],
+    "repos": ["<repo>"],
     "commit": "<sha at add>"
   }
 }
 ```
 
-`argv` is an argv array resolved to absolute paths at `add`, never a shell string. The `bun` in it is a bare name
+`repos` names repos as the scan set does (`Session.repo`, `SessionEntry.repo`: a clone's name, never a forge
+path); its meaning for untasked sessions and for messages to the adapter is §6.2's. `argv` is an argv array resolved
+to absolute paths at `add`, never a shell string. The `bun` in it is a bare name
 resolved through PATH at exec, never a recorded `process.execPath`. `name` follows `^[a-z][a-z0-9-]{0,31}$`, and a
 machine may name at most four adapters. Hand-editing the key is equivalent; `remove`, `restart` and `status` are the
 other verbs. Self-update never pulls or rebuilds an adapter: an update restarts the daemon, which restarts the
@@ -416,7 +495,9 @@ adapters on the code they have. Each machine is set up on its own, and nothing a
 - spawn, despawn, enqueue, cancel, amend, pass or otherwise touch the queue (open question 5);
 - send cross-machine, or reach the relay or the leader at all;
 - read an inbox, a prompt, a transcript, a screen, or any message not addressed to it;
-- address an untasked session except by reply, or a task by anything but its id on this machine;
+- address an untasked session except by reply or by a subscription the session made (§6.2), or a task by anything but
+  its id on this machine;
+- write a task tag, or any tag outside `adapter.<name>.*`, or one on a session it may not deliver to;
 - send a key, answer a dialog, or deliver as the user (the delivery is the `inbox` mod's, never tmux);
 - be declared from a frame, the PWA, MCP or another machine.
 
@@ -427,17 +508,19 @@ with task ids, kind, byte count and outcome. Never text, a `from` label, a messa
 
 #### 6.7 Checked against three kinds of tool
 
-| Need                                                            | A hosted workspace agents attach to | A team chat bridge  | A work tracker             |
-| --------------------------------------------------------------- | ----------------------------------- | ------------------- | -------------------------- |
-| Turn state of each session (busy, idle, needs input), lifecycle | `session`, `task`                   | `session`           | `task`                     |
-| A stable key per session                                        | task id, else `key`                 | task id, else `key` | task id                    |
-| Text into a session, held while idle or waking it               | `deliver`, note or `wake`           | `deliver`           | —                          |
-| Whether and when it landed                                      | `result`, `delivery`                | `result`            | —                          |
-| A session talking to the tool, and the tool answering           | `adapter:<name>`, reply             | same                | —                          |
-| PR URL and done                                                 | `session.prUrl`, `task` `done`      | —                   | `task`                     |
-| Start or resume a session for an item nobody holds              | **no** (open question 5)            | —                   | **no**                     |
-| Create, amend or settle tasks                                   | —                                   | —                   | **no**: orchestrator.md §1 |
-| Tasks queued but not yet placed on any machine                  | —                                   | —                   | **no** (open question 6)   |
+| Need                                                            | A hosted workspace agents attach to  | A team chat bridge | A work tracker             |
+| --------------------------------------------------------------- | ------------------------------------ | ------------------ | -------------------------- |
+| Turn state of each session (busy, idle, needs input), lifecycle | `session`, `task`                    | `session`          | `task`                     |
+| A stable key per session                                        | `session.id` (conversation), task id | `session.id`       | task id                    |
+| Its own id and state on the session                             | `adapter.<name>.*` tags (`tag`)      | same               | —                          |
+| Text into a session, held while idle or waking it               | `deliver`, note or `wake`            | `deliver`          | —                          |
+| Whether and when it landed                                      | `result`, `delivery`                 | `result`           | —                          |
+| A session talking to the tool, and the tool answering           | `adapter:<name>`, `toSession`        | same               | —                          |
+| Inbox lifecycle (seen, deferred, declined, done, options)       | the tool's own CLI, by `session.id`  | same               | —                          |
+| PR URL and done                                                 | `session.prUrl`, `task` `done`       | —                  | `task`                     |
+| Start or resume a session for an item nobody holds              | **no** (open question 5)             | —                  | **no**                     |
+| Create, amend or settle tasks                                   | —                                    | —                  | **no**: orchestrator.md §1 |
+| Tasks queued but not yet placed on any machine                  | —                                    | —                  | **no** (open question 6)   |
 
 The first two fit the seam as it stands. The tracker's core needs (create and amend tasks, see the whole queue)
 are the queue's, which this seam is forbidden on purpose; it gets state out from here and writes through an
@@ -463,6 +546,25 @@ orchestrator session (docs/orchestrator.md). A fourth, an output-only tool (a de
 - **The adapter installing its own Claude mod.** Two mods would deliver into one session, with no shared rule for
   wake, and Séance would lose its say over what reaches a session.
 - **A `boundary` delivery mode** (above). Kept out until a tool needs it.
+- **An opaque `data` field passed through unread** (§6.2, review point 2).
+- **Keeping the hour for adapter replies, or lengthening it** (review point 3). A longer-lived bearer, still bound to
+  one process, still useless across `--resume`; replaced by the subscription.
+
+#### Review points settled (2026-11-17)
+
+From a review of §6 as drafted on 2026-11-14 against a hosted-workspace tool's own wire and inbox contracts:
+
+1. **Identity join.** A session could not learn the key the adapter attached it under. Settled by `agent.session`
+   (docs/tags.md §4): the record carries `session.id`, `send_message` returns it, and the session knows it.
+2. **Text-only replies lose the tool's inbox lifecycle; messages to an adapter have no addressing inside the tool.**
+   Settled: structured acts through the tool's own CLI, keyed by the conversation id; the `data` field rejected (§6.2).
+3. **The hour vs a tool's long-lived asks.** Replaced by the subscription (§6.2; D3 amended as above).
+4. **`session-gone` had no reason, and nothing said which id is stable across `continue_task`.** `reason` is `exited`,
+   `closed` or `replaced`; the conversation (`session.id`) is the stable id (§6.1).
+5. **The `repos` example used a forge path; `Session.repo` is the scan-set name.** Fixed (§6.5), and `repos` now
+   filters untasked sessions and messages to `adapter:<name>` (§6.2).
+6. **`Session` gains the joined `tags` map and a `name`**, an untasked session's name follows docs/tags.md's
+   precedence, and after a daemon restart state reads `unknown` until the next event, which is expected (§6.1).
 
 ### 7. Build order
 
@@ -488,15 +590,18 @@ Small PRs, each landing on its own:
      phase (a successor still waiting) is covered in `scheduler/` and the leader's unit tests only: a
      successor placed through `succeeds` dispatches at once and ignores `deps`, so the e2e cannot hold one.
 3. **Adapter seam** (§6), in three PRs, each landing on its own:
-   - **3a. The child and state out.** `config.json` `adapters` and its parser, the supervisor (env,
+   - **3a. The child and state out.** Needs docs/tags.md's PR 1 (the vocabulary, `agent.session` and its
+     verification). `config.json` `adapters` and its parser, the supervisor (env,
      process group, backoff, `failed`, stop with the daemon, the unread cap), the handshake and versioning,
-     `snapshot`, `session`, `session-gone` and `task`, `shared/src/adapter-protocol.ts` and its committed JSON
+     `snapshot`, `session` (with `session`, `name` and `tags`), `session-gone` with its `reason`, and `task`, `shared/src/adapter-protocol.ts` and its committed JSON
      Schema, the reference adapter, and audit origin `adapter`'s lifecycle lines. Useful alone: an
      output-only tool works after it.
-   - **3b. Delivery in and messages out.** `deliver`, `result` and `delivery`, `kinds` and `repos`, the
-     adapter wrapper in `shared/src/messages.ts`, the rate buckets, `adapter:<name>` in `send_message` and
-     the `message` frame out, replies both ways through the `sent` table, and the `op=deliver` and
-     `op=message` audit lines.
+   - **3b. Delivery in and messages out.** `deliver`, `result` and `delivery`, `kinds` and `repos` (both directions),
+     the adapter wrapper in `shared/src/messages.ts`, the rate buckets, `adapter:<name>` in `send_message` and
+     the `message` frame out, replies both ways through the `sent` table, the subscription (docs/tags.md §8:
+     `conversations.json`, `toSession`, `subscribed`, `leave`, `ambiguous`, `unverified`, `send_message` returning
+     `session`, `adapter add` dropping a name's subscriptions), the `tag` frame, and the `op=deliver` and `op=message`
+     audit lines.
    - **3c. Installing.** `seanced adapter add | remove | restart | status`, `seance-adapter.json`, the
      recorded commit and `doctor`'s checks, and README's setup step with §6.3's trust statement.
    - Tested by: daemon tests with the reference adapter as a committed stub, linked and exec'd once in
@@ -504,6 +609,12 @@ Small PRs, each landing on its own:
      session events from real `session-event` frames, delivery by kind and `wake`, a reply round trip in
      both directions (the adapter answering a session, and a session answering the adapter's question),
      every refusal (`unknown`, `too_long`, `rate_limited`, `refused`), a malformed line, the unread cap,
+     a subscription surviving a `claude` restart with `--resume` and a daemon restart, refused for an unverified
+     sender (`subscribed: false`, reply still works), `ambiguous` with two panes on one conversation, `unverified`
+     after a `/clear` the file shows, ended by `leave` and by `adapter add` under the same name, and refused for a
+     session outside `repos`; `session-gone` with each `reason`, and a `/clear` sent as one `session` with the new `session.id`;
+     `state: "unknown"` for every session in the snapshot after a daemon restart; a `tag` on an unsubscribed
+     conversation refused and another adapter never seeing it;
      restart with backoff and the `failed` hold, stop with the daemon by process group, and the env
      without `CREDENTIALS_DIRECTORY`; a layering test that nothing in the adapter modules reads message
      text into `log.ts` or `audit.ts`.
@@ -543,6 +654,12 @@ model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will a
   addressed it; it delivers only by the `inbox` mod's local delivery, under its own wrapper, kinds and
   rate buckets, to a task this machine's launch ledger holds or by reply; it writes nothing to the queue,
   the store, the leader or the relay; and nothing it sends or prints is logged.
+- **A verified conversation id addresses one thing, adapter delivery on its own machine, to a subscribed
+  conversation** (docs/tags.md §4, §8), refused when two live panes claim it. Wording it changes, in PR 3b: CLAUDE.md's
+  messaging bullet ("A session with no task is reached only as a reply, by the id of a message it sent") gains "or by an
+  adapter on its own machine through a subscription the session made by messaging it, keyed by its verified
+  conversation id: kept at rest in `conversations.json`, refused when two live panes claim the id, usable only over
+  that adapter's stdin"; DESIGN.md, "Replies by handle", Rejected, "the Claude session id", narrowed as §2 here.
 - **A service-delivered credential never leaves the daemon process.** An adapter's env drops
   `CREDENTIALS_DIRECTORY`, as a session's and a trait probe's do.
 - **Traits are declared only in the machine's own `config.json`; probes run only that argv.**
@@ -576,9 +693,9 @@ The adapter seam's (§6), each with a recommendation:
    slow, a per-adapter `grants` key is its own threat-model change, later.
 6. **A fleet-wide queue view out** (tasks not yet placed on any machine)? _Recommend no for now._ Each
    machine's adapter covers the sessions; unplaced tasks reach a tool through whoever queued them.
-7. **Addressing an untasked session beyond a reply** (D3)? _Recommend keeping D3._ A hand-started session
-   joins a tool by messaging `adapter:<name>`, and is answerable by reply for the `sent` table's hour; it
-   messages again to stay reachable. Revisit only if a tool needs longer.
+7. **Addressing an untasked session beyond a reply** (D3)? **Settled 2026-11-17 by the subscription**
+   (docs/tags.md §8; §6.2): a session that messages `adapter:<name>` is reachable by that adapter for its
+   conversation's life. Still no general address: only that adapter, only that machine.
 8. **Session-to-session message metadata out** (who messaged whom, when)? _Recommend no, not even counts._
    It is the mailbox-shaped record D3 rejected keeping at the leader, handed to a third party instead.
 9. **`request` from an adapter by default?** _Recommend off_, opt-in per adapter in `kinds` (§6.3), since
@@ -587,11 +704,11 @@ The adapter seam's (§6), each with a recommendation:
     _Recommend not in PR 3._ State the same-uid trust plainly (§6.3); revisit before any adapter the owner did
     not write is installed. Containment would have to be drilled as the custodian's was before it is claimed.
 11. **An external ref on a task in state out**, for a tool to map a task to its own object without keeping a
-    map? _Recommend yes once docs/orchestrator.md's display-only `ref` exists_; until then the adapter keeps
-    its own map from task id.
+    map? **Settled 2026-11-17**: `Session.task.ref`, the dispatched `creator.ref` (docs/tags.md §5.4, §6.1).
 12. **Adapters on the Machines row** (a `MachineStatus` field)? _Recommend later_; `seanced adapter status`
     and `doctor` first.
-13. **State in beyond messages** (a tool setting a label, a flag or done on a task)? _Recommend none in PR 3._
-    Each touches the leader's record, which §6.6 keeps out of the seam.
-14. **The spec's `linear` field names a tool**, against the brief's rule. _Recommend folding it into
-    docs/orchestrator.md's general `ref`_ when that is decided; out of PR 3's scope.
+13. **State in beyond messages** (a tool setting a label, a flag or done on a task)? **Partly settled
+    2026-11-17**: an adapter may set its own `adapter.<name>.*` tags on a session (§6.1 `tag`), memory only, on its
+    machine. Nothing on the task record: a flag or done touches the leader's record, which §6.6 keeps out of the seam.
+14. **The spec's `linear` field names a tool**, against the brief's rule. **Settled 2026-11-17**: it becomes the
+    task tag `creator.ref` (docs/tags.md §5.4), which is also orchestrator.md's `ref`.
