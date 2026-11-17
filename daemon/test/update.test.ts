@@ -165,7 +165,7 @@ describe("self-update over the relay", () => {
       expect(notice.sha).toBe(await runGit(checkout, ["rev-parse", "HEAD"]));
       expect(notice.commitTs).toBeGreaterThan(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -187,7 +187,7 @@ describe("self-update over the relay", () => {
       expect(relay.registerConnections).toEqual([1, 2]);
       expect((await open(appKey, env)).op).toBe("update-available");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -214,7 +214,7 @@ describe("self-update over the relay", () => {
       expect(info.lastUpdate?.outcome).toBe("ok");
       expect(info.source?.sha).toBeDefined();
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -252,7 +252,7 @@ describe("self-update over the relay", () => {
       await pollUntil(() => calls.restart > 0, "the restart once the launch settled");
       expect(calls.restart).toBe(1);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -293,7 +293,7 @@ describe("self-update over the relay", () => {
       expect(await statusWhere(relay, (s) => s.drn !== true)).not.toHaveProperty("drn");
       expect((await endedTasksFor(launchLedgerPath())).draining).toBe(false);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -330,7 +330,7 @@ describe("self-update over the relay", () => {
       await daemon.updater?.settled();
       await expect(relay.registers.next(300)).rejects.toThrow();
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -354,7 +354,7 @@ describe("self-update over the relay", () => {
       expect(calls.install).toBe(0);
       expect(calls.restart).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -380,7 +380,7 @@ describe("self-update over the relay", () => {
       await Bun.sleep(300);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });

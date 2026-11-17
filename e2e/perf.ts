@@ -707,7 +707,7 @@ async function main(opts: Options): Promise<void> {
         await ready(s);
         await s.page.fill("textarea", "perf D");
         // Both nominees down; the other second daemons stay connected.
-        stack.daemon.stop();
+        await stack.daemon.stop();
         await seconds.get("LeaderBox")?.();
         await watcher.waitForApp((st) => st.relay.scheduler.kind === "none", "no leader");
         await submitAndAwaitVerdict(s, "D");

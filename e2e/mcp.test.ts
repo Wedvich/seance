@@ -323,7 +323,7 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
 
       // A stops mid-session: the error says so, and once it is back the same
       // MCP server recovers on its own — nothing here cached the broken path.
-      stack.daemon.stop();
+      await stack.daemon.stop();
       const down = await call("get_sessions", { machine: "RemoteBox" });
       expect(down.error).toBe(true);
       expect(down.text).toContain("is seanced running?");

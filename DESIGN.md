@@ -6077,9 +6077,15 @@ of this section built.
   that was already running. The watcher re-arms itself: the runtime closes it
   after an `error` event, so an inotify limit or a wholesale directory replace
   would otherwise end hot reload for the life of the process while the README
-  promises the opposite. Restarting `startDaemon` in-process is also what makes
-  state.json's write atomic (tmp + rename) load-bearing — the outgoing daemon's
-  background rescan can be writing while the incoming one reads, and a torn
+  promises the opposite. The swap awaits the outgoing handle's `stop()`, which
+  settles only once every state.json write it had begun has landed (added
+  2026-11-17, from a flaky test): a background rescan past its `stopped` check
+  has its save queued, and an incoming daemon started beside it read the file
+  before the save and came up on the old repo set, registering without a clone
+  the outgoing one had just announced. Only writes already begun are drained,
+  never a scan still reading git, so a reload waits on a disk write, not a scan.
+  state.json's write stays atomic (tmp + rename) all the same — the CLI reads it
+  from another process while the daemon writes, and a torn
   read is indistinguishable from corruption, which mints a new identity and
   re-registers the machine as a stranger. runtime.json takes the same tmp +
   rename: small as it is, an in-place write truncates first, and a reader in
@@ -9789,7 +9795,8 @@ relay state unnecessary).
   `LAUNCHD_EXIT_TIMEOUT_S`, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
   `daemon.stop()`, so a finishing spawn's reply still reaches its leader; a second signal exits at once.
   That drain is **final**: an update's release (a thrown restart, the grace) cannot reopen the gate
-  during a shutdown. `stopPower` or `stop` throwing still exits (`shutdown.ts`). `seance install` on macOS waits
+  during a shutdown. `exit` waits for `stop()` to drain the daemon's in-flight state.json writes, and
+  `stopPower` or `stop` throwing or rejecting still exits (`shutdown.ts`). `seance install` on macOS waits
   the `ExitTimeOut` plus 5 s for `bootout` to unload the job (`launchd.ts`), so it never
   bootstraps over a job still draining; systemd's 30 s relaunch wait in `signalRestart` already
   covers 15 s plus `RestartSec=5`.

@@ -2657,7 +2657,7 @@ describe("leader in the daemon", () => {
         await pollUntil(() => relay.openAppCount() === 0, "the leader's leg closing on follow");
         expect(daemon.leader.term()).toBeNull();
       } finally {
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2704,7 +2704,7 @@ describe("leader in the daemon", () => {
       });
       expect((await store.get("on-self"))?.body?.state).toBe("ready");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2753,7 +2753,7 @@ describe("leader in the daemon", () => {
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", ended) }));
       await pollUntil(async () => (await store.get("t-b"))?.body?.state === "done", "the ended event to land");
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2790,7 +2790,7 @@ describe("leader in the daemon", () => {
         await pollUntil(() => droppedSoFar() >= 3, "the malformed, app and sentinel branch-states to drop");
       } finally {
         console.log = capture;
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2867,7 +2867,7 @@ describe("leader in the daemon", () => {
         }, "the leader to handle a valid pass");
       } finally {
         console.log = capture;
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2914,7 +2914,7 @@ describe("leader in the daemon", () => {
           return (await store.get("t-1"))?.body?.flag?.reason === "look";
         }, "the leader to write the flag");
       } finally {
-        daemon.stop();
+        await daemon.stop();
         relay.stop();
       }
     });
@@ -2944,7 +2944,7 @@ describe("leader in the daemon", () => {
       await Bun.sleep(100);
       expect(relay.messages.size).toBe(0);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -2989,7 +2989,7 @@ describe("leader in the daemon", () => {
       }
       expect(redialed.frame.roles).toEqual(["scheduler"]);
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -3040,7 +3040,7 @@ describe("leader in the daemon", () => {
       expect(await store.list()).toHaveLength(1);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -3091,7 +3091,7 @@ describe("leader in the daemon", () => {
       expect(lines.filter((l) => l.includes("op=amend") && l.includes(" ok"))).toHaveLength(1);
     } finally {
       console.log = realLog;
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });
@@ -3108,7 +3108,7 @@ describe("leader in the daemon", () => {
       await pollUntil(() => relay.openAppCount() === 0, "the leader's leg closing on socket loss", 10_000);
       expect(daemon.leader.term()).toBeNull();
     } finally {
-      daemon.stop();
+      await daemon.stop();
       relay.stop();
     }
   });

@@ -106,7 +106,7 @@ describe("a delivered credential survives the daemon's own spawning", () => {
         handle: () => Promise.resolve(null),
       });
       const leader = { term: (): null => null, settled: async (): Promise<void> => {} };
-      return { client, stop: (): void => {}, updater: null, localSocket: null, leader };
+      return { client, stop: async (): Promise<void> => {}, updater: null, localSocket: null, leader };
     };
     const trigger = makeConfigTrigger();
     const supervisor = await startSupervisor({ configPath: path, startDaemon: start, watch: trigger.watch });
@@ -116,7 +116,7 @@ describe("a delivered credential survives the daemon's own spawning", () => {
       await supervisor.current();
       expect(sources).toEqual(["credential", "credential"]);
     } finally {
-      supervisor.stop();
+      await supervisor.stop();
       if (original === undefined) delete process.env["CREDENTIALS_DIRECTORY"];
       else process.env["CREDENTIALS_DIRECTORY"] = original;
     }

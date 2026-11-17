@@ -13,7 +13,10 @@ function seams(over: Partial<ShutdownSeams> = {}): { readonly calls: string[]; r
         calls.push("drain");
         return Promise.resolve(true);
       },
-      stop: () => void calls.push("stop"),
+      stop: () => {
+        calls.push("stop");
+        return Promise.resolve();
+      },
       exit: (code) => void calls.push(`exit ${code}`),
       ...over,
     },
@@ -34,6 +37,34 @@ describe("createShutdown", () => {
     expect(calls).toEqual(["stopPower", "drain"]);
     gate.resolve(true);
     await pollUntil(() => calls.includes("exit 0"), "the exit");
+    expect(calls).toEqual(["stopPower", "drain", "stop", "exit 0"]);
+  });
+
+  test("exits only once stop has drained", async () => {
+    const gate = Promise.withResolvers<void>();
+    const { calls, seams: s } = seams({
+      stop: () => {
+        calls.push("stop");
+        return gate.promise;
+      },
+    });
+    createShutdown(s)("SIGTERM");
+    await pollUntil(() => calls.includes("stop"), "the stop");
+    await Bun.sleep(20); // a non-event can't be polled
+    expect(calls).toEqual(["stopPower", "drain", "stop"]);
+    gate.resolve();
+    await pollUntil(() => calls.includes("exit 0"), "the exit");
+  });
+
+  test("exits even when stop rejects", async () => {
+    const { calls, seams: s } = seams({
+      stop: () => {
+        calls.push("stop");
+        return Promise.reject(new Error("stop broke"));
+      },
+    });
+    createShutdown(s)("SIGTERM");
+    await pollUntil(() => calls.includes("exit 0"), "the exit despite the rejection");
     expect(calls).toEqual(["stopPower", "drain", "stop", "exit 0"]);
   });
 

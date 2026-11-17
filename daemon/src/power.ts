@@ -36,8 +36,12 @@ export function startPowerLoop(intervalMs = 60_000): () => void {
     }
   };
 
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
+  // `Bun.spawn` throws when the OS refuses a process (EMFILE, EAGAIN); unhandled, that would take the
+  // daemon down over a sleep assertion the next tick can retry.
+  const safeTick = (): void =>
+    void tick().catch((err: unknown) => log.warn(`power loop: ${String(err)} — retrying next tick`));
+  safeTick();
+  const timer = setInterval(safeTick, intervalMs);
   return (): void => {
     clearInterval(timer);
     assertion?.kill();

@@ -322,11 +322,11 @@ export async function startStack(
 
   let daemon = await startTestDaemon().catch(failed);
   const state = await readState(join(stateDir, "state.json")).catch(async (error: unknown) => {
-    daemon.stop();
+    await daemon.stop();
     return failed(error);
   });
   if (state === null) {
-    daemon.stop();
+    await daemon.stop();
     return failed(new Error("the daemon's state.json is missing or unreadable"));
   }
   const { deviceId } = state;
@@ -401,7 +401,7 @@ export async function startStack(
       // Only an app creates a task, and an app's create nudges the leader, which would act on version 1
       // before version 2 lands. So the daemon goes, and a stand-in signing as it holds a term of its own:
       // it ignores the nudge, writes the rest, and leaves the record for the restarted daemon's takeover.
-      daemon.stop();
+      await daemon.stop();
       adoptIdentity(await identityOfState(await loadOrInitState(join(stateDir, "state.json"))));
       const standIn = await connectDaemon(relay);
       const app = await connectApp(relay);
@@ -430,14 +430,14 @@ export async function startStack(
       // A failed test's finally can land here with the old daemon still live;
       // an orphan would share the state dir, deviceId and tmux for the rest
       // of the process. stop() is idempotent, so always stop before starting.
-      daemon.stop();
+      await daemon.stop();
       daemon = await startTestDaemon(opts.spawnWaitMs, opts.quiet);
       stack.daemon = daemon;
     },
     startSecondDaemon,
     pushAttempts: () => [...pushAttempts],
     dispose: async (): Promise<void> => {
-      daemon.stop();
+      await daemon.stop();
       for (const proc of secondProcs) proc.kill();
       await Promise.all([...secondProcs].map((proc) => proc.exited));
       await relay.dispose();

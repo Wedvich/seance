@@ -76,7 +76,12 @@ import {
 
 export interface DaemonHandle {
   readonly client: RelayClient;
-  readonly stop: () => void;
+  /**
+   * Tears down at once, then settles once every state.json write already begun has landed: the next
+   * daemon (a reload's, or a restart's) reads that file, and a caller removing the state dir must not
+   * race a rename into it.
+   */
+  readonly stop: () => Promise<void>;
   /** Null unless self-update is wired; tests await its `settled()` instead of sleeping. */
   readonly updater: Updater | null;
   /** Where the local op socket bound, or null when it could not — see `local-socket.ts`. */
@@ -168,6 +173,8 @@ export interface RunOpts {
   readonly now?: () => number;
   /** Outbound HTTP for the leader and telemetry; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
+  /** Writes state.json; defaults to `saveState`. Tests hold a write here to prove `stop` drains it. */
+  readonly writeState?: (state: State) => Promise<void>;
   /** The host telemetry samples; defaults to `hostProbe`. */
   readonly probe?: HostProbe;
   /** Tests only: the fleet quota writer's cadence, `FLEET_QUOTA_INTERVAL_MS` in production. */
@@ -270,8 +277,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let state: State = await loadOrInitState();
   // One write at a time, each of the latest `state`: two overlapping renames could land an older snapshot last and drop a close.
   let saving: Promise<void> = Promise.resolve();
+  const writeState = opts.writeState ?? saveState;
   const persistState = (): Promise<void> => {
-    const run = saving.then(() => saveState(state));
+    const run = saving.then(() => writeState(state));
     saving = run.catch(() => {});
     return run;
   };
@@ -459,10 +467,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     return next;
   };
 
-  const updateRuntime = (connected: boolean): void => {
-    // Unawaited, so its rejection has to land somewhere: `status` reading a
+  const updateRuntime = (connected: boolean): Promise<void> =>
+    // Unawaited but by `stop`, so its rejection has to land somewhere: `status` reading a
     // stale runtime.json is a nuisance, an unhandled rejection is the daemon.
-    void writeRuntime({
+    writeRuntime({
       pid: process.pid,
       startedAt,
       connected,
@@ -470,7 +478,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sha: source?.sha ?? null,
       root,
     }).catch((err: unknown) => log.warn(`could not write runtime.json: ${String(err)}`));
-  };
 
   // Created after the client (its report re-registers); the closures below
   // read it late through this let. One announce per process: the wave must
@@ -721,7 +728,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       fleetQuota.registered();
     },
     onConnect: (): void => {
-      updateRuntime(true);
+      void updateRuntime(true);
       announcedHere = false;
       if (announcePending && source !== null) {
         const notice: UpdateAvailable = { sha: source.sha, commitTs: source.commitTs };
@@ -744,7 +751,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       if (announcedHere) announcePending = true;
     },
     onDisconnect: () => {
-      updateRuntime(false);
+      void updateRuntime(false);
       // The term belongs to this socket: replies to the leader arrive on it, and
       // the relay re-nominates — under a new term — once the redial registers.
       leader.follow("the daemon's relay socket dropped");
@@ -861,7 +868,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   return {
     client,
     localSocket: local.path,
-    stop: (): void => {
+    stop: async (): Promise<void> => {
       stopped = true;
       stopGateWatch();
       status.stop();
@@ -880,7 +887,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // Last, after every timer that writes: a tick still in flight fails its
       // write into the warn above rather than a closed-handle throw elsewhere.
       metrics.close();
-      updateRuntime(false);
+      const runtime = updateRuntime(false);
+      // A scan past its `stopped` check has its save queued already, and nothing queues one after
+      // it but work begun before stop; drain until the chain stands still.
+      const drain = async (): Promise<void> => {
+        const tail = saving;
+        await tail;
+        if (tail !== saving) await drain();
+      };
+      await drain();
+      await runtime;
     },
     updater,
     leader,

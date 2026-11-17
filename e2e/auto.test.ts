@@ -1109,7 +1109,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
         "the suite's daemon verified as leader, with its repos listed",
       );
-      stack.daemon.stop();
+      await stack.daemon.stop();
       down = true;
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
       const created = await app.client.createTask({
@@ -1156,7 +1156,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
         "the suite's daemon verified as leader, with its repos listed",
       );
-      stack.daemon.stop();
+      await stack.daemon.stop();
       down = true;
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
 
@@ -1404,7 +1404,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const before = app.client.getState().scheduler;
       const term = before.kind === "ready" ? before.term : 0;
 
-      stack.daemon.stop();
+      await stack.daemon.stop();
       down = true;
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
 
@@ -1512,7 +1512,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const seed = await identityOfState(state);
 
       // Down, so it cannot redial and take its route back mid-test.
-      stack.daemon.stop();
+      await stack.daemon.stop();
       down = true;
       await app.waitForApp((s) => s.relay.scheduler.kind === "none", "no leader while the daemon is down");
       thief = await connectDaemon(stack.relay);

@@ -186,7 +186,7 @@ describe("daemon ↔ relay ↔ app", () => {
         (s) => ownMachine(s, stack.deviceId)?.status?.quota !== undefined,
         "a status carrying quota",
       );
-      stack.daemon.stop();
+      await stack.daemon.stop();
       const asleep = await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
       const machine = ownMachine(asleep, stack.deviceId);
       if (machine === null) throw new Error("unreachable");
@@ -375,7 +375,7 @@ describe("daemon ↔ relay ↔ app", () => {
     const app = startApp(stack);
     try {
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
-      stack.daemon.stop();
+      await stack.daemon.stop();
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
 
       // The DO answers a send to the dead daemon with a real undeliverable.
@@ -433,7 +433,7 @@ describe("daemon ↔ relay ↔ app", () => {
       // the relay refuses, which is why the CLI stops it first.
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "connected" });
 
-      stack.daemon.stop();
+      await stack.daemon.stop();
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
 
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "forgotten" });
