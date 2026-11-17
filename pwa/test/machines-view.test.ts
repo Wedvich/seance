@@ -15,7 +15,7 @@ import {
   type SessionEntry,
   type Task,
 } from "@seance/shared";
-import { accountSeries, chartLines } from "../src/chart.ts";
+import { accountSeries, chartLines, offlineSpans } from "../src/chart.ts";
 import {
   accountDisplayName,
   deriveArchivist,
@@ -904,6 +904,54 @@ describe("chartLines", () => {
       size,
     );
     expect([line?.d, line?.gaps]).toEqual(["M0 100H240V50", ""]);
+  });
+});
+
+describe("offlineSpans", () => {
+  const window = { from: 0, to: 300, step: 30 };
+
+  test("shades a break no gauge measured inside, between the points either side of it", () => {
+    const spans = offlineSpans(
+      [
+        series(METRIC_NAMES.cpu, [
+          [0, 1],
+          [30, 1],
+          [150, 1],
+          [180, 1],
+          [270, 1],
+        ]),
+        // Memory caught a tick cpu missed: no band there, and the 30–150 band narrows to 60–150.
+        series(METRIC_NAMES.mem, [
+          [60, 1],
+          [210, 1],
+          [240, 1],
+        ]),
+      ],
+      window,
+      300,
+    );
+    expect(spans).toEqual([{ x: 60, width: 90 }]);
+  });
+
+  test("no band before the first point, after the last, outside the window or from a quota series", () => {
+    expect(
+      offlineSpans(
+        [
+          series(METRIC_NAMES.cpu, [
+            [-300, 1],
+            [120, 1],
+            [150, 1],
+            [600, 1],
+          ]),
+          series(METRIC_NAMES.h, [
+            [0, 1],
+            [300, 1],
+          ]),
+        ],
+        window,
+        300,
+      ),
+    ).toEqual([]);
   });
 });
 

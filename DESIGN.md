@@ -10265,7 +10265,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   routing has dropped. The leader's disk push (Scheduler, "Web Push", "Disk alerts") reads the same figure from the live `status`, not from this history. The chart is inline SVG geometry (`chart.ts`), no charting
   dependency; gauges break their line at a missed tick and bridge the break with a faint
   dotted run (nothing was measured there, but a sleep should read as one gap, not as
-  missing ink), and a point alone between two breaks is a dot — a laptop in clamshell
+  missing ink); a break no gauge measured inside is also shaded full height behind the lines and
+  named Offline in the legend (`offlineSpans`; only between points, never before the first or after the
+  last, where history may just not reach or the next tick not be due), and a point alone between two breaks is a dot — a laptop in clamshell
   sleep leaves exactly that, one tick per dark wake. Quota holds its level between
   observations, since a sample carries the observation's time, not the tick's.
 - **Machines say who leads and what each runs** (2026-10-18). A line above the cards names

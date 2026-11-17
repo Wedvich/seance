@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
-import { type ChartLine, chartLines } from "../chart.ts";
+import { type ChartLine, type ChartSpan, chartLines, offlineSpans } from "../chart.ts";
 import type {
   AccountCard,
   ArchivistCard,
@@ -940,6 +940,10 @@ function HistoryChart(props: {
           ),
     [series, from, to, step],
   );
+  const offline = useMemo(
+    () => (series === null ? [] : offlineSpans(series, { from, to, step }, CHART_WIDTH)),
+    [series, from, to, step],
+  );
 
   // Every state fills the same frame, axis and legend row, so a range pick can't collapse the card mid-load.
   return (
@@ -951,7 +955,7 @@ function HistoryChart(props: {
         {result.kind === "loading" && <p className="chart-status">Loading…</p>}
         {result.kind === "failed" && <p className="chart-status chart-failed">{result.message}</p>}
         {result.kind === "ok" && lines.length === 0 && <p className="chart-status">Nothing recorded in this range.</p>}
-        {lines.length > 0 && <ChartPlot history={history} lines={lines} />}
+        {lines.length > 0 && <ChartPlot history={history} lines={lines} offline={offline} />}
       </div>
       <div className="chart-axis">
         <span>{history.range} ago</span>
@@ -964,13 +968,23 @@ function HistoryChart(props: {
             {line.label}
           </li>
         ))}
+        {lines.length > 0 && offline.length > 0 && (
+          <li key="offline">
+            <span className="chart-swatch chart-offline-swatch" aria-hidden="true" />
+            Offline
+          </li>
+        )}
       </ul>
     </div>
   );
 }
 
-function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] }): JSX.Element {
-  const { history, lines } = props;
+function ChartPlot(props: {
+  history: HistoryView;
+  lines: readonly ChartLine[];
+  offline: readonly ChartSpan[];
+}): JSX.Element {
+  const { history, lines, offline } = props;
   return (
     <svg
       className="chart-plot"
@@ -979,6 +993,10 @@ function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] })
       role="img"
       aria-label={`${TARGET_LABELS[history.target.kind]} over the last ${history.range}`}
     >
+      {/* Under the grid and the lines: the bands mark the ground, never cover a measurement. */}
+      {offline.map((span) => (
+        <rect key={span.x} className="chart-offline" x={span.x} y="0" width={span.width} height={CHART_HEIGHT} />
+      ))}
       {[25, 50, 75].map((pct) => (
         <line
           key={pct}
