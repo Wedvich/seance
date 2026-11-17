@@ -377,7 +377,8 @@ green:
   report, which only `report_task_done` sends (`seance session-event` drops a `done` unsent):
   the daemon notes it in the launch ledger and forwards it once, both for the pane's own task
   only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
-  no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
+  no launch of (nothing sent); the leader settles that task only under `until: "reported"`, or under
+  `until: "merged"` while it holds no PR and no successor (`reportSettles`), and
   only from the machine it was placed or reserved on — and clearing its own pane's task's
   `interrupted` mark in the launch ledger, only on an `ended` or `done` frame (proof the session ran;
   never when ingest is stopped), bound to the pane like the `done` report (including on a

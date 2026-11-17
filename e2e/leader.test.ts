@@ -248,7 +248,7 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
       await pollUntil(async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()) !== "", "the report");
       expect(JSON.parse(await Bun.file(out).text())).toEqual({
         ok: true,
-        text: "sent — settles the task if it was queued to settle on its report",
+        text: "sent — settles the task if it was queued to settle on its report or holds no pull request; one holding a pull request waits for its merge",
       });
       await pollUntil(
         async () => (await stack.queue().get(predecessor))?.body?.state === "done",

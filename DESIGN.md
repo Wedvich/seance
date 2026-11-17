@@ -724,7 +724,8 @@ Séance's noise is cover for a real intruder.
    asking for its exclave's `/usage` refresh, which runs only on a stale reading
    (Daemon, "Usage refresh"), and, while the owner has closed the machine, timing
    the constant keys the daemon types into that pane (The drain's session ask). It can also report its
-   own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task and releases
+   own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task, or one holding
+   no PR (amended 2026-11-17), and releases
    `after: "done"` dependents. A session that lies about being done can do no more than one
    that exits. Through the inbox mod's listener it also reads only messages sent to the task its own
    pane carries, and through `send_message` it can send as that task and no other (Local op socket,
@@ -1026,7 +1027,7 @@ nothing checked it. The last is the gap they leave.
   socket. A new kind, or a new act for this one, is a threat-model change like the
   broker's. The second act, built (#21, "Session events"): a `done` report finishing the sender's own
   task, noted in the launch ledger and forwarded, and settled only by a leader and only
-  for an `until: "reported"` task. The third (2026-11-11, "Session events", `handoff`): a hand-off
+  for an `until: "reported"` task or one holding no PR (amended 2026-11-17). The third (2026-11-11, "Session events", `handoff`): a hand-off
   closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
   launch and a PR URL of (for a continuation, the one that ledger noted on it at launch from the launch it
   continues, `continuedPr`: still the ledger's word, never a session-event frame's; for a successor, the one
@@ -4142,7 +4143,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   the PR check, so a merged PR leaves it `awaiting-merge`, and a PR-less clean exit still
   settles `done` by `session` and a nonzero one `failed`, `session_failed` — a lying report can do
   no more than exiting can. The report counts only from the machine the task was placed or
-  reserved on, and under `until: "merged"` it is ignored. A reported task past the merge
+  reserved on, and under `until: "merged"` it settles only a task holding no PR and no successor
+  (`done` by `reported`, before its exit is read), and is ignored beside one. A reported task past the merge
   expiry fails `merge_expired` as "never reported done". **The forge's word** (2026-10-23, "PR status"):
   the leader's own `gh` reads each unfinished task's GitHub PR, and a PR it finds `merged` settles
   a `running`, `needs-input`, `lost` or `awaiting-merge` task `done`, `doneBy: "merged"`, with none
@@ -10765,10 +10767,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   not in a task pane (`untasked`), no launch of the task on this machine (`unrecorded`), a daemon
   that is stopping (`stopping`), a report sent but not saved to disk (`unwritten`), a daemon that
   predates it (`invalid`: run `seance update`) — and imports nothing that logs. Its `ok` says
-  the report was sent, which settles the task only if it was queued to settle on its report. It is
+  the report was sent, which settles the task if it was queued to settle on its report or holds no
+  PR ("Session events", `done`). It is
   MCP only, with no CLI subcommand (`seance session-event` drops a `done` unsent): a session
-  reports from inside Claude, and the tool's description tells it to call only when the task's
-  prompt says so. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
+  reports from inside Claude, and the tool's description tells it to call when the task's
+  prompt says so, or when it opened no PR and its work is finished — for one, handed to a task it
+  queued, which `spawn_session`'s and `queue_batch`'s descriptions say too. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
   The session needs the seance MCP server installed in its exclave, which `seance mcp
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
@@ -12094,11 +12098,17 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   sent; a failed ledger write answers `unwritten` (sent, but a restart could lose it); a stopped
   ingest answers `stopping`; and a daemon that predates it answers `invalid`. The forward is
   never coalesced into the outbox window, since a report is acted on once and a later state must
-  not replace it. The leader settles the task `done` by `reported` only under `until: "reported"` and only from the machine
+  not replace it. The leader settles the task `done` by `reported` only from the machine
   the task was placed (or reserved) on, so a session can finish only its own task. Under `until:
   "reported"` it settles beside `mark-done`, Linear Done and a session ending clean with no PR;
-  `after: "done"` dependents release on it. Under `until: "merged"` the report is ignored: a
-  merge settles, as before. Two things follow. The report is the first act beyond ingest, so a threat-model
+  `after: "done"` dependents release on it. Under `until: "merged"` it settles only a task holding
+  no PR and no successor (`reportSettles`, `scheduler/src/done.ts`); beside a PR (the task's or the
+  event's) it is ignored and the merge settles, as before (amended 2026-11-17). The case it was
+  widened for: a session that designs something and queues another task to build it, which opens
+  the PR; its own task had nothing to settle it but its exit, and held a slot while it sat at its
+  prompt. Inferring that from the spawn was rejected: a coordinator spawns and keeps working, and
+  the leader has no lineage for a brokered spawn. A session that reports this way can do no more
+  than one that exits with no PR, which settles `done` by `session` too. Two things follow. The report is the first act beyond ingest, so a threat-model
   change (Threat model, item 6), and a session that lies about being done can do no more than
   one that exits. And the slot is freed at the report while the session may still be running
   (Scheduler, "Done detection"): the leader counts `done` tasks as holding no capacity, so a

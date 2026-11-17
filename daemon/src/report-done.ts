@@ -197,7 +197,7 @@ export function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneResult>
     { state: "done" },
     opts,
     REPORT_REFUSED,
-    "sent — settles the task if it was queued to settle on its report",
+    "sent — settles the task if it was queued to settle on its report or holds no pull request; one holding a pull request waits for its merge",
   );
 }
 

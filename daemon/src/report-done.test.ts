@@ -29,7 +29,7 @@ describe("reportDone", () => {
     try {
       expect(await reportDone({ path: fake.path, pane: "%7" })).toEqual({
         ok: true,
-        text: "sent — settles the task if it was queued to settle on its report",
+        text: "sent — settles the task if it was queued to settle on its report or holds no pull request; one holding a pull request waits for its merge",
       });
       expect(fake.frames).toEqual([{ v: 1, kind: "session-event", state: "done", pane: "%7" }]);
     } finally {

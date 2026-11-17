@@ -1482,12 +1482,17 @@ describe("a session's own done report (#21)", () => {
     expect(scheduler.task(next.id)?.state).toBe("running");
   });
 
-  test("a task that did not ask to settle on a report is left running", async () => {
+  test("under until: merged a report settles a PR-less task, and leaves one with a PR to its merge", async () => {
     const { scheduler, store } = setup();
-    const task = await enqueue(store, scheduler, spec());
+    const prless = await enqueue(store, scheduler, spec());
+    const withPr = await enqueue(store, scheduler, spec());
     await pass(scheduler);
-    await scheduler.onSession(task.id, "done", { deviceId: "a", pane: "%1" });
-    expect(scheduler.task(task.id)?.state).toBe("running");
+    await scheduler.onSession(withPr.id, "busy", { deviceId: "a", pane: "%2" }, "https://github.com/acme/app/pull/7");
+
+    await scheduler.onSession(prless.id, "done", { deviceId: "a", pane: "%1" });
+    await scheduler.onSession(withPr.id, "done", { deviceId: "a", pane: "%2" });
+    expect(scheduler.task(prless.id)).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(scheduler.task(withPr.id)?.state).toBe("running");
   });
 });
 
