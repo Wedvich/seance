@@ -1277,9 +1277,7 @@ export function SpawnScreen(props: {
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
 
-        {view.previewShown && (
-          <PreviewCard preview={preview} machines={machines} now={now} />
-        )}
+        {view.previewShown && <PreviewCard preview={preview} machines={machines} now={now} />}
       </div>
 
       {renderedSheet !== null && (
