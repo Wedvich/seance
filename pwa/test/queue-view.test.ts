@@ -1645,6 +1645,13 @@ describe("a task deferred by its not-before time", () => {
     expect(row?.startNow).toEqual({ sub: "Skip the queue", enabled: true });
   });
 
+  test("a blocked task keeps its dependency headline and still shows the time in its body", () => {
+    const blocked = task("b", { state: "blocked", spec: { repo: ORIGIN, mode: "worktree", notBefore: LATER } });
+    const row = rowAt(blocked);
+    expect(lineText(row?.headline ?? [])).not.toMatch(/^Queued — until /u);
+    expect(lineText(row?.body ?? [])).toMatch(/^Not placed before /u);
+  });
+
   test("says nothing once the leader's clock, by the skew, is past it", () => {
     const row = rowAt(stale(), 3_600_001);
     expect(lineText(row?.headline ?? [])).not.toContain("until");

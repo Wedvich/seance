@@ -5842,6 +5842,24 @@ describe("the not-before choice", () => {
     expect(store.getState().notBefore).toBeNull();
   });
 
+  test("the route preview goes while a time is set and is asked again once the queued task clears it", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    try {
+      await until(() => store.getState().preview?.kind === "ok", "the first preview");
+      store.setNotBefore({ kind: "in", ms: 7_200_000 });
+      await until(() => store.getState().preview === null, "the preview dropped while a time is set");
+      const asked = client.previews.length;
+      await store.spawn();
+      expect(store.getState().notBefore).toBeNull();
+      await until(() => client.previews.length > asked, "the preview asked again");
+      await until(() => store.getState().preview?.kind === "ok", "the preview back");
+    } finally {
+      detach();
+    }
+  });
+
   test("none leaves the field off the spec", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });

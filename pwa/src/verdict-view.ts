@@ -79,7 +79,9 @@ export function describeVerdict(
     const deferred = notBeforeLine(task, now);
     const waiting = deferred === null ? waitingText(task) : null;
     const parts = [
-      queuedBody(task),
+      deferred !== null && (task.state === "queued" || task.state === "ready")
+        ? "The scheduler holds it. Nothing is running yet."
+        : queuedBody(task),
       pin === null ? null : `${pin}.`,
       requires === null ? null : `${requires}.`,
       deferred === null ? null : `Not placed ${deferred}.`,

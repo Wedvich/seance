@@ -771,9 +771,8 @@ export interface AfterSheetView {
  */
 export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   const view = state.queueView;
-  const tasks = (view?.kind === "ok" ? view.tasks : []).map((task) =>
-    asRunning(task, now + (view?.kind === "ok" ? view.skew : 0)),
-  );
+  const skew = view?.kind === "ok" ? view.skew : 0;
+  const tasks = (view?.kind === "ok" ? view.tasks : []).map((task) => asRunning(task, now + skew));
   const held = new Map(state.form.after.map((dep) => [dep.task, dep.after]));
   const listed = tasks
     .filter(
@@ -783,7 +782,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .map((task) => ({
       id: task.id,
       title: taskTitle(task),
-      headline: plain(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
+      headline: plain(taskHeadline(task, state.relay.machines, state.accounts.aliases, now, now + skew)),
       when: held.get(task.id) ?? null,
     }));
   const shown = new Set(listed.map((option) => option.id));

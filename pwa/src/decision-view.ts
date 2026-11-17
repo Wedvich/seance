@@ -337,7 +337,8 @@ export function taskHeadline(
   leaderNow: number = now,
 ): Timed {
   const deferred = notBeforeLine(task, leaderNow);
-  if (deferred !== null) return [`Queued — ${deferred}.`];
+  // A blocked task keeps its "Waiting on" headline: that wait outlasts the time, and the body carries the time.
+  if (deferred !== null && task.state !== "blocked") return [`Queued — ${deferred}.`];
   const headline = headlineOf(task, machines, aliases, now);
   return typeof headline === "string" ? [headline] : headline;
 }

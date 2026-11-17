@@ -1573,6 +1573,8 @@ export class Store {
     const { form } = this.#state;
     // Only the files this task carries leave the form: a retry's task names the ones it was built with.
     const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
+    // `refreshPreview` patched the card away while a time was set, so nothing else asks again.
+    const hadNotBefore = this.#state.notBefore !== null;
     this.#patch({
       form: {
         ...form,
@@ -1587,6 +1589,7 @@ export class Store {
       attachments: this.#state.attachments.filter((f) => f.upload.kind !== "stored" || !sent.has(f.upload.id)),
       attachNotice: null,
     });
+    if (hadNotBefore) void this.refreshPreview();
   }
 
   /** Why the store refused a create, as the verdict and a held row say it. */

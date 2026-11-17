@@ -169,6 +169,7 @@ describe("a deferred task's verdict", () => {
     const shown = verdictOf(deferred);
     expect(shown.headline).toMatch(/^Queued — until /u);
     expect(shown.body).toMatch(/Not placed until /u);
+    expect(shown.body).not.toContain("as soon as");
     const past = describeVerdict({ kind: "queued", task: deferred }, [], {}, NOW + 60_000, null);
     expect(past.headline).not.toContain("until");
     expect(past.body).not.toContain("Not placed");

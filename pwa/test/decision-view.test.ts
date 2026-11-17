@@ -11,6 +11,7 @@ import {
 import {
   describeDecision,
   isPlaced,
+  notBeforeLine,
   pinLine,
   queuedBody,
   requiresLine,
@@ -730,5 +731,29 @@ describe("startNowItem", () => {
     expect(startNowItem(preview, false)).toEqual({ sub: "The queue is paused", enabled: false });
     const capped = ok(null, [rejected("mac", "Mac", [GLOBAL])]);
     expect(startNowItem(capped, false)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+  });
+});
+
+describe("notBeforeLine", () => {
+  const later = NOW + 3_600_000;
+  const deferred = (state: Task["state"]): Task => ({
+    id: "t-1",
+    state,
+    createdAt: NOW - 1000,
+    spec: { repo: "github.com/acme/app", mode: "worktree", notBefore: later },
+  });
+
+  test("reads until when for a waiting task whose time is ahead of the leader's clock, else null", () => {
+    expect(notBeforeLine(deferred("ready"), NOW)).toMatch(/^until /u);
+    expect(notBeforeLine(deferred("ready"), later)).toBeNull();
+    expect(notBeforeLine(deferred("running"), NOW)).toBeNull();
+    expect(
+      notBeforeLine({ ...deferred("ready"), spec: { repo: "github.com/acme/app", mode: "worktree" } }, NOW),
+    ).toBeNull();
+  });
+
+  test("a deferred ready task's headline is the until line, a blocked one keeps its own", () => {
+    expect(taskHeadline(deferred("ready"), [], NOW)).toMatch(/^Queued — until /u);
+    expect(taskHeadline(deferred("blocked"), [], NOW)).not.toMatch(/until/u);
   });
 });
