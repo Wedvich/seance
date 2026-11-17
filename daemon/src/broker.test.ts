@@ -240,6 +240,15 @@ describe("parseBrokerRequest on scheduler frames", () => {
       taskId: TASK_ID,
     });
     expect(parsedRequest(enqueue())).toMatchObject({ schedulerOp: "enqueue", taskId: TASK_ID });
+    // A deferred enqueue and amend carry the time through the parsers; a bad one is refused.
+    expect(parsedRequest(enqueue({ notBefore: 1_900_000_000_000 }))["spec"]).toMatchObject({
+      notBefore: 1_900_000_000_000,
+    });
+    expect(refusedCode(enqueue({ notBefore: -1 }))).toBe("invalid_request");
+    expect(parsedRequest(frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, notBefore: null } }))["amend"]).toEqual({
+      taskId: TASK_ID,
+      notBefore: null,
+    });
     // A keyless peer names no basis: its broker's daemon reads the prompt for one.
     const append = { taskId: TASK_ID, prompt: { mode: "append", text: "more" } };
     const parsed = parsedRequest(frame({ schedulerOp: "amend", amend: { ...append } }));

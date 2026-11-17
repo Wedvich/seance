@@ -13,7 +13,7 @@ export function isNotBefore(value: unknown): value is number {
 
 const DURATION_PATTERN = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$/u;
 const CLOCK_PATTERN = /^([01]?\d|2[0-3]):([0-5]\d)$/u;
-const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(Z|[+-]\d{2}:\d{2})?$/u;
+const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/u;
 
 const MS = { d: 86_400_000, h: 3_600_000, m: 60_000 } as const;
 
@@ -41,28 +41,29 @@ export function parseClockTime(text: string): { readonly hh: number; readonly mm
 }
 
 /**
- * `YYYY-MM-DD[T ]HH:MM[:SS]` with an optional `Z` or `±HH:MM`; none means local time, refused when
+ * `YYYY-MM-DD[T ]HH:MM[:SS[.mmm]]` with an optional `Z` or `±HH:MM`; none means local time, refused when
  * `requireOffset`. Range-checked by round trip, so `2026-02-30` is refused.
  */
 export function parseDateTime(text: string, opts: { readonly requireOffset: boolean }): number | null {
   const match = DATE_TIME_PATTERN.exec(text.trim());
   if (match === null) return null;
-  const [, y, mo, d, h, mi, s, zone] = match;
+  const [, y, mo, d, h, mi, s, frac, zone] = match;
   const year = Number(y);
   const month = Number(mo);
   const day = Number(d);
   const hour = Number(h);
   const minute = Number(mi);
   const second = Number(s ?? 0);
+  const ms = Number((frac ?? "").padEnd(3, "0") || 0);
   if (second > 59) return null;
   let at: number;
   if (zone === undefined) {
     if (opts.requireOffset) return null;
-    const local = new Date(year, month - 1, day, hour, minute, second);
+    const local = new Date(year, month - 1, day, hour, minute, second, ms);
     if (local.getFullYear() !== year || local.getMonth() !== month - 1 || local.getDate() !== day) return null;
     at = local.getTime();
   } else {
-    const utc = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+    const utc = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
     if (utc.getUTCFullYear() !== year || utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) return null;
     if (utc.getUTCHours() !== hour || utc.getUTCMinutes() !== minute) return null;
     let offset = 0;

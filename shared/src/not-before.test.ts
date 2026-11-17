@@ -41,6 +41,7 @@ describe("parseDateTime", () => {
     expect(parseDateTime("2026-11-18T20:30:00Z", { requireOffset: true })).toBe(utc);
     expect(parseDateTime("2026-11-18T21:30:00+01:00", { requireOffset: true })).toBe(utc);
     expect(parseDateTime("2026-11-18 21:30+01:00", { requireOffset: true })).toBe(utc);
+    expect(parseDateTime("2026-11-18T20:30:00.250Z", { requireOffset: true })).toBe(utc + 250);
   });
   test("local when no offset, refused when one is required", () => {
     expect(parseDateTime("2026-11-18T21:30", { requireOffset: false })).toBe(new Date(2026, 10, 18, 21, 30).getTime());

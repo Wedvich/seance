@@ -161,7 +161,7 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * not set `lineage` or `base` (neither client sends them), and its `client` is
  * `mcp` or `cli` — the peer's unverifiable claim, since the daemon cannot tell
  * the two apart, kept in the record and audited as `claimed_client`. It may
- * continue a task (`mode: "continue"` with `continues`, paired by the parser). Never
+ * continue a task (`mode: "continue"` with `continues`, paired by the parser), and defer one (`notBefore`, carried as the parser keeps it). Never
  * `pwa`, `raycast` or `scheduler`. `cancel`, `run-now` and `pass` take a task id alone (a leader
  * without `runNow` or `successor` refuses that op as unknown, so it needs no gate here), `amend` a
  * draft held to the leader's own checks (`parseAmendDraft`), `queue` and `accounts` no payload, and

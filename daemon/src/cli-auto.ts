@@ -1,4 +1,4 @@
-import { CAPABILITIES, withAutonomy, type AmendDraft } from "@seance/shared";
+import { CAPABILITIES, resolveNotBefore, withAutonomy, type AmendDraft } from "@seance/shared";
 import { setAccountOpen, setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
@@ -129,6 +129,11 @@ function keylessNotQueued(why: string): string {
   return `spawn: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. ${NOW_HINT}`;
 }
 
+/** `--at` / `--in` as `resolveNotBefore` takes them: only the ones given. */
+function withTime(args: { readonly at?: string; readonly in?: string }): { at?: string; in?: string } {
+  return { ...(args.at === undefined ? {} : { at: args.at }), ...(args.in === undefined ? {} : { in: args.in }) };
+}
+
 /**
  * The spec from the CLI's flags — repo, mode, title, prompt, the fields both
  * forms share — resolved to the origin the scheduler keys repos by, and the
@@ -140,6 +145,8 @@ export async function spawnAuto(
   audit: AuditSink,
   opts: SpawnAutoOpts = {},
 ): Promise<AutoEnqueued> {
+  const deferred = args.at === undefined && args.in === undefined ? null : resolveNotBefore(withTime(args), Date.now());
+  if (deferred !== null && !deferred.ok) return failed(`spawn refused: ${deferred.error}`);
   const fields: AutoSpec = {
     repo: args.repo,
     mode: args.here ? "here" : "worktree",
@@ -147,6 +154,7 @@ export async function spawnAuto(
     ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
     ...(args.autonomy === undefined ? {} : { autonomy: args.autonomy }),
     ...(args.requires === undefined ? {} : { requires: args.requires }),
+    ...(deferred === null ? {} : { notBefore: deferred.at }),
   };
   // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`. Never null: the CLI takes no `plan`.
   const spec = withAutonomy(fields) ?? fields;
@@ -209,6 +217,8 @@ export async function continueTaskAuto(
   audit: AuditSink,
   opts: { readonly keyless?: boolean } = {},
 ): Promise<AutoEnqueued> {
+  const deferred = args.at === undefined && args.in === undefined ? null : resolveNotBefore(withTime(args), Date.now());
+  if (deferred !== null && !deferred.ok) return failed(`continue refused: ${deferred.error}`);
   let lease: FleetLease;
   try {
     lease = await fleet.open();
@@ -228,6 +238,7 @@ export async function continueTaskAuto(
       args.prompt,
       audit,
       "cli",
+      deferred === null ? undefined : deferred.at,
     );
   } finally {
     lease.release();

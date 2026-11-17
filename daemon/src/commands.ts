@@ -155,8 +155,8 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
   spawn: {
     summary: "queue a session for the scheduler",
     usage:
-      "[--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]... " +
-      "[--requires <trait>]...] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
+      "[--now | [--start | --at <HH:MM|ISO> | --in <duration>] [--machine <name|here>] [--account <alias|email|id>] " +
+      "[--not <machine|here>]... [--requires <trait>]...] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
     details: [RELAY_NOTE],
     arg: "repo",
     flags: [
@@ -177,6 +177,16 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         help: "once the scheduler admits it, start it past the concurrency limit and a paused queue (as seance start)",
       },
       {
+        flag: "--at",
+        value: "HH:MM|ISO",
+        help: "not before: the next HH:MM on this machine's clock, or a date-time (YYYY-MM-DDTHH:MM, local unless it ends in Z or an offset); never with --in, --start or --now",
+      },
+      {
+        flag: "--in",
+        value: "duration",
+        help: "not before: from now, e.g. 90m, 2h or 1d2h; never with --at, --start or --now",
+      },
+      {
         flag: "--autonomy",
         value: "level",
         choices: ["steer", "checkpoint", "auto"],
@@ -184,16 +194,20 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
       },
       {
         flag: "--now",
-        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires or --start",
+        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires, --start, --at or --in",
       },
     ],
   },
   continue: {
     summary:
       "resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new queued task",
-    usage: "<task-id> [-p|--prompt <note>]",
+    usage: "<task-id> [-p|--prompt <note>] [--at <HH:MM|ISO> | --in <duration>]",
     details: [RELAY_NOTE],
-    flags: [{ flag: "-p", alias: "--prompt", value: "note", help: "a note to add" }],
+    flags: [
+      { flag: "-p", alias: "--prompt", value: "note", help: "a note to add" },
+      { flag: "--at", value: "HH:MM|ISO", help: "not before: as spawn's --at; never with --in" },
+      { flag: "--in", value: "duration", help: "not before: as spawn's --in; never with --at" },
+    ],
   },
   start: {
     summary: "start a queued task now, past the concurrency limit and a paused queue (the app's Start now)",
@@ -230,7 +244,9 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
   },
   amend: {
     summary: "change a task still waiting in the queue",
-    usage: "<task-id> [text…] [--replace] [--title <title>] [--model <model>] [--effort <effort>]",
+    usage:
+      "<task-id> [text…] [--replace] [--title <title>] [--model <model>] [--effort <effort>] " +
+      "[--at <HH:MM|ISO> | --in <duration> | --not-before none]",
     details: ["the text is appended to its prompt", RELAY_NOTE],
     flags: [
       { flag: "--replace", help: "make the text the prompt" },
@@ -242,6 +258,9 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         choices: ["low", "medium", "high", "xhigh", "max", "default"],
         help: "set its effort",
       },
+      { flag: "--at", value: "HH:MM|ISO", help: "set or move the time before which it will not start" },
+      { flag: "--in", value: "duration", help: "as --at, from now (e.g. 2h)" },
+      { flag: "--not-before", value: "none", choices: ["none"], help: "clear the not-before time" },
     ],
   },
   despawn: {

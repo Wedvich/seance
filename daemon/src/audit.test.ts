@@ -12,6 +12,7 @@ import {
   drainAskAudit,
   ensureAuditLog,
   enqueueAudit,
+  queueAudit,
   messageAudit,
   spawnAudit,
   traitRefusalAudit,
@@ -264,6 +265,24 @@ describe("enqueue audit lines", () => {
     ]);
   });
 
+  test("the leader's amend line names notBefore as a field, never the time", async () => {
+    await queueAudit(collect).amended("req-1", { id: "t-1", spec: {} }, {
+      taskId: "t-1",
+      notBefore: 1_900_123_456_789,
+    });
+    expect(collected).toEqual(['audit queue origin=relay op=amend id="req-1" task="t-1" fields=notBefore ok']);
+    expect(emitted()).not.toContain("1900123456789");
+  });
+
+  test("a deferred enqueue carries notBefore=1 and never the time", async () => {
+    await enqueueAudit(collect, "cli")(
+      { ...task, spec: { notBefore: 1_900_123_456_789 } },
+      { kind: "queued", landedEarlier: false },
+    );
+    expect(collected).toEqual(['audit enqueue origin=cli client=cli task="t-1" notBefore=1 createdAt=42 queued']);
+    expect(emitted()).not.toContain("1900123456789");
+  });
+
   test("the broker's line says claimed_client: the peer's word, never client=", async () => {
     await enqueueAudit(collect, "local-broker", "cli")(task, { kind: "queued", landedEarlier: true });
     await enqueueAudit(collect, "local-broker", "mcp")(task, { kind: "refused", code: 'rate"limited' });
@@ -285,9 +304,14 @@ describe("trait audit lines", () => {
     });
     await admitAudit(collect)({ id: "t-2", createdAt: 43, state: "ready", spec: {} });
     expect(collected).toEqual([
-      'audit queue origin=leader op=admit task="t-1" client="mcp" createdAt=42 state=ready avoid=1 requires=2 pin=1',
-      'audit queue origin=leader op=admit task="t-2" createdAt=43 state=ready avoid=0 requires=0 pin=0',
+      'audit queue origin=leader op=admit task="t-1" client="mcp" createdAt=42 state=ready avoid=1 requires=2 pin=1 notBefore=0',
+      'audit queue origin=leader op=admit task="t-2" createdAt=43 state=ready avoid=0 requires=0 pin=0 notBefore=0',
     ]);
+    await admitAudit(collect)({ id: "t-3", createdAt: 44, state: "ready", spec: { notBefore: 1_900_123_456_789 } });
+    expect(collected.at(-1)).toBe(
+      'audit queue origin=leader op=admit task="t-3" createdAt=44 state=ready avoid=0 requires=0 pin=0 notBefore=1',
+    );
+    expect(emitted()).not.toContain("1900123456789");
     expect(emitted()).not.toMatch(/atlas|gpu|secret|device-x/u);
   });
 

@@ -8,6 +8,7 @@ import {
   offeredSpec,
   continueOffer,
   failureReasonText,
+  formatNotBefore,
   httpsUrl,
   isTaskId,
   isTransportError,
@@ -148,7 +149,7 @@ function overBound(
 
 /** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), a pin and avoid, never lineage or base. */
 export type AutoSpec = TaskRequest &
-  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires">;
+  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires" | "notBefore">;
 
 /**
  * `machine` is the human name from the target's config, resolved against the
@@ -535,6 +536,7 @@ export async function continueAuto(
   prompt: string | undefined,
   audit: AuditSink,
   surface: EnqueueSurface,
+  notBefore?: number,
 ): Promise<AutoEnqueued> {
   const label = surface === "mcp" ? "continue_task" : "continue";
   const shown = JSON.stringify(taskId.slice(0, 64));
@@ -564,7 +566,8 @@ export async function continueAuto(
     leaderHandoff: leaderAdvertises(lease, CAPABILITIES.continueHandoff),
   });
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
-  const spec = offeredSpec(task, offer, prompt);
+  // Its own, never the continued task's: `offeredSpec` carries none.
+  const spec: AutoSpec = { ...offeredSpec(task, offer, prompt), ...(notBefore === undefined ? {} : { notBefore }) };
   const invalid = specError(spec, surface);
   if (invalid !== null) return failed(`${label} refused: ${invalid}`);
   // No unknown-name check: the target is exact and the names came from the stored task. A leader that
@@ -801,9 +804,15 @@ const AMEND_CHECK: Readonly<Record<EnqueueSurface, string>> = {
 /** Why `draft` would be refused as malformed, in a caller's words, or null. The leader's parser is the authority. */
 export function amendDraftError(draft: AmendDraft): string | null {
   const limits = TASK_REQUEST_LIMITS;
-  const { prompt, title, model, effort } = draft;
-  if (prompt === undefined && title === undefined && model === undefined && effort === undefined) {
-    return "nothing to amend: give a prompt, title, model or effort";
+  const { prompt, title, model, effort, notBefore } = draft;
+  if (
+    prompt === undefined &&
+    title === undefined &&
+    model === undefined &&
+    effort === undefined &&
+    notBefore === undefined
+  ) {
+    return "nothing to amend: give a prompt, title, model, effort or not-before time";
   }
   if (prompt !== undefined && prompt.text.length > limits.prompt) {
     return `the prompt text is past the ${limits.prompt}-character bound`;
@@ -1038,8 +1047,12 @@ export async function enqueueAuto(
     }
     // oxlint-disable-next-line no-await-in-loop -- as above
     await audited(task, { kind: "queued", landedEarlier: reply.landedEarlier });
+    const deferred =
+      request.notBefore === undefined
+        ? ""
+        : `, not before ${formatNotBefore(request.notBefore, undefined, { withOffset: true })}`;
     const lines = [
-      `task ${task.id}: queued${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
+      `task ${task.id}: queued${deferred}${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
       followUp.placed,
     ];
     if (schedulerRefusal(scheduler.availability()) !== null) {
