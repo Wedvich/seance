@@ -36,6 +36,8 @@ class RelayStore implements QueueStore {
   delete: QueueStore["delete"] = (id, at) => this.#now.delete(id, at);
   getPause: QueueStore["getPause"] = () => this.#now.getPause();
   putPause: QueueStore["putPause"] = (at, holds) => this.#now.putPause(at, holds);
+  getLimits: QueueStore["getLimits"] = () => this.#now.getLimits();
+  putLimits: QueueStore["putLimits"] = (at, limits) => this.#now.putLimits(at, limits);
 }
 
 /** A task that ran and finished at version 5, and the version-1 create a relay can put back: the same id, queued. */
@@ -149,6 +151,61 @@ describe("a relay rolling the pause back", () => {
       expect(await ask("resume")).toEqual({ holds: [] });
       const spawn = await nextRequest(relay, 5_000);
       expect((await open(key, spawn.env)).payload).toMatchObject({ taskId: "p-missing" });
+    });
+  });
+});
+
+describe("a relay rolling the limits back", () => {
+  test("missing or older limits, once version 2 was seen, place nothing until a set-limits", async () => {
+    const real = new MemoryQueueStore();
+    await real.putLimits(0, { fleet: 1 });
+    await real.putLimits(1, { fleet: 2 });
+    // No record reads as no limit, and version 1 as a looser one: either lifts a person's bound.
+    const missing = new MemoryQueueStore();
+    await missing.put("l-missing", 0, task("l-missing"));
+    const older = new MemoryQueueStore();
+    await older.putLimits(0, { fleet: 8 });
+    await older.put("l-older", 0, task("l-older"));
+    const store = new RelayStore(real);
+    await withLeader(store, VersionFloor.memory(), async ({ relay, lead, queue, ask }) => {
+      await lead(1);
+      expect((await queue()).globalMax).toBe(2);
+      for (const [term, rolled] of [
+        [2, older],
+        [3, missing],
+      ] as const) {
+        store.rolled = rolled;
+        // oxlint-disable-next-line no-await-in-loop -- one term after the other
+        await lead(term);
+        // oxlint-disable-next-line no-await-in-loop
+        const shown = await queue();
+        expect(shown.limitsUnreadable).toBe(true);
+        expect(shown).not.toHaveProperty("globalMax");
+        // oxlint-disable-next-line no-await-in-loop
+        await noSpawn(relay);
+      }
+      // A person's set-limits is a write of the leader's own, which the relay cannot forge: it lets the queue go.
+      expect(await ask("set-limits", { fleet: null })).toEqual({ limits: {} });
+      const spawn = await nextRequest(relay, 5_000);
+      expect((await open(key, spawn.env)).payload).toMatchObject({ taskId: "l-missing" });
+      expect(await queue()).not.toHaveProperty("limitsUnreadable");
+    });
+  });
+
+  test("the floor is read back from disk, and a file from before the limits has none", async () => {
+    const path = join(base, "limits.json");
+    const real = new MemoryQueueStore();
+    await real.putLimits(0, { fleet: 1 });
+    const before = await VersionFloor.open(path);
+    expect(before.limits()).toBe(0);
+    await withLeader(real, before, async ({ lead }) => {
+      await lead(1);
+    });
+    const after = await VersionFloor.open(path);
+    expect(after.limits()).toBe(1);
+    await withLeader(new MemoryQueueStore(), after, async ({ lead, queue }) => {
+      await lead(1);
+      expect((await queue()).limitsUnreadable).toBe(true);
     });
   });
 });

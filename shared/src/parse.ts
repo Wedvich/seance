@@ -38,6 +38,7 @@ import {
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   LINEAR_KEY_MAX_LENGTH,
+  FLEET_LIMIT_MAX,
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   PAUSE_UNTIL,
@@ -134,6 +135,10 @@ import {
   type PauseHold,
   type PauseRecord,
   type PauseReply,
+  type SchedulerLimits,
+  type SchedulerSettingsRecord,
+  type SetLimitsReply,
+  type SetLimitsRequest,
   type PauseRequest,
   type ContinuedBy,
   type CustodianEvent,
@@ -1950,6 +1955,27 @@ export function parsePauseRecord(value: unknown): PauseRecord | null {
   return holds === null ? null : { version: value["version"], holds };
 }
 
+export function isFleetLimit(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= FLEET_LIMIT_MAX;
+}
+
+/**
+ * Strict, unknown keys included: a limit this build cannot read, or one a newer
+ * leader added, must not read as none.
+ */
+function parseLimits(value: unknown): SchedulerLimits | null {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "fleet")) return null;
+  const { fleet } = value;
+  if (fleet === undefined) return {};
+  return isFleetLimit(fleet) ? { fleet } : null;
+}
+
+export function parseSchedulerSettingsRecord(value: unknown): SchedulerSettingsRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"])) return null;
+  const limits = parseLimits(value["limits"]);
+  return limits === null ? null : { version: value["version"], limits };
+}
+
 /**
  * The opened body of an `account:<hmac>` record — shape only. Whether its
  * `accountId` hashes to the key it was listed under is the reader's, beside
@@ -2608,6 +2634,13 @@ export function parseResumeRequest(value: unknown): ResumeRequest | null {
   return isAccountId(account) ? { account } : null;
 }
 
+/** `set-limits`, at the leader. `fleet` must be stated: null lifts the limit, and 0 is a pause, not a limit. */
+export function parseSetLimitsRequest(value: unknown): SetLimitsRequest | null {
+  if (!isRecord(value)) return null;
+  const { fleet } = value;
+  return fleet === null || isFleetLimit(fleet) ? { fleet } : null;
+}
+
 /** `discard`, at the leader: the id and the version a `queue` reply listed the record under. */
 export function parseDiscardRequest(value: unknown): DiscardRequest | null {
   if (!isRecord(value) || !isTaskId(value["taskId"]) || !isVersion(value["version"])) return null;
@@ -2657,6 +2690,7 @@ export function parseQueueReply(value: unknown): QueueReply | null {
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
     ...(idle === undefined || idle.length === 0 ? {} : { idle }),
     ...(cap === undefined ? {} : { globalMax: cap }),
+    ...(value["limitsUnreadable"] === true ? { limitsUnreadable: true } : {}),
     ...(passRefused === undefined || passRefused.length === 0 ? {} : { passRefused }),
   };
 }
@@ -2709,6 +2743,12 @@ export function parsePauseReply(value: unknown): PauseReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const holds = isRecord(value) ? parseHolds(value["holds"]) : null;
   return holds === null ? null : { holds };
+}
+
+export function parseSetLimitsReply(value: unknown): SetLimitsReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const limits = isRecord(value) ? parseLimits(value["limits"]) : null;
+  return limits === null ? null : { limits };
 }
 
 /** A `lead-proof` payload. The term is the relay's counter, so never negative. */

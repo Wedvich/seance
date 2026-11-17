@@ -1,11 +1,19 @@
-import { MAX_TASKS, STORE_TOMBSTONE_MS, type PauseHold, type RecordUnreadable } from "@seance/shared";
+import {
+  MAX_TASKS,
+  STORE_TOMBSTONE_MS,
+  type PauseHold,
+  type RecordUnreadable,
+  type SchedulerLimits,
+} from "@seance/shared";
 import {
   StoreRevoked,
   type QueueStore,
   type StoreEntry,
+  type StoredLimits,
   type StoredPause,
   type StoreWrite,
   type StoreWriteFailure,
+  type UnreadableLimits,
   type UnreadablePause,
 } from "./ports.ts";
 import type { Task } from "./task.ts";
@@ -49,6 +57,7 @@ export class MemoryQueueStore implements QueueStore {
   readonly #tombstoneMs: number;
   readonly #maxTasks: number;
   #pause: StoredPause | UnreadablePause | null = null;
+  #limits: StoredLimits | UnreadableLimits | null = null;
 
   constructor(options: MemoryQueueStoreOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -99,6 +108,19 @@ export class MemoryQueueStore implements QueueStore {
     });
   }
 
+  async getLimits(): Promise<StoredLimits | UnreadableLimits | null> {
+    return this.#limits;
+  }
+
+  async putLimits(expect: number, limits: SchedulerLimits): Promise<StoreWrite> {
+    return this.#write(() => {
+      const version = this.#limits?.version ?? 0;
+      if (version !== expect) return { ok: false, code: "version_conflict" };
+      this.#limits = { version: version + 1, limits };
+      return { ok: true, version: version + 1 };
+    });
+  }
+
   /** The next write meets `fault` instead of its normal answer; queued, one per write. */
   failNext(fault: StoreFault): void {
     this.#faults.push(fault);
@@ -124,6 +146,11 @@ export class MemoryQueueStore implements QueueStore {
   /** The pause record no reader can use. */
   plantPause(reason: RecordUnreadable, version = 1): void {
     this.#pause = { version, reason };
+  }
+
+  /** The limits record no reader can use. */
+  plantLimits(reason: RecordUnreadable, version = 1): void {
+    this.#limits = { version, reason };
   }
 
   #read(id: string): StoreEntry | null {

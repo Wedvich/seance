@@ -8,12 +8,13 @@ import { stateDir } from "./paths.ts";
 /**
  * The leader's version floor (DESIGN.md, threat model, "Relay compromise"):
  * the highest version this process has seen or written at each `task:` key, at
- * `queue:pause` and at `settings:main`. Version binding stops a token holder
+ * `queue:pause`, at `settings:scheduler` and at `settings:main`. Version binding stops a token holder
  * putting an old blob back, because the relay counts versions; it cannot stop the relay itself
  * answering a read with an authentic old blob at that blob's own version. Below
  * the floor such a record reads `version_regressed` (`flooredStore` in
  * `queue-store.ts`), so a task rolled back is never admitted or dispatched
- * again, a pause rolled back holds the whole queue, and a settings record rolled
+ * again, a pause rolled back holds the whole queue, limits rolled back place
+ * nothing, and a settings record rolled
  * back reads `version_regressed` (`settings-store.ts`), so push goes off.
  *
  * One per process, like `schedulerGuard` in `run.ts`: the relay chooses which
@@ -63,6 +64,8 @@ interface FloorFile {
    * task floors afresh, but ignores a key it does not know (`parseFloor`).
    */
   readonly settings?: number;
+  /** The highest version seen at `settings:scheduler`; 0 when absent. Added as `settings` was. */
+  readonly limits?: number;
   /** `[taskId, version, at, mark?]`. */
   readonly tasks: readonly (readonly [string, number, number, Mark?])[];
 }
@@ -86,7 +89,15 @@ function parseFloor(raw: unknown): FloorFile | null {
   }
   const settings = raw["settings"];
   if (settings !== undefined && !isVersion(settings)) return null;
-  return { v: FLOOR_VERSION, pause: raw["pause"], tasks, ...(settings === undefined ? {} : { settings }) };
+  const limits = raw["limits"];
+  if (limits !== undefined && !isVersion(limits)) return null;
+  return {
+    v: FLOOR_VERSION,
+    pause: raw["pause"],
+    tasks,
+    ...(settings === undefined ? {} : { settings }),
+    ...(limits === undefined ? {} : { limits }),
+  };
 }
 
 export class VersionFloor {
@@ -96,6 +107,7 @@ export class VersionFloor {
   readonly #tasks = new Map<string, TaskFloor>();
   #pause: number;
   #settings: number;
+  #limits: number;
   #writing: Promise<void> = Promise.resolve();
   #queued = false;
 
@@ -104,6 +116,7 @@ export class VersionFloor {
     this.#now = now;
     this.#pause = file?.pause ?? 0;
     this.#settings = file?.settings ?? 0;
+    this.#limits = file?.limits ?? 0;
     const ordered = (file?.tasks ?? []).toSorted((a, b) => a[2] - b[2]);
     for (const [id, version, at, mark] of ordered) {
       this.#tasks.set(id, { version, at, savedAt: at, ...(mark === undefined ? {} : { mark }) });
@@ -215,6 +228,27 @@ export class VersionFloor {
     this.#pause = version;
   }
 
+  /** The lowest version `settings:scheduler` may have; 0 before any was seen. */
+  limits(): number {
+    return this.#limits;
+  }
+
+  /** A read found the limits at `version`, at or above the floor. True when that raised it. */
+  sawLimits(version: number): boolean {
+    if (version <= this.#limits) return false;
+    this.#limits = version;
+    return true;
+  }
+
+  /**
+   * This leader's own limits write landed at `version`: set, not raised, as `wrotePause` is. A
+   * `set-limits` is a person's request, sealed past the replay guard, and the one way a queue
+   * held by regressed or missing limits is let go again.
+   */
+  wroteLimits(version: number): void {
+    this.#limits = version;
+  }
+
   /** The lowest version `settings:main` may have; 0 before any was seen. */
   settings(): number {
     return this.#settings;
@@ -266,6 +300,7 @@ export class VersionFloor {
       pause: this.#pause,
       tasks,
       ...(this.#settings === 0 ? {} : { settings: this.#settings }),
+      ...(this.#limits === 0 ? {} : { limits: this.#limits }),
     };
     try {
       await writeDurable(path, `${JSON.stringify(file)}\n`, FLOOR_MODE);

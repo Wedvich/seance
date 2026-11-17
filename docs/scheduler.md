@@ -171,7 +171,7 @@ they now live:
 
 **Routing, ahead.** M4 adds:
 
-- Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
+- Filters (the per-account cap, gone again 2026-11-17, and `skill_absent` are DESIGN.md "Routing caps" and "Skills
   filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): a daemon that cannot stack (`base_unsupported`, built,
   DESIGN.md "Stacking"; the sketched `base_unpushed` is never emitted, since an `opened` edge
   releases only on a pushed branch); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
@@ -1052,7 +1052,7 @@ of M4 has landed.
 - **Batches are a group** — **Done** (owner, 2026-10-26). A batch is where a set of tasks came
   from, shown and acted on together, never a scheduling primitive: `sequential` and `parallel`
   went from the scheduler, `queue_batch` and the PWA, so order is `after` edges and concurrency
-  the global and per-account caps. #318's carve-out (a batch bound counting members on an asleep
+  the global and per-account caps (since 2026-11-17 the one fleet limit, none by default). #318's carve-out (a batch bound counting members on an asleep
   machine) went with them. DESIGN.md "Batches" is the record, with both strategies as rejected
   alternatives.
   The `strategy` field left the wire 2026-10-27; the parser still drops a stored one.
@@ -1610,7 +1610,9 @@ same PR, with the reason.
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
    dependency 4, queue 1, keepFree 8 (a flat 0/1, added with traits, 2026-11-12: `globalMax`'s
    worth of in-flight tasks on a competitor, two fully loaded machines); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
-   weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
+   weekly (all-models or per-model); no cap on in-flight tasks unless the owner sets the fleet limit
+   (2026-11-17: a stored record set from the PWA, DESIGN.md "Routing caps"; a constant global max of 8
+   until then); a reservation's TTL 240 s
    (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
    put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn
    reply, so no launch can start after the TTL check has proved the task never landed). The estimate is per span
@@ -1620,7 +1622,9 @@ same PR, with the reason.
    from observed deltas. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
    are fractions or counts, so the weights put one busy machine, or the farthest base, on
    the scale of an account near 70%. First guesses, to tune from decision records; nothing
-   observed yet argues for them. **Per-account max 4** in-flight tasks (`accountMax`, added
+   observed yet argues for them. _The per-account cap that follows went 2026-11-17 with the fleet
+   limit (owner): an account is bounded by its quota line alone, and the queue runs free by default._
+   **Per-account max 4** in-flight tasks (`accountMax`, added
    with M3 item 5, 2026-10-17): half the global max, so one account cannot take every slot,
    and an account's parallel sessions draw on its 5h window together — at the 5% estimate, four
    already project +20%. A fleet on one account therefore runs at most four `auto` tasks at
@@ -1690,7 +1694,7 @@ same PR, with the reason.
     (M4). A tier the table doesn't name, or none (an older daemon, a non-Team account), keeps
     today's estimate but includes no gated model: an unknown seat may bill Fable to credits.
 18. **A machine asleep 2 min holds no concurrency slot** (`slotReleaseAfterMs`, owner,
-    2026-10-26). Its in-flight tasks stop counting toward `globalMax`, `accountMax` and projected
+    2026-10-26). Its in-flight tasks stop counting toward the fleet limit (then `globalMax` and `accountMax`) and projected
     usage, with no change of state; on return they count again and the fleet may sit over a cap
     until work drains. A blip or relay reconnect frees nothing, and a dark wake restarts the clock, so after each one
     the slots come back only after the connected-read window (~2.5 min, DESIGN.md) plus the grace; `lostAfterMs` (10)

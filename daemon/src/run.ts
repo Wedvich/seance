@@ -367,6 +367,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.successorSelf,
         CAPABILITIES.successorAuto,
         CAPABILITIES.amend,
+        CAPABILITIES.limits,
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,

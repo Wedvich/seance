@@ -19,6 +19,7 @@ import {
   type PrChecks,
   type PrState,
   type Task,
+  FLEET_LIMIT_MAX,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
@@ -39,6 +40,7 @@ import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveLimitsAvailability,
   derivePassAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
@@ -201,9 +203,35 @@ export interface HoldRow {
   readonly account?: string;
 }
 
+/** The fleet limit, as the header's count opens it in the Limits sheet. */
+export interface LimitView {
+  /** The limit in force; null is none. */
+  readonly fleet: number | null;
+}
+
+/** The banner over a queue whose leader cannot read its limits record. */
+export const LIMITS_UNREADABLE =
+  "The session limit can't be read, so nothing new starts. Set it again to let the queue go.";
+
+/** The Limits sheet's field as a limit: null for none (empty), undefined for text that is no limit. */
+export function parseLimitDraft(draft: string): number | null | undefined {
+  const text = draft.trim();
+  if (text === "") return null;
+  if (!/^\d+$/u.test(text)) return undefined;
+  const fleet = Number(text);
+  return fleet >= 1 && fleet <= FLEET_LIMIT_MAX ? fleet : undefined;
+}
+
 export interface QueueScreenView {
-  /** The header's meta line, "2/8 running · 1 waiting"; null until a list has been read. */
+  /** The header's meta line, "2 running · 1 waiting", or "2/8 running" under a limit; null until a list has been read. */
   readonly summary: string | null;
+  /**
+   * The fleet limit to change; null while no verified leader that keeps one has answered `queue`,
+   * and the header's line is then plain text.
+   */
+  readonly limit: LimitView | null;
+  /** `LIMITS_UNREADABLE` while the leader says so, else null. */
+  readonly limitsUnreadable: string | null;
   /** A verified leader answers and the socket is open. */
   readonly available: boolean;
   /** The reply held `QUEUE_MAX_TASKS` tasks, so older ones may be left out. */
@@ -646,6 +674,8 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
             ...(count(IDLE_SECTION) === 0 ? [] : [`${count(IDLE_SECTION)} idle`]),
             `${count("Waiting")} waiting`,
           ].join(" · "),
+    limit: ok !== null && available && deriveLimitsAvailability(state.relay) ? { fleet: ok.globalMax ?? null } : null,
+    limitsUnreadable: ok?.limitsUnreadable === true ? LIMITS_UNREADABLE : null,
     available,
     partial: tasks.length >= QUEUE_MAX_TASKS ? `Showing the ${QUEUE_MAX_TASKS} most relevant tasks` : null,
     holds,

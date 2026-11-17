@@ -697,7 +697,7 @@ async function sendRunNow(lease: SchedulerLease, taskId: string, surface: Enqueu
 
 /**
  * `start_task` / `seance start`: the Queue screen's Start now — one `run-now` for a task already
- * queued, placing it past the concurrency cap and nothing else (DESIGN.md "Run now lifts the cap
+ * queued, placing it past the concurrency limit and nothing else (DESIGN.md "Run now lifts the cap
  * for one task"). Sent once, never retried: a lost answer may have reserved it. Never logs; the
  * leader's own `op=run-now` audit line, and the broker's where it carried it, are the record.
  */

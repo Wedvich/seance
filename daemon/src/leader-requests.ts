@@ -22,6 +22,7 @@ import {
   parseQueueRequest,
   parseResumeRequest,
   parseRoutePreviewRequest,
+  parseSetLimitsRequest,
   parseTaskRef,
   PUSH_MAX_SUBSCRIPTIONS,
   QUEUE_MAX_TASKS,
@@ -45,6 +46,7 @@ import {
   type SchedulerError,
   type SchedulerErrorCode,
   type SchedulerOp,
+  type SetLimitsResponse,
   type Task,
   type TaskResponse,
   type UnreadableTaskRef,
@@ -72,6 +74,7 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
   const unreadable = scheduler
     .unreadable()
     .map(({ id, version, reason }): UnreadableTaskRef => ({ taskId: id, version, reason }));
+  const { limits, unreadable: limitsUnreadable } = scheduler.limits();
   return boundedQueue(
     tasks,
     (id) => scheduler.lastDecision(id),
@@ -79,11 +82,12 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
     scheduler.holds(),
     unreadable,
     scheduler.idle(),
-    scheduler.globalMax(),
+    limits.fleet,
     scheduler.sessionPassRefusals().map(({ taskId, code, sentAt }): PassRefusalRef => {
       const wire = PASS_REFUSALS[code].code;
       return sentAt === undefined ? { taskId, code: wire } : { taskId, code: wire, sentAt };
     }),
+    limitsUnreadable,
   );
 }
 
@@ -136,6 +140,7 @@ export function boundedQueue(
   idle: readonly IdleTaskRef[] = [],
   globalMax?: number,
   passRefused: readonly PassRefusalRef[] = [],
+  limitsUnreadable = false,
 ): QueueResponse {
   const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
@@ -187,6 +192,7 @@ export function boundedQueue(
     ...(unreadable.length === 0 ? {} : { unreadable }),
     ...(idle.length === 0 ? {} : { idle }),
     ...(globalMax === undefined ? {} : { globalMax }),
+    ...(limitsUnreadable ? { limitsUnreadable: true as const } : {}),
     ...(passRefused.length === 0 ? {} : { passRefused }),
   };
 }
@@ -247,7 +253,7 @@ const RUN_NOW_REFUSALS: Record<Exclude<RunNowResult, { readonly ok: true }>["cod
   not_waiting: schedulerError("not_waiting", "the task is not ready: it waits on admission or its deps, or is placed"),
   unplaceable: schedulerError(
     "unplaceable",
-    "past the concurrency caps it still places nowhere; its decision says why",
+    "past the concurrency limit it still places nowhere; its decision says why",
   ),
   conflict: schedulerError("conflict", "the task changed while it was placed; ask again"),
 };
@@ -413,6 +419,20 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const reply = await held(op, id, request.account, await scheduler.resume(request));
       // What the hold kept waiting is placed now rather than on the next 30s tick.
       tick();
+      return reply;
+    }
+    case "set-limits": {
+      const request = parseSetLimitsRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed set-limits request");
+      const result = await scheduler.setLimits(request);
+      if (!result.ok) {
+        await audit.refused(op, id, result.code);
+        return schedulerError("conflict", "the limits record changed while this ran; ask again");
+      }
+      await audit.limited(id, result.limits.fleet);
+      // What a lower limit held back is placed now rather than on the next 30s tick.
+      tick();
+      const reply: SetLimitsResponse = { limits: result.limits };
       return reply;
     }
     case "mark-done": {

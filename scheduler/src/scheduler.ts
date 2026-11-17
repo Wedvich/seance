@@ -27,7 +27,9 @@ import {
   type PauseHold,
   type PauseRequest,
   type ResumeRequest,
+  type SchedulerLimits,
   type SessionState,
+  type SetLimitsRequest,
   type SpillStamp,
   type SuccessorTrigger,
   type Target,
@@ -51,6 +53,7 @@ import { admission } from "./deps.ts";
 import { resolveMessageTarget, type MessageRoute } from "./message-route.ts";
 import { branchChange, ended as settledEnd, prBound, prChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
+import { LimitsRecord, type LimitsResult } from "./limits.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
 import {
   StoreRevoked,
@@ -171,7 +174,7 @@ export type MarkDoneResult = ByHandResult;
 /**
  * `runNow`: the task as reserved, or why not. `not_waiting`: it is not `ready`
  * (waiting on admission or deps, or already placed). `unplaceable`: something
- * besides the caps holds it. `conflict`: it moved under the write.
+ * besides the fleet limit holds it. `conflict`: it moved under the write.
  */
 export type RunNowResult =
   | { readonly ok: true; readonly task: Task }
@@ -352,6 +355,7 @@ export class Scheduler {
   readonly #log: (line: string) => void;
   readonly #held = new Map<string, Held>();
   readonly #pause: PauseRecord;
+  readonly #limits: LimitsRecord;
   readonly #spills: SpillAlerts;
   /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
   readonly #unreadable = new Map<string, UnreadableTask>();
@@ -513,6 +517,7 @@ export class Scheduler {
     this.#prHead = options.prHead;
     this.#log = options.log ?? (() => {});
     this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
+    this.#limits = new LimitsRecord(this.#store, this.#onError);
     this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
   }
@@ -539,11 +544,20 @@ export class Scheduler {
         });
     }
     await this.#pause.load();
+    await this.#limits.load();
   }
 
-  /** The in-flight cap routing enforces. */
-  globalMax(): number {
-    return this.#config.globalMax;
+  /** The limits a person set (none while `unreadable`, when routing places nothing). */
+  limits(): { readonly limits: SchedulerLimits; readonly unreadable: boolean } {
+    return { limits: this.#limits.limits, unreadable: this.#limits.unreadable };
+  }
+
+  /**
+   * Sets every limit as the request states it (`fleet` null: none). Running sessions are never
+   * touched: under a limit below what runs, nothing new is placed until the count falls under it.
+   */
+  async setLimits(request: SetLimitsRequest): Promise<LimitsResult> {
+    return this.#limits.write(request.fleet === null ? {} : { fleet: request.fleet });
   }
 
   /** The holds in force now: a reset hold past its `resumeAt` has lifted, written or not. */
@@ -755,6 +769,7 @@ export class Scheduler {
         now,
         config: this.#config,
         holds: this.#pause.holds,
+        limits: this.#limits.enforced(),
         fleetQuota: this.#fleetQuota(),
         // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
         released: release.length === 0 ? this.#released(now) : new Set([...this.#released(now), ...release]),
@@ -1277,7 +1292,7 @@ export class Scheduler {
    * waiting for. A `running` or `needs-input` task, or a `lost` one whose
    * machine is connected, has its session ended first, as `cancel` does, since a
    * `done` task holds no slot and a session left running would keep working
-   * beyond the caps. `lost`, `awaiting-merge` and the waiting states are settled
+   * beyond the fleet limit. `lost`, `awaiting-merge` and the waiting states are settled
    * as they stand (their session is gone, or unreachable, or never was); a
    * `lost` one is marked `leftRunning`, as `cancel` marks it. A later event for a `done` task is ignored
    * (`sessionChange` and `branchChange` touch placed tasks only). `reserved` is
@@ -1306,10 +1321,10 @@ export class Scheduler {
   }
 
   /**
-   * Places a `ready` task now, past both concurrency caps (`RouteInput.uncapped`)
+   * Places a `ready` task now, past the fleet limit (`RouteInput.uncapped`)
    * and nothing else: a pause, the quota line, disk, a pin and every other filter
    * still hold it, answered `unplaceable` with nothing written. Once placed it
-   * counts toward the caps like any task, so the fleet may run over them until
+   * counts toward the limit like any task, so the fleet may run over it until
    * the count drains — as when a machine wakes with released slots. One-shot:
    * nothing on the record says it was forced, so a takeover mid-way leaves it
    * `ready`, waiting as before.
@@ -1867,7 +1882,7 @@ export class Scheduler {
     await this.#expire();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
-    // usage and the caps. The spawns are not awaited: one slow machine
+    // usage and the fleet limit. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
     for (const seen of ready) {

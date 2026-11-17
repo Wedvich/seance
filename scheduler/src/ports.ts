@@ -11,6 +11,7 @@ import type {
   PushBranchRequest,
   PushBranchResponse,
   RecordUnreadable,
+  SchedulerLimits,
   SessionsResponse,
   SpawnRequest,
   SpawnResponse,
@@ -125,6 +126,19 @@ export interface UnreadablePause {
   readonly holds?: never;
 }
 
+/** The `settings:scheduler` record: the limits a person set, at its version. */
+export interface StoredLimits {
+  readonly version: number;
+  readonly limits: SchedulerLimits;
+  readonly reason?: never;
+}
+
+export interface UnreadableLimits {
+  readonly version: number;
+  readonly reason: RecordUnreadable;
+  readonly limits?: never;
+}
+
 /**
  * Plain task bodies and holds; sealing, opening and the reader rules are the
  * adapter's. A failed write is a value (`StoreWrite`) — a conflict is the
@@ -141,6 +155,9 @@ export interface QueueStore {
   /** `queue:pause`, or null before the first pause. */
   getPause(): Promise<StoredPause | UnreadablePause | null>;
   putPause(expect: number, holds: readonly PauseHold[]): Promise<StoreWrite>;
+  /** `settings:scheduler`, or null before a limit was ever set. */
+  getLimits(): Promise<StoredLimits | UnreadableLimits | null>;
+  putLimits(expect: number, limits: SchedulerLimits): Promise<StoreWrite>;
 }
 
 /** Every scheduler spawn carries its task id; the wire field is optional only for other clients. */

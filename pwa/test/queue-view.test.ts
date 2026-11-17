@@ -13,7 +13,15 @@ import {
   type RelayState,
   type Task,
 } from "@seance/shared";
-import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
+import {
+  armTap,
+  deriveAfterSheet,
+  deriveQueue,
+  disarmRow,
+  LIMITS_UNREADABLE,
+  parseLimitDraft,
+  primaryAction,
+} from "../src/queue-view.ts";
 import { NEEDS_INPUT_SCREEN_MS, nextReveal } from "../src/input-debounce.ts";
 import { plain as lineText } from "../src/timed.ts";
 import {
@@ -24,7 +32,7 @@ import {
   RESCAN_IDLE,
   type QueueState,
 } from "../src/state.ts";
-import { CAPABILITIES, reasonText } from "@seance/shared";
+import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -89,6 +97,7 @@ function state(
     startNowRefusal: null,
     pausing: false,
     accountOpen: null,
+    limiting: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],
@@ -713,6 +722,33 @@ describe("deriveQueue", () => {
     expect(deriveQueue(state(ok(running, [], 0, [], 2)), NOW).summary).toBe("2/2 running · 0 waiting");
     expect(deriveQueue(state(ok(running, [], 0, [], 1)), NOW).summary).toBe("2/1 running · 0 waiting");
     expect(deriveQueue(state(null), NOW).summary).toBeNull();
+  });
+
+  test("the limit is offered only by a verified leader that keeps one, and null there is none", () => {
+    const keeps = { machines: [machine({ capabilities: [CAPABILITIES.limits] })] };
+    expect(deriveQueue(state(ok([])), NOW).limit).toBeNull();
+    expect(deriveQueue(state(ok([]), {}, keeps), NOW).limit).toEqual({ fleet: null });
+    expect(deriveQueue(state(ok([], [], 0, [], 3), {}, keeps), NOW).limit).toEqual({ fleet: 3 });
+    // Nothing read yet, or no leader to send it to: nothing to change.
+    expect(deriveQueue(state(null, {}, keeps), NOW).limit).toBeNull();
+    expect(deriveQueue(state(ok([]), {}, { ...keeps, scheduler: { kind: "none" } }), NOW).limit).toBeNull();
+  });
+
+  test("an unreadable limit is a banner, whether or not it can be set from here", () => {
+    const read = ok([]);
+    const unreadable: QueueState = read.kind === "ok" ? { ...read, limitsUnreadable: true } : read;
+    expect(deriveQueue(state(ok([])), NOW).limitsUnreadable).toBeNull();
+    expect(deriveQueue(state(unreadable), NOW).limitsUnreadable).toBe(LIMITS_UNREADABLE);
+  });
+
+  test("the limit field reads empty as none and refuses what is no limit", () => {
+    expect(parseLimitDraft("")).toBeNull();
+    expect(parseLimitDraft("  ")).toBeNull();
+    expect(parseLimitDraft(" 8 ")).toBe(8);
+    expect(parseLimitDraft(String(FLEET_LIMIT_MAX))).toBe(FLEET_LIMIT_MAX);
+    for (const bad of ["0", "-1", "1.5", "8x", "1e2", String(FLEET_LIMIT_MAX + 1)]) {
+      expect(parseLimitDraft(bad)).toBeUndefined();
+    }
   });
 
   test("an empty screen says why: loading, failed, or nothing", () => {

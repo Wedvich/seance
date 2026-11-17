@@ -390,6 +390,13 @@ export const PAUSE_KEY = "queue:pause";
 /** The one key the leader writes under `settings:`: one `SettingsRecord` holds every setting. */
 export const SETTINGS_KEY = "settings:main";
 
+/**
+ * The scheduler's own settings (`SchedulerSettingsRecord`: the fleet limit), under `settings:` beside
+ * `SETTINGS_KEY` and apart from it: that record holds the VAPID private key, sits near the store's size
+ * bound and is never written over once unreadable, none of which a routing limit should inherit.
+ */
+export const SCHEDULER_SETTINGS_KEY = "settings:scheduler";
+
 /** The one key under `quota:`. */
 export const QUOTA_KEY = "quota:fleet";
 
@@ -695,6 +702,8 @@ export const AT_REST_OPS = {
   account: "account",
   quota: "quota",
   settings: "settings",
+  /** `SchedulerSettingsRecord`, sealed to SCHEDULER_ID by the leader's queue-store adapter (`putLimits`). */
+  schedulerSettings: "scheduler-settings",
 } as const;
 
 export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
@@ -755,6 +764,7 @@ export const SCHEDULER_OPS = [
   "push-unsubscribe",
   "pass",
   "amend",
+  "set-limits",
 ] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
@@ -804,6 +814,7 @@ export const OP_TIMEOUT_MS = {
   "push-unsubscribe": 10_000,
   pass: 180_000,
   amend: 10_000,
+  "set-limits": 10_000,
   "push-branch": 90_000,
   "pass-close": 10_000,
   "deliver-message": 10_000,
@@ -1170,6 +1181,9 @@ export interface MachineInfo {
  * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`). It also means the daemon
  * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
  * rounds were held (`ROUNDS_LIVE`) on every build before custodian 4b, so the one bit gates the Machines card's menu too.
+ * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
+ * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
+ * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1199,6 +1213,7 @@ export const CAPABILITIES = {
   messageRoute: "messageRoute",
   messageReply: "messageReply",
   custodian: "custodian",
+  limits: "limits",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -2970,9 +2985,10 @@ export type Reason =
    */
   | { readonly code: "model_not_included"; readonly model: string }
   /**
-   * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
-   * per-account cap. (Scope `batch` and the `batch_order` reason went with
-   * batch strategies; a reader drops either as a reason it does not know.)
+   * `scope` absent is `global`, as M2's leaders sent it: the fleet limit (`SchedulerLimits.fleet`), and
+   * `max: 0` is a limit record the leader cannot read, which holds every task. `account` is what a leader
+   * that predates `CAPABILITIES.limits` sends for its per-account cap. (Scope `batch` and the `batch_order`
+   * reason went with batch strategies; a reader drops either as a reason it does not know.)
    */
   | {
       readonly code: "cap_reached";
@@ -3492,6 +3508,25 @@ export interface PauseRecord extends VersionBound {
   readonly holds: readonly PauseHold[];
 }
 
+/** The highest fleet limit `set-limits` takes: past the store's `MAX_TASKS` nothing could reach it. */
+export const FLEET_LIMIT_MAX = MAX_TASKS;
+
+/**
+ * What a person set to bound the queue; each part absent means no limit. `fleet`: in-flight scheduler
+ * tasks across every machine and account, 1 to `FLEET_LIMIT_MAX` (0 is a pause, and refused).
+ */
+export interface SchedulerLimits {
+  readonly fleet?: number;
+}
+
+/**
+ * Payload of `settings:scheduler` (`op: "scheduler-settings"`, sealed to SCHEDULER_ID by the leader; sealed
+ * and opened by `daemon/src/queue-store.ts`). Absent until a limit is first set: no record is no limit.
+ */
+export interface SchedulerSettingsRecord extends VersionBound {
+  readonly limits: SchedulerLimits;
+}
+
 /** An alias's length at most, in UTF-16 units: a name on a card. */
 export const ACCOUNT_ALIAS_MAX_LENGTH = 64;
 
@@ -3764,7 +3799,7 @@ export const SCHEDULER_ERROR_CODES = [
   "finished",
   /** `run-now`: the task is not `ready` — waiting on admission or its deps, or already placed. */
   "not_waiting",
-  /** `run-now`: something besides the concurrency caps (a pause, quota, a pin, …) keeps it from every machine. */
+  /** `run-now`: something besides the concurrency limit (a pause, quota, a pin, …) keeps it from every machine. */
   "unplaceable",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
@@ -3877,10 +3912,16 @@ export interface QueueResponse {
    */
   readonly idle?: readonly IdleTaskRef[];
   /**
-   * The leader's `globalMax`: the in-flight cap the header's "8/8 running" divides by. Not a
-   * ceiling on `running` — a task placed past the caps (`run-now`) overprovisions it. Absent from older leaders.
+   * The fleet limit (`SchedulerLimits.fleet`): the in-flight cap the header's "8/8 running" divides by. Not a
+   * ceiling on `running` — a task placed past it (`run-now`) overprovisions it. Absent when none is set (a
+   * leader advertising `CAPABILITIES.limits` then runs unbounded) and from older leaders.
    */
   readonly globalMax?: number;
+  /**
+   * The leader cannot read `settings:scheduler`, so it places nothing (`cap_reached` at `max: 0`) until a
+   * `set-limits` overwrites the record. `true` only.
+   */
+  readonly limitsUnreadable?: true;
   /**
    * Session passes (`session-pass`, fire-and-forget) this leader refused in the last ten minutes, whatever
    * `QueueRequest.tasks` asked for: what `pass_to_successor` reads to tell its session why no successor came.
@@ -3997,6 +4038,20 @@ export interface ResumeRequest {
 /** `pause` and `resume` → every hold after the change. */
 export interface PauseResponse {
   readonly holds: readonly PauseHold[];
+}
+
+/**
+ * `op: "set-limits"`, only to a leader advertising `CAPABILITIES.limits`. States every limit, not a change:
+ * `fleet` null lifts it. Running sessions are never touched; a limit below what runs places nothing new
+ * until the count falls under it.
+ */
+export interface SetLimitsRequest {
+  readonly fleet: number | null;
+}
+
+/** `set-limits` → the limits after the change. */
+export interface SetLimitsResponse {
+  readonly limits: SchedulerLimits;
 }
 
 /**
@@ -4164,4 +4219,5 @@ export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
 export type TaskReply = TaskResponse | SchedulerError;
 export type PassReply = PassResponse | SchedulerError;
 export type PauseReply = PauseResponse | SchedulerError;
+export type SetLimitsReply = SetLimitsResponse | SchedulerError;
 export type DiscardReply = DiscardResponse | SchedulerError;

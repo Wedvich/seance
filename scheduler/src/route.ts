@@ -27,6 +27,7 @@ import {
   type QuotaWindow,
   type Reason,
   type RepoEntry,
+  type SchedulerLimits,
   type ScoreComponents,
 } from "@seance/shared";
 import type { SchedulerConfig, SeatProfile } from "./config.ts";
@@ -63,7 +64,9 @@ export interface RouteInput {
    * session idle at its prompt).
    */
   readonly released?: ReadonlySet<string>;
-  /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
+  /** What a person set to bound the queue (`settings:scheduler`); absent, or a part absent, is no limit. */
+  readonly limits?: SchedulerLimits;
+  /** `runNow`: the fleet limit (`cap_reached`) does not apply; every other filter does. */
   readonly uncapped?: boolean;
   /**
    * Route as though the task carried attachments: `route-preview`'s flag, since a
@@ -87,7 +90,6 @@ interface Pass {
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
-  readonly uncapped: boolean;
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
   readonly skills: readonly string[];
@@ -99,6 +101,7 @@ export function route(input: RouteInput): Decision {
   const { task, machines, now, config } = input;
   const inFlight = holdingSlots(input.tasks, input.released).filter((t) => t.id !== task.id);
   const newest = newestQuotaByAccount(machines, input.fleetQuota);
+  const fleetMax = input.limits?.fleet;
   const pass: Pass = {
     task,
     now,
@@ -106,10 +109,9 @@ export function route(input: RouteInput): Decision {
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
     accountAt: (placement) => accountOfPlacement(machines, placement),
-    uncapped: input.uncapped === true,
     capReached:
-      input.uncapped !== true && inFlight.length >= config.globalMax
-        ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
+      input.uncapped !== true && fleetMax !== undefined && inFlight.length >= fleetMax
+        ? { code: "cap_reached", inFlight: inFlight.length, max: fleetMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
@@ -194,9 +196,6 @@ function judge(
   const account =
     exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  if (!pass.uncapped && sharing >= seat.accountMax) {
-    rejected.push({ code: "cap_reached", inFlight: sharing, max: seat.accountMax, scope: "account" });
-  }
   const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
   if (paused !== null) rejected.push(paused);
 
@@ -245,16 +244,16 @@ interface AccountJudgement {
 }
 
 /**
- * What the caps and projected usage count: in flight, and not released. A
- * released task that counts again is counted over a cap or not.
+ * What the fleet limit and projected usage count: in flight, and not released. A
+ * released task that counts again is counted over the limit or not.
  */
 function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
   return tasks.filter((t) => IN_FLIGHT.includes(t.state) && !released.has(t.id));
 }
 
 /**
- * In-flight tasks billed to `accountId`, by where each is placed: what the
- * account cap and projected usage both count. A task whose machine has left
+ * In-flight tasks billed to `accountId`, by where each is placed: what
+ * projected usage counts. A task whose machine has left
  * the registry has no account to read, so it counts toward neither.
  */
 function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: string): number {

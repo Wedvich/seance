@@ -87,6 +87,8 @@ export function fencedStore(inner: QueueStore, term: number, live: () => boolean
     delete: (id, expect) => fence(() => inner.delete(id, expect)),
     getPause: () => inner.getPause(),
     putPause: (expect, holds) => fence(() => inner.putPause(expect, holds)),
+    getLimits: () => inner.getLimits(),
+    putLimits: (expect, limits) => fence(() => inner.putLimits(expect, limits)),
   };
 }
 

@@ -60,6 +60,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     startNowRefusal: null,
     pausing: false,
     accountOpen: null,
+    limiting: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],

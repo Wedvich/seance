@@ -639,7 +639,7 @@ describe("startNowItem", () => {
     const one = ok(null, [rejected("mac", "Mac", [GLOBAL, ACCOUNT]), rejected("lxc", "LXC", [{ code: "offline" }])]);
     expect(startNowItem(one)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
     const two = ok(null, [rejected("mac", "Mac", [GLOBAL]), rejected("wsl", "WSL", [ACCOUNT])]);
-    expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency caps", enabled: true });
+    expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency limit", enabled: true });
   });
 
   test("a chosen target is not named while a cap-held candidate, unscored, may win run-now; nor are the caps", () => {

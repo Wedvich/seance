@@ -96,6 +96,7 @@ function state(
     startNowRefusal: null,
     pausing: false,
     accountOpen: null,
+    limiting: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],

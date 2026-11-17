@@ -47,6 +47,20 @@
   color: var(--fg2);
 }
 
+/* The Queue's count, where it opens the Limits sheet: the same line, with a chevron saying it opens. */
+.header-meta-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  /* Pads the 44px tap target without moving the line. */
+  margin: -10px -8px -12px;
+  padding: 12px 8px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
 /* The settings header's subtitle carries the live status dot. */
 .header-status {
   display: flex;

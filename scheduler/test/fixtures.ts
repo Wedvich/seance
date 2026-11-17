@@ -16,12 +16,10 @@ import type {
 } from "@seance/shared";
 import { bindTaskRecord, CAPABILITIES, parseTask, STORE_PREFIXES } from "@seance/shared";
 import {
-  DEFAULT_CONFIG,
   UNREACHABLE,
   type Fleet,
   type NoAnswer,
   type QueueStore,
-  type SchedulerConfig,
   type StoreEntry,
   type Unreachable,
   type TaskSessionsReply,
@@ -34,11 +32,6 @@ import type { Task, TaskSpec } from "../src/task.ts";
 export const NOW = 1_800_000_000_000;
 export const NOW_S = NOW / 1000;
 export const REPO = "github.com/acme/app";
-
-/** Config that caps each account at `n` on the seat fixtures report (none: `unknownSeat`). */
-export function accountMax(n: number): Pick<SchedulerConfig, "unknownSeat"> {
-  return { unknownSeat: { ...DEFAULT_CONFIG.unknownSeat, accountMax: n } };
-}
 
 export function exclave(id: string, accountId: string | null, extra: Partial<ExclaveInfo> = {}): ExclaveInfo {
   return { id, accountId, extraUsageEnabled: false, authOk: accountId !== null, skills: [], ...extra };
@@ -252,6 +245,8 @@ export function readerChecked(store: QueueStore, now: () => number): QueueStore 
     delete: (id, expect) => store.delete(id, expect),
     getPause: () => store.getPause(),
     putPause: (expect, holds) => store.putPause(expect, holds),
+    getLimits: () => store.getLimits(),
+    putLimits: (expect, limits) => store.putLimits(expect, limits),
   };
 }
 
