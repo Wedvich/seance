@@ -723,7 +723,11 @@ describe("deriveMachines", () => {
     const labels = (window: Window): string[] => {
       const quota = [{ x: 0, s: "cache" as const, at: S - 60, d: 40, c: 84, cu: 4177, cl: 5000, ...window }];
       const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW, NO_LEADER).accounts;
-      return account?.bars.map((bar) => [bar.label, `${bar.pct}%`, bar.note === null ? "" : plain(bar.note)].join(" ").trim()) ?? [];
+      return (
+        account?.bars.map((bar) =>
+          [bar.label, `${bar.pct}%`, bar.note === null ? "" : plain(bar.note)].join(" ").trim(),
+        ) ?? []
+      );
     };
     expect(labels({ h: 99 })).toEqual(["5h 99%", "7d 40%"]);
     expect(labels({ h: 100 })).toEqual(["5h 100%", "7d 40%", "Credits 84% $42 of $50"]);
