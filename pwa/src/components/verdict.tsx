@@ -160,6 +160,13 @@ export function VerdictView(props: {
   );
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
+  // Focused on mount so Enter takes the obvious next step and Tab reaches the rest. A followed task keeps one
+  // mount across its stages (app.tsx's key), so a refresh never pulls focus back from where the user moved it.
+  // No scroll: the verdict's entrance is still running.
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    primaryRef.current?.focus({ preventScroll: true });
+  }, []);
 
   return (
     <div className="verdict" role="status" aria-live="polite">
@@ -178,7 +185,7 @@ export function VerdictView(props: {
         <SwapText as="p" className="verdict-body" text={content.body} />
         {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
         <div className="verdict-actions">
-          <button type="button" className="primary" onClick={onPrimary}>
+          <button ref={primaryRef} type="button" className="primary" onClick={onPrimary}>
             {content.primary.label}
           </button>
           {verdict.kind === "queued" && props.onQueue !== undefined && (
