@@ -258,6 +258,57 @@ describe("idle notes (the settings Stop hook)", () => {
       events.stop();
     }
   });
+
+  test("awaitsWake: a turn that left work or a cron pending, tasked or not, until its next turn", async () => {
+    const { events, send } = setup();
+    try {
+      await send("%2", { state: "busy" });
+      await send("%2", { stop: { background: { wakeup: 1 } } });
+      await send("%2", { state: "idle", turnEnded: true });
+      expect(events.awaitsWake("%2")).toBe(true);
+      expect(events.awaitsWake("%2", "t1")).toBe(true);
+      // The caller read another task on the pane: another session's note.
+      expect(events.awaitsWake("%2", "t2")).toBe(false);
+      await send("%2", { state: "busy" });
+      expect(events.awaitsWake("%2")).toBe(false);
+
+      // An untasked pane is held too: the custodian closes those as well.
+      await send("%1", { stop: { background: { shell: 1 } } });
+      expect(events.awaitsWake("%1", null)).toBe(true);
+      // An error, or nothing left running, holds nothing.
+      await send("%1", { stop: { stopError: "overloaded" } });
+      expect(events.awaitsWake("%1")).toBe(false);
+      await send("%1", { stop: { background: { shell: 0 } } });
+      expect(events.awaitsWake("%1")).toBe(false);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("awaitsWake: a pane gone or under another process drops its note at the next frame", async () => {
+    let live: readonly BoundPane[] = panes;
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(live),
+      exclaves: () => [],
+      forward: () => undefined,
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    try {
+      await events.handle(frame({ pane: "%1", stop: { background: { monitor: 1 } } }), null);
+      expect(events.awaitsWake("%1")).toBe(true);
+      // A tmux server restart reused `%1` for another process.
+      live = [
+        { id: "%1", pid: 11, dead: false, taskId: null, ours: true, path: "/home" },
+        ...panes.filter((pane) => pane.id !== "%1"),
+      ];
+      await events.handle(frame({ pane: "%2", state: "busy" }), null);
+      expect(events.awaitsWake("%1")).toBe(false);
+    } finally {
+      events.stop();
+    }
+  });
 });
 
 describe("EndedTasks", () => {

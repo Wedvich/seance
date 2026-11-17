@@ -98,7 +98,8 @@ export interface SessionEventFrame {
   /**
    * The settings hooks' `Stop`/`StopFailure` (`seance session-event --hook`): what the turn end left running, or
    * the error that ended it. Carries no state: Claude runs `Stop` before the turn is over, and another `Stop` hook
-   * may yet continue it, so it is never read as a turn end. Held for the pane and joined to its idles. Display-only.
+   * may yet continue it, so it is never read as a turn end. Held for the pane and joined to its idles, display-only
+   * there; its counts also make the custodian's `close` leave the pane (`awaitsWake`), and nothing else.
    */
   readonly stop?: IdleNote;
 }
@@ -958,6 +959,12 @@ export interface SessionEvents {
    * into such a pane (one close per pane; two C-c exit Claude Code).
    */
   readonly marked: (pane: string) => boolean;
+  /**
+   * Whether the pane's last turn ended with background work or a session cron pending, by its settings `Stop` note:
+   * the session will wake by itself, so the custodian's `close` leaves it and no round is due for it. Given a task (the
+   * caller's own read of the pane), a note held for another task is another session's, and reads none.
+   */
+  readonly awaitsWake: (pane: string, taskId?: string | null) => boolean;
   readonly stop: () => void;
 }
 
@@ -995,21 +1002,27 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   /** Panes whose hand-off or pass close was started and has not settled. */
   const closing = new Set<string>();
   /**
-   * Pane → the settings hooks' latest `stop` note, for the task it carried then: joined to that pane's idles until a
-   * busy, needs-input or ended frame drops it. Memory only; a restart loses it until the next turn end.
+   * Pane → the settings hooks' latest `stop` note, for the process and task it carried then: joined to that pane's
+   * idles until any state but an idle drops it, or a frame finds the pane gone or under another process. Untasked
+   * panes' too, which only `awaitsWake` reads. Memory only; a restart loses it until the next turn end.
    */
-  const notes = new Map<string, { readonly taskId: string; readonly note: IdleNote }>();
+  const notes = new Map<string, { readonly pid: number; readonly taskId: string | null; readonly note: IdleNote }>();
+  const heldNote = (pane: string, taskId: string | null | undefined): IdleNote | null => {
+    const held = notes.get(pane);
+    if (held === undefined) return null;
+    return taskId === undefined || held.taskId === taskId ? held.note : null;
+  };
   /** Pane → the task whose idle it last forwarded, until any other state: a note landing then re-sends that idle. */
   const idleNow = new Map<string, string>();
-  const noteOf = (pane: string, taskId: string): IdleNote => {
-    const held = notes.get(pane);
-    return held?.taskId === taskId ? held.note : {};
-  };
-  /** Ingest, not an act: held for the pane's own task and forwarded only on an idle, which the leader's clock already reads. */
+  const noteOf = (pane: string, taskId: string): IdleNote => heldNote(pane, taskId) ?? {};
+  /**
+   * Ingest, not an act: held for the pane's own process and task, forwarded only on a tasked idle, which the leader's
+   * clock already reads, and read by the custodian's close.
+   */
   const takeNote = (pane: BoundPane, exclave: string, note: IdleNote, at: number): SessionEventReply => {
-    if (stopped || pane.taskId === null) return { ok: true };
-    setNewest(notes, pane.id, { taskId: pane.taskId, note });
-    if (idleNow.get(pane.id) === pane.taskId) {
+    if (stopped) return { ok: true };
+    setNewest(notes, pane.id, { pid: pane.pid, taskId: pane.taskId, note });
+    if (pane.taskId !== null && idleNow.get(pane.id) === pane.taskId) {
       enqueue({ session: pane.id, taskId: pane.taskId, exclave, state: "idle", at, ...note });
     }
     return { ok: true };
@@ -1173,6 +1186,9 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     // Per host, never per connection: a sender the kernel could not name here is refused.
     if (peer === null && hostNamesPeers()) return null;
     const live = (await deps.panes()).filter((pane) => !pane.dead);
+    // A pane gone, or its `%n` under another process (a tmux server restart reuses ids), takes its note with it.
+    const pids = new Map(live.map((pane) => [pane.id, pane.pid]));
+    for (const [id, held] of notes) if (pids.get(id) !== held.pid) notes.delete(id);
     if (peer === null) return live.find((pane) => pane.id === frame.pane) ?? null;
     return ancestorIn(peer, new Map(live.map((pane) => [pane.pid, pane])));
   };
@@ -1200,6 +1216,8 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (!stopped && frame.state !== undefined && frame.state !== "done") {
         deps.retain?.(pane, frame.state, frame.state === "idle" && frame.turnEnded === true);
       }
+      // Any state but an idle is a turn the note was not for; before the untasked return, since `awaitsWake` reads those too.
+      if (frame.state !== undefined && frame.state !== "idle") notes.delete(pane.id);
       if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.
@@ -1235,10 +1253,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       }
       // A pane killed without its `ended` never clears its entry: the cap is what bounds that.
       if (frame.state === "idle") setNewest(idleNow, pane.id, pane.taskId);
-      else {
-        idleNow.delete(pane.id);
-        notes.delete(pane.id);
-      }
+      else idleNow.delete(pane.id);
       // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
       if (reported !== "same") {
         enqueue({
@@ -1296,6 +1311,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     },
     armPassClose,
     marked: (pane): boolean => handoffs.has(pane) || passes.has(pane) || closing.has(pane),
+    awaitsWake: (pane, taskId): boolean => {
+      const work = heldNote(pane, taskId)?.background;
+      return work !== undefined && Object.values(work).some((count) => count > 0);
+    },
     stop: (): void => {
       stopped = true;
       handoffs.clear();

@@ -380,6 +380,30 @@ describe("`seance session-event` and a done report (#21)", () => {
   });
 });
 
+describe("`seance session-event --hook`", () => {
+  test("a Stop hook's input, run in a pane, holds that pane for the custodian and forwards nothing", async () => {
+    const input = join(base, "hook-stop.json");
+    await writeFile(
+      input,
+      JSON.stringify({
+        hook_event_name: "Stop",
+        session_id: "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90",
+        last_assistant_message: "private",
+        background_tasks: [{ id: "b1", type: "shell", status: "running", command: "sleep 300" }],
+        session_crons: [],
+      }),
+    );
+    const cli = `${shq(process.execPath)} ${shq(MAIN)} session-event --hook < ${shq(input)}`;
+    const sender = await senderPane("hook", base, cli, "hook-task");
+    expect(events.awaitsWake(sender.pane)).toBe(false);
+    await sender.go();
+    await pollUntil(() => events.awaitsWake(sender.pane), "the Stop note to hold the pane", 10_000);
+    expect(events.awaitsWake(sender.pane, "hook-task")).toBe(true);
+    // A note rides an idle only: none was sent, so nothing went to the leader.
+    expect(forwardedFor("hook-task")).toEqual([]);
+  });
+});
+
 describe("activity", () => {
   test("a report through `seance session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
     const input = join(base, "legacy.json");

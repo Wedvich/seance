@@ -9339,7 +9339,8 @@ decision is recorded here.
   is what the ask _reads_, and does not say an entry is live; once the prompt is typed, the pane skipped or dropped
   or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
   as the machine stays closed), never counts, since no verb may
-  touch it and it would otherwise keep a round due for ever. **So does every pane no built verb could act on**
+  touch it and it would otherwise keep a round due for ever. Nor does a pane whose last turn left background work or
+  a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"): `close` answers it `busy`. **So does every pane no built verb could act on**
   (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
   gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (a session
   started, resumed or cleared and never prompted, from the settings `SessionStart` hook; until mod 0.6.0 the
@@ -12227,7 +12228,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     counted by `BACKGROUND_KINDS` (Claude's `background_tasks` by type, `subagent` as `agent`, any
     unknown type `other`, and each of `session_crons` a `wakeup`), each count 1–99; `StopFailure`'s
     is `stopError`, the API error that ended the turn, one of `STOP_ERRORS` or `unknown`. The daemon
-    keeps the latest note per tasked pane, in memory, and joins it to that pane's `idle` events
+    keeps the latest note per pane, in memory, bound to the pane's pid and task (an untasked pane's
+    too, forwarded nowhere; a frame that finds the pane gone or under another pid drops it), and joins
+    it to a tasked pane's `idle` events
     (`parseIdleNote` at ingest and at `parseSessionEvent`, each field dropped alone); one landing
     after the idle re-sends that idle with it, and any other state drops it, so a note never
     outlives its turn. The leader keeps it beside its idle clock (`#idleSince`), replaced by each
@@ -12236,6 +12239,14 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     releases nothing; the idle release counts the same with or without it ("A session idle at its
     prompt past a grace holds no slot", limitation (b)). A same-uid process can make its own idle
     task's row say it is waiting on background work.
+    One act reads it, on the daemon alone (added 2026-11-17, from PR #502's command hooks): a held
+    note with any count is `awaitsWake`, which makes the custodian's `close` answer `busy` and the
+    seat count no round due for that pane. The custodian acts without the session's word, so it must
+    not kill work that will wake the session; there is no age cap and crons count, and the pane still
+    lists in `sessions`, so a round can flag or nudge it. The hand-off and pass closes ignore it: each
+    is the session's own word that it is done, and a never-ending job (a Monitor, a dev server) would
+    hold the pane for good. A same-uid process can keep its own pane from the custodian's close,
+    which it could already do by never reporting a turn's end.
     Rejected: `PermissionRequest`, which fires only when the dialog shows (none in auto mode for an
     allowed call) and gives no event when it is approved, so it cannot close what it opens; the
     mod's `tool.check` already covers the open. Rejected: launching each session with `--settings`,
@@ -12848,7 +12859,8 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   `shell` or `starting` pane is `unobserved`; a `background-prompt` is `waiting`; an `exit-prompt` is despawned
   (someone already asked, and the despawn's Keep answers it); a `live` pane is `unobserved` with no retained state
   or an `ended` one, `waiting` on `needs-input`, `busy` on `busy`, `unobserved` on an `idle` that is not a turn's
-  own end, `too_soon` before it has stood `closeAfterMinutes`, and otherwise despawned through the graceful path
+  own end, `busy` when that turn's settings `Stop` note left background work or a cron pending (`awaitsWake`,
+  "Settings hooks"), `too_soon` before it has stood `closeAfterMinutes`, and otherwise despawned through the graceful path
   (`despawnSession`, `force: false`, audited `origin=custodian`). The pane is **re-read at the moment of the act**
   (`paneInfo`, then the classification), never trusted from an earlier `sessions`, and a pane id the frame names
   that is gone is `gone`. A close holds its pane while it runs, so a second for it is `marked`.

@@ -60,6 +60,7 @@ const verdict = (over: Partial<CloseVerdictInput> = {}): ReturnType<typeof close
     state: "live",
     activity: rested(),
     untouchable: false,
+    awaitsWake: false,
     now: NOW,
     closeAfterMs: CLOSE_AFTER,
     ...over,
@@ -78,6 +79,14 @@ describe("closeVerdict", () => {
     expect(verdict({ activity: rested({ state: "busy" }) })).toBe("busy");
     expect(verdict({ activity: rested({ state: "needs-input" }) })).toBe("waiting");
     expect(verdict({ activity: rested({ stateSince: NOW - CLOSE_AFTER + 1 }) })).toBe("too_soon");
+  });
+
+  test("a turn that left background work or a cron to wake it is busy, however long it has stood", () => {
+    expect(verdict({ awaitsWake: true })).toBe("busy");
+    expect(verdict({ awaitsWake: true, activity: rested({ stateSince: NOW - 10 * CLOSE_AFTER }) })).toBe("busy");
+    // What the daemon saw first: a dialog still waits, and an unobserved pane stays unobserved.
+    expect(verdict({ awaitsWake: true, activity: rested({ state: "needs-input" }) })).toBe("waiting");
+    expect(verdict({ awaitsWake: true, activity: null })).toBe("unobserved");
   });
 
   test("foreign and the round's own pane are never touched, and a mark outranks the state", () => {

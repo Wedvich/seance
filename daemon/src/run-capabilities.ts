@@ -485,6 +485,9 @@ const custodianSeat: DaemonCapability = (ctx) => {
   // A hand-off, pass or drain ask marked it: one expression for the seat's due check and the `close` verb.
   const untouchable = (pane: string): boolean =>
     eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true;
+  // Its last turn left background work or a cron to wake it: `close` refuses it, and it makes no round due.
+  const awaitsWake = (pane: string, taskId?: string | null): boolean =>
+    eventsOf.get(ctx)?.awaitsWake(pane, taskId) === true;
 
   /** The seat's checks failed, it refused this host or it could not start: no round will ever run here. */
   let seatFailed = false;
@@ -538,6 +541,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
           retainedSince: () =>
             retainedSince === null ? null : Math.min(retainedSince, paneActivity.restoredSince() ?? retainedSince),
           untouchable,
+          awaitsWake,
           tasks: ctx.endedTasks,
           readPr: createPrReader({ now: ctx.now }),
           worktree: createWorktreeRule({ tasks: ctx.endedTasks, repos: ctx.repos, listPanes }),
@@ -664,7 +668,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       now: ctx.now,
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
-      untouchable,
+      untouchable: (pane) => untouchable(pane) || awaitsWake(pane),
       busyReach: verbs.reach,
       appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
       readRounds: () => readRounds(custodianRoundsPath()),
