@@ -244,13 +244,17 @@ id for the same process from a source of its own:
 - **An untasked Claude session:** the file Claude Code writes for each running process,
   `<configDir>/sessions/<pid>.json`, which the daemon already reads for the custodian round's Remote Control link
   (`daemon/src/custodian-remote.ts`). Observed on Claude Code 2.1.326 (2026-11-17), it holds `pid`, `sessionId`,
-  `procStart`, `startedAt`, `cwd` and `bridgeSessionId` (and `name`, `nameSource`, `status`). The daemon opens it
+  `procStart`, `startedAt`, `cwd` and, only while Remote Control is on, `bridgeSessionId` (and `name`, `nameSource`,
+  `status`). It is written for every `claude` past the trust dialog, `-p` and `--resume` launches included, under
+  whichever config dir the process runs with (S2), and removed on a clean exit but left behind by a `SIGKILL`. The daemon opens it
   exactly as `custodian-remote.ts` does (no symlink, no FIFO, a regular file of at most 64 KiB, the open descriptor
   checked), only for the pid of the `Bound.session` process, searching every config dir its exclave scan knows (the
   default one included) and requiring **exactly one** match, and verifies when the file's `pid` is that pid, its
-  `procStart` denotes the same start as `processStart` (spike S3: the file's is a date string, `processStart` is
-  `/proc` ticks on Linux and `sec.usec` on macOS, so the match is to the second at best), and its `sessionId` equals
-  the claim. Undocumented behaviour, like the round's link: re-verified on Claude Code upgrades,
+  `procStart` denotes the same start as `processStart`, and its `sessionId` equals the claim. On macOS (S3, evidence
+  below) `procStart` is the kernel's start second as a zone-less UTC `ctime` string, so the match is exact to the
+  second: parse it as UTC and compare with the seconds part of `processStart`'s `sec.usec`, which is two integers
+  (the microseconds unpadded), never a decimal. `startedAt` is no substitute: it trails the kernel's start by a
+  third to two thirds of a second. Linux (`/proc` ticks since boot) is still to be spiked. Undocumented behaviour, like the round's link: re-verified on Claude Code upgrades,
   and a missing or changed file only means "claimed", never a failure.
 - **Codex** (docs/agents.md): from the session files under its own `CODEX_HOME`, read the same way; part of that
   spike, not this spec's build.
@@ -274,7 +278,10 @@ nothing on this machine defeats the owner's uid; the threat model says so, as #4
   nothing.
 - **A refuted claim is dropped at ingest.** When the daemon's own source for the claiming process names another id
   (its file, or the ledger for an unchanged launch), the claim is not kept, shown or counted: the source says which
-  conversation the process is in.
+  conversation the process is in. **A claim that arrives on a `session.start` from `resume` is not refuted by the
+  first read**: Claude Code rewrites the file tens of milliseconds after that event (S1, evidence below), so the
+  daemon re-reads it for a bounded settle window (§4.3) and refutes only a file that still names another id at its
+  end. Until then the claim is held as unverifiable, which can refuse a delivery as `ambiguous`, never misdeliver.
 - **Two live panes claiming one id refuse it** (T1): a delivery by that id is `ambiguous`, and the adapter is told so
   in its `session` records (`conflict: true`). The claims counted are the verified ones and the **unverifiable** ones
   (no file, no ledger entry), never a refuted one, and never one bound through the `pane` fallback (§3.1). Counting the
@@ -288,9 +295,12 @@ nothing on this machine defeats the owner's uid; the threat model says so, as #4
 
 `/clear` starts a new conversation and `/resume` switches to another, in the same `claude` process. The mod sees
 both (`session.start` with source `clear` or `resume`; `CONTINUES` in both mods) and reports the new id; the daemon
-moves the process's link and re-verifies. **Spike before PR 1 (S1):** whether `sessions/<pid>.json`'s `sessionId`
-follows `/clear` and `/resume` (its `updatedAt` suggests it is rewritten), and how soon. If it does not, an untasked
-session that cleared is "claimed" until its next start, which costs addressing, never correctness.
+moves the process's link and re-verifies. **The file follows both** (S1, macOS, evidence below): after `/clear` it
+already names the new conversation when the `SessionStart` event fires (written 13–19 ms before it), and after
+`/resume` it names the resumed one 37–46 ms after the event. So a `clear` report verifies on its first read, and a
+`resume` report re-reads the file until it agrees or a settle window of **500 ms** (ten times the slowest observed lag)
+has passed, only then demoting or refuting (§4.2). The mod's own `session.start` rides the same event; the lag the
+daemon sees also includes the report's trip over the socket, which only shortens the wait.
 
 ### 4.4 This amends a rejected alternative
 
@@ -611,6 +621,61 @@ second:
 - **S3.** What precision `procStart` carries (observed as a date string to the second) and how it compares with
   `processStart` on each platform, including across a clock change; whether `startedAt` (ms) is the better match.
 
+Linux is still to be run for all three; macOS is below.
+
+### Evidence, macOS (Claude Code 2.1.326, 2026-11-17)
+
+Throwaway `claude` processes in panes of a private tmux server, in a trusted checkout, with no prompt typed but one
+`-p` call. A watcher polled `sessions/*.json` every 5 ms and logged each change of `sessionId`; a `SessionStart`
+command hook (from a `--settings` file, not the user's settings) logged its own time, `source` and `session_id`. That
+hook fires on the event the mod's `session.start` rides. Timings are the watcher's first sight of the file minus the
+hook's log line, so each is good to about ±5 ms. Ids were compared, never recorded.
+
+**S1: the file follows `/clear` and `/resume`, in the same process.** Yes to both.
+
+| Act                                | Tries | File names the new id                                                      |
+| ---------------------------------- | ----- | -------------------------------------------------------------------------- |
+| `/clear`                           | 11    | 13–19 ms **before** the hook (11/11)                                       |
+| `/resume <id>`                     | 6     | 37–46 ms **after** the hook (6/6)                                          |
+| fresh start                        | 4     | first write 3–390 ms before the hook, already carrying the hook's id (4/4) |
+| `claude --resume <id>` (at launch) | 1     | first write 261 ms before the hook, already the resumed id                 |
+
+`procStart`, `startedAt` and `pid` stay put across `/clear` and `/resume`; only `sessionId` (and `updatedAt`) moves.
+`/resume` is the case that changes the design: a report read against the file at once would find the old id and be
+refuted, so §4.2 and §4.3 now re-read for a settle window, and the build order's step 1 tests it.
+
+**S2: which `claude`s get a file.**
+
+| Process                                                             | File?                                                                                    |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| interactive, Remote Control at startup (the config's own setting)   | yes, `bridgeSessionId` added about a second after the first write                        |
+| interactive, `remoteControlAtStartup: false` (through `--settings`) | yes, with no `bridgeSessionId` key; follows `/clear` the same                            |
+| `-p`                                                                | yes, for its life; `kind` is still `interactive`, `entrypoint` is `sdk-cli` (else `cli`) |
+| `claude --resume <id>`                                              | yes, the resumed id from the first write                                                 |
+| under a named exclave's `CLAUDE_CONFIG_DIR`                         | yes, in that dir's `sessions/`, none in the default one                                  |
+| waiting at the trust dialog of an untrusted folder                  | no (and no `SessionStart` either)                                                        |
+
+On exit: `/exit`, `SIGTERM` and the end of a `-p` run remove the file; `SIGKILL` leaves it, with its
+`<pid>.<hash>.key` beside it, so a stale file for a later process with a reused pid is real and `procStart` is what
+rejects it. `kind` does not tell a `-p` process from an interactive one on this version, so nothing should key on it.
+The design holds: every config dir is searched, and a file only ever corroborates.
+
+**S3: `procStart` against `processStart`.** `procStart` is a `ctime`-style string (`Ddd Mmm d HH:MM:SS YYYY`) in
+**UTC, with no zone**: read as local time it is off by the zone offset (an hour here), read as UTC it equals the
+seconds part of `processStart`'s `sec.usec` exactly, in 9 of 9 files (the spike's and the machine's other sessions'
+files, read for these two fields only). `ps -o lstart` shows the same second in local time. `processStart`'s
+microseconds are unpadded (`.1477` is 1477 µs), so it is compared as two integers, never parsed as a decimal.
+`startedAt` (ms) is the process's own clock read early in its boot, 0.30–0.61 s after the kernel's start in the same
+9 files: it cannot match `processStart` exactly, and a window wide enough to hold it would be wider than `procStart`'s
+one second. `procStart` is the match; `startedAt` is at most a sanity bound (never earlier than the kernel's start).
+
+A clock change was not tested: stepping the clock needs root and would disturb every other process on the owner's
+machine (TLS, timers, other sessions). By reasoning only: macOS keeps a process's start as wall time stamped at fork
+and never adjusts it, and `procStart` agrees with it to the second (so it is most likely read from the kernel, not
+from Claude's own clock), so a step moves neither side and the match survives. Linux, where
+`processStart` is ticks since boot and a date string has to add a boot time, is where a clock change could matter and
+is part of the Linux run.
+
 ## Build order
 
 Small PRs, each landing on its own. #526's PR 1 (`self.doing`) can land before or after PR 1 here: its shapes are
@@ -618,7 +683,8 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
 
 1. **The vocabulary and `agent.*`.** `shared/src/tags.ts` (grammar, namespaces, caps, `displayLine` moved,
    `parseTags`, known-key parsers, `joinTags`, `displayName`); the session-event frame's `agent`, on every report;
-   `Conversations` in memory; verification from the launch ledger and `sessions/<pid>.json`, re-read at each act; the
+   `Conversations` in memory; verification from the launch ledger and `sessions/<pid>.json` (`procStart` read as UTC
+   against `processStart`'s seconds; a `resume` report re-read over the settle window, §4.3), re-read at each act; the
    daemon's own read for panes with no report since start; `remoteSession` as `agent.remote`'s fallback (§7 steps 1
    and 4); retention keyed on the bound `claude` process, for any such pane (§3.2, §3.3); `SessionEntry.tags` with
    `scope`.
@@ -626,8 +692,10 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
      known key's parser, the caps and per-writer budgets (`full`), `joinTags`' precedence and `displayName`'s sources;
      daemon tests with real peers (`ClaudeStub.runInPane`): a claim verified from the ledger; one verified from a
      `sessions/<pid>.json` the stub writes; one left unverifiable with no file; a refuted claim (the file names
-     another id) neither kept nor counted toward a conflict; a file for another pid, an older start, a symlink or a
-     FIFO ignored; two config dirs both matching is no verification; two verified or unverifiable claims marked
+     another id) neither kept nor counted toward a conflict; a `resume` report whose file still names the old id at
+     first read and the new one within the settle window verified, and one whose file never changes refuted only at
+     the window's end; a `procStart` in UTC matched across a non-UTC `TZ`, and one a second off not; a file for
+     another pid, an older start, a symlink or a FIFO ignored; two config dirs both matching is no verification; two verified or unverifiable claims marked
      `conflict`; a claim through the `pane` fallback never verified or counted; a `/clear` in a tasked pane demoting
      the ledger's id until the file agrees, and an act after it re-reading the file and answering `unverified`; a
      daemon restart relearning the conversation from the next report and, for an idle pane, from its own read;
