@@ -27,6 +27,8 @@ const TOKEN = "test-bearer-token";
 const ACCOUNT = "org-1:acct-aaaaaaaa-1111";
 const OTHER = "org-1:acct-bbbbbbbb-2222";
 const THIRD = "org-1:acct-cccccccc-3333";
+/** Named before a store opens, so its alias showing is the proof the listing landed. */
+const LISTED = "org-1:acct-dddddddd-4444";
 
 let key: CryptoKey;
 let accountKey: CryptoKey;
@@ -174,6 +176,17 @@ async function openStore(double: Double, withAccountKey = true): Promise<Store> 
   return store;
 }
 
+/**
+ * Opens a store and waits until its listing is applied, not just asked: a rename
+ * before that reads the key first, so it cannot lose a race a test set up.
+ */
+async function openListed(double: Double): Promise<Store> {
+  await planted(double, LISTED, "listed");
+  const store = await openStore(double);
+  await pollUntil(() => store.getState().accounts.aliases[LISTED] === "listed", "the listing to land");
+  return store;
+}
+
 async function planted(
   double: Double,
   accountId: string,
@@ -248,12 +261,11 @@ describe("account aliases in the store", () => {
 
   test("a rename in one client reaches another through the nudge alone, one get, no re-list", async () => {
     const double = startDouble();
-    const a = await openStore(double);
-    const b = await openStore(double);
-    await pollUntil(() => lists(double) === 2, "both clients to list");
+    const a = await openListed(double);
+    const b = await openListed(double);
 
     await a.renameAccount(ACCOUNT, "  work ");
-    expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "work" });
+    expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "work", [LISTED]: "listed" });
     await pollUntil(() => b.getState().accounts.aliases[ACCOUNT] === "work", "B to show the rename");
     expect(gets(double)).toBe(1);
     expect(lists(double)).toBe(2);
@@ -282,27 +294,25 @@ describe("account aliases in the store", () => {
 
   test("a rename that lost a race re-reads, shows the latest name and says so; the next one replaces it", async () => {
     const double = startDouble();
-    const a = await openStore(double);
-    const b = await openStore(double);
-    await pollUntil(() => lists(double) === 2, "both clients to list");
+    const a = await openListed(double);
+    const b = await openListed(double);
     double.muted = true;
     await b.renameAccount(ACCOUNT, "from-b");
 
     await a.renameAccount(ACCOUNT, "from-a");
     expect(a.getState().accounts.notice).toBe("Renamed elsewhere to “from-b” — save again to replace it");
-    expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-b" });
+    expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-b", [LISTED]: "listed" });
     expect(a.getState().accounts.saving).toBeNull();
 
     await a.renameAccount(ACCOUNT, "from-a");
     expect(a.getState().accounts.notice).toBeNull();
-    expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-a" });
+    expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-a", [LISTED]: "listed" });
     expect(double.records.get(await accountStoreKey(accountKey, ACCOUNT))?.version).toBe(2);
   });
 
   test("a lost race whose re-read finds an unreadable record, or gets no answer, does not claim a clear or a name", async () => {
     const double = startDouble();
-    const a = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const a = await openListed(double);
     const storeKey = await planted(double, ACCOUNT, "work", 1, undefined, 3);
 
     await a.renameAccount(ACCOUNT, "home");
@@ -355,8 +365,7 @@ describe("account aliases in the store", () => {
 
   test("a rename past the bound is refused before anything is sent", async () => {
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     await store.renameAccount(ACCOUNT, "x".repeat(65));
     expect(store.getState().accounts.notice).toBe("Names are at most 64 characters");
     expect(double.received.some((frame) => frame["t"] === "store-put")).toBe(false);
@@ -460,9 +469,8 @@ describe("account aliases in the store", () => {
 
   test("a rename reports whether it landed", async () => {
     const double = startDouble();
-    const a = await openStore(double);
-    const b = await openStore(double);
-    await pollUntil(() => lists(double) === 2, "both clients to list");
+    const a = await openListed(double);
+    const b = await openListed(double);
     double.muted = true;
     expect(await b.renameAccount(ACCOUNT, "from-b")).toBe(true);
     expect(await a.renameAccount(ACCOUNT, "from-a")).toBe(false);
@@ -486,8 +494,7 @@ describe("account aliases in the store", () => {
 
   test("a nudge while the tab is hidden reads nothing", async () => {
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     const hidden = await planted(double, OTHER, "home");
     const shown = await planted(double, THIRD, "third");
 
@@ -510,8 +517,7 @@ describe("account aliases in the store", () => {
 
   test("showing the tab again probes the live socket and lists what a hidden nudge named, on that same socket", async () => {
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     const [socket] = double.sockets;
     const hidden = await planted(double, OTHER, "home");
     try {
@@ -597,8 +603,7 @@ describe("the rename dialog", () => {
   test("is a layer: back closes it and takes its notice along, leaving the screen under it", async () => {
     fake = fakeHistory();
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     store.openMachines();
     store.openAccountRename(ACCOUNT);
     expect(store.getState().accounts.renaming).toBe(ACCOUNT);
@@ -615,8 +620,7 @@ describe("the rename dialog", () => {
   test("closes when its name lands, and stays open on a refusal", async () => {
     fake = fakeHistory();
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     store.openAccountRename(ACCOUNT);
 
     expect(await store.renameAccount(ACCOUNT, "x".repeat(65))).toBe(false);
@@ -632,8 +636,7 @@ describe("the rename dialog", () => {
   test("shows nothing of another account's failure", async () => {
     fake = fakeHistory();
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     store.openAccountRename(OTHER);
 
     await store.renameAccount(ACCOUNT, "x".repeat(65));
@@ -655,8 +658,7 @@ describe("the rename dialog", () => {
   test("closing twice pops one entry, and a save landing after Cancel pops none", async () => {
     fake = fakeHistory();
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     store.openMachines();
     store.openAccountRename(ACCOUNT);
     store.closeAccountRename();
@@ -680,8 +682,7 @@ describe("the rename dialog", () => {
   test("refuses a second account's save while one is in flight, and sends nothing", async () => {
     fake = fakeHistory();
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     const release = gatePuts(double);
     const first = store.renameAccount(ACCOUNT, "home");
     await pollUntil(() => puts(double) === 1, "the put");
@@ -717,8 +718,7 @@ describe("the rename dialog", () => {
   test("a dialog reopened for the same account closes when the earlier save lands", async () => {
     fake = fakeHistory();
     const double = startDouble();
-    const store = await openStore(double);
-    await pollUntil(() => lists(double) === 1, "the listing");
+    const store = await openListed(double);
     store.openMachines();
     store.openAccountRename(ACCOUNT);
     const release = gatePuts(double);
