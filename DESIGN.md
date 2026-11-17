@@ -9971,7 +9971,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `POST /share` route is one `runtimeCaching` entry (Attachments, "Share target").
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
   verdict, the Settings dialog and the phone's Queue and Machines screens all push on open and are cleared by
-  `popstate`, so Android back dismisses the layer instead of exiting the app.
+  `popstate`, so Android back dismisses the layer instead of exiting the app. Queue and Machines share one entry
+  over the prompt flow (the verdict included): opening either closes whatever sits over that flow — the other
+  screen, Settings, a sheet, the rename dialog — in one patch and keeps the lowest of their entries
+  (`history.go` past the rest), so back from either lands on Prompt and switching never stacks. Settings opens over
+  whichever screen shows and closes first. The menu's Prompt goes back past every layer, the verdict too, landing on
+  the form where the verdict's "Back to prompt" does; back from a Queue opened over a verdict still steps to it.
   History outlives the document, though: a reload (a service-worker update, saving
   credentials) or Android restoring a discarded PWA resumes on a layer entry with
   nothing open, and back from the form then lands on an entry the app has nothing
@@ -10007,15 +10012,25 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   global clamp, which would freeze it at full size over the dot. The settings
   header's own status line renders the same three dots from the same component:
   one state must never read two ways.
-- **On a phone the pill's face is a menu.** Below the desktop breakpoint the raised face is a
-  hamburger opening Queue, Machines and Settings — the screens a desk shows as columns, plus
-  the one it doesn't — each with a feather-weight icon (list, server, the cog). The track and
-  its dot are unchanged; an escalated task puts the queue's attention dot on the closed face
-  and on the Queue row. A native `popover="auto"`, not a layer: outside taps, Escape and
-  Android back (Chrome routes back to an open popover before history) all close it, so it
-  pushes no history entry. Pinned under the pill from its rect on open, since CSS anchor
-  positioning is not in every browser the app runs in. Rejected: a bottom tab bar, which
-  would spend a phone's height on three destinations visited far less than the form.
+- **On a phone the pill's face is a menu, in one header every screen shares.** Below the desktop
+  breakpoint Prompt, Queue and Machines are peers under one fixed header that `app.tsx` renders outside
+  the keyed screen body, so the pill never moves or re-mounts and any screen is two taps from any other;
+  Queue and Machines have no back button. Its left holds the screen's title block (`PromptHeading`,
+  `QueueHeading`, `MachinesHeading`, which the desk's column headers render too); its right the pill,
+  with the Queue's ↻ beside it on that screen only. The raised face is a hamburger opening Prompt, Queue,
+  Machines and Settings, each with a feather-weight icon (pen, list, server, the cog); the current
+  screen's row is tinted in the accent and `aria-current="page"`, and picking it only closes the menu.
+  The track and its dot are unchanged; an escalated task puts the queue's attention dot on the closed
+  face and on the Queue row, except while the Queue is the screen showing. Settings stays a modal over
+  everything, with its own header and back. The verdict, part of the prompt's flow, keeps no header. A
+  native `popover="auto"`, not a layer: outside taps, Escape and Android back (Chrome routes back to an
+  open popover before history) all close it, so it pushes no history entry. Pinned under the pill from
+  its rect on open, since CSS anchor positioning is not in every browser the app runs in. Rejected: a
+  bottom tab bar, which would spend a phone's height on three destinations visited far less than the
+  form; and (2026-11-17, after a clickable prototype of both) a bottom tab bar with the cog kept in the
+  header, one tap fewer between screens, for the vertical space it takes and for stacking a second bar
+  under the screens' own footers. Before it, Queue and Machines were back-out layers and the menu lived
+  on the prompt screen alone, so Queue to Machines took three taps.
 - **A relative time shows its timestamp on hover.** "6m ago" and "resets in 2h" stay coarse on
   the page; a mouse resting on one opens a small styled tip with the full timestamp in Norwegian form (24-hour, viewer's zone), to
   the second (`tooltip.ts`), not the browser's `title`. View models keep the instant beside the
@@ -10032,37 +10047,43 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   while the relay is down, saves-then-reconnects when credentials were edited,
   and otherwise just returns.
 - **Settings is a native modal `<dialog>`, shaped by width.** Below the 1200px desktop
-  breakpoint it fills the screen and slides in exactly as a pushed screen does — the form
-  still gives way and dims beneath it — with a back chevron; at and above it, it is a
+  breakpoint it fills the screen and slides in over whichever screen shows, which gives way
+  and dims beneath it (the page is hidden under it, not unmounted, so it comes back as it
+  was) — with a back chevron; at and above it, it is a
   centred modal over the three columns, closed by an × at the header's right, Escape or a
   backdrop click. The top layer makes the page behind it inert for free, and Chrome on
   Android routes back to an open modal's `cancel` before history; that event is
   cancelled and sent through the store as a history pop, so every way out takes the
   one path and the layer's history entry never strands. Both motions are view
-  transitions (next bullet): the phone's panel `main` is the layer, as a pushed screen's
-  is; on a desk the `<dialog>` itself is, so its border and shadow scale with the panel.
+  transitions (next bullet): the phone's panel `main` is the layer; on a desk the
+  `<dialog>` itself is, so its border and shadow scale with the panel.
   The dialog unmounts the moment it closes — the old snapshot plays its exit.
 - **Screen and layer motion is the View Transition API, started at the store boundary.**
-  Phone push/pop (Queue, Machines, Settings), form ↔ verdict, and the desk's Settings
-  modal run through `document.startViewTransition({ update, types })`; the old screen is
+  Phone push/pop (Settings), the phone's switch between Prompt, Queue and Machines, form ↔
+  verdict, and the desk's Settings modal run through
+  `document.startViewTransition({ update, types })`; the old screen is
   a snapshot, so the outgoing one never stays mounted, and the browser composites the
   motion. Every store change reaches `useStoreState` — clicks, `popstate` (closing is
   `history.back()`) and network replies alike — so that is where one `TransitionRunner`
   (`pwa/src/transition.ts`) is offered each new state. It is keyed on screen identity
-  only (depth, layer, and the verdict by the same key `VerdictView` mounts on: a queued
-  task's id, any other verdict's object), never content, so a poll or a keystroke never
-  starts one; a depth change outranks a verdict change, a verdict replacing a verdict is
-  none, and on a desk only Settings moves. A started transition holds the state back
+  only (the phone screen, whether Settings is open, and the verdict by the same key
+  `VerdictView` mounts on: a queued task's id, any other verdict's object), never content,
+  so a poll or a keystroke never starts one; Settings outranks a screen change, which
+  outranks a verdict change, a verdict replacing a verdict is none, and on a desk only
+  Settings and the form column's verdict move. A `switch` moves only what changes: the
+  header's title block cross-fades with a 4px shift, the Queue's ↻ fades, the body
+  cross-fades with a small rise, and the pill is named only to be held still (the rest
+  of the header is one panel the same on both sides). A started transition holds the state back
   until its update callback, which runs after the browser captures the old screen; the
   latest offer in that frame wins. The callback's promise resolves once Preact has
   committed the DOM (a `useLayoutEffect` on a render sequence number, children's layout
   effects such as `showModal()` running first), with a 100ms backstop so a dropped render
   never leaves the screen frozen until the browser's own timeout. Transition types
-  (`push`, `pop`, `verdict-in`, `verdict-out`, `modal-in`, `modal-out`) are the CSS
+  (`push`, `pop`, `switch`, `verdict-in`, `verdict-out`, `modal-in`, `modal-out`) are the CSS
   vocabulary; `view-transition-name`s and `-class`es are set only under
   `:root:active-view-transition`, so no idle element is a stacking context because of
   one and a duplicate name, which aborts a transition, can come only from the two host
-  classes. Reduced motion, a hidden page, or a browser without typed transitions
+  classes and the phone header's parts, each of which exists once. Reduced motion, a hidden page, or a browser without typed transitions
   (feature-tested by `CSS.supports("selector(:active-view-transition-type(x))")`, which
   proves the object form and the type selectors together) gets the state at once — an
   instant swap. `base.css`'s `*` reduced-motion clamp does not reach the
@@ -10086,8 +10107,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   preview into the verdict was dropped with the verdict's card itself (2026-10-19).
 - **Machines is a screen, not a route** (scheduler M1). On a desk it is a column (below).
   Settings no longer links to it: Machines is meant to be always on screen, not a layer reached
-  through Settings; on a phone it is a layer straight over the form, opened from the header
-  menu (`openMachines`). Rejected for now: URL routes (`/machines`),
+  through Settings; on a phone it is a peer of the prompt screen under the shared header, opened
+  from the header menu (`openMachines`) and holding the one entry Queue would. Rejected for now: URL routes (`/machines`),
   which would need boot-time path parsing and a rethink of entry depth for deep links — a
   separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
