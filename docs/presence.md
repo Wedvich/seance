@@ -58,15 +58,15 @@ What Séance has today, and the gap each section closes:
 **D1.0 `doing` is the tag `self.doing` (O3).** The session-tags model is docs/tags.md (§2.1 there is the record); in
 brief, tags are key/value pairs namespaced by writer, and **the namespace is the access rule**:
 
-| Namespace          | Written by                         | Scope                 | Notes                                                                   |
-| ------------------ | ---------------------------------- | --------------------- | ----------------------------------------------------------------------- |
-| `agent.*`          | the agent's own mod and hooks only | process, conversation | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`) |
-| `seance.*`         | the daemon only                    | session               |                                                                         |
-| `self.*`           | the session itself, through MCP    | process               | display-only, never keyed on, bound by peer pid                         |
-| `adapter.<name>.*` | that adapter only, over its stdin  | conversation          | docs/messaging.md §6                                                    |
-| `owner.*`          | the PWA, sealed `from: "app"`      | task, or conversation | on the task record for a tasked session (docs/tags.md §5)               |
-| `creator.*`        | whoever enqueued the task          | task                  | proposed (docs/tags.md open question 7): `linear` becomes `creator.ref` |
-| `scheduler.*`      | the leader                         | task                  | proposed, same question                                                 |
+| Namespace          | Written by                         | Scope                 | Notes                                                                    |
+| ------------------ | ---------------------------------- | --------------------- | ------------------------------------------------------------------------ |
+| `agent.*`          | the agent's own mod and hooks only | process, conversation | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`)  |
+| `seance.*`         | the daemon only                    | session               |                                                                          |
+| `self.*`           | the session itself, through MCP    | process               | display-only, never keyed on, bound by peer pid                          |
+| `adapter.<name>.*` | that adapter only, over its stdin  | conversation          | docs/messaging.md §6                                                     |
+| `owner.*`          | the PWA, sealed `from: "app"`      | task, or conversation | on the task record for a tasked session (docs/tags.md §5)                |
+| `creator.*`        | whoever enqueued the task          | task                  | beyond T1 (docs/tags.md open question 7): `linear` becomes `creator.ref` |
+| `scheduler.*`      | the leader                         | task                  | beyond T1, same question                                                 |
 
 No tag ever binds, routes or authorizes anything. Display precedence for a session's name is owner label > task
 title > `self.name` > window, the source marked, on the owner's surfaces only (docs/tags.md §6.1). Session tags live
