@@ -314,7 +314,7 @@ green:
   event — a session event or a branch state — moves only a task placed (or, for a session event,
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to a PR URL the record holds (`taskPrs`), its values passed as GraphQL variables, and no frame
-  carries one, and a task's prompt, title, model and effort change after its create only by the
+  carries one, and a task's prompt, title, model, effort and not-before time change after its create only by the
   leader's own write on an `amend` (`Scheduler.amend`), only while the task is `queued`, `blocked` or
   `ready` with no spawn out, a prompt change only at the `basis` it names (never a replace on a
   successor), the record re-sealed through the one task sealer, and no prompt text — the amendment's

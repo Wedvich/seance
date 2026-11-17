@@ -1640,8 +1640,8 @@ describe("a task deferred by its not-before time", () => {
 
   test("says until when, in place of the decision's headline and body, and Start now names no machine", () => {
     const row = rowAt(stale());
-    expect(lineText(row?.headline ?? [])).toMatch(/^Queued — until /);
-    expect(lineText(row?.body ?? [])).toMatch(/^Not placed before /);
+    expect(lineText(row?.headline ?? [])).toMatch(/^Queued — until /u);
+    expect(lineText(row?.body ?? [])).toMatch(/^Not placed before /u);
     expect(row?.startNow).toEqual({ sub: "Skip the queue", enabled: true });
   });
 

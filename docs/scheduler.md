@@ -414,7 +414,7 @@ of M4 has landed.
 | 2     | Traits: keep free — **Done** (#414)                                | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — **Done** (#408, #416, #425, #429)                | account records; fleet quota record; Web Push                          | M–L                      |
-| 2     | Not before (new)                                                   | amending a waiting task (built)                                        | M                        |
+| 2     | Not before (new) — **Done**                                        | amending a waiting task (built)                                        | M                        |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
 | Later | Proxmox node view (follow-up)                                      | LXC pressure view; reopens #17                                         | M                        |
 
@@ -1561,7 +1561,7 @@ of M4 has landed.
   - _Measure:_ the leader's `audit queue op=amend` lines, by `fields` and `mode`, against cancels of
     waiting tasks followed by an enqueue from the same client: whether amend replaced the workaround.
 
-- **Not before** (new) — _Decided_ by the owner, 2026-11-17. "Do this in 2 hours", "do this at 21:30
+- **Not before** (new) — **Built 2026-11-17, recorded in DESIGN.md, "Not before".** _Decided_ by the owner, 2026-11-17. "Do this in 2 hours", "do this at 21:30
   tomorrow": a task carries a time before which the scheduler does not place it. Today the owner holds
   such work back by hand, or queues it later.
   - _Decided, the field:_ `TaskSpec.notBefore`, epoch ms, a positive safe integer. The client turns

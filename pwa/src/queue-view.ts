@@ -362,7 +362,7 @@ function bodyLine(
     return "Settles when its machine wakes; cancel or mark done to give up on it";
   }
   const deferred = notBeforeLine(task, now + skew);
-  if (deferred !== null) return deferred.replace(/^until/, "Not placed before");
+  if (deferred !== null) return deferred.replace(/^until/u, "Not placed before");
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") {

@@ -1192,7 +1192,7 @@ nothing checked it. The last is the gap they leave.
     mark a restart recreated has seen no turn end, so a session already idle is closed only by the
     leader's backstop.
 - **An amend** (built 2026-11-12, a threat-model change; Scheduler, "Amending a waiting task"): a
-  waiting task's prompt, title, model and effort change only by the leader's own write, on an `amend`
+  waiting task's prompt, title, model, effort and not-before time change only by the leader's own write, on an `amend`
   sealed `from: "app"`, parsed by `parseAmendRequest` and checked against `schedulerGuard`, and only
   while the task is `queued`, `blocked` or `ready` with no spawn out. A prompt change names the
   `basis` it was read at and is refused `prompt_changed` against any other, so a replayed append
@@ -3940,6 +3940,34 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   unstamped. A refused or skipped stamp write costs one repeated alert after a leader change, never
   a missed one. **Residual:** the stamp lives on a task, so pruning the stamped task (and its
   tombstone aging out) loses it; the next leader may alert that window once more.
+- **Not before** (built 2026-11-17; docs/scheduler.md, M4). `TaskSpec.notBefore` is an epoch-ms
+  instant before which the scheduler places a task. The client resolves what was typed ("in 2h",
+  "21:30", the PWA's quick choices) in its own zone with the shared pure resolver
+  (`shared/src/not-before.ts`, one for the CLI, MCP and PWA; a bare clock time is its next occurrence,
+  an explicit date-time already past is refused by the client); the record holds only the instant, and
+  the leader compares it with its own clock (skew accepted, as for `createdAt`). **It holds at
+  placement, not admission:** the task goes `queued → blocked/ready` on its deps as ever, and
+  `#pass`'s reserve loop skips a `ready` task with `now < notBefore` before `#route`, before the
+  decision is stored and before the trait-held alert, so a long wait costs no store write and no
+  decision (why it waits is read off the spec). No timer: the 30 s tick places it, up to 30 s late.
+  Holding it `queued` would have met `ADMIT_MAX_AGE_MS` for a time past 29 days. Its dependents wait
+  on it as on any unfinished task. `continue_expired` and `pin_expired` run from
+  `max(createdAt, notBefore)` (`expiry.ts`), or a continuation deferred five days would fail before it
+  could start. **`run-now` ignores it**, as it ignores the cap and the pause, one-shot: nothing is
+  written, so a takeover between the route and the write leaves the task waiting for its time. A
+  successor (any trigger) and a continuation never inherit it (a continuation may carry its own).
+  **No sentinel, no `CAPABILITIES` entry, no horizon** (owner): every daemon updates together, and a
+  deferred task queued under an older leader mid-update may start at once (accepted; the owner runs
+  `seance update` right after merge, before using the PWA control). Amendable while waiting (see
+  "Amending a waiting task"). The audit lines carry `notBefore=0|1`, never the time. The PWA shows
+  `until Wed 18 Nov, 21:30` (the viewer's zone, off the leader's clock by the queue's skew) in the
+  row's headline and body and the verdict, in place of what a decision says: a deferred task is not
+  routed, so a decision on it is stale, and Start now's label then names no machine. The form's
+  choice is transient (kept as a kind, resolved at the press), hides the Start now split (the two
+  contradict) and asks no route preview. Surfaces: MCP `not_before` (ISO 8601 with an offset) on
+  `spawn_session`, `queue_batch` and `continue_task`, and on `amend_task` (or `null`); CLI `--at` and
+  `--in` on `spawn` and `continue`, and on `amend` with `--not-before none` to clear. Raycast: none.
+  The archivist keeps it on the task row (a time is neither a prompt nor an account id).
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory
@@ -8399,7 +8427,9 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 
 A queued stack learns things as it runs: session 1 finds what sessions 6, 8 and 9 should be told.
 Cancelling and requeuing them loses their ids, so every `after` naming them breaks. `amend` changes a
-waiting task's prompt, title, model and effort in place, under its own id.
+waiting task's prompt, title, model, effort and not-before time in place, under its own id. The
+not-before time takes a number or `null` (clear), needs no `basis` (the last write wins, as for title,
+model and effort), and is audited as `fields=notBefore`, never the time ("Not before").
 
 - **The op.** `amend` (wire spec above), sent `from: "app"`, parsed by `parseAmendRequest` into a fresh
   value, checked against the one `schedulerGuard`, and run by `Scheduler.amend` through `#update`, the
