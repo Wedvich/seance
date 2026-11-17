@@ -1799,7 +1799,7 @@ same PR, with the reason.
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
   and can't dedupe a re-dispatch), while `seance spawn --now`, the only direct path left, keeps working. Self-update makes
   this a short window.
-- **An admitted task the leader never placed** (open, seen once, 2026-11-12). On ubuntu CI (run
+- **An admitted task the leader never placed** (resolved 2026-11-17; seen 2026-11-12 and twice more since). On ubuntu CI (run
   43224839001, attempt 1) `e2e/mcp.test.ts`'s pinned task logged `op=admit` and then nothing for
   20s: no reservation, no spawn, no store timeout, no refused write, the daemon's socket up
   throughout. The likeliest reading is a route that chose no machine on the admitting pass, then no
@@ -1823,6 +1823,18 @@ same PR, with the reason.
   only the failure, not the daemon's lines, so it can't be checked there. That run's test also died
   at bun's 15s timeout before its 20s poll could report; #400's 90s budget lets the next one print
   the decision. Still open.
+  _Resolved (2026-11-17):_ a race in the shared client, not a missing pass. The decision, caught by
+  probes on a looped ubuntu job (2 of ~325 full-suite runs, both in `e2e/amend.test.ts`), was
+  `status_stale` on every pass while the test's own client held a current status. A daemon registers
+  twice at boot (the rescan re-registers), and the leader's leg connected between the two: its first
+  push carried the first register's status, whose decrypt was still pending when the second
+  register's push and the current status frame landed. The slow open then settled last and overwrote
+  the current status in `#statuses`; `#rebuildMachines` dropped it for its scan, so the machine read
+  as having no status until the next beat, 30 to 60s out. `#decryptStatus` now lands an open only
+  while it is still the newest status asked for that machine (`#statusWanted`, reset with each push),
+  and `#decryptLeadProof` the same for the lead proof, whose slow open could leave a new term's
+  leader `unverified` until the next push. `pwa/test/client.test.ts` holds each open at WebCrypto
+  to pin both orders. The mcp occurrence's log is gone, so it is matched by signature only.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
   box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces
