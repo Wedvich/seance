@@ -30,8 +30,20 @@ commands.
    above were cut (normal: judge from the bottom you get, never capture again to see more). For each pane it lists as `ours` whose `close`
    is `ok`, decide which one case applies:
    - `dead`: `seance custodian close <pane>`.
+   - red CI: an idle session whose `prUrl` is set, where `seance custodian pr <pane>` shows a check that
+     failed and its screen shows it is not working on it (it reported done, or stopped on the failure).
+     Nudge it (step 4's limits and `limit` rule apply) with the PR and the names of the checks that failed,
+     asking it to fix them, push to the same PR and stop there, never merging it:
+
+     ```
+     printf '%s\n' 'CI on your PR is red: lint and test (ubuntu) failed. Fix them, push to the same PR, and do not merge it.' | seance custodian nudge %12
+     ```
+
+     Never close it while that check is red. Run `pr` for every idle session with a `prUrl` before
+     calling it finished.
+
    - finished (it gave its final report, asks nothing, and waits on nothing it is still responsible
-     for; waiting only on a merge counts as finished): `seance custodian close <pane>`.
+     for; waiting only on a merge, with no check failed, counts as finished): `seance custodian close <pane>`.
    - idle and not finished, because it is still responsible for something in flight (it said it will
      fix CI if it fails, and the run is still going; check with `seance custodian pr <pane>`, which
      prints the PR's state and checks and refuses `prless` when the session has no PR): leave it, and
