@@ -144,7 +144,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     const dependent = crypto.randomUUID();
     let window: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const origin = await readyOrigin(client);
       expect(await client.pause({ until: "resume" })).toMatchObject({ holds: [{ until: "resume" }] });
@@ -247,7 +247,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     const big = crypto.randomUUID();
     const small = crypto.randomUUID();
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const origin = await readyOrigin(client);
       await client.pause({ until: "resume" });
@@ -322,7 +322,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     });
     const fleet = relayFleet(lazy);
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const origin = await readyOrigin(client);
       await client.pause({ until: "resume" });

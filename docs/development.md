@@ -212,7 +212,11 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   state as its own. The leader leads on the real relay store: a test reads the queue with
   `stack.queue()` and puts a task where a previous term left it with `stack.seedTask`
   (written from the leader's own socket, so no `store-changed` — `restartDaemon` after it
-  makes the next term take it over). `startSecondDaemon({ env })` passes extra environment to the second daemon (its claude
+  makes the next term take it over). A test waits for the suite's daemon to lead with
+  `stack.waitForLead`, never a bare poll on `leader.term()`: the stack's relay keeps its
+  console lines (`captureLogs`) rather than printing them, and that wait's timeout prints the
+  daemon socket's state and the relay's last lines, the only record of why a register went
+  unanswered. `startSecondDaemon({ env })` passes extra environment to the second daemon (its claude
   stub, and `SEANCE_E2E_SPAWN_WAIT_MS`, its spawn registration budget), and `beforeBoot` runs
   with its state dir before it boots (a pre-seeded launch ledger, say), so a test can hold a
   spawn mid-flight and still have the ledger prove what the next term needs.

@@ -77,7 +77,7 @@ beforeAll(async () => {
     createdAt: Date.now(),
   });
   await stack.restartDaemon();
-  await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+  await stack.waitForLead("the suite's daemon to lead");
   await stack.daemon.leader.settled();
   second = await bootBox();
   app = startApp(stack);

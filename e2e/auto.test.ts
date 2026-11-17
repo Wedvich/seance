@@ -99,7 +99,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let window: string | null = null;
     let taskId: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       // Both machines decrypted with a live status, and the leader verified.
       const ready = (state: AppState): boolean =>
@@ -195,7 +195,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let window: string | null = null;
     let taskId: string | undefined;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
 
       const spawned = await call("spawn_session", { machine: "auto", repo: "myrepo", prompt: "route me by mcp" });
@@ -278,7 +278,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const audit = spyOn(console, "log");
     let id: string | undefined;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
 
       const spawned = await call("spawn_session", {
@@ -372,7 +372,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const ids: string[] = [];
     const windows: string[] = [];
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -504,7 +504,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       return { text, error: result.isError === true };
     };
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -616,7 +616,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     await client.connect(clientTransport);
     const ids: string[] = [];
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       // The probe runs at boot and its verdict rides the next status: exclave 0, trait 0.
       await app.waitForApp(
@@ -700,7 +700,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const ids: string[] = [];
     const windows: string[] = [];
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -766,7 +766,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let id: string | undefined;
     let window: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -832,7 +832,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let window: string | null = null;
     let taskId: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
       await app.store.spawn();
@@ -864,7 +864,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let window: string | null = null;
     let taskId: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -924,7 +924,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let taskId: string | null = null;
     let closed = false;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -986,7 +986,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const app = startApp(stack, { prompt: "wait for me" });
     let taskId: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) =>
@@ -1071,7 +1071,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         assignment: { deviceId: b, exclave: "default", clone: "myrepo", window, pane },
       });
       await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.waitForLead("the suite's daemon to lead again");
       await stack.daemon.leader.settled();
       // Takeover asked B and found the session, so the task is still running.
       expect((await stack.queue().get(taskId))?.body?.state).toBe("running");
@@ -1122,7 +1122,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       await stack.restartDaemon();
       down = false;
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.waitForLead("the suite's daemon to lead again");
       await stack.daemon.leader.settled();
       await pollUntil(
         async () => (await stack.queue().get(id))?.body?.state === "running",
@@ -1178,7 +1178,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       await stack.restartDaemon();
       down = false;
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.waitForLead("the suite's daemon to lead again");
       await stack.daemon.leader.settled();
       await pollUntil(
         async () => (await stack.queue().get(taskId))?.body?.state === "running",
@@ -1218,7 +1218,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let id: string | undefined;
     let window: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp(
         (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
@@ -1274,7 +1274,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const app = startApp(stack);
     let window: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const ready = await app.waitForApp(
         (state) =>
@@ -1315,7 +1315,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const audit = spyOn(console, "log");
     let window: string | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const up = await app.waitForApp(
         (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
@@ -1367,7 +1367,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   test("pause and resume show up as holds in the queue", async () => {
     const app = startApp(stack);
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
 

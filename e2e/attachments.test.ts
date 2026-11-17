@@ -33,7 +33,7 @@ async function taskOf(id: string): Promise<Task | null> {
 
 /** The leader verified, advertising attachments, and the machine's repos listed: before that the form refuses files. */
 async function ready(app: AppHandle): Promise<string> {
-  await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+  await stack.waitForLead("the suite's daemon to lead");
   await stack.daemon.leader.settled();
   const state = await app.waitForApp(
     (s) =>

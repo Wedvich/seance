@@ -68,7 +68,7 @@ describe("mcp ↔ relay ↔ daemon", () => {
         "the machine's exclaves in list_machines",
         20_000,
       );
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const spawned = await text("spawn_session", { machine: "TestMac", repo: "myrepo", prompt: "haunt the relay" });
       const id = /^task (\S+): queued/u.exec(spawned)?.[1];
@@ -297,7 +297,7 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       expect(bLog).not.toContain("broker the fleet");
 
       // The current MCP's spawn is a task the broker enqueues, pinned to B: the leader (A) places it there.
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       // B's exclaves were listed above (its pin needs them); one spawn, not a retry that could queue twice.
       const queued = await call("spawn_session", {
