@@ -99,6 +99,13 @@ export function disarmRow(rowId: string, armed: string | null): string | null {
   return armed !== null && own.includes(armed) ? null : armed;
 }
 
+/** A row prints `headline · age`, so a sentence's full stop would sit mid-line; an ellipsis stays. */
+function withoutPeriod(line: Timed): Timed {
+  const last = line.at(-1);
+  if (typeof last !== "string" || !last.endsWith(".") || last.endsWith("..")) return line;
+  return [...line.slice(0, -1), last.slice(0, -1)].filter((part) => part !== "");
+}
+
 export interface QueueRow {
   readonly id: string;
   readonly title: string;
@@ -536,7 +543,7 @@ function rowOf(
   return {
     id: task.id,
     title: taskTitle(task),
-    headline: taskHeadline(task, state.relay.machines, now),
+    headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
     body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
     age: seen(task.createdAt, now),
@@ -726,7 +733,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .map((task) => ({
       id: task.id,
       title: taskTitle(task),
-      headline: plain(taskHeadline(task, state.relay.machines, now)),
+      headline: plain(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
       when: held.get(task.id) ?? null,
     }));
   const shown = new Set(listed.map((option) => option.id));

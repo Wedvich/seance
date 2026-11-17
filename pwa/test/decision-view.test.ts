@@ -25,7 +25,8 @@ const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
 
 // The sentence is what these tests are about; the instants a line keeps are asserted where a line is compared whole.
-const taskHeadline = (...args: Parameters<typeof timedHeadline>): string => lineText(timedHeadline(...args));
+const taskHeadline = (task: Task, machines: readonly Machine[], now: number, aliases = {}): string =>
+  lineText(timedHeadline(task, machines, aliases, now));
 
 function machine(deviceId: string, name: string, connected = true): Machine {
   return { deviceId, name, platform: "darwin", repos: [], scannedAt: 1, lastSeen: NOW, connected };
@@ -282,6 +283,15 @@ describe("taskHeadline", () => {
     expect(taskHeadline(task({ state: "running", assignment: at }), machines, NOW)).toBe(
       "It's running on Mac · default.",
     );
+  });
+
+  test("names the exclave by its account's alias, else by its id", () => {
+    const exclave = { id: "work", accountId: "org:acct", extraUsageEnabled: null, authOk: true, skills: [] };
+    const named = [{ ...machine("mac", "Mac"), exclaves: [exclave] }];
+    const running = task({ state: "running", assignment: { ...at, exclave: "work" } });
+    expect(taskHeadline(running, named, NOW, { "org:acct": "Secondary" })).toBe("It's running on Mac · Secondary.");
+    expect(taskHeadline(running, named, NOW)).toBe("It's running on Mac · work.");
+    expect(taskHeadline(running, [], NOW, { "org:acct": "Secondary" })).toBe("It's running on mac · work.");
   });
 
   test("a lost task on a machine back says it hasn't answered yet; on one gone from the registry, when it went", () => {
