@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -541,9 +541,14 @@ describe("cadence", () => {
     await Bun.sleep(150);
     expect(await count(log)).toBe(1);
     const file = join(f.exclave.configDir, ".credentials.json");
-    await writeFile(file, creds({ accessToken: "", refreshToken: "" }));
-    await utimes(file, new Date(NOW), new Date(NOW + 1000));
-    await pollUntil(async () => (await count(log)) === 2, "re-read after the file changed");
+    // One atomic change (the new inode moves the marker): a write then a utimes is two changes, and a
+    // check landing between them rightly reads each, overshooting an exact-count poll.
+    await writeFile(`${file}.tmp`, creds({ accessToken: "", refreshToken: "" }));
+    await rename(`${file}.tmp`, file);
+    await pollUntil(async () => (await count(log)) >= 2, "re-read after the file changed");
+    // Negative assertion: a non-event cannot be polled.
+    await Bun.sleep(150);
+    expect(await count(log)).toBe(2);
     await h.stop();
   });
 
