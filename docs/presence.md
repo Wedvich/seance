@@ -3,8 +3,8 @@
 **Status: draft 2026-11-17, nothing built. The owner decided O1 and O2 (below) on 2026-11-17; the rest is proposed.** Three features borrowed from huddle
 (`pengefix/huddle`, `origin/main`): a one-line `self.doing` tag a session declares about itself (§1), status questions
 answered from presence without waking anyone (§2), and coalesced wakes (§3). Each stands on its own and lands on its
-own; each also feeds the adapter seam (docs/messaging.md §6, as revised in draft PR #486), which none of them depends
-on. Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as
+own; each also feeds the adapter seam (docs/messaging.md §6, #486), which none of them depends on. It builds on
+docs/tags.md (#533), whose "What changes in #526" this file has taken (2026-11-17). Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as
 it is built, and its text here goes.
 
 **Decided by the owner (2026-11-17):**
@@ -12,17 +12,17 @@ it is built, and its text here goes.
 - **O1. The custodian's `sessions` verb carries `doing`** (§1, D1.6), as its own PR (PR 4).
 - **O2. The standing instruction tells sessions to keep `doing` current** (§1, D1.7), in PR 1.
 - **O3. `doing` is the first tag of the session-tags model, `self.doing`, not a standalone field** (§1, D1.0),
-  relayed 2026-11-17 by the session that queued this spec. The tags model's own spec is separate and not this file's.
+  recorded as T1 in docs/tags.md (#533). The tags model is that file's, not this one's.
 
-**Depends on, for the general model only: the session-tags spec** (not yet written). It will define tags, their
-writer namespaces and access rules, and the `self.*` setter in general. `self.doing` here is buildable without it:
-PR 1 builds the one key with the caps that spec will use, and its wire shapes are the tags model's from the start, so
-nothing is renamed when the general model lands.
+**Depends on, for the general model only: docs/tags.md.** It defines tags, their writer namespaces and scopes, session
+identity and the `self.*` setter in general. `self.doing` here is buildable before its PR 1: this file's PR 1 builds
+the one key with that spec's caps and wire shapes, so nothing is renamed when the general model lands, and either PR 1
+may land first (docs/tags.md, "Build order").
 
 **Why a file of its own, not a docs/messaging.md section.** `doing` is not messaging: it is a session event that
 three readers (the PWA, the custodian, the status answer) consume, and it would sit awkwardly in a file about delivery.
-§2 and §3 are messaging, but docs/messaging.md's open edit is #486's §6, and a second branch rewriting the same file
-would make one of the two rebase prose. When §2 and §3 land, their record goes to DESIGN.md, "Session messages", as
+§2 and §3 are messaging, but they were drafted beside #486's rewrite of docs/messaging.md §6, and one file per draft
+kept the two from rebasing each other's prose. When §2 and §3 land, their record goes to DESIGN.md, "Session messages", as
 PR 1's and PR 2's did, so the split costs nothing later.
 
 ## What huddle does (read from `origin/main`)
@@ -52,32 +52,36 @@ What Séance has today, and the gap each section closes:
 
 ### Decisions
 
-**D1.0 `doing` is the tag `self.doing` (O3).** The session-tags model, as decided and to be specified separately:
-tags are key/value pairs namespaced by writer, and **the namespace is the access rule**:
+**D1.0 `doing` is the tag `self.doing` (O3).** The session-tags model is docs/tags.md (§2.1 there is the record); in
+brief, tags are key/value pairs namespaced by writer, and **the namespace is the access rule**:
 
-| Namespace          | Written by                         | Notes                                                                   |
-| ------------------ | ---------------------------------- | ----------------------------------------------------------------------- |
-| `agent.*`          | the agent's own mod and hooks only | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`) |
-| `seance.*`         | the daemon only                    |                                                                         |
-| `self.*`           | the session itself, through MCP    | display-only, never keyed on, bound by peer pid                         |
-| `adapter.<name>.*` | that adapter only, over its stdin  | docs/messaging.md §6 (#486)                                             |
-| `owner.*`          | the PWA, sealed `from: "app"`      |                                                                         |
+| Namespace          | Written by                         | Scope                  | Notes                                                                   |
+| ------------------ | ---------------------------------- | ---------------------- | ----------------------------------------------------------------------- |
+| `agent.*`          | the agent's own mod and hooks only | process, conversation  | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`) |
+| `seance.*`         | the daemon only                    | session                |                                                                         |
+| `self.*`           | the session itself, through MCP    | process                | display-only, never keyed on, bound by peer pid                         |
+| `adapter.<name>.*` | that adapter only, over its stdin  | conversation           | docs/messaging.md §6                                                    |
+| `owner.*`          | the PWA, sealed `from: "app"`      | task, or conversation  | on the task record for a tasked session (docs/tags.md §5)               |
+| `creator.*`        | whoever enqueued the task          | task                   | proposed (docs/tags.md open question 7): `linear` becomes `creator.ref` |
+| `scheduler.*`      | the leader                         | task                   | proposed, same question                                                 |
 
 No tag ever binds, routes or authorizes anything. Display precedence for a session's name is owner label > task
-title > `self.name` > window, the source marked. Tags live in daemon memory per pane, at most ~16 keys a pane, short
-keys, values at most 256 bytes under the printable-text rule, never logged or audited as text, never in a task
-record or `MachineStatus`.
+title > `self.name` > window, the source marked, on the owner's surfaces only (docs/tags.md §6.1). Session tags live
+in daemon memory, short keys, values at most 256 bytes under the printable-text rule, never logged or audited as text,
+never in `MachineStatus`; task tags live in the task record (docs/tags.md §5), and no session tag ever does.
 
 This spec builds one key of it, `self.doing`, and shapes everything so the rest is additive:
 
 - **The setter is general in shape, narrow in what it accepts.** `set_self_tag { key, value }` (D1.1). PR 1 accepts
-  only `key: "doing"` and refuses any other key `unknown_key`; the tags spec widens the accepted set, not the tool.
+  only `key: "doing"` and refuses any other key `unknown_key`; docs/tags.md widens the accepted set to `doing` and
+  `name` (its open question 1), not the tool.
 - **The caps are the tags model's.** Values at most `TAG_VALUE_MAX` (256 UTF-8 bytes) after the printable-text rule;
-  keys `[a-z][a-z0-9-]{0,31}`; `TAGS_PER_PANE_MAX` (16) across all namespaces, of which `self.doing` is today the only
-  one (D1.2).
-- **Every wire shape carries a `tags` map keyed by the full namespaced key**, `{ "self.doing": { value, at } }`, never
-  a `doing` field: `SessionEntry.tags`, the custodian's `CustodianPaneView.tags`, `Presence.tags`, and later the
-  adapter `Session` record. Every parser keeps only the keys it knows (`self.doing` in PR 1) and drops the rest, so a
+  keys `[a-z][a-z0-9-]{0,31}`; `TAGS_PER_WRITER_MAX` (4) per namespace and `TAGS_PER_PANE_MAX` (16) over a session's
+  non-adapter tags (docs/tags.md §2.1), of which `self.doing` is today the only one (D1.2).
+- **Every wire shape carries a `tags` map keyed by the full namespaced key**, `{ "self.doing": { value, at, scope:
+  "process" } }` (docs/tags.md §6.1's entry shape, so PR 1 already emits `scope`), never a `doing` field:
+  `SessionEntry.tags`, the custodian's `CustodianPaneView.tags`, `Presence.tags`, and the adapter `Session` record
+  (docs/messaging.md §6.1). Every parser keeps only the keys it knows (`self.doing` in PR 1) and drops the rest, so a
   daemon that knows more keys never pushes them through an older reader.
 - **`self.doing` is a line, not a name.** It never enters the name precedence above; the PWA shows it under the
   session's name, never in its place.
@@ -89,7 +93,7 @@ pane?}`), the shape `handoff` and `pass` already take, over the local socket. A 
 `state`, `handoff`, `pass`, `prUrl` or `done`; one that does is refused `invalid`. The key is the bare `self.*` suffix:
 the namespace is never on the frame, since the frame's path (an MCP call from the session, bound by peer pid) is what
 makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carrying `self` unsent, as it drops `done`,
-`handoff` and `pass`: the mod's hooks never write `self.*` (they will write `agent.*`, under the tags spec).
+`handoff` and `pass`: the mod's hooks never write `self.*` (they will write `agent.*`, docs/tags.md §3.1).
 
 - **Bound by the kernel-reported peer pid only, never by a field**: the peer is the `seance mcp` process, whose
   ancestor chain names the pane. Unlike a state report, the frame's `pane` never decides: on a host that names no peer
@@ -99,22 +103,28 @@ makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carry
 - **Only a pane séance started (`ours`), tasked or not.** That is the set `pane-activity.ts` already retains
   (`observe` skips any other pane, `session-events.ts`'s `BoundPane.ours`). A hand-started session in a pane of its own
   is refused `untracked`: retaining state for panes séance did not start would widen what CLAUDE.md lets the daemon
-  keep, for a line only the Machines list would show. Widening it later is the same kind of change as any retention.
-- **Bound to the pane's process.** In an `ours` pane `claude` is the pane process itself, so the stored `pid` is the
-  pane's; a `claude` restart is a respawned pane with a new pid (D1.4). No `Bound.session` walk is needed.
+  keep, for a line only the Machines list would show. docs/tags.md §3.3 recommends lifting this to "any pane whose
+  peer resolves to a `claude` process" (`Bound.session` non-null), not decided yet. If the owner decides it before
+  PR 1 is built, PR 1 takes it: the `untracked` refusal and its test go, and the wording in this section's Threat
+  model changes as docs/tags.md's Threat model says. If not, PR 1 ships `ours` only and docs/tags.md's PR 1 lifts it.
+- **Bound to the `claude` process, keyed on `Bound.session`** (`<pid>:<start time>`, "Replies by handle";
+  docs/tags.md §3.2). In an `ours` pane `claude` is the pane process itself, so the key and the pane pid agree and a
+  `claude` restart is a respawned pane (D1.4). Keying on `Bound.session` from PR 1 costs one walk the message path
+  already makes and is what keeps a restarted `claude` under a surviving shell from inheriting the last one's line,
+  once hand-started panes are in.
 
 **D1.2 The value is scrubbed, capped and display-only.**
 
-- **Scrub** at ingest, by the printable-text rule, built here as `displayLine(raw, maxBytes)` in
-  `shared/src/messages.ts` (the tags spec may move or rename it; the rule is the one it adopts): whitespace runs fold to one
+- **Scrub** at ingest, by the printable-text rule, `displayLine(raw, maxBytes)` in `shared/src/tags.ts` (docs/tags.md
+  §2.1's home; whichever PR 1 lands first creates the file, with the key grammar and caps beside it): whitespace runs fold to one
   space; C0, DEL and C1 controls, format characters (`\p{Cf}`, which covers the bidi overrides and zero-widths),
   line and paragraph separators, lone surrogates, the backtick and the double quote are dropped; the result is
   trimmed. `displayTitle` stays as it is (`displayLine` is the stricter sibling: a window title reaches a wrapper,
   a `doing` reaches the PWA, a round and another session).
 - **Cap** `TAG_VALUE_MAX` = 256 UTF-8 bytes after the scrub, cut on a code point boundary. Over it is cut, not
   refused: a session that wrote a long line still meant to say something. Empty after the scrub clears. Keys are held
-  to `[a-z][a-z0-9-]{0,31}` and, in PR 1, to `doing` alone; `TAGS_PER_PANE_MAX` (16) is defined now and enforced when
-  a second key exists.
+  to `[a-z][a-z0-9-]{0,31}` and, in PR 1, to `doing` alone; `TAGS_PER_WRITER_MAX` and `TAGS_PER_PANE_MAX` are
+  defined now and enforced when a second key exists.
 - **Display-only.** It binds, routes, moves, settles and alerts nothing: no scheduler decision, no drain timing, no
   custodian act, no notification reads it. It is never logged, never audited as text, never in argv, `progress`,
   `MachineStatus`, a store record, a push or the archive.
@@ -123,15 +133,15 @@ makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carry
 
 **D1.3 Kept in the daemon's memory only, beside the pane's state.** `PaneActivity` (`daemon/src/pane-activity.ts`)
 gains `reason` (the last `needs-input` reason, which the tracker does not keep today; §2 needs it) and
-`tags: Map<string, { value, at }>` (full keys; `self.doing` alone in PR 1), with the `pid` and `taskId` the
-entry was bound under. Today that tracker runs only while a custodian seat does; §1 and §2 need
+`tags: Map<string, { value, at }>` (full keys; `self.doing` alone in PR 1), with the `Bound.session` and `taskId`
+the entry was bound under (D1.1). Today that tracker runs only while a custodian seat does; §1 and §2 need
 the state half always, so **state, `reason` and `doing` retention run unconditionally for every `ours` pane**, and the
 screen sampler stays the custodian's alone. Retention, not an act, as now.
 
 - **Pruning without the sampler.** Today entries are dropped only by the sampler's pass. Without a seat, the
   tracker prunes on every pane listing the daemon already makes for another reason (each session-event bind, each
-  `sessions` op, each message delivery): an entry whose pane is absent, whose pane pid differs from the stored `pid`,
-  or whose `@seance-task` differs from the stored `taskId` is dropped. A machine with no session activity and no
+  `sessions` op, each message delivery): an entry whose pane is absent, whose bound `claude` process is gone (the
+  stored `Bound.session` no longer runs, by pid and start time), or whose `@seance-task` differs from the stored `taskId` is dropped. A machine with no session activity and no
   reads keeps a few stale entries until the next listing, which is bounded by the number of panes it ever had.
 - **Not persisted.** A daemon restart forgets every `doing` and every state. A session at rest sends no frame until
   its next turn, so after a restart an idle session reads `state unknown` with no line (§2) until it is next busy.
@@ -143,7 +153,7 @@ screen sampler stays the custodian's alone. Retention, not an act, as now.
 
 - `set_self_tag` for `doing` with `""`;
 - `ended` for the pane, or the pane gone from tmux;
-- a different pane process (the stored `pid` no longer matches: the pane was respawned), or a different task on it
+- the bound `claude` process gone (in an `ours` pane, a respawned pane), or a different task on it
   (`@seance-task` changed), found at the next listing (D1.3);
 - a daemon restart.
 
@@ -158,12 +168,12 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 | `sessions` op (`SessionEntry.tags`)     | yes, to an app only                                               | D1.5a.                                                                                                                                                                                                                   |
 | PWA Machines session list               | yes, with its age                                                 | Rendered as text (Preact escapes), on its own line, prefixed "doing:".                                                                                                                                                   |
 | PWA Queue screen, a running task's card | yes, read from its machine's `sessions` reply, joined on `taskId` | Fetched when the card's details open, not on every queue push. No store field (rejected below).                                                                                                                          |
-| MCP `get_sessions`                      | **no**, projected out by `seance mcp`                             | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper. D1.5a.         |
+| MCP `get_sessions`                      | **no**, projected out by `seance mcp`                             | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper. D1.5a. docs/tags.md §6.3 widens the allowlist by writer and keeps `self.*` out of it for every caller. |
 | MCP `get_queue`                         | **no**                                                            | Same reason, and the queue has no field for it.                                                                                                                                                                          |
 | `MachineStatus`                         | **no**                                                            | 1.5 KiB of ciphertext (`STATUS_MAX_CT_LENGTH`) for the whole machine; a per-session text field would be the first thing `fitStatus` trims, and the 30 s beat would carry it to every app and the leader for no decision. |
 | Custodian `sessions` verb               | yes, from PR 4 (below), labelled                                  | D1.6 (O1).                                                                                                                                                                                                               |
 | Status answer (§2)                      | yes                                                               | The point of §2.                                                                                                                                                                                                         |
-| Adapter `Session` record (#486)         | later, as its `tags` map                                          | The same in-memory value; the adapter protocol adds the map when it is built, under the tags spec. Nothing here waits for it.                                                                                            |
+| Adapter `Session` record                | later, as its `tags` map                                          | docs/messaging.md §6.1 specifies `Session.tags` as this map, joined; built with the adapter seam (its PR 3a). Nothing here waits for it.                                                                                 |
 
 **D1.5a The `sessions` op has three readers, and only the PWA gets `doing`.**
 
@@ -178,7 +188,8 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 - **Budget.** No fitter exists for `sessions` today (only `progress` is trimmed, in `handlers.ts`). PR 1 adds one: when
   the reply's JSON would pass `REPLY_JSON_BUDGET`, every entry's `tags` are dropped (all, not some, so
   the PWA reads "lines omitted" once rather than guessing which ones are missing), and the reply says so with
-  `tagsOmitted: true`.
+  `tagsOmitted: "all"`. The value is docs/tags.md §2.1's tiered one (`"adapter" | "all"`): once adapter tags exist
+  the fitter drops those first, all or nothing per tier; PR 1 has only the second tier.
 
 **D1.6 The custodian's `sessions` verb carries it (O1).** The verb's reply is JSON (`CustodianPaneView`,
 `daemon/src/custodian-frame.ts`); each pane gains `tags: { "self.doing"?: { value, minutes } }` (`minutes` whole
@@ -243,8 +254,9 @@ Wording this changes, in the same PR as the code:
 - CLAUDE.md, same bullet, "Keeping each `ours` pane's last state and `turnEnded` … only while a custodian seat runs":
   state, `reason` and `doing` are kept for every `ours` pane always, pruned at the daemon's pane listings; the screen
   sampler stays the seat's.
-- The session-tags spec, when written, takes over this wording for every namespace; until then it names `self.doing`
-  alone.
+- docs/tags.md's Threat model takes over this wording for every namespace when its PR 1 lands (widening `self` to the
+  keys it accepts and, if decided, the retention line from `ours` to a bound `claude` process); until then it names
+  `self.doing` alone.
 - DESIGN.md, "Session events": the frame shape, the `self` bullet, "Per-pane retention"; MCP server: `set_self_tag`; the
   `sessions` op's `SessionEntry`; "Session messages" (the standing instruction's added sentence); Threat model item 6
   (the session-chosen line and its readers).
@@ -266,6 +278,8 @@ knows.
 
 **D2.1 A new message kind, `status`, never a flag on `question`.** `send_message { to, kind: "status" }`, no text.
 It addresses a task only (`to`), never a reply by handle: a session with no task has no presence anyone asks about.
+`to: "adapter:<name>"` (docs/messaging.md §6.2) is refused `invalid`: an adapter has no presence, and it already
+reads every session's from its own snapshot.
 
 - **Wire shape.** `text` is absent on every frame that carries a `status` (`message`, `session-message`,
   `deliver-message`); `parseMessageFrame` and the two op parsers take `kind: "status"` only without `text`,
@@ -315,7 +329,8 @@ other machine's scrub). A new fixed renderer, `presenceNote(presence, machine)` 
 > not woken. To ask the session itself, send a question.
 
 The `doing` sits inside double quotes `displayLine` keeps out of it, after Séance's own sentence, so it cannot read as
-Séance's words.
+Séance's words. The note names the session by its task's title, never by `self.name` or an owner label: docs/tags.md
+§6.1 keeps the joined name to the owner's own surfaces and an adapter's `Session`.
 
 **D2.4 Local: answered in the `send_message` result.** A `message` frame of kind `status` whose target the sender's
 daemon holds a live pane for is answered synchronously, `{ok: true, id, outcome: "answered", presence}`, and
@@ -446,7 +461,9 @@ limited to questions and `wake` notes, and each request keeps its own submit.
 
 **D3.2 No daemon or wire change.** The daemon cannot see turn boundaries for a session without the session-events
 mod, and batching lines on its side would still reach the mod as lines. The coalescing lives where the turn events
-are.
+are. It covers adapter deliveries for free (docs/messaging.md §6.1): an adapter's question, request or `wake: true`
+note reaches the mod as the same inbox line and is merged like any other, which matters more there, since an
+adapter's own bucket (60 a minute) allows denser bursts than a session's.
 
 **Rejected:**
 
@@ -483,21 +500,22 @@ Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other,
 
 1. **`self.doing`** (§1). `set_self_tag` on `seance mcp` (key `doing` only); the frame's `self` (`session-event-frame.ts`,
    `parseSessionEventFrame`), dropped unsent by `seance session-event`; `displayLine`, `TAG_VALUE_MAX`, the key
-   pattern and `TAGS_PER_PANE_MAX` in shared;
-   retention in `pane-activity.ts` for every bound pane; `SessionEntry.tags` on the `sessions` op, stripped
+   pattern and the caps in `shared/src/tags.ts` (created here unless docs/tags.md's PR 1 landed first);
+   retention in `pane-activity.ts` for every `ours` pane, keyed on `Bound.session`; `SessionEntry.tags` on the `sessions` op, stripped
    by `get_sessions`; the PWA's Machines session list and the Queue card's details; the standing instruction's sentence
    (D1.7). DESIGN.md and CLAUDE.md wording as in §1.
    - Tested by: `shared` unit tests for `displayLine` (bidi overrides, zero-widths, separators, quotes, the cap on a
      code point, empty-after-scrub); daemon tests on the local socket with a real peer (`ClaudeStub.runInPane`):
      bound by peer pid, refused `unbound` on a null pid and on a host that names no peer (even with a `pane`),
-     refused `untracked` for a hand-started (not `ours`) pane, refused alongside `state`, cleared by `""`, by `ended`,
+     refused `untracked` for a hand-started (not `ours`) pane (unless docs/tags.md §3.3 is decided first), refused alongside `state`, cleared by `""`, by `ended`,
      by a respawned pane and by a task change found at the next listing with no custodian seat running (the pruning
      path), kept across a turn end, rate-limited, any key but `doing` refused `unknown_key`, a value cut at 256
      bytes on a code point boundary; every `tags` parser (`SessionEntry`, `Presence`) dropping an unknown key and keeping
      the record; `reason` retained beside `needs-input`; `seance session-event` drops a
      `doing` (the CLI test); the `sessions` op carries it to an app and not to a scheduler-sealed request; `get_sessions`
      prints only the allowlisted fields (a test that adds an unknown field to an entry and sees it absent); the new
-     fitter drops every `doing` and sets `tagsOmitted` past `REPLY_JSON_BUDGET`;
+     fitter drops every entry's `tags` and sets `tagsOmitted: "all"` past `REPLY_JSON_BUDGET`; every entry carrying
+     `scope: "process"`;
      a PWA view test for the line and its age; the layering test that nothing in the path logs the text; and the
      existing `STANDING_INSTRUCTION` test still holding (it names `set_self_tag` and never `--remote-control`).
 2. **Status answers** (§2). Kind `status`, `Presence`/`parsePresence`, `presenceNote`, outcome `answered`, the local
