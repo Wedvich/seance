@@ -439,7 +439,9 @@ describe("layers and history", () => {
 
     // A retry with nothing to put ends without a verdict: the held entry is given back.
     store.retrySpawn({ kind: "unqueued", message: failed.message, mayHaveLanded: false });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
     store.openMachines();
     store.showPrompt();
     fake.settle(store);
