@@ -11922,6 +11922,144 @@ an id the daemon verified from its own sources ("Session events", "Session ident
 message id, and the one use a verified id gets is docs/tags.md §8's, not yet built); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
+### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`) — 3a built 2026-11-18, docs/messaging.md §6
+
+An adapter is a program the machine's owner names in that machine's `config.json`, run by the daemon as a supervised
+child that speaks newline-delimited JSON on its stdin and stdout. It is the seam through which a tool (a chat, a hosted
+workspace, a notifier) sees this machine's sessions and, from 3b, talks to them. Séance never names a tool: an adapter
+for one lives in its own repository and vendors the protocol's JSON Schema. 3a is the child and state out: the
+supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Delivery in and messages out (3b) and
+`seance adapter add|remove|restart|status` (3c) are docs/messaging.md's still.
+
+- **Declared only in `config.json`** (`adapters`, `parseAdapters` in `daemon/src/config.ts`), at most `ADAPTERS_MAX`
+  (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?}` and nothing else, parsed
+  strictly, as `traits` are: any mistake fails the load, naming `adapters.<name>.<key>`. `argv` is an array of at most
+  32 non-empty, NUL-free words, never a shell string; `argv[0]` is an absolute path or a bare name resolved through
+  `PATH` at each start (`Bun.which`), never a relative path with a slash and never a recorded `process.execPath`.
+  `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds 3b's deliveries in and is parsed now so a
+  config written for 3b loads. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that 3c's `doctor`
+  will read. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the relay, and no
+  capability advertises them.
+- **The protocol** (`shared/src/adapter-protocol.ts`, the schema of record, as `types.ts` is for the wire). One UTF-8
+  frame per line, at most `ADAPTER_LINE_MAX` (256 KiB). `shared/src/adapter-protocol.schema.json` is generated from it
+  (`bun run adapter-schema`, then formatted) and committed beside it; `adapter-protocol.test.ts` holds the two equal.
+  The adapter's lines go through `parseAdapterLine` into a fresh value, exact fields only. A line that does not parse
+  is answered `{kind: "error", code: "invalid"}`, and `deliver` and `tag` (protocol 1's, taken from 3b) are answered
+  `unsupported`.
+- **The handshake and versioning.** The daemon writes `hello` first: `{protocol: ADAPTER_PROTOCOLS, features:
+  ADAPTER_FEATURES (none yet), machine: {deviceId, name}, daemon: {version}}`. The adapter answers `{protocol, name,
+  version, wants, features}` within 10 s, or it is restarted (`reason=handshake`). Nothing else flows before both. A
+  major outside `ADAPTER_PROTOCOLS` is audited `op=refused reason=protocol`, and a `name` other than its config key
+  `op=refused reason=name`; either is stopped and never restarted (until the next daemon start). A frame kind goes out
+  only for what `wants` names (`adapterWants`): `sessions` for `snapshot`, `session` and `session-gone`, `tasks` for
+  `task`; `messages` is accepted and means nothing until 3b. Additions inside a major are `features`, as
+  `CAPABILITIES` are on the wire.
+- **The supervisor** (`createAdapterSupervisor`), one per adapter:
+  - **Env.** The one a session gets (`childEnv`, so no `CREDENTIALS_DIRECTORY`) less every `TMUX*` variable, plus
+    `SEANCE_ADAPTER_NAME` and `SEANCE_ADAPTER_DIR`. That is `stateDir()/adapters/<name>`, made 0700 before each start,
+    and also the child's cwd. The adapter's own state lives there; the daemon reads and writes nothing in it.
+  - **Process.** Started `detached`, so it leads its own process group. stdin and stdout are piped, stderr is
+    discarded: an adapter keeps its own log, and nothing it prints reaches the daemon's log or an audit line.
+  - **Restarts.** Each exit is followed by a restart with backoff, 1 s doubling to 60 s. A run of 60 s resets the
+    backoff. Five exits within ten minutes put the adapter in the `failed` hold until the next daemon start
+    (`op=failed exits=<n>`); 3c's `seance adapter restart` will lift it.
+  - **Malformed lines.** Ten `invalid` lines within a minute restart the adapter (`reason=invalid`).
+  - **The unread cap.** The daemon's writes to stdin are queued, and the bytes the adapter has not drained are counted.
+    Past `ADAPTER_UNREAD_MAX` (2 MiB) the adapter has stopped reading and is restarted (`reason=unread`), never
+    buffered for. Every start begins with a fresh `snapshot`, so nothing is resent from memory.
+  - **Stop with the daemon.** stdin is closed, then SIGTERM goes to the group, then SIGKILL after 5 s
+    (`op=stop`, then `op=exit reason=stopped`). `run.ts` awaits it (`adaptersSettled`).
+  - **Held while draining.** An adapter starts after the local socket is up and the feed has had its first read
+    (`afterLocal`). While the daemon drains for a restart, an adapter is held (state `held`), never started, and it
+    starts when the drain's gate reopens.
+- **The feed** (`createAdapterFeed`), one per daemon, shared by every adapter. A session is a live pane whose process
+  tree holds a `claude`: the process the conversation table bound, or else the shallowest `claude`-named process under
+  the pane's process (`ps`, at most four levels; a name is a hint, as in "Replies by handle", and here it decides only
+  what is reported, never what is bound or reached). Its `key` is that process's `<pid>:<start time>`, the
+  `Bound.session` key. The record (`AdapterSession`) carries:
+  - **`session`** from the conversation table only: `{id, verified, conflict?}`; a refuted claim is never sent.
+  - **`task`** from the pane's tag.
+  - **`exclave`** by name, never an account id (`exclaveOf`).
+  - **`repo`** as the scan set names it (`repoNames`, the mapping `sessions` uses), and **`branch`** read by the
+    hardened git (`symbolic-ref`, memoised 30 s).
+  - **State.** `state`, `turnEnded` and `reason` (beside `needs-input` only) from the table, which keeps them in
+    memory only, so after a daemon restart every session reads `unknown` until it reports. `since` is the time of the
+    state, or the time the feed first saw the process.
+  - **`prUrl`** from the launch ledger (`EndedTasks.prUrl`).
+  - **`name`** from `displayName` (tags, then the window), with its `source`.
+  - **`tags`**: the joined map as `sessions` gives it, less other adapters' `adapter.*` keys (`tagsFor`, per
+    adapter).
+
+  Not sent yet: `task.title` and `task.ref` (the dispatched record is the leader's; the daemon's ledger notes
+  neither) and `task`'s `continues`.
+
+- **Triggers and diffs.** The feed refreshes every 5 s, 50 ms after any conversation-table change (a report, a sweep,
+  a verification), and on task events. Each refresh is diffed against the last: a changed record goes out as one
+  `session` frame, the whole record, never a patch. A `/clear` or `/resume` is one `session` with the new
+  `session.id`, since the process is the same. A record that is gone goes out as `session-gone` with its `reason`:
+  - **`closed`**: Séance closed the pane. `despawnSession` notes the pane in a short-lived registry
+    (`daemon/src/closing-panes.ts`, 60 s, 256 entries) before it acts, which covers a despawn, a hand-off's or a pass's
+    close, a custodian `close` and the drain's.
+  - **`exited`**: the process ended on its own, or its `ended` report came in.
+  - **`replaced`**: the same process now carries another task.
+- **`task` frames** come from `EndedTasks` (`onTask`), and only for task ids this machine's launch ledger holds. The
+  events are `launched` when a launch lands, `done` on a recorded `report_task_done`, `handoff` on a taken hand-off,
+  `pass` once a session's own pass has gone to the leader, and `ended` once per launch, from an `ended` report or the
+  harvest note. `prUrl` rides on each when the ledger holds one.
+- **`repos` filters state out already** (`adapter-host.ts`). With `repos` set, a session whose `repo` is not listed,
+  or is absent, is in no `snapshot`, `session` or `session-gone` for that adapter, and a task whose ledger `repo` is not
+  listed is in no `task` frame. A session that leaves the list goes out as `session-gone` with `reason: "replaced"` to an
+  adapter told of it, since what that adapter holds no longer describes anything it may see.
+- **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
+  account id, an absolute path, the PSK or anything derived from it.
+- **Audit**, origin `adapter` (`adapterAudit`), lifecycle lines only:
+
+  ```
+  audit adapter origin=adapter op=start name=<n> argv=<word count> argv0="<basename>" pid=<pid>
+  audit adapter origin=adapter op=exit name=<n> code=<exit code | signal name | -> reason=<exited|stopped|invalid|unread|handshake|spawn|protocol|name>
+  audit adapter origin=adapter op=restart name=<n> delay=<ms>ms
+  audit adapter origin=adapter op=refused name=<n> reason=<protocol|name>
+  audit adapter origin=adapter op=failed name=<n> exits=<n>
+  audit adapter origin=adapter op=stop name=<n>
+  ```
+
+  Never an argv word but `argv[0]`'s basename, and nothing the adapter wrote. The adapter modules load neither
+  `log.ts` nor `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what
+  the supervisor's own constants pass to `AdapterAudit`. 3b adds `op=deliver` and `op=message`.
+
+- **Trust.** An adapter runs as the owner's uid, so Séance cannot contain it (docs/messaging.md §6.3). These rules
+  bound what Séance grants and audits, not what the program can do. They are not a sandbox, and the threat model does
+  not count them as one.
+- **The reference adapter** (`daemon/test/bin/reference-adapter.ts`) is the tests' stub, linked and exec'd once in
+  `beforeAll`, and the template a new adapter starts from. It is standalone and imports nothing from Séance.
+- **Tested by** `daemon/test/adapter-supervisor.test.ts`, which covers:
+  - the handshake, its ordering and `wants`, and a `resync`;
+  - each refusal, and the handshake timeout;
+  - a malformed line, and the restart after ten;
+  - the unread cap, the backoff, and the `failed` hold;
+  - a spawn failure, and the stop by group with SIGKILL;
+  - the hold while draining, and the env and 0700 dir.
+
+  `daemon/test/adapters.test.ts` uses real `session-event` frames on a private tmux and covers:
+  - a hand-started session;
+  - state, and a `/clear` as one record;
+  - each `session-gone` `reason`;
+  - `unknown` after a restart;
+  - `task` events;
+  - the host's snapshot and its `repos` filter;
+  - `tagsFor`.
+
+  The parsers and the schema are tested in `shared/src/adapter-protocol.test.ts` and `daemon/src/config.test.ts`, and
+  the audit lines in `daemon/src/audit.test.ts`.
+
+- **Rejected** (docs/messaging.md §6.7 has the rest):
+  - **Sending only titled (tasked) panes.** A hand-started session is the common case for a tool that mirrors a
+    machine.
+  - **Reading `closed` from the despawn's audit line.** That is a log, not a signal, and the custodian's and the
+    drain's closes go through the same `despawnSession` anyway.
+  - **Holding `repos` until 3b.** Leaving it for 3b would make a config written for 3b disclose the out-of-scope
+    sessions it means to hide, for as long as 3a runs.
+
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
 On a credential-delivered box `seance mcp` can read no PSK, so on its own it

@@ -77,6 +77,7 @@ interface ProcessEntry {
   /** Bound through the frame's `pane`, on a host that names no peer: never verified, never counted. */
   readonly fallback: boolean;
   taskId: string | null;
+  readonly seenAt: number;
   reportedAt: number;
   state: TrackedState | null;
   stateAt: number | null;
@@ -91,8 +92,14 @@ interface ProcessEntry {
 export interface ProcessView {
   readonly pane: string;
   readonly pid: number;
+  /** The process, `<pid>:<start time>` (`Bound.session`). */
+  readonly key: SessionKey;
   readonly taskId: string | null;
   readonly state: TrackedState | null;
+  /** Beside `idle`: the idle a turn's own end raised. */
+  readonly turnEnded: boolean;
+  /** When the state began, else when this table first held the process. */
+  readonly since: number;
   readonly reason: NeedsInputReason | null;
   readonly remote: string | null;
   readonly kind: AgentKind | null;
@@ -144,6 +151,13 @@ export interface Conversations {
    * `ended` when none is live.
    */
   readonly atAct: (id: string) => Promise<ActCheck>;
+  /**
+   * `listener` hears that a process's facts may have moved (a report taken, a claim verified or refuted): a nudge with
+   * nothing in it, for a reader that re-reads (`adapter-feed.ts`). Returns its unsubscribe.
+   */
+  readonly listen: (listener: () => void) => () => void;
+  /** Whether the process reported `ended` here lately: it is leaving, so no reader should list it as a session again. */
+  readonly ended: (key: SessionKey) => boolean;
   readonly stop: () => void;
 }
 
@@ -155,7 +169,15 @@ export function createConversations(deps: ConversationsDeps): Conversations {
   const retryMs = deps.retryMs ?? RETRY_MS;
   const processes = new Map<SessionKey, ProcessEntry>();
   const conversations = new Map<string, { kind: AgentKind | null; lastLive: number }>();
+  const listeners = new Set<() => void>();
+  /** Processes that reported `ended`, newest last; bounded like the table. */
+  const endedKeys = new Set<SessionKey>();
   let stopped = false;
+
+  const changed = (): void => {
+    if (stopped) return;
+    for (const listener of listeners) listener();
+  };
 
   const alive = (entry: ProcessEntry): boolean => startOf(entry.pid) === entry.start;
 
@@ -210,10 +232,14 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       if (!current(entry, claim)) return;
       if (result !== "mismatch") {
         apply(entry, claim, result);
+        changed();
         return;
       }
     }
-    if (current(entry, claim)) entry.claim = null;
+    if (current(entry, claim)) {
+      entry.claim = null;
+      changed();
+    }
   };
 
   const verify = async (entry: ProcessEntry, claim: Claim): Promise<void> => {
@@ -243,8 +269,11 @@ export function createConversations(deps: ConversationsDeps): Conversations {
   const viewOf = (entry: ProcessEntry): ProcessView => ({
     pane: entry.pane,
     pid: entry.pid,
+    key: entry.key,
     taskId: entry.taskId,
     state: entry.state,
+    turnEnded: entry.state === "idle" && entry.turnEnded,
+    since: entry.stateAt ?? entry.seenAt,
     reason: entry.reason,
     remote: entry.remote?.value ?? null,
     kind: entry.kind?.value ?? null,
@@ -273,6 +302,7 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       pane: pane.id,
       fallback,
       taskId: pane.taskId,
+      seenAt: now(),
       reportedAt: now(),
       state: null,
       stateAt: null,
@@ -286,7 +316,7 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     return fresh;
   };
 
-  const report: Conversations["report"] = async (pane, process, fallback, body) => {
+  const take: Conversations["report"] = async (pane, process, fallback, body) => {
     if (stopped) return;
     let bound: { readonly pid: number; readonly start: string } | null = process;
     if (bound === null) {
@@ -304,6 +334,12 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       // The process is leaving: its tags go with it, and its conversation was last live now.
       touchConversation(entry);
       processes.delete(entry.key);
+      endedKeys.delete(entry.key);
+      endedKeys.add(entry.key);
+      for (const old of endedKeys) {
+        if (endedKeys.size <= CONVERSATIONS_MEMORY_MAX) break;
+        endedKeys.delete(old);
+      }
       return;
     }
     if (body.state !== undefined) {
@@ -332,6 +368,14 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     };
     entry.claim = claim;
     await verify(entry, claim);
+  };
+
+  const report: Conversations["report"] = async (pane, process, fallback, body) => {
+    try {
+      await take(pane, process, fallback, body);
+    } finally {
+      changed();
+    }
   };
 
   /**
@@ -426,9 +470,17 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       } else apply(only, claim, result);
       return { ok: false, code: "unverified" };
     },
+    listen: (listener): (() => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    ended: (key): boolean => endedKeys.has(key),
     stop: (): void => {
       stopped = true;
       processes.clear();
+      listeners.clear();
     },
   };
 }

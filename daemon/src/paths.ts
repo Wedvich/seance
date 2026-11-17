@@ -92,6 +92,11 @@ export function runDir(): string {
   return join(stateDir(), "run");
 }
 
+/** Each adapter's own 0700 directory sits under this (`SEANCE_ADAPTER_DIR`, docs/messaging.md §6.1). */
+export function adaptersDir(): string {
+  return join(stateDir(), "adapters");
+}
+
 /** The custodian seat's own files (docs/custodian.md): the notes, and the default exclave's round dir. */
 export function custodianDir(): string {
   return join(stateDir(), "custodian");

@@ -910,6 +910,49 @@ export type MessageAudit = (line: {
   readonly outcome: MessageOutcome;
 }) => Promise<void>;
 
+/** The daemon running an adapter this machine's `config.json` names (`adapter-host.ts`; docs/messaging.md §6). */
+export type AdapterOrigin = "adapter";
+
+/**
+ * Why an adapter's process went or is held: `exited` on its own, `stopped` with the daemon, `invalid` too many malformed lines, `unread` it stopped
+ * reading its stdin, `handshake` no valid `hello` in time, `spawn` it could not be started; `protocol` it speaks no
+ * major this daemon does, `name` its `hello` named another adapter.
+ */
+export type AdapterReason = "exited" | "stopped" | "invalid" | "unread" | "handshake" | "spawn" | "protocol" | "name";
+
+export interface AdapterAudit {
+  /** A start, with what the argv may say: its word count and `argv[0]`'s basename, never another word. */
+  readonly start: (name: string, argv: readonly string[], pid: number) => Promise<void>;
+  /** The process ended or was ended; `code` its exit code, or the signal's name. */
+  readonly exit: (name: string, code: number | string | null, reason: AdapterReason) => Promise<void>;
+  readonly restart: (name: string, delayMs: number) => Promise<void>;
+  /** Stopped and never restarted: a protocol or name refusal. */
+  readonly refused: (name: string, reason: AdapterReason) => Promise<void>;
+  /** Held after `exits` exits in the window, until the next daemon start. */
+  readonly failed: (name: string, exits: number) => Promise<void>;
+  readonly stop: (name: string) => Promise<void>;
+}
+
+/**
+ * Lifecycle only: the name (held to `ADAPTER_NAME_PATTERN`, so written bare), a code and a reason. Never anything the
+ * adapter printed or sent, nor an argv word but `argv[0]`'s basename.
+ */
+export function adapterAudit(sink: AuditSink): AdapterAudit {
+  const origin: AdapterOrigin = "adapter";
+  const emit = async (op: string, name: string, rest = ""): Promise<void> => {
+    await sink(`audit adapter origin=${origin} op=${op} name=${name}${rest === "" ? "" : ` ${rest}`}`);
+  };
+  return {
+    start: (name, argv, pid) =>
+      emit("start", name, `argv=${argv.length} argv0=${quote(basename(argv[0] ?? ""))} pid=${pid}`),
+    exit: (name, code, reason) => emit("exit", name, `code=${code ?? "-"} reason=${reason}`),
+    restart: (name, delayMs) => emit("restart", name, `delay=${delayMs}ms`),
+    refused: (name, reason) => emit("refused", name, `reason=${reason}`),
+    failed: (name, exits) => emit("failed", name, `exits=${exits}`),
+    stop: (name) => emit("stop", name),
+  };
+}
+
 /** Ids, kind and a byte count, never text, a title, a message id or a pane. */
 export function messageAudit(sink: AuditSink): MessageAudit {
   const origin: MessageOrigin = "message";

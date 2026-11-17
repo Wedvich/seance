@@ -1,7 +1,7 @@
 # Session messaging — spec
 
 **Status: PR 1 (local delivery) built 2026-11-13, PR 2 (cross-machine) and the reply by handle (D3, amended)
-built 2026-11-14; PR 3 (adapter seam) not built; §6 revised 2026-11-14, and again 2026-11-17 to build on docs/tags.md
+built 2026-11-14; PR 3 (adapter seam): 3a (the child and state out) built 2026-11-18, 3b and 3c not built; §6 revised 2026-11-14, and again 2026-11-17 to build on docs/tags.md
 (draft PR #533: session identity, tags, the adapter subscription).** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
 Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
 macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
@@ -11,8 +11,8 @@ and its text here goes. PR 1's and PR 2's record is in DESIGN.md: Local op socke
 (the frames, the daemon's inbox, the outcomes, the wrappers, the audit) and its "Cross-machine"
 subsection (the gate, the leader's resolve, forward and receipt, the size budget, the skew table) and its
 "Replies by handle" subsection (the two tables, the `claude`-process binding, `wake`, `messageReply`),
-Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. What stays
-here is the evidence, PR 3, and the open questions.
+Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. PR 3a's record is DESIGN.md,
+"Adapters". What stays here is the evidence, PR 3's whole design (3b and 3c build on it), and the open questions.
 
 ## Problem
 
@@ -240,8 +240,12 @@ the daemons', with the outcomes of §3 added to the built set.
 
 ### 6. The adapter seam
 
-Revised 2026-11-14 from the owner's brief for PR 3 and the 2026-11-13 memo; nothing here is built. Three PRs,
-§7 item 3.
+Revised 2026-11-14 from the owner's brief for PR 3 and the 2026-11-13 memo. Three PRs, §7 item 3. **3a (the child
+and state out) is built 2026-11-18**, recorded in DESIGN.md, "Adapters": §6.1's handshake, versioning, supervision and
+the state-out frames, `config.json` `adapters`, and the lifecycle audit lines. Deliveries in, messages out, the
+subscription, `kinds` and the `deliver`, `tag`, `result`, `delivery` and `message` frames (3b), and installing (3c),
+are not. 3a sends `Session` without `task.title` and `task.ref`, and `task` without `continues` (the daemon's ledger
+notes none of them), and already applies `repos` to state out.
 
 **What the owner decided (the brief, 2026-11-14).**
 
@@ -590,7 +594,7 @@ Small PRs, each landing on its own:
      phase (a successor still waiting) is covered in `scheduler/` and the leader's unit tests only: a
      successor placed through `succeeds` dispatches at once and ignores `deps`, so the e2e cannot hold one.
 3. **Adapter seam** (§6), in three PRs, each landing on its own:
-   - **3a. The child and state out.** Needs docs/tags.md's PR 1 (the vocabulary, `agent.session` and its
+   - **3a. The child and state out. Built 2026-11-18; the record is DESIGN.md, "Adapters".** Needs docs/tags.md's PR 1 (the vocabulary, `agent.session` and its
      verification). `config.json` `adapters` and its parser, the supervisor (env,
      process group, backoff, `failed`, stop with the daemon, the unread cap), the handshake and versioning,
      `snapshot`, `session` (with `session`, `name` and `tags`), `session-gone` with its `reason`, and `task`, `shared/src/adapter-protocol.ts` and its committed JSON

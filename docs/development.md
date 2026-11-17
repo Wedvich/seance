@@ -19,13 +19,14 @@ its `wss:` one (DESIGN.md, "Attachments").
 
 ## Commands
 
-| Command                | What it does                                       |
-| ---------------------- | -------------------------------------------------- |
-| `bun run test`         | the whole suite, sharded into concurrent processes |
-| `bun run typecheck`    | root `tsc --noEmit` plus each workspace's own      |
-| `bun run lint`         | oxlint (`lint:fix` to apply)                       |
-| `bun run format:check` | oxfmt (`format` to apply)                          |
-| `bun run perf`         | PWA idle/resume cost, opt-in (see below)           |
+| Command                  | What it does                                                          |
+| ------------------------ | --------------------------------------------------------------------- |
+| `bun run test`           | the whole suite, sharded into concurrent processes                    |
+| `bun run typecheck`      | root `tsc --noEmit` plus each workspace's own                         |
+| `bun run lint`           | oxlint (`lint:fix` to apply)                                          |
+| `bun run format:check`   | oxfmt (`format` to apply)                                             |
+| `bun run perf`           | PWA idle/resume cost, opt-in (see below)                              |
+| `bun run adapter-schema` | regenerates `shared/src/adapter-protocol.schema.json` from its record |
 
 The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`help`
 lists the commands). So does the archivist's: `bun archivist/src/main.ts <command>`.
