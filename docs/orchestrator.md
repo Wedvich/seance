@@ -28,7 +28,7 @@ From the memo, in order. These are wants, not decisions on mechanism.
    starts building.
 2. Amend has to grow for this. As work proceeds it creates follow-up issues and more work, which
    must adapt the graph already in the queue, and Séance should support that.
-3. Séance is not tied hard to Linear. As with the companion tool (huddle; docs/messaging.md §6),
+3. Séance is not tied hard to Linear. As with the adapter seam for other tools (docs/messaging.md §6),
    neither codebase knows the other: Séance offers an adapter interface, and a separate adapter
    mediates. Work tracking is the same shape, with a Linear adapter as the first one.
 4. A new role, after Steve Yegge's split: short-lived agents do the implementation and are gone;
@@ -100,7 +100,7 @@ Working name **orchestrator**. Proposed shape, each line a decision to take:
 
 - **Not a task**, as the custodian's round is not: no task id, no queue record, no concurrency
   slot, its own pane option so every reader of panes can tell it apart.
-- **Any number per machine**, started by the owner (PWA, `seanced`, MCP), one per project or per
+- **Any number per machine**, started by the owner (PWA, `seance`, MCP), one per project or per
   standing brief. Not a daemon seat, not a registry role: the relay learns nothing.
 - **Long-lived**, unlike a round. The custodian rejected a standing session for itself (recycle
   rules, a liveness check, context cost between rounds). Those costs are real here too and have to
