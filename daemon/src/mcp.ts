@@ -1555,7 +1555,8 @@ export function buildMcpServer(
         const placement = placementInput(member.pin, member.avoid);
         if ("error" in placement) return errorResult(`queue_batch refused: task ${n}: ${placement.error}`);
         const deferred = member.not_before === undefined ? null : notBeforeInput(member.not_before);
-        if (deferred !== null && "error" in deferred) return errorResult(`queue_batch refused: task ${n}: ${deferred.error}`);
+        if (deferred !== null && "error" in deferred)
+          return errorResult(`queue_batch refused: task ${n}: ${deferred.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
           ...requestFields({

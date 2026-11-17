@@ -155,9 +155,7 @@ describe("amendSpec, notBefore", () => {
     const set = amendSpec(spec(), { taskId: "t", notBefore: 5 });
     expect(set).toEqual(spec({ notBefore: 5 }));
     expect(amendSpec(spec({ notBefore: 5 }), { taskId: "t", notBefore: 9 })).toEqual(spec({ notBefore: 9 }));
-    expect(amendSpec(spec({ notBefore: 5 }), { taskId: "t", title: "x" })).toEqual(
-      spec({ notBefore: 5, title: "x" }),
-    );
+    expect(amendSpec(spec({ notBefore: 5 }), { taskId: "t", title: "x" })).toEqual(spec({ notBefore: 5, title: "x" }));
     const cleared = amendSpec(spec({ notBefore: 5 }), { taskId: "t", notBefore: null });
     expect(cleared).toEqual(spec());
     expect(cleared).not.toHaveProperty("notBefore");

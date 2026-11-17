@@ -245,7 +245,9 @@ describe("parseBrokerRequest on scheduler frames", () => {
       notBefore: 1_900_000_000_000,
     });
     expect(refusedCode(enqueue({ notBefore: -1 }))).toBe("invalid_request");
-    expect(parsedRequest(frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, notBefore: null } }))["amend"]).toEqual({
+    expect(
+      parsedRequest(frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, notBefore: null } }))["amend"],
+    ).toEqual({
       taskId: TASK_ID,
       notBefore: null,
     });

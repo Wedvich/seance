@@ -13,7 +13,8 @@ export function isNotBefore(value: unknown): value is number {
 
 const DURATION_PATTERN = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$/u;
 const CLOCK_PATTERN = /^([01]?\d|2[0-3]):([0-5]\d)$/u;
-const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/u;
+const DATE_TIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/u;
 
 const MS = { d: 86_400_000, h: 3_600_000, m: 60_000 } as const;
 

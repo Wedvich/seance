@@ -266,10 +266,14 @@ describe("enqueue audit lines", () => {
   });
 
   test("the leader's amend line names notBefore as a field, never the time", async () => {
-    await queueAudit(collect).amended("req-1", { id: "t-1", spec: {} }, {
-      taskId: "t-1",
-      notBefore: 1_900_123_456_789,
-    });
+    await queueAudit(collect).amended(
+      "req-1",
+      { id: "t-1", spec: {} },
+      {
+        taskId: "t-1",
+        notBefore: 1_900_123_456_789,
+      },
+    );
     expect(collected).toEqual(['audit queue origin=relay op=amend id="req-1" task="t-1" fields=notBefore ok']);
     expect(emitted()).not.toContain("1900123456789");
   });
