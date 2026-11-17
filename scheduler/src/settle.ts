@@ -3,6 +3,7 @@ import {
   REPLAY_WINDOW_MS,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  type IdleNote,
   type NeedsInputReason,
   type SessionEvent,
   type SessionState,
@@ -39,7 +40,8 @@ type SessionsAnswer = Extract<TaskSessionsReply, { readonly ok: true }>;
  * where the event moves the task — and its claim of why it waits (`reason`,
  * with the `tool` of a permission prompt): read by `questionAlert` and written
  * onto the record as display-only wording, only where the event is the task's
- * own machine's.
+ * own machine's. Beside an `idle`, its `note` (what the turn end left running,
+ * or the error that ended it): held beside the idle clock, never on the record.
  */
 export interface SessionSource {
   readonly deviceId: string;
@@ -47,17 +49,23 @@ export interface SessionSource {
   readonly remoteSession?: string;
   readonly reason?: NeedsInputReason;
   readonly tool?: string;
+  readonly note?: IdleNote;
 }
 
 /** `event`'s source as sealed by `deviceId`. */
 export function sourceOf(deviceId: string, event: SessionEvent): SessionSource {
-  const { session: pane, remoteSession, reason, tool } = event;
+  const { session: pane, remoteSession, reason, tool, background, stopError } = event;
+  const note: IdleNote = {
+    ...(background === undefined ? {} : { background }),
+    ...(stopError === undefined ? {} : { stopError }),
+  };
   return {
     deviceId,
     pane,
     ...(remoteSession === undefined ? {} : { remoteSession }),
     ...(reason === undefined ? {} : { reason }),
     ...(tool === undefined ? {} : { tool }),
+    ...(Object.keys(note).length === 0 ? {} : { note }),
   };
 }
 

@@ -17,6 +17,7 @@ import {
   type BranchState,
   type CustodianEvent,
   type FleetQuotaEntry,
+  type IdleNote,
   type IdleRelease,
   type DrainRefusal,
   type IdleTaskRef,
@@ -381,7 +382,7 @@ export class Scheduler {
    * seeds this from, so a release outlives the term; a clock still inside its
    * grace is memory only, and a new leader counts that task until its next `idle`.
    */
-  readonly #idleSince = new Map<string, IdleRelease>();
+  readonly #idleSince = new Map<string, IdleRelease & { readonly note?: IdleNote }>();
   /** Task id → the stamp write the store last refused outright, and when: `#stampIdle` holds off repeating it. */
   readonly #stampRefused = new Map<string, { readonly key: string; readonly at: number }>();
   /** The idle releases last told to the host (`onIdleChange`): what `#syncIdle` diffs against. */
@@ -847,7 +848,8 @@ export class Scheduler {
     return this.tasks().flatMap((task) => {
       const clock = this.#idleSince.get(task.id);
       if (clock === undefined || !idleHere(task, clock.deviceId)) return [];
-      return now - clock.since >= this.#config.idleReleaseAfterMs ? [{ taskId: task.id, since: clock.since }] : [];
+      if (now - clock.since < this.#config.idleReleaseAfterMs) return [];
+      return [{ taskId: task.id, since: clock.since, ...clock.note }];
     });
   }
 
@@ -1013,7 +1015,9 @@ export class Scheduler {
    * touches nothing, as `sessionChange` moves nothing for it — or any machine
    * could hold a slot by resetting the clock. A sender that does not say which
    * machine it is starts nothing, but its other states stop the clock, since
-   * `sessionChange` accepts them for a confirmed task.
+   * `sessionChange` accepts them for a confirmed task. Each idle replaces the
+   * clock's note (its daemon joins the latest to every idle, so none is none),
+   * and never its start: display-only, it moves no clock and frees no slot.
    */
   #idleClock(taskId: string, state: SessionState, from: SessionSource | undefined): void {
     const task = this.#held.get(taskId)?.task;
@@ -1023,7 +1027,14 @@ export class Scheduler {
       return;
     }
     if (state !== "idle" || from === undefined || task.assignment?.deviceId !== from.deviceId) return;
-    if (!this.#idleSince.has(taskId)) this.#idleSince.set(taskId, { since: this.#now(), deviceId: from.deviceId });
+    const clock = this.#idleSince.get(taskId);
+    // Only this machine's own clock is kept: another's start must never count toward this one's release.
+    const since = clock?.deviceId === from.deviceId ? clock.since : this.#now();
+    this.#idleSince.set(taskId, {
+      since,
+      deviceId: from.deviceId,
+      ...(from.note === undefined ? {} : { note: from.note }),
+    });
   }
 
   #reportsExit(deviceId: string): boolean {

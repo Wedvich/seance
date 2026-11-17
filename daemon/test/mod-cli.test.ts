@@ -94,6 +94,12 @@ exit 0
       expect(out).toContain(`Claude mod session-events installed in ${label}`);
       expect(out).toContain(`Claude mod inbox installed in ${label}`);
     }
+    // The settings hooks ride the same install, into each config dir set up, running this checkout's CLI.
+    for (const dir of [join(root, ".claude"), work]) {
+      const settings = await readFile(join(dir, "settings.json"), "utf8");
+      expect(settings).toContain(`${checkout}/daemon/src/main.ts' session-event --hook`);
+    }
+    expect(out).toContain(`séance's settings hooks written to ${join(work, "settings.json")}`);
   });
 
   test("a failing exclave is reported and fails the run, without stopping the ones after it", async () => {
@@ -128,6 +134,8 @@ exit 0
       "- plugin marketplace remove seance --json",
       `${work} plugin marketplace remove seance --json`,
     ]);
+    expect(after.out).toContain(`removed séance's settings hooks from ${join(work, "settings.json")}`);
+    expect(JSON.parse(await readFile(join(work, "settings.json"), "utf8"))).toEqual({});
   });
 
   test("an unknown subcommand fails with the usage line and touches nothing", async () => {

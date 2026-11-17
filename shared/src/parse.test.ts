@@ -912,7 +912,9 @@ describe("tasks and their records", () => {
     expect(parseTask(waiting)).toEqual(waiting);
     const question = { ...stay, inputReason: "question" } as const;
     expect(parseTask(question)).toEqual(question);
-    expect(parseTask({ ...waiting, inputReason: "elicitation" })).toEqual(stay);
+    const elicitation = { ...stay, inputReason: "elicitation" } as const;
+    expect(parseTask(elicitation)).toEqual(elicitation);
+    expect(parseTask({ ...waiting, inputReason: "mystery" })).toEqual(stay);
     expect(parseTask({ ...waiting, inputReason: 3 })).toEqual(stay);
     for (const inputTool of ["rm -rf /", "a/b", "", "t".repeat(65), 4]) {
       expect(parseTask({ ...waiting, inputTool })).toEqual({ ...stay, inputReason: "permission" });
@@ -1469,6 +1471,18 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
   });
 
+  test("an idle task's note rides its entry; a malformed part is dropped alone, the entry kept", () => {
+    const noted = { taskId: "t-1", since: 4, background: { shell: 2, wakeup: 1 }, stopError: "rate_limit" } as const;
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [noted] })).toEqual({ tasks: [], at: 5, idle: [noted] });
+    expect(
+      parseQueueReply({
+        tasks: [],
+        at: 5,
+        idle: [{ ...noted, background: { shell: 1, teleport: 1 }, stopError: "x" }],
+      }),
+    ).toEqual({ tasks: [], at: 5, idle: [{ taskId: "t-1", since: 4 }] });
+  });
+
   test("queue lists refused session passes, each one alone; a bad list costs only the explanations, never the reply", () => {
     const refused = { taskId: "t-1", code: "finished", sentAt: 4 };
     const stampless = { taskId: "t-2", code: "branch_mismatch" };
@@ -1562,8 +1576,20 @@ describe("parseSessionEvent", () => {
   test("a question reason rides needs-input only; elsewhere, or unknown, it is dropped and the event kept", () => {
     expect(parseSessionEvent({ ...event, reason: "question" })).toEqual({ ...event, reason: "question" });
     expect(parseSessionEvent({ ...event, state: "busy", reason: "question" })).toEqual({ ...event, state: "busy" });
-    expect(parseSessionEvent({ ...event, reason: "elicitation" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, reason: "elicitation" })).toEqual({ ...event, reason: "elicitation" });
+    expect(parseSessionEvent({ ...event, reason: "mystery" })).toEqual(event);
     expect(parseSessionEvent({ ...event, reason: true })).toEqual(event);
+  });
+
+  test("an idle note rides idle only; each malformed count or error is dropped alone, the event kept", () => {
+    const idle = { ...event, state: "idle" } as const;
+    const note = { background: { shell: 2, agent: 1, wakeup: 99 }, stopError: "overloaded" } as const;
+    expect(parseSessionEvent({ ...idle, ...note })).toEqual({ ...idle, ...note });
+    expect(parseSessionEvent({ ...event, ...note })).toEqual(event);
+    for (const background of [{ shell: 0 }, { shell: 100 }, { shell: 1.5 }, { teleport: 1 }, [], "shell", null]) {
+      expect(parseSessionEvent({ ...idle, background })).toEqual(idle);
+    }
+    expect(parseSessionEvent({ ...idle, stopError: "on_fire" })).toEqual(idle);
   });
 
   test("a permission reason carries its tool only when it is a tool name; a bad tool is dropped, reason and event kept", () => {

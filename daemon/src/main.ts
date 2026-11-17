@@ -101,7 +101,7 @@ const [command, ...rest] = process.argv.slice(2);
 try {
   switch (command) {
     case "session-event":
-      await cmdSessionEvent();
+      await cmdSessionEvent(rest);
       break;
     case "inbox":
       await cmdInbox();

@@ -18,6 +18,7 @@ import {
   deriveAfterSheet,
   deriveQueue,
   disarmRow,
+  idleClause,
   LIMITS_UNREADABLE,
   parseLimitDraft,
   primaryAction,
@@ -782,6 +783,22 @@ describe("deriveQueue", () => {
     expect(row?.markDoneEndsSession).toBe(true);
     expect(view.summary).toBe("1 running · 1 idle · 0 waiting");
     expect(deriveQueue(state(ok([busy])), NOW).summary).toBe("1 running · 0 waiting");
+  });
+
+  test("an idle task says what its last turn left: its background work by kind, else the API error that ended it", () => {
+    const at = { deviceId: "dev-a", exclave: "main", clone: "app" };
+    const watching = task("idle", { state: "running", assignment: at });
+    const released = [{ taskId: "idle", since: NOW - 5 * 60_000, background: { shell: 1, wakeup: 2 } }];
+    const row = deriveQueue(state(ok([watching], [], 0, released)), NOW).sections.find((s) => s.title === "Idle")
+      ?.rows[0];
+    expect(lineText(row?.body ?? [])).toBe(
+      "Idle, waiting on its background work (1 shell, 2 scheduled wake-ups) since 5m ago — its slot is free",
+    );
+    expect(idleClause({ taskId: "t", since: 0, background: { agent: 2, monitor: 1, other: 1 } })).toBe(
+      "Idle, waiting on its background work (2 subagents, 1 monitor, 1 other task)",
+    );
+    expect(idleClause({ taskId: "t", since: 0, stopError: "rate_limit" })).toBe("Stopped on an API error (rate limit)");
+    expect(idleClause({ taskId: "t", since: 0, background: {} })).toBe("Idle at its prompt");
   });
 
   test("unreadable records get a line of their own, counted, and none gets none", () => {
@@ -1572,6 +1589,7 @@ describe("the screen debounce on needs-input", () => {
       "May be waiting for permission to use Bash since 31m ago",
     );
     expect(body({ inputReason: "question" })).toBe("Asking a question since 31m ago");
+    expect(body({ inputReason: "elicitation" })).toBe("Waiting for an answer to an MCP server since 31m ago");
     expect(body({})).toBe("Waiting for input since 31m ago");
   });
 

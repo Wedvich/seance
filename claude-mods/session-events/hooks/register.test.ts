@@ -135,33 +135,29 @@ describe("reports", () => {
     await $.turn.start({ ...turn, text: "hi" });
     await $.turn.complete(answered);
     await end($, "prompt_input_exit");
-    await settled(sent, 4);
+    await settled(sent, 3);
     // The checkout the mod is read from, never a name on PATH.
     const main = sent[0]?.argv[1] ?? "";
     expect(main.endsWith("/daemon/src/main.ts")).toBe(true);
-    expect(sent.map((s) => s.argv)).toEqual(Array.from({ length: 4 }, () => ["bun", main, "session-event"]));
+    expect(sent.map((s) => s.argv)).toEqual(Array.from({ length: 3 }, () => ["bun", main, "session-event"]));
+    // No idle at the start: that is the settings `SessionStart` hook's, which a respawn does not raise.
     expect(sent.map((s) => s.report)).toEqual([
-      { state: "idle" },
       { state: "busy" },
       { state: "idle", turnEnded: true },
       { state: "ended" },
     ]);
   });
 
-  test("only the main loop's turn ending marks an idle: a respawn's start mid-turn does not", async ($, on) => {
+  test("a respawn's start mid-turn reports nothing: the turn reads busy until it ends", async ($, on) => {
     const sent = record(on);
     await $.turn.start({ ...turn, text: "hi" });
     await settled(sent, 1);
     // A hooks-worker respawn raises session.start while the turn runs on.
     await $.session.start({ cwd: "/repo", surface: "terminal", isInteractive: true });
-    await settled(sent, 2);
     await $.turn.complete(answered);
-    await settled(sent, 3);
-    expect(sent.map((s) => s.report)).toEqual([
-      { state: "busy" },
-      { state: "idle" },
-      { state: "idle", turnEnded: true },
-    ]);
+    await settled(sent, 2);
+    // Ordered after the start: had it sent an idle, that would be second here.
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "idle", turnEnded: true }]);
   });
 
   test("a subagent's turns say nothing: the main loop's turn is still running", async ($, on) => {

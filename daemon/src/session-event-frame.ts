@@ -6,6 +6,19 @@ export const SESSION_EVENT_VERSION = 1;
 
 export const SESSION_EVENT_KIND = "session-event";
 
+/**
+ * The Claude settings-hook events `seance mod install` registers (`settings-hooks.ts`) and `seance session-event
+ * --hook` reads (`hookFrame`): what the mod's engine events cannot see. Settings hooks run where a plugin's
+ * `classic.*` hooks do not (DESIGN.md, "Settings hooks").
+ */
+export const SETTINGS_HOOK_EVENTS = [
+  "SessionStart",
+  "Stop",
+  "StopFailure",
+  "Elicitation",
+  "ElicitationResult",
+] as const;
+
 export const SESSION_EVENT_REPLY_CODES = [
   /** Not a frame this daemon reads: wrong version, mistyped fields, nothing to report. */
   "invalid",

@@ -435,7 +435,11 @@ green:
   once instead of at the deadline; it never binds, routes, moves or settles anything — and `tool`,
   only beside `permission` and only as `isToolName` passes it, display-only like `remoteSession`
   (written onto `Task.inputTool`, never used to bind, route, move, settle or alert, and kept out of
-  `get_queue`).
+  `get_queue`) — and a `stop` note, sent alone by the settings `Stop`/`StopFailure` hooks (`seance session-event
+  --hook`, DESIGN.md "Settings hooks"): counts by `BACKGROUND_KINDS` and a `STOP_ERRORS` value only, never a command,
+  description or prompt, held in memory for the pane's own task, joined to its `idle` and dropped at any other state,
+  kept by the leader beside its idle clock and in `queue`'s idle entries only (never on a record), display-only like
+  `tool`. `elicitation` joins `NEEDS_INPUT_REASONS` with `permission`'s effects (none).
   While this machine is draining, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
   A bound `busy` following an `idle` this process retained for that pane (`isNewTurn`; a pane with no state retained is not a new turn) also lifts the pane's own

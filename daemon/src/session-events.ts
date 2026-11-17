@@ -3,6 +3,8 @@ import {
   isNeedsInputReason,
   isToolName,
   isRecord,
+  parseIdleNote,
+  type IdleNote,
   isRemoteSessionId,
   isSessionState,
   isTaskId,
@@ -93,6 +95,12 @@ export interface SessionEventFrame {
   readonly reason?: NeedsInputReason;
   /** Only beside `reason: "permission"`: the prompt's tool, kept only as `isToolName` passes it. Display-only. */
   readonly tool?: string;
+  /**
+   * The settings hooks' `Stop`/`StopFailure` (`seance session-event --hook`): what the turn end left running, or
+   * the error that ended it. Carries no state: Claude runs `Stop` before the turn is over, and another `Stop` hook
+   * may yet continue it, so it is never read as a turn end. Held for the pane and joined to its idles. Display-only.
+   */
+  readonly stop?: IdleNote;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
@@ -115,8 +123,18 @@ const MAX_FIELD = 64;
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane, handoff, pass, record, turnEnded, reason, tool } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff, pass, record, turnEnded, reason, tool, stop } = raw;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
+  if (stop !== undefined) {
+    // Alone, as a hand-off is: a note is never a state, so no ingest path can read one as a turn's end.
+    if (!isRecord(stop) || state !== undefined || handoff !== undefined || pass !== undefined) return null;
+    return {
+      v: SESSION_EVENT_VERSION,
+      kind: SESSION_EVENT_KIND,
+      stop: parseIdleNote(stop),
+      ...(pane === undefined ? {} : { pane }),
+    };
+  }
   if (pass !== undefined) {
     // Alone, as a hand-off is, and never beside one: no ingest path can read a pass as anything else.
     if (pass !== true || handoff !== undefined || state !== undefined) return null;
@@ -943,6 +961,19 @@ export interface SessionEvents {
   readonly stop: () => void;
 }
 
+/** Panes a `stop` note or a forwarded idle is held for: far above any machine's live sessions, so only a gone pane's entry goes. */
+const NOTES_MAX = 256;
+
+/** Sets `key` as `map`'s newest entry (insertion order is age order), dropping the oldest past `NOTES_MAX`. */
+function setNewest<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key);
+  map.set(key, value);
+  for (const id of map.keys()) {
+    if (map.size <= NOTES_MAX) break;
+    map.delete(id);
+  }
+}
+
 interface Outbox {
   lastSentAt: number;
   pending: SessionEvent | null;
@@ -963,6 +994,26 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   const passes = new Map<string, { readonly taskId: string; confirmed: boolean; turnEnded: boolean }>();
   /** Panes whose hand-off or pass close was started and has not settled. */
   const closing = new Set<string>();
+  /**
+   * Pane → the settings hooks' latest `stop` note, for the task it carried then: joined to that pane's idles until a
+   * busy, needs-input or ended frame drops it. Memory only; a restart loses it until the next turn end.
+   */
+  const notes = new Map<string, { readonly taskId: string; readonly note: IdleNote }>();
+  /** Pane → the task whose idle it last forwarded, until any other state: a note landing then re-sends that idle. */
+  const idleNow = new Map<string, string>();
+  const noteOf = (pane: string, taskId: string): IdleNote => {
+    const held = notes.get(pane);
+    return held?.taskId === taskId ? held.note : {};
+  };
+  /** Ingest, not an act: held for the pane's own task and forwarded only on an idle, which the leader's clock already reads. */
+  const takeNote = (pane: BoundPane, exclave: string, note: IdleNote, at: number): SessionEventReply => {
+    if (stopped || pane.taskId === null) return { ok: true };
+    setNewest(notes, pane.id, { taskId: pane.taskId, note });
+    if (idleNow.get(pane.id) === pane.taskId) {
+      enqueue({ session: pane.id, taskId: pane.taskId, exclave, state: "idle", at, ...note });
+    }
+    return { ok: true };
+  };
   const startClose = (pane: string, run: Promise<void> | undefined): void => {
     if (run === undefined) return;
     closing.add(pane);
@@ -1144,6 +1195,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (!stopped) deps.onActivity?.(exclave);
       if (frame.handoff === true) return markHandoff(pane);
       if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
+      if (frame.stop !== undefined) return takeNote(pane, exclave, frame.stop, at);
       // Before the untasked return: an untasked pane's state is retained too, and goes nowhere else.
       if (!stopped && frame.state !== undefined && frame.state !== "done") {
         deps.retain?.(pane, frame.state, frame.state === "idle" && frame.turnEnded === true);
@@ -1181,9 +1233,16 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           `local socket: session-event pane=${quote(pane.id)} carried a malformed remote session id — dropped it`,
         );
       }
+      // A pane killed without its `ended` never clears its entry: the cap is what bounds that.
+      if (frame.state === "idle") setNewest(idleNow, pane.id, pane.taskId);
+      else {
+        idleNow.delete(pane.id);
+        notes.delete(pane.id);
+      }
       // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
       if (reported !== "same") {
         enqueue({
+          ...(frame.state === "idle" ? noteOf(pane.id, pane.taskId) : {}),
           session: pane.id,
           taskId: pane.taskId,
           exclave,
@@ -1242,6 +1301,8 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       handoffs.clear();
       passes.clear();
       closing.clear();
+      notes.clear();
+      idleNow.clear();
       for (const box of outboxes.values()) if (box.timer !== null) clearTimeout(box.timer);
       outboxes.clear();
     },
