@@ -1309,6 +1309,56 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // The leader skips a deferred ready task before routing, so it is never placed and carries no decision;
+  // run-now ignores the time.
+  test("a task with a not-before time waits ready and unrouted, and run-now starts it", async () => {
+    const id = crypto.randomUUID();
+    const app = startApp(stack);
+    let window: string | null = null;
+    try {
+      await stack.waitForLead("the suite's daemon to lead");
+      await stack.daemon.leader.settled();
+      const up = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the leader verified, with the repos listed",
+      );
+      const created = await app.client.createTask({
+        id,
+        spec: { repo: fixtureOrigin(up) ?? "", mode: "worktree", prompt: "not yet", notBefore: Date.now() + 3_600_000 },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "ready",
+        "the task to be admitted ready",
+      );
+      // A non-event can't be polled: give a pass or two to place it, which it must not.
+      await Bun.sleep(1_500);
+      const waiting = (await stack.queue().get(id))?.body;
+      expect(waiting?.state).toBe("ready");
+      expect(waiting?.decision).toBeUndefined();
+
+      // The leader's own view, as the mark-done test waits for, before an op on it.
+      await pollUntil(async () => {
+        const queue = await app.client.queue();
+        return queue !== null && "tasks" in queue && queue.tasks.some((t) => t.id === id && t.state === "ready");
+      }, "the leader to hold the task ready");
+      const started = await app.client.runNow(id);
+      expect(started).toMatchObject({ task: { id } });
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the task to run past its time",
+        20_000,
+      );
+      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+    } finally {
+      await cancelTask(app.client, id);
+      if (window !== null) await killWindow(window);
+      app.stop();
+    }
+  }, 60_000);
+
   // Mark done is the leader's, not the session's: the task finishes as `manual`,
   // its session is ended first (a done task holds no slot, so a session left
   // running would work past the caps), and the daemon audits the request as the
