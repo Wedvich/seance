@@ -35,7 +35,7 @@ import {
   tmuxOk,
   TmuxError,
 } from "./tmux.ts";
-import { ensureRepoTrusted } from "./trust.ts";
+import { ensureAttachmentsTrusted, ensureRepoTrusted } from "./trust.ts";
 
 function slugCore(src: string): string {
   return src
@@ -916,7 +916,9 @@ async function continueLocked(
   await releaseStaleLock(repo, path);
 
   // The worktree, not the clone root, is where claude starts, so trust is asked for the worktree's own path.
-  await ensureRepoTrusted(path, exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
+  const configFile = exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE);
+  await ensureRepoTrusted(path, configFile);
+  await ensureAttachmentsTrusted(attachments?.dirs ?? [], configFile);
 
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
@@ -969,7 +971,9 @@ async function spawnUntracked(
   }
 
   // answer claude's trust dialog before it can block the session (fails open — see trust.ts)
-  await ensureRepoTrusted(repo.path, exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
+  const configFile = exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE);
+  await ensureRepoTrusted(repo.path, configFile);
+  await ensureAttachmentsTrusted(attachments?.dirs ?? [], configFile);
 
   const worktreeName = stacked?.name ?? (request.mode === "here" ? slug : await freeWorktreeName(repo, slug));
   const windowName = sanitizeWindowName(request.title ?? worktreeName);

@@ -5484,6 +5484,17 @@ Where the build adds to or departs from the wording above:
   by the next flag, and `--model` always follows. The path is the daemon's own, never a
   wire value, but it goes through `shq()` like every path. A working directory added this
   way lets the session read the files with no permission prompt.
+- **Trust** (`ensureAttachmentsTrusted`, `daemon/src/trust.ts`): since Claude Code 2.1.326 an
+  `--add-dir` meets the same trust dialog a repo does ("Adding a new directory"), and every
+  task's directory is new, so each attachment spawn sat dead at it. Both spawn paths write one
+  entry beside the repo's ("Pre-trust on spawn"), for the attachments root's real path in the
+  session's exclave config: a dir outside any git repo is trusted through a trusted ancestor,
+  looked up by real path (both checked against 2.1.326), so that one entry answers it for every
+  task directory. It widens less than the repo's entry: the root holds only files the daemon
+  fetched, under names it chose, never a settings file, skill or git config the dialog warns of.
+  Rejected: an entry per task directory (one more `projects` key per task, never removed), and
+  leaving the owner to trust the root once by hand (each exclave's config needs it, and a
+  missed one is a dead session again).
 - **The seed**: an attachment spawn always writes a seed file, even with no prompt. After
   the `Task:` line, or after the preamble when there is no prompt, it adds:
 
@@ -6536,6 +6547,8 @@ of this section built.
   check. A continuation is the exception: it starts in the worktree itself, so
   `spawnContinued` trusts that path in the clone's exclave config file, one more
   `projects[<path>]` entry per continued worktree (Daemon, "Continuing a session").
+  A spawn carrying attachments also trusts the attachments root, since each `--add-dir`
+  meets the dialog too (Attachments, "Trust").
   Memoized in-process per (config, repo) pair, so it costs one
   config read per repo per daemon run. Rejected: caching trust in
   state.json or `RepoEntry` (stale in the dangerous direction — revoking

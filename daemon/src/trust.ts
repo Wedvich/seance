@@ -34,6 +34,20 @@ export async function ensureRepoTrusted(repoPath: string, configPath: string): P
   await queue;
 }
 
+/**
+ * Claude Code asks the same dialog for each `--add-dir` (2.1.326 on), and every task's attachments directory is new,
+ * so each such spawn sat dead at it. One entry for their parent, the attachments root, answers it for all of them: a
+ * dir outside any git repo is trusted through any trusted ancestor, looked up by real path (both checked against
+ * 2.1.326). It widens less than the repo's entry: the root holds only files the daemon fetched, under names it chose
+ * (`<index>.<ext>`), never a settings file, skill or git config the dialog warns of. Fails open, like the repo's.
+ */
+export async function ensureAttachmentsTrusted(dirs: readonly string[], configPath: string): Promise<void> {
+  for (const root of new Set(dirs.map((dir) => dirname(dir)))) {
+    // oxlint-disable-next-line no-await-in-loop -- one root in practice; the writes serialize on `queue` anyway
+    await ensureRepoTrusted(await realpath(root).catch(() => root), configPath);
+  }
+}
+
 async function ensureNow(configPath: string, repoPath: string, memoKey: string): Promise<void> {
   if (ensured.has(memoKey)) return; // a queued predecessor may have handled it
   try {
