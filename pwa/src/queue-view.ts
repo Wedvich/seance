@@ -8,6 +8,7 @@ import {
   continueOffer,
   goneContinuation,
   knownAccounts,
+  parseTags,
   passOffer,
   taskPrBlock,
   waitingContinuation,
@@ -450,11 +451,21 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
 }
 
 /**
- * `remoteSession` passed `isRemoteSessionId` at parse (`session_` and base62 only), so it can
- * name no other path, query or origin.
+ * The live session's `agent.remote` from its machine's last `sessions` read, else the task's `remoteSession` (docs/tags.md
+ * §7 step 4). Both passed `isRemoteSessionId` at parse (`session_` and base62 only), so they can name no other path,
+ * query or origin.
  */
-function sessionOf(task: Task): string | null {
-  return task.remoteSession === undefined ? null : `https://claude.ai/code/${task.remoteSession}`;
+function sessionOf(task: Task, sessions: AppState["sessions"]): string | null {
+  const remote = liveRemote(task, sessions) ?? task.remoteSession;
+  return remote === undefined ? null : `https://claude.ai/code/${remote}`;
+}
+
+function liveRemote(task: Task, sessions: AppState["sessions"]): string | undefined {
+  const deviceId = task.assignment?.deviceId;
+  const read = deviceId === undefined ? undefined : sessions[deviceId];
+  if (read === undefined || read === "unknown") return undefined;
+  const entry = read.sessions.find((session) => session.taskId === task.id);
+  return parseTags(entry?.tags, { scope: "session" })?.["agent.remote"]?.value;
 }
 
 function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
@@ -582,7 +593,7 @@ function rowOf(
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = startNowFor(task, deriveRunNowPastPause(state.relay), now + skew);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
-  const session = sessionOf(task);
+  const session = sessionOf(task, state.sessions);
   const autonomy = autonomyOf(task.spec);
   return {
     id: task.id,

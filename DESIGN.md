@@ -11915,9 +11915,11 @@ session in it and names no session, so it is a guess the daemon cannot check, an
 re-used by the next `claude`); **a synthetic task id, or a queue entry, for a hand-started session** (it would put a
 session Séance never spawned in the leader's record and the Queue screen, with a lifecycle nothing ends); **a
 leader-held reply table** (the leader would keep a map of who talked to whom, a mailbox's worth of metadata, to
-answer a question the asker's own daemon can: it keeps the minting table already); **the Claude session id** (a
-`$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the peer-pid binding
-exists to avoid); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
+answer a question the asker's own daemon can: it keeps the minting table already); **the Claude session id** for
+replies (a `$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the
+peer-pid binding exists to avoid; amended 2026-11-17, docs/tags.md §4.4: that reason stands for a claim and falls for
+an id the daemon verified from its own sources ("Session events", "Session identity"), but a reply is still by
+message id, and the one use a verified id gets is docs/tags.md §8's, not yet built); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
@@ -12161,7 +12163,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), or `{v, kind, stop, pane?}` alone ("Settings hooks", below), routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, agent?, pane?, turnEnded?, reason?}` (`agent` alone too, below), or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), or `{v, kind, stop, agent?, pane?}` ("Settings hooks", below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -12627,6 +12629,54 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   another claude.ai session the same account owns. Not covered: the spawn verdict (above,
   "Out of scope for v1"), and sessions with no task, whose events go nowhere. The custodian's round is such a session
   and its id reaches the Machines row another way (custodian 5, "the live link").
+- **Session identity: the `agent` claims and the conversation table** (built 2026-11-17, docs/tags.md step 1;
+  `daemon/src/conversations.ts`, `daemon/src/agent-session-file.ts`, the vocabulary in `shared/src/tags.ts`).
+  - **The claims.** Every report carries `agent: {kind, session?, remote?}`. The mod reads `$.session.id` and
+    `$CLAUDE_CODE_BRIDGE_SESSION_ID` at each report, never cached, since `/clear` and `/resume` move the conversation
+    under one process. The settings hooks add the hook input's `session_id` (`hookFrame`), so the `SessionStart` that
+    follows a `/clear` or `/resume` is the report naming the new conversation. Each key is held by its own parser
+    (`parseTagValue`: `agent.kind` one of `AGENT_KINDS`, `agent.session` a lowercase UUID, `agent.remote`
+    `isRemoteSessionId`). A bad value drops that key, an unknown key drops the whole `agent`, and neither drops the
+    frame. A frame may carry `agent` with no state. `agent.remote` is read first and `remoteSession` is its fallback
+    (docs/tags.md §7). The leader's `SessionEvent.remoteSession` keeps its name, and the PWA's claude.ai link prefers
+    the live session's `agent.remote` from its machine's last `sessions` read over `Task.remoteSession`.
+  - **Retention, keyed on the bound `claude` process.** The key is `<pid>:<start time>` of the innermost
+    `claude`-named process on the peer's chain (`claudeProcessOf`, `daemon/src/claude-process.ts`, the one
+    `Bound.session` messaging uses), never the pane. A hand-started pane's process is the shell, which outlives a
+    restarted `claude`, so a pane key would carry one `claude`'s facts onto the next. It holds the process's last
+    state, `reason`, `agent.remote`, `agent.kind` and its conversation claim. This applies to any pane whose peer
+    resolves to such a process, tasked or not, `ours` or not. A peer with none retains nothing. A frame bound through
+    `pane` (a host that names no peer) is retained on the pane's own process and never verified or counted. It is kept
+    in memory only, with at most 256 conversations remembered. `ended` drops a process. So does a process gone, moved
+    out of its pane or under another task, at the next report in that pane or the next `sweep` (each app `sessions`
+    read). This is retention, not an act: nothing is run or sent from it, and no reply depends on it.
+  - **Verification.** An `agent.session` claim is verified only from the daemon's own sources, never the frame:
+    - **The file.** The process's own `sessions/<pid>.json` in any exclave's config dir (`readAgentSession`) decides
+      whenever exactly one exists. It is opened `O_NOFOLLOW | O_NONBLOCK` and must be a regular file of at most 64 KiB
+      whose `pid` matches. Its `procStart` is read per platform: on Linux it must equal `processStart`'s tick string;
+      on macOS it is a zone-less UTC `ctime` that must equal the seconds of `sec.usec`. A file left behind for a
+      reused pid is no match.
+    - **The ledger.** With no file, the launch ledger's session id for the pane's task (`EndedTasks.launchSession`)
+      verifies an equal claim and refutes any other at once.
+    - **Settling and refutation.** A file naming another id is re-read every 25 ms for `SETTLE_MS` (500 ms, ten times
+      the slowest lag S1 saw), and only then refutes. A refuted claim is dropped: not shown, not counted.
+    - **Unverifiable.** Two config dirs' matching files, or neither source, leave the claim unverifiable.
+    - **Conflicts.** Two live claimants of one id (verified, unverifiable or still settling) are a conflict.
+    - **At each act.** `atAct` re-reads the source before any act a verified id names, demotes the claim on a
+      mismatch and answers `ambiguous` on a conflict. In this step no act uses it; adapter delivery and the owner's
+      `session-tag` will (docs/tags.md §3.1, §8).
+  - **The daemon's own read.** At start and at each `sweep`, a live pane with no report since this process began is
+    matched to a `sessions/<pid>.json` whose pid is the innermost `claude` on its own chain, exactly one under that
+    pane. That conversation is linked verified, with the file's `bridgeSessionId` as `agent.remote`. An idle session
+    is known after a daemon restart without waiting for its next turn.
+  - **Where tags go.** `SessionEntry.tags` carries the newest live process's `agent.remote` (process scope) and its
+    `agent.kind` and `agent.session` (conversation scope, `verified` when it is), each with `{value, at, scope}`.
+    They go on an app's `sessions` only, never a scheduler-sealed one, and are read only through
+    `parseTags(…, { scope: "session" })`. MCP's `get_sessions` prints only `AGENT_VISIBLE_TAG_KEYS` (docs/tags.md
+    §6.3), so another session never sees a conversation id or a bridge id. No tag is logged or audited:
+    `message-layering.test.ts` holds the three modules that keep them off both sinks, type-only imports included.
+  - **Rejected:** the custodian's per-pane tracker (`pane-activity.ts`) as the store. It is `ours`-only and keyed by
+    pane for the custodian's own reads, so it would have had to change both to serve this.
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
   `question`, `permission` and (2026-11-17, from the settings `Elicitation` hook) `elicitation`, an MCP

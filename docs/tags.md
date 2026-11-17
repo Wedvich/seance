@@ -1,6 +1,8 @@
 # Tags, session identity and the adapter subscription — spec
 
-**Status: draft 2026-11-17, nothing built.** The owner decided T1–T4 (below) on 2026-11-17; everything else is
+**Status: draft 2026-11-17; build step 1 built 2026-11-17** (the vocabulary, the frame's `agent`, the conversation
+table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record).
+Steps 2–4 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
 proposed, with a recommendation where there is a choice. Two drafts build on this file: docs/presence.md (draft PR
 #526: `self.doing`, `set_self_tag`, the `tags` map on `SessionEntry`), which already fixes the first key and must stay
 valid under this model, and docs/messaging.md §6 (draft PR #486: the adapter seam), whose `Session` record, addressing
@@ -87,7 +89,8 @@ printable value. What differs is the store:
 
 ### 2.1 The vocabulary (`shared/src/tags.ts`)
 
-One module, imported by every writer and reader; nothing restates it.
+One module, imported by every writer and reader; nothing restates it. Built (step 1); the module is the record of the
+grammar, caps and parsers, and this section stays as their rationale.
 
 - **Key grammar.** A full key is `<namespace>.<suffix>`. `suffix` is #526's pattern, `[a-z][a-z0-9-]{0,31}`.
   `namespace` is one of the fixed words below, or `adapter.<name>` with `<name>` held to #486's adapter-name pattern
@@ -232,6 +235,9 @@ process and conversation tags) is kept for any pane whose peer resolves to a `cl
 - **Wording.** CLAUDE.md's retention line and #526's `untracked` refusal both change (Threat model).
 
 ## 4. Session identity: `agent.session`, claimed and verified
+
+**Built (step 1)**, as DESIGN.md, "Session events", "Session identity" records it. This section stays as the
+rationale steps 2 and 4 build on (the acts `atAct` guards).
 
 ### 4.1 Verified means the daemon corroborated it from its own facts
 
@@ -459,14 +465,14 @@ Today `remoteSession` is a carried claim on the local session-event frame, a fie
 leader, and `Task.remoteSession` in the store (DESIGN.md, "Session events"; CLAUDE.md's local-socket bullet). The
 migration renames the concept, not the wire fields the skew table depends on:
 
-1. **Local frame.** The mod sends `agent: { remote }` and, until its floor moves, `remoteSession` too; the daemon
+1. **Local frame** (built, step 1). The mod sends `agent: { remote }` and, until its floor moves, `remoteSession` too; the daemon
    reads `agent.remote` first and `remoteSession` as its fallback, through the one `isRemoteSessionId`.
 2. **Daemon to leader.** `SessionEvent.remoteSession` keeps its name: it is the daemon's own field on a sealed op,
    and an older leader parses it. No rename on the wire.
 3. **The store.** `Task.remoteSession` keeps its name and its rule (the newest its machine reported, dropped when the
    task goes back to `ready`). It is a task field, not a tag: the joined view carries `agent.remote` at process scope
    from a live session only, and the PWA falls back to `Task.remoteSession` outside the tag map, as today.
-4. **Readers.** The PWA's claude.ai link reads `agent.remote` from the joined view; the custodian round's link
+4. **Readers** (built, step 1). The PWA's claude.ai link reads `agent.remote` from the joined view; the custodian round's link
    (`custodian-remote.ts`) is unchanged, since the round has no session events.
 5. **Codex** later supplies its own `agent.remote` (docs/agents.md: a link into its app), through the same key.
 
@@ -569,14 +575,16 @@ New, and what bounds it:
 
 Wording this changes, each in the PR that builds it:
 
-- CLAUDE.md, local-socket bullet, "The frame's other carried claims are `remoteSession` …": becomes `agent`
+- CLAUDE.md, local-socket bullet, "The frame's other carried claims are `remoteSession` …" (done, step 1, but for #526's
+  `self` wording, which has not landed): becomes `agent`
   (`kind`, `session`, `remote`; `remoteSession` read as `remote`'s fallback), each kept only as its parser passes it;
   `agent.session` verified only against the launch ledger or the `claude` process's own `sessions/<pid>.json`,
   opened as `custodian-remote.ts` opens it, re-read at each act, a refuted claim dropped, and used only to address
   adapter delivery and the owner's `session-tag`; and #526's `self` wording
   widened from `self.doing` to the `self.*` keys this spec accepts.
 - CLAUDE.md, same bullet, "Keeping each `ours` pane's last state and `turnEnded`, tasked or not …": "each pane whose
-  peer resolves to a `claude` process", and the conversation table beside it.
+  peer resolves to a `claude` process", and the conversation table beside it (done, step 1, as a sentence of its own:
+  the custodian's tracker stays `ours`-only, and the table is a separate module, `conversations.ts`).
 - CLAUDE.md, the task-sealer list: "every task record carrying `tags` is sealed through that same sealer, which
   appends `TAGS_DEP_SENTINEL` …; a client writes `tags` only to a verified leader advertising `CAPABILITIES.taskTags`;
   `owner.*` only through `amend` from the PWA, in any state; adapters write none".
@@ -756,7 +764,8 @@ why §4.1 now reads `procStart` per platform.
 Small PRs, each landing on its own. #526's PR 1 (`self.doing`) can land before or after PR 1 here: its shapes are
 this spec's (the `tags` map, the caps, the `self` frame), and the edits above follow whichever lands second.
 
-1. **The vocabulary and `agent.*`.** `shared/src/tags.ts` (grammar, namespaces, caps, `displayLine` moved,
+1. **The vocabulary and `agent.*`.** **Built 2026-11-17** (DESIGN.md, "Session events", "Session identity").
+   `shared/src/tags.ts` (grammar, namespaces, caps, `displayLine` moved,
    `parseTags`, known-key parsers, `joinTags`, `displayName`); the session-event frame's `agent`, on every report;
    `Conversations` in memory; verification from the launch ledger and `sessions/<pid>.json` (`procStart` read per platform: on
    Linux equal to `processStart`'s tick string, on macOS read as UTC against its seconds; a report the file does not

@@ -33,7 +33,7 @@ import {
   RESCAN_IDLE,
   type QueueState,
 } from "../src/state.ts";
-import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText, WORKTREE_AND_BRANCH_GONE } from "@seance/shared";
+import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText, WORKTREE_AND_BRANCH_GONE, type SessionEntry } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -454,6 +454,44 @@ describe("deriveQueue", () => {
       "https://claude.ai/code/session_01TuECqfR7Twko9QJm98sWAw",
     );
     expect(sessionOf()).toBeNull();
+  });
+
+  test("the live session's `agent.remote` wins over the task's `remoteSession`, which stays the fallback", () => {
+    const live = "session_01LiveLiveLiveLiveLiveLive";
+    const stored = "session_01TuECqfR7Twko9QJm98sWAw";
+    const linkOf = (tags: SessionEntry["tags"], sessions?: AppState["sessions"]) =>
+      deriveQueue(
+        state(ok([task("a", { state: "running", assignment: placedAt, remoteSession: stored })]), {
+          sessions: sessions ?? {
+            [placedAt.deviceId]: {
+              at: NOW,
+              sessions: [
+                {
+                  id: "%1",
+                  window: "w",
+                  repo: "app",
+                  path: "/w",
+                  taskId: "a",
+                  ...(tags === undefined ? {} : { tags }),
+                },
+              ],
+            },
+          },
+        }),
+        NOW,
+      ).sections[0]?.rows[0]?.session;
+    expect(linkOf({ "agent.remote": { value: live, at: NOW, scope: "process" } })).toBe(
+      `https://claude.ai/code/${live}`,
+    );
+    // A malformed id, or one at a scope `agent.remote` does not live at, is dropped at parse.
+    expect(linkOf({ "agent.remote": { value: "session_../x", at: NOW, scope: "process" } })).toBe(
+      `https://claude.ai/code/${stored}`,
+    );
+    expect(linkOf({ "agent.remote": { value: live, at: NOW, scope: "conversation" } })).toBe(
+      `https://claude.ai/code/${stored}`,
+    );
+    expect(linkOf(undefined, { [placedAt.deviceId]: "unknown" })).toBe(`https://claude.ai/code/${stored}`);
+    expect(linkOf(undefined, {})).toBe(`https://claude.ai/code/${stored}`);
   });
 
   test("Answer in Claude is offered only on a task waiting for input with a session link", () => {

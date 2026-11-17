@@ -1,3 +1,4 @@
+import type { SessionTag } from "./tags.ts";
 import type { AutonomyLevel } from "./autonomy.ts";
 import type { MessageKind } from "./messages.ts";
 
@@ -991,6 +992,12 @@ export interface SessionEntry {
    * session spawned without one, and from daemons without the capability.
    */
   readonly taskId?: string;
+  /**
+   * The session's tags (docs/tags.md §2, §6.2): its bound `claude` process's and its current conversation's, full keys,
+   * each with its scope. Sent only to an app, never on a scheduler-sealed `sessions`; display-only, read only through
+   * `parseTags(…, { scope: "session" })`. Absent when there are none, and from older daemons.
+   */
+  readonly tags?: Readonly<Record<string, SessionTag>>;
 }
 
 /** Git identity of a daemon's own checkout. `commitTs` is ms, like every other wire timestamp. */

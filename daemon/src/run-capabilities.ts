@@ -30,6 +30,7 @@ import {
   writeSeatView,
   type PauseRead,
 } from "./custodian-control.ts";
+import { createConversations, type SessionTagsSource } from "./conversations.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
 import { createWorktreeRule } from "./custodian-worktree.ts";
@@ -170,6 +171,8 @@ export interface Started {
   readonly custodianPoke?: () => void;
   /** Whether the seat exists: `starting` while its async checks run, `failed` once they declined. The op reads it, never the file view. */
   readonly custodianHost?: () => CustodianHost;
+  /** Session identity and tags, once session events run: an app's `sessions` reads it late (`run.ts`). */
+  readonly conversations?: SessionTagsSource;
 }
 
 export type CustodianHost = "starting" | "failed" | "ready";
@@ -295,9 +298,15 @@ const sessionEvents: DaemonCapability = (ctx) => {
         ? Promise.resolve(ctx.leader.onSessionMessage(message, ctx.deviceId))
         : ctx.client.sendSessionMessage(message),
   });
+  const conversations = createConversations({
+    configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
+    launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
+    panes: listPanePids,
+  });
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
+    conversations,
     // The leader reaches itself in process, never by a relay round trip. A
     // daemon that just lost the role still sends to "scheduler", which the
     // relay routes to whoever leads now.
@@ -367,15 +376,19 @@ const sessionEvents: DaemonCapability = (ctx) => {
   messagesOf.set(ctx, messages);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
+  // The daemon's own read for sessions that were running before it started and have not reported since.
+  void conversations.sweep().catch((err: unknown) => log.warn(`conversations: ${String(err)}`));
   return {
     stop: (): void => {
       drainAsk?.stop();
       events.stop();
+      conversations.stop();
       messages.stop();
     },
     local: { sessionEvents: events.handle, messages },
     armPassClose: events.armPassClose,
     messages,
+    conversations,
     ...(drainAsk === undefined ? {} : { drainAsk }),
   };
 };
@@ -887,6 +900,7 @@ export interface StartedCapabilities {
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
   readonly custodianPoke?: () => void;
   readonly custodianHost?: () => CustodianHost;
+  readonly conversations?: SessionTagsSource;
   readonly local: LocalSurfaces;
   readonly stop: () => void;
 }
@@ -909,6 +923,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
     let custodianStatus: Started["custodianStatus"];
     let custodianPoke: Started["custodianPoke"];
     let custodianHost: Started["custodianHost"];
+    let conversations: Started["conversations"];
     for (const capability of capabilities) {
       const entry = capability(ctx);
       started.push(entry);
@@ -919,6 +934,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       custodianStatus ??= entry.custodianStatus;
       custodianPoke ??= entry.custodianPoke;
       custodianHost ??= entry.custodianHost;
+      conversations ??= entry.conversations;
     }
     return {
       local,
@@ -929,6 +945,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       ...(custodianStatus === undefined ? {} : { custodianStatus }),
       ...(custodianPoke === undefined ? {} : { custodianPoke }),
       ...(custodianHost === undefined ? {} : { custodianHost }),
+      ...(conversations === undefined ? {} : { conversations }),
     };
   } catch (err) {
     // Already-started ones hold timers and sockets nothing else will stop.

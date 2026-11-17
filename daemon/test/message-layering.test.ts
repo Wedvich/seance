@@ -49,6 +49,21 @@ describe("the message paths that run where stdout is a protocol channel", () => 
 });
 
 /**
+ * Tag text (a claimed `agent.session`, `agent.remote`, what a `sessions/<pid>.json` holds) is never logged or audited
+ * (docs/tags.md, "Threat model"). The modules that hold it load neither sink, type-only edges included, so a call
+ * that would put it there cannot be written without failing here.
+ */
+describe("the modules that hold session tags", () => {
+  for (const entry of ["conversations.ts", "agent-session-file.ts", "claude-process.ts"]) {
+    test(`${entry} loads neither log.ts nor audit.ts`, async () => {
+      const reached = await closure(entry);
+      expect(reached.has(entry)).toBe(true);
+      expect([...reached].filter((file) => file === "log.ts" || file === "audit.ts")).toEqual([]);
+    });
+  }
+});
+
+/**
  * The round runs `seanced` under a sandbox that reads only `daemon/`, `shared/` and `node_modules/` of the checkout
  * (`toolchainAllow`, `custodian-launch.ts`): a static import from `main.ts` that left `daemon/src` or named another
  * workspace (`@seance/scheduler`, whose source is `scheduler/src`) would make every verb fail inside the round, with

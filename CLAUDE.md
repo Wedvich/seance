@@ -84,9 +84,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
   item and lists the open questions. Read it before building amend deps, anything that reads a
   tracker, or a new kind of session that is not a task; build nothing from it until it is decided.
-- **docs/tags.md** — spec, nothing built: tags at task and session scope (namespace = writer), session identity
+- **docs/tags.md** — spec: tags at task and session scope (namespace = writer), session identity
   (pane, process, conversation; a verified `agent.session`) and the adapter subscription that amends messaging's D3.
-  Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
+  Step 1 is built (the vocabulary in `shared/src/tags.ts`, the frame's `agent`, the conversation table and its
+  verification, `SessionEntry.tags`), recorded in DESIGN.md, "Session events", "Session identity"; owner labels, task
+  tags and the subscription are not. Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -426,15 +428,19 @@ green:
   naming that pane's task have arrived, after re-reading that it still carries the task; an `ended`, a
   pane reused for another task or a restart drops the mark, and `pass-close` arms only a live pane
   carrying the task (`no_pane` otherwise), never a pane or task a frame names.
-  The frame's other carried claims are `remoteSession`, Remote Control's id for the session:
-  display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
-  never used to bind, route or move anything — and `reason`, kept only as a known
+  The frame's other carried claims are `agent` (`kind`, `session`, `remote`; `remoteSession` read as `remote`'s
+  fallback), each kept only as its parser (`parseTagValue`, `shared/src/tags.ts`; `agent.remote` through
+  `isRemoteSessionId`) passes it, display-only (`agent.remote` is the PWA's claude.ai link) and never used to bind, route
+  or move anything; `agent.session` is verified only against the launch ledger or the `claude` process's own
+  `sessions/<pid>.json`, opened as `custodian-remote.ts` opens it (`readSessionFile`), re-read at each act (`atAct`), a
+  refuted claim dropped, and is to be used only to address adapter delivery and the owner's `session-tag` (docs/tags.md
+  §8, §3.1; neither built), never a reply — and `reason`, kept only as a known
   `NEEDS_INPUT_REASONS` value (`question` or `permission`) beside `needs-input` (dropped otherwise,
   never the event), whose effects on behaviour are `question` making the leader alert that
   needs-input stay at once instead of after its debounce (`questionAlert`), only for the task's
   own machine and once per stay, and, on a closed machine, making the drain ask send its one Escape to that pane at
   once instead of at the deadline; it never binds, routes, moves or settles anything — and `tool`,
-  only beside `permission` and only as `isToolName` passes it, display-only like `remoteSession`
+  only beside `permission` and only as `isToolName` passes it, display-only like `agent.remote`
   (written onto `Task.inputTool`, never used to bind, route, move, settle or alert, and kept out of
   `get_queue`) — and a `stop` note, sent alone by the settings `Stop`/`StopFailure` hooks (`seance session-event
   --hook`, DESIGN.md "Settings hooks"): counts by `BACKGROUND_KINDS` and a `STOP_ERRORS` value only, never a command,
@@ -454,6 +460,11 @@ green:
   write is the daemon's own 0600 `custodian/activity.json` (`pane-activity-store.ts`): those facts, keyed by pane id
   and the pane process's pid and start time, never screen text; a reloaded entry stays hidden from every reader until
   the pane's process matches and a fresh sample hashes its screen the same, and is dropped otherwise.
+  Keeping, for each pane whose peer resolves to a `claude` process (tasked or not, `ours` or not), that process's last
+  state, `reason` and `agent` claims, keyed on the process (`<pid>:<start time>`), with the conversation table beside
+  it (`conversations.ts`, memory only), is retention too: nothing there is run or sent, no reply depends on it, and its
+  tags reach only an app's `sessions` (`SessionEntry.tags`: never a scheduler-sealed one, and MCP's `get_sessions` only
+  `AGENT_VISIBLE_TAG_KEYS`), never a log, an audit line or argv.
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
   Nothing reachable from `seance mcp` may call `log.ts` — that writes to stdout, which is the MCP

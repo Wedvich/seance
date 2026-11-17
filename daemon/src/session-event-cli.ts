@@ -55,9 +55,19 @@ function backgroundOf(tasks: unknown, crons: unknown): BackgroundWork {
  *   `Stop` hook may continue it, so the turn's end stays the mod's `turn.complete`.
  * - `Elicitation` is `needs-input` (`elicitation`), its `ElicitationResult` `busy`: an MCP server asks inside a tool
  *   call, which the mod reports nothing of.
+ * Each carries `agent` with the hook's `session_id`, as the mod's reports do.
  */
 export function hookFrame(input: unknown): Record<string, unknown> | null {
   if (!isRecord(input)) return null;
+  const frame = hookBody(input);
+  if (frame === null) return null;
+  // A claim like the mod's, which the daemon verifies and parses (`parseAgentClaim`): a `SessionStart` after `/clear`
+  // or `/resume` is the report that names the conversation the process moved to.
+  const session = input["session_id"];
+  return typeof session === "string" ? { ...frame, agent: { kind: "claude", session } } : frame;
+}
+
+function hookBody(input: Record<string, unknown>): Record<string, unknown> | null {
   switch (input["hook_event_name"]) {
     case "SessionStart":
       return STARTS.has(input["source"]) ? { state: "idle" } : null;
