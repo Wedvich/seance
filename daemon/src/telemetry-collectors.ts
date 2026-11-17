@@ -9,7 +9,7 @@ import {
   type SessionEntry,
 } from "@seance/shared";
 import { exclaveOf, type ExclaveScan } from "./exclaves.ts";
-import { quotaSamples, type Sample } from "./metrics-tiers.ts";
+import { githubSamples, quotaSamples, type Sample } from "./metrics-tiers.ts";
 import type { CpuTimes, HostProbe, Registered, Snapshot, TelemetrySources } from "./telemetry.ts";
 
 /**
@@ -82,6 +82,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   custodianCollector,
   authCollector,
   traitCollector,
+  githubCollector,
 ];
 
 function cpuCollector(sources: CollectorSources): Collect {
@@ -151,6 +152,19 @@ function custodianCollector(sources: CollectorSources): Collect {
   return () => {
     const cu = sources.custodian?.() ?? null;
     return Promise.resolve(cu === null ? NO_CONTRIBUTION : { fields: { cu }, samples: [] });
+  };
+}
+
+/**
+ * `gh` from the daemon's own `gh` budget reader, and `github_used_pct` per budget (label `resource`) so a chart can
+ * show it later. Every machine signed in as one user stores the same series; the archivist keeps each under its
+ * `observer`, as it keeps every gauge.
+ */
+function githubCollector(sources: CollectorSources): Collect {
+  return (tick) => {
+    const gh = sources.github?.() ?? null;
+    if (gh === null) return Promise.resolve(NO_CONTRIBUTION);
+    return Promise.resolve({ fields: { gh }, samples: githubSamples(gh, {}, tick.at) });
   };
 }
 

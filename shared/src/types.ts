@@ -1400,7 +1400,32 @@ export interface MachineStatus {
    * `running` and only as `isRemoteSessionId` passes it.
    */
   readonly cu?: CustodianStatus;
+  /**
+   * This machine's own `gh`'s GitHub API budget (DESIGN.md, "GitHub rate limits"): display-only but for the leader's
+   * `github` push, never trimmed by `fitStatus` (it is at most ~70 bytes), absent with no `gh`, no login, or a failed
+   * last read. A bad `gh` is dropped alone, never the status.
+   */
+  readonly gh?: GithubRate;
 }
+
+/** A budget's reading: `[limit, remaining, reset]`, reset in unix seconds, remaining at most limit, limit above 0. */
+export type GithubBudget = readonly [number, number, number];
+
+/**
+ * `MachineStatus.gh`. `u` is the GitHub user id the daemon's `gh` is signed in as, which is what tells budgets
+ * apart: every machine signed in as one user reads the same budget, and the leader alerts once per user, not per
+ * machine. Absent until `gh api user` has answered; a reading without it is never alerted on. `c` is the REST core
+ * budget, `g` the GraphQL one; at least one is present.
+ */
+export interface GithubRate {
+  readonly u?: number;
+  readonly c?: GithubBudget;
+  readonly g?: GithubBudget;
+}
+
+/** The two budgets a `github` push names: REST core and GraphQL, as `GithubRate.c` and `.g`. */
+export const GITHUB_RESOURCES = ["core", "graphql"] as const;
+export type GithubResource = (typeof GITHUB_RESOURCES)[number];
 
 export const CUSTODIAN_STATES = ["idle", "running", "paused", "failing"] as const;
 export type CustodianState = (typeof CUSTODIAN_STATES)[number];
@@ -1719,6 +1744,8 @@ export const METRIC_NAMES = {
   /** Label `model` carries the display name. */
   w: "quota_7d_model_pct",
   c: "quota_credits_pct",
+  /** The daemon's own `gh` budget used, label `resource` (`core` or `graphql`); `MachineStatus.gh`. */
+  gh: "github_used_pct",
 } as const;
 
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
@@ -3702,8 +3729,8 @@ export const PUSH_SERVICE_HOSTS = [
  * A push endpoint's length at most. Real ones run a few hundred characters;
  * the cap is what keeps the settings record under the store's cap: 16
  * subscriptions at it, each with a `PUSH_LABEL_MAX_LENGTH` label and an `addedAt`, the
- * `DISK_ALERTS_MAX` disk alerts, `AUTH_ALERTS_MAX` auth alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
- * their bounds, seal to ~40.1 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
+ * `DISK_ALERTS_MAX` disk alerts, `AUTH_ALERTS_MAX` auth alerts, `GITHUB_ALERTS_MAX` GitHub alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
+ * their bounds, seal to ~40.6 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
  * bound test in parse.test.ts. Little headroom is left: grow nothing here unchecked.
  */
 export const PUSH_ENDPOINT_MAX_LENGTH = 1024;
@@ -3750,6 +3777,23 @@ export interface SettingsRecord extends VersionBound {
    * archivist entry, so a fleet that never had one is never alerted, whichever leader reads it.
    */
   readonly archivistSilence?: ArchivistSilence;
+  /** GitHub budgets alerted in a reset window not yet over (`daemon/src/github-alerts.ts`). */
+  readonly githubAlerts?: readonly GithubAlerted[];
+}
+
+/**
+ * Budgets held in `SettingsRecord.githubAlerts` at most: two GitHub users' REST and GraphQL budgets. An entry
+ * goes once its window resets, within the hour, so past the cap a budget alerts once a slot frees. Small
+ * because the settings record has under 1 KB of headroom (`PUSH_ENDPOINT_MAX_LENGTH`).
+ */
+export const GITHUB_ALERTS_MAX = 4;
+
+/** A GitHub user's budget alerted (`u`, the user id; `r`, which budget), the window's reset (unix s), and when (ms). */
+export interface GithubAlerted {
+  readonly u: number;
+  readonly r: GithubResource;
+  readonly reset: number;
+  readonly at: number;
 }
 
 /**
@@ -4258,7 +4302,16 @@ export type PushAlert =
       readonly taskId: string;
       readonly reason: FlagReason;
     }
-  | { readonly v: 1; readonly kind: "custodian-failing"; readonly at: number; readonly deviceId: string };
+  | { readonly v: 1; readonly kind: "custodian-failing"; readonly at: number; readonly deviceId: string }
+  | {
+      readonly v: 1;
+      readonly kind: "github";
+      readonly at: number;
+      /** Which budget; no GitHub user id, no machine id: one fleet's budget, the same on every machine. */
+      readonly resource: GithubResource;
+      /** The window's reset, unix seconds. */
+      readonly reset: number;
+    };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */
 export const PUSH_ALERT_MAX_BYTES = 1024;

@@ -45,6 +45,7 @@ import { peerPidSupported } from "./peer.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
+import { startGithubRate, type GithubRateOpts } from "./github-rate.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
@@ -135,6 +136,12 @@ export interface RunOpts {
    * child by surprise; main.ts passes `{}`. `keychain` defaults to the config's `authHealth.keychain`.
    */
   readonly authHealth?: Partial<Omit<AuthHealthDeps, "scan" | "home">>;
+  /**
+   * Enables the GitHub budget reader (`github-rate.ts`): this machine's own `gh`'s rate limits, read on a timer, in
+   * the status's `gh`. Off unless supplied, as `authHealth` is — tests must not run the developer's `gh` by surprise;
+   * main.ts passes `{}`.
+   */
+  readonly githubRate?: GithubRateOpts;
   /**
    * Enables the custodian seat's side of this process (`custodian-seat.ts`): with a `custodian` key in the config it
    * advertises the capability and starts rounds, and without one it closes any round a seat left. Off unless supplied, as `authHealth` is — a test daemon must never start a real round in a developer's
@@ -332,6 +339,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           scan: () => exclaveScan,
           home,
         });
+  const githubRate = opts.githubRate === undefined ? null : startGithubRate(opts.githubRate);
+  if (githubRate !== null) void githubRate.readNow();
   const traitProbes = hasProbe(config.traits)
     ? createTraitProbes({
         // Late-bound, as auth health's: the status loop is built after this.
@@ -652,6 +661,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       drainAt: () => drainingOf(state)?.drainAt ?? null,
       custodian: () => custodianSeat.status?.(now()) ?? null,
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
+      ...(githubRate === null ? {} : { github: () => githubRate.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
@@ -873,6 +883,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       stopped = true;
       stopGateWatch();
       status.stop();
+      githubRate?.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();
       capabilities.stop();

@@ -358,6 +358,51 @@ describe("createMachineAlertWatch", () => {
       expect(restored).toHaveLength(1);
     }
   });
+  test("a GitHub budget nearly gone on two machines of one user is one alert, written beside a disk alert", async () => {
+    const { settings, puts, record } = await setup();
+    const reset = NOW / 1000 + 1_200;
+    const gh = { u: 7, c: [5000, 400, reset] as const };
+    const withGh = (deviceId: string, disk: number): Machine => {
+      const m = machine(deviceId, disk);
+      return { ...m, status: { at: NOW / 1000 - 10, scan: NOW, disk, gh } };
+    };
+    const fleet = { current: [withGh("a", 95), withGh("b", 10)] };
+    const { watch, raised, clock } = watchOver(settings, fleet);
+    watch.check(false);
+    await pollUntil(() => raised.length === 2, "the disk and GitHub alerts");
+    expect(puts).toEqual([["a"]]);
+    expect(raised).toContainEqual({ v: 1, kind: "github", at: NOW, resource: "core", reset });
+    expect(record().githubAlerts).toEqual([{ u: 7, r: "core", reset, at: NOW }]);
+
+    // A new term reading the same record stays silent for the rest of the window.
+    const again = watchOver(settings, fleet);
+    again.clock.now = NOW + 60_000;
+    again.watch.check(false);
+    await Bun.sleep(20);
+    expect(again.raised).toEqual([]);
+    clock.now = NOW + 60_000;
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toHaveLength(2);
+  });
+
+  test("a GitHub alert whose write's answer was lost, but landed, is pushed once by the next check", async () => {
+    const { settings, puts } = await setup(0, 1, true);
+    const reset = NOW / 1000 + 1_200;
+    const m = machine("a", 10);
+    const fleet = {
+      current: [{ ...m, status: { at: NOW / 1000 - 10, scan: NOW, gh: { u: 7, g: [5000, 1, reset] as const } } }],
+    };
+    const { watch, raised, clock } = watchOver(settings, fleet);
+    watch.check(false);
+    await pollUntil(() => puts.length === 1, "the write whose answer was lost");
+    await Bun.sleep(20);
+    expect(raised).toEqual([]);
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the alert, once the record shows it landed");
+    expect(raised).toEqual([{ v: 1, kind: "github", at: NOW, resource: "graphql", reset }]);
+  });
 });
 
 describe("createMachineAlertWatch: the archivist's silence", () => {

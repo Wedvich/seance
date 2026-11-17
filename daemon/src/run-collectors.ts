@@ -2,6 +2,7 @@ import {
   startSlotTimer,
   STATUS_MIN_INTERVAL_MS,
   type CustodianStatus,
+  type GithubRate,
   type MachineStatus,
   type SessionEntry,
 } from "@seance/shared";
@@ -38,6 +39,8 @@ export interface CollectorDeps {
   readonly drainAt?: () => number | null;
   /** The custodian seat's view, read late (the seat starts after the loop): the status's `cu`. */
   readonly custodian?: () => CustodianStatus | null;
+  /** The `gh` budget reader's view (`github-rate.ts`): the status's `gh`. */
+  readonly github?: () => GithubRate | null;
   /** Auth health's view: the status's `ax`/`ae`/`au`. */
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' pairs for the registered scan: the status's `tf`/`tu`. */
@@ -98,6 +101,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     ...(collectors.closed === undefined ? {} : { closed: collectors.closed }),
     ...(collectors.drainAt === undefined ? {} : { drainAt: collectors.drainAt }),
     ...(collectors.custodian === undefined ? {} : { custodian: collectors.custodian }),
+    ...(collectors.github === undefined ? {} : { github: collectors.github }),
     ...(collectors.auth === undefined ? {} : { auth: collectors.auth }),
     ...(collectors.traits === undefined ? {} : { traits: collectors.traits }),
   });

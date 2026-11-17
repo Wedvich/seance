@@ -619,8 +619,8 @@ with `machine` the observing daemon's device id and, on quota metrics, `account`
 rolled up from its own samples, and `pull_marks` (`machine`, `step`, `series`, `ts`) is
 the newest point pulled per machine, tier and series. Metrics
 are `cpu_pct`, `mem_pct`, `disk_pct`, `disk_free_mib`, `disk_read_kibs`,
-`disk_write_kibs`, `sessions`, `quota_5h_pct`, `quota_7d_pct`, `quota_7d_model_pct` and
-`quota_credits_pct`.
+`disk_write_kibs`, `sessions`, `quota_5h_pct`, `quota_7d_pct`, `quota_7d_model_pct`,
+`quota_credits_pct` and `github_used_pct` (label `resource`: `core` or `graphql`).
 
 ```sql
 -- Finished tasks per repo and outcome, last 30 days

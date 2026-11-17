@@ -4,6 +4,7 @@ import {
   METRICS_STEPS,
   type MetricsRequest,
   type MetricsSeries,
+  type GithubRate,
   type MetricsStep,
   type QuotaObservation,
 } from "@seance/shared";
@@ -103,6 +104,25 @@ export function quotaSamples(q: QuotaObservation, labels: Readonly<Record<string
     samples.push({ metric: METRIC_NAMES.w, labels: { ...labels, model: window.m }, ts: q.at, value: window.p });
   }
   if (q.c !== undefined) samples.push({ metric: METRIC_NAMES.c, labels, ts: q.at, value: q.c });
+  return samples;
+}
+
+/** `github_used_pct` samples for a `gh` reading, shared by the daemon's collector and the archivist's live import so the two cannot drift. Used share in percent, as the quota series are. */
+export function githubSamples(gh: GithubRate, labels: Readonly<Record<string, string>>, ts: number): Sample[] {
+  const samples: Sample[] = [];
+  for (const [resource, b] of [
+    ["core", gh.c],
+    ["graphql", gh.g],
+  ] as const) {
+    if (b === undefined) continue;
+    const [limit, remaining] = b;
+    samples.push({
+      metric: METRIC_NAMES.gh,
+      labels: { ...labels, resource },
+      ts,
+      value: Math.min(100, Math.max(0, ((limit - remaining) / limit) * 100)),
+    });
+  }
   return samples;
 }
 

@@ -401,4 +401,13 @@ describe("statusSamples", () => {
       exclave: "default",
     });
   });
+
+  test("the GitHub budget is a used share per resource under the observer, never the user id", async () => {
+    const status: MachineStatus = { at: NOW, scan: 0, gh: { u: 583231, c: [5000, 4000, 1], g: [5000, 0, 1] } };
+    const samples = await statusSamples(machine(), status, () => Promise.reject(new Error("no account here")));
+    expect(samples).toEqual([
+      { metric: "github_used_pct", labels: { machine: "dev-a", resource: "core" }, ts: NOW, value: 20 },
+      { metric: "github_used_pct", labels: { machine: "dev-a", resource: "graphql" }, ts: NOW, value: 100 },
+    ]);
+  });
 });

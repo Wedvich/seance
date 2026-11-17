@@ -34,6 +34,7 @@ async function runForeground(): Promise<void> {
   const daemon = await startSupervisor({
     authHealth: {},
     custodian: {},
+    githubRate: {},
     usageRefresh: {},
     ...(supervised ? { selfUpdate: {} } : {}),
   });

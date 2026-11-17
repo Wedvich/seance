@@ -65,6 +65,8 @@ import {
   PUSH_MAX_SUBSCRIPTIONS,
   AUTH_ALERTS_MAX,
   DISK_ALERTS_MAX,
+  GITHUB_ALERTS_MAX,
+  GITHUB_RESOURCES,
   PUSH_SERVICE_HOSTS,
   PUSH_SERVICE_VENDORS,
   REPO_MAX_SKILLS,
@@ -124,6 +126,9 @@ import {
   type ArchivistSilence,
   type AuthAlerted,
   type DiskAlerted,
+  type GithubAlerted,
+  type GithubBudget,
+  type GithubRate,
   type SpillStamp,
   type TaskPr,
   type VapidKeys,
@@ -615,6 +620,28 @@ export function parseCustodianStatus(value: unknown): CustodianStatus | null {
   };
 }
 
+function parseGithubBudget(value: unknown): GithubBudget | null {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const [limit, remaining, reset] = value;
+  if (!isUint(limit) || !isUint(remaining) || !isUint(reset)) return null;
+  return limit > 0 && remaining <= limit && reset > 0 ? [limit, remaining, reset] : null;
+}
+
+/** `MachineStatus.gh`. Null for anything off, a key it does not know included: the caller drops `gh` alone. */
+export function parseGithubRate(value: unknown): GithubRate | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "u" || key === "c" || key === "g")) return null;
+  const { u, c, g } = value;
+  if (u !== undefined && !(isUint(u) && u > 0)) return null;
+  const core = c === undefined ? undefined : parseGithubBudget(c);
+  const graphql = g === undefined ? undefined : parseGithubBudget(g);
+  if (core === null || graphql === null || (core === undefined && graphql === undefined)) return null;
+  return {
+    ...(u === undefined ? {} : { u }),
+    ...(core === undefined ? {} : { c: core }),
+    ...(graphql === undefined ? {} : { g: graphql }),
+  };
+}
+
 /**
  * The decrypted `status` blob. Strict where `parseMachineInfo` is lenient: a
  * status is regenerated every tick and renders nothing on its own, so one bad
@@ -652,6 +679,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (dr !== undefined && !(isFiniteNumber(dr) && dr > 0 && cl !== undefined)) return null;
   // Unlike `drn`, `cl` and `dr`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
   const cu = value["cu"] === undefined ? null : parseCustodianStatus(value["cu"]);
+  // Dropped alone too, for the same reason.
+  const gh = value["gh"] === undefined ? null : parseGithubRate(value["gh"]);
   return {
     at: value["at"],
     scan: value["scan"],
@@ -673,6 +702,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(cl === undefined ? {} : { cl }),
     ...(dr === undefined ? {} : { dr }),
     ...(cu === null ? {} : { cu }),
+    ...(gh === null ? {} : { gh }),
   };
 }
 
@@ -2193,6 +2223,7 @@ const PUSH_ALERT_KEYS = {
   archivist: ["v", "kind", "at", "since"],
   flag: ["v", "kind", "at", "taskId", "reason"],
   "custodian-failing": ["v", "kind", "at", "deviceId"],
+  github: ["v", "kind", "at", "resource", "reset"],
 } as const;
 
 /**
@@ -2275,6 +2306,12 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     if (!known(PUSH_ALERT_KEYS["custodian-failing"]) || !isRoutingId(deviceId)) return null;
     return { v: 1, kind, at, deviceId };
   }
+  if (kind === "github") {
+    const { resource, reset } = value;
+    const budget = GITHUB_RESOURCES.find((r) => r === resource);
+    if (!known(PUSH_ALERT_KEYS.github) || budget === undefined || !isUint(reset)) return null;
+    return { v: 1, kind, at, resource: budget, reset };
+  }
   return null;
 }
 
@@ -2306,7 +2343,7 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
-  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts, archivistSilence } = value;
+  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts, archivistSilence, githubAlerts } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
   if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
@@ -2324,6 +2361,8 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (auth === null) return null;
   const silence = archivistSilence === undefined ? undefined : parseArchivistSilence(archivistSilence);
   if (silence === null) return null;
+  const github = githubAlerts === undefined ? undefined : parseGithubAlerts(githubAlerts);
+  if (github === null) return null;
   return {
     version: value["version"],
     ...(keys === undefined ? {} : { vapid: keys }),
@@ -2332,7 +2371,22 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
     ...(disk === undefined ? {} : { diskAlerts: disk }),
     ...(auth === undefined ? {} : { authAlerts: auth }),
     ...(silence === undefined ? {} : { archivistSilence: silence }),
+    ...(github === undefined ? {} : { githubAlerts: github }),
   };
+}
+
+/** One entry per GitHub user and budget. */
+function parseGithubAlerts(value: unknown): readonly GithubAlerted[] | null {
+  if (!Array.isArray(value) || value.length > GITHUB_ALERTS_MAX) return null;
+  const parsed = parseList(value, (entry): GithubAlerted | null => {
+    if (!isRecord(entry) || Object.keys(entry).length !== 4) return null;
+    const { u, r, reset, at } = entry;
+    const budget = GITHUB_RESOURCES.find((candidate) => candidate === r);
+    if (!isUint(u) || u === 0 || budget === undefined || !isUint(reset) || !isFiniteNumber(at)) return null;
+    return { u, r: budget, reset, at };
+  });
+  if (parsed === null || new Set(parsed.map((e) => `${e.u}:${e.r}`)).size !== parsed.length) return null;
+  return parsed;
 }
 
 function parseArchivistSilence(value: unknown): ArchivistSilence | null {

@@ -92,6 +92,7 @@ import {
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   AUTH_ALERTS_MAX,
+  GITHUB_ALERTS_MAX,
   DISK_ALERTS_MAX,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
@@ -2545,6 +2546,29 @@ describe("M4 shapes", () => {
     expect(extra?.cu).toEqual({ s: "idle" });
   });
 
+  test("a status carries this machine's GitHub budget as `gh`; a bad one is dropped alone", () => {
+    const gh = { u: 583231, c: [5000, 120, 1_763_000_000], g: [5000, 4990, 1_763_000_100] } as const;
+    expect(parseMachineStatus({ at: 1, scan: 2, gh })).toEqual({ at: 1, scan: 2, gh });
+    // No user yet, and one budget alone, are readings too.
+    expect(parseMachineStatus({ at: 1, scan: 2, gh: { g: gh.g } })?.gh).toEqual({ g: gh.g });
+    for (const bad of [
+      {},
+      { u: 7 },
+      { ...gh, u: 0 },
+      { ...gh, u: "7" },
+      { ...gh, c: [5000, 5001, 1] },
+      { ...gh, c: [0, 0, 1] },
+      { ...gh, c: [5000, 1, 0] },
+      { ...gh, c: [5000, 1] },
+      { ...gh, g: [5000, 1.5, 1] },
+      { ...gh, login: "octocat" },
+      "gh",
+      null,
+    ]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, gh: bad })).toEqual({ at: 1, scan: 2, cpu: 40 });
+    }
+  });
+
   test("cu's p is a pause behind running or failing, kept only as true beside those", () => {
     for (const s of ["running", "failing"] as const) {
       expect(parseMachineStatus({ at: 1, scan: 2, cu: { s, p: true } })?.cu).toEqual({ s, p: true });
@@ -2853,6 +2877,10 @@ describe("M4 shapes", () => {
         { deviceId: "dev-1", exclave: "work", state: "expiring", at: 1_760_000_000_001 },
       ],
       archivistSilence: { state: "alerted", since: 1_760_000_000_002 },
+      githubAlerts: [
+        { u: 7, r: "core", reset: 1_760_000_000, at: 1_760_000_000_003 },
+        { u: 7, r: "graphql", reset: 1_760_000_000, at: 1_760_000_000_004 },
+      ],
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
     for (const archivistSilence of [{ state: "present" }, { state: "absent", since: 1 }] as const) {
@@ -2912,6 +2940,26 @@ describe("M4 shapes", () => {
       { ...settings, archivistSilence: { state: "alerted", since: 8.64e15 + 1 } },
       { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
       { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
+      { ...settings, githubAlerts: [{ u: 7, r: "search", reset: 1, at: 1 }] },
+      { ...settings, githubAlerts: [{ u: 0, r: "core", reset: 1, at: 1 }] },
+      { ...settings, githubAlerts: [{ u: 7, r: "core", reset: 1 }] },
+      { ...settings, githubAlerts: [{ u: 7, r: "core", reset: 1, at: 1, login: "octocat" }] },
+      {
+        ...settings,
+        githubAlerts: [
+          { u: 7, r: "core", reset: 1, at: 1 },
+          { u: 7, r: "core", reset: 2, at: 2 },
+        ],
+      },
+      {
+        ...settings,
+        githubAlerts: Array.from({ length: GITHUB_ALERTS_MAX + 1 }, (_, i) => ({
+          u: i + 1,
+          r: "core",
+          reset: 1,
+          at: 1,
+        })),
+      },
       {
         ...settings,
         diskAlerts: Array.from({ length: DISK_ALERTS_MAX + 1 }, (_, i) => ({ deviceId: `dev-${i}`, at: 1 })),
@@ -3033,6 +3081,12 @@ describe("M4 shapes", () => {
         at: 1_760_000_000_000,
       })),
       archivistSilence: { state: "alerted", since: 8.64e15 },
+      githubAlerts: Array.from({ length: GITHUB_ALERTS_MAX }, (_, i) => ({
+        u: Number.MAX_SAFE_INTEGER - i,
+        r: "graphql" as const,
+        reset: Number.MAX_SAFE_INTEGER,
+        at: Number.MAX_SAFE_INTEGER,
+      })),
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -3061,7 +3115,23 @@ describe("parsePushAlert", () => {
     const archivist = { v: 1, kind: "archivist", at: 5, since: 3 } as const;
     const flagged = { v: 1, kind: "flag", at: 5, taskId: "t-1", reason: "stuck" } as const;
     const failing = { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1" } as const;
-    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring, archivist, flagged, failing]) {
+    const github = { v: 1, kind: "github", at: 5, resource: "core", reset: 1_763_000_000 } as const;
+    const graphql = { ...github, resource: "graphql" } as const;
+    for (const alert of [
+      spill,
+      spending,
+      input,
+      question,
+      disk,
+      bare,
+      auth,
+      expiring,
+      archivist,
+      flagged,
+      failing,
+      github,
+      graphql,
+    ]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -3137,6 +3207,11 @@ describe("parsePushAlert", () => {
       { v: 1, kind: "custodian-failing", at: 5, deviceId: "a/b" },
       { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1", note: "free text" },
       { v: 1, kind: "custodian-failing", at: 5 },
+      { v: 1, kind: "github", at: 5, resource: "search", reset: 1 },
+      { v: 1, kind: "github", at: 5, resource: "core" },
+      { v: 1, kind: "github", at: 5, resource: "core", reset: -1 },
+      { v: 1, kind: "github", at: 5, resource: "core", reset: 1, deviceId: "dev-1" },
+      { v: 1, kind: "github", at: 5, resource: "core", reset: 1, u: 7 },
       null,
       "spill",
     ]) {
