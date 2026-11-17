@@ -172,7 +172,10 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         repeatable: true,
         help: "only place it where every named trait is declared (traits in config.json; list_machines shows them)",
       },
-      { flag: "--start", help: "once the scheduler admits it, start it past the concurrency limit and a paused queue (as seance start)" },
+      {
+        flag: "--start",
+        help: "once the scheduler admits it, start it past the concurrency limit and a paused queue (as seance start)",
+      },
       {
         flag: "--autonomy",
         value: "level",

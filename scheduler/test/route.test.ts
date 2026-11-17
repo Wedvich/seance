@@ -864,7 +864,15 @@ describe("filter", () => {
         { until: "resume", at: NOW - 1 },
         { account: "org:a", until: "resume", at: NOW - 1 },
       ] as const;
-      const decision = route({ task: task(), machines: fleet, tasks: [], now: NOW, config: DEFAULT_CONFIG, holds, runNow: true });
+      const decision = route({
+        task: task(),
+        machines: fleet,
+        tasks: [],
+        now: NOW,
+        config: DEFAULT_CONFIG,
+        holds,
+        runNow: true,
+      });
       expect(decision.chosen?.deviceId).toBe("b");
       expect(decision.candidates.find((c) => c.deviceId === "a")?.rejected).toEqual([
         { code: "paused", until: "resume", scope: "account" },
