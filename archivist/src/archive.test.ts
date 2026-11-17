@@ -236,6 +236,12 @@ describe("task rows", () => {
     expect(row).toMatchObject({ repo: "seance", title: "Do the thing", deviceId: "dev-a", prState: "open" });
   });
 
+  test("a task's notBefore is kept on the row: a time, neither a prompt nor an account", () => {
+    expect(archivedTask(task({ spec: { repo: "r", mode: "here", notBefore: 1_900_000_000_000 } })).spec.notBefore).toBe(
+      1_900_000_000_000,
+    );
+  });
+
   test("a successor keeps its lineage but not its predecessor's raw account id, and still parses as a task", () => {
     const succeeds = {
       task: "t-0",
