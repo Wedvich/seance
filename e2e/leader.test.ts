@@ -120,7 +120,7 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
         reservation: { deviceId: b, exclave: "default", clone: "app", expiresAt: Date.now() + 600_000 },
       });
       await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       expect((await stack.queue().get(taskId))?.body?.state).toBe("reserved");
       // Same state dir, same id; connected later, so it follows.
@@ -180,7 +180,7 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
     const app = startApp(stack);
     let window: string | undefined;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       // A spawn before the machine's repos are listed resolves no repo and does nothing, silently.
       const ready = await app.waitForApp(
@@ -322,7 +322,7 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
     try {
       // The takeover settles what the earlier tests in this file left running, whose windows are gone: caps are clear.
       await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
 
       // A ledger old enough to prove a never-landed spawn (`ledgerSince` + the replay window <= the
@@ -383,7 +383,7 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
 
       await stack.restartDaemon();
       down = false;
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.waitForLead("the suite's daemon to lead again");
       await stack.daemon.leader.settled();
 
       const listed = await app.client.request<{ sessions: readonly SessionEntry[] }>(b, "sessions", {});
@@ -478,7 +478,7 @@ describe("settings record: the leader's term creates it, and no later term repla
     const err = spyOn(console, "error").mockImplementation((...args) => void lines.push(args.join(" ")));
     try {
       await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       // Created beside takeover, not before it.
       await pollUntil(async () => (await readSettings()) !== null, "the leader to create the settings record", 10_000);
@@ -522,7 +522,7 @@ describe("settings record: the leader's term creates it, and no later term repla
   }, 30_000);
 
   test("push-subscribe adds a browser's subscription to the record, is idempotent, refuses a host off the allowlist, stops at the cap, and push-unsubscribe frees a slot", async () => {
-    await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+    await stack.waitForLead("the suite's daemon to lead");
     await stack.daemon.leader.settled();
     const app = startApp(stack);
     const keys = USER_AGENT_KEYS;
@@ -603,7 +603,7 @@ describe("settings record: the leader's term creates it, and no later term repla
     const app = startApp(stack);
     const taskId = "e2e-push-stuck";
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
       const keys = USER_AGENT_KEYS;
       await pollUntil(
@@ -678,7 +678,7 @@ describe("pass: a session's own pass ↔ local daemon ↔ leader ↔ the daemon'
     let window: string | undefined;
     let successorId: string | undefined;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const ready = await app.waitForApp(
         (state) =>
@@ -805,7 +805,7 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
     let window: string | undefined;
     let successorId: string | undefined;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const ready = await app.waitForApp(
         (state) =>
@@ -945,7 +945,7 @@ describe("drain: a closed machine ↔ leader ↔ the machine's push and close", 
     taskId: string,
     branch: string,
   ): Promise<{ readonly window: string | undefined; readonly tip: string; readonly origin: string }> {
-    await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+    await stack.waitForLead("the suite's daemon to lead");
     await stack.daemon.leader.settled();
     const ready = await app.waitForApp(
       (state) =>
@@ -1270,7 +1270,7 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
         createdAt: Date.now(),
       });
       await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       app = startApp(stack);
       const ready = await app.waitForApp(
@@ -1369,7 +1369,7 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
     const app = startApp(stack);
     let window: string | undefined;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       const ready = await app.waitForApp(
         (state) =>
           state.relay.scheduler.kind === "ready" &&
@@ -1421,7 +1421,7 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
     const app = startApp(stack);
     let second: SecondDaemon | null = null;
     try {
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       const now = Date.now();
       second = await stack.startSecondDaemon({
         name: "ContinueBox",
@@ -1547,7 +1547,7 @@ describe("stacking: the leader's dispatch ↔ the daemon's worktree from origin/
         createdAt: Date.now(),
       });
       await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
       const ready = await app.waitForApp(
         (state) =>
