@@ -177,6 +177,17 @@ function closeTop(state: AppState): Partial<AppState> | null {
   return null;
 }
 
+/**
+ * One patch closing every layer over the `base` the prompt flow holds, except `keep`. `keep` is the
+ * lowest of them, so closing from the top never reaches it while another remains.
+ */
+function closedOver(state: AppState, base: number, keep: "queue" | "machines"): Partial<AppState> {
+  if (openLayers(state) - base <= (state[keep] ? 1 : 0)) return {};
+  const step = closeTop(state);
+  if (step === null) return {};
+  return { ...step, ...closedOver({ ...state, ...step }, base, keep) };
+}
+
 const HISTORY_UNREADABLE = "Couldn't read the machine's answer. Update seanced and the app to matching versions.";
 
 const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
@@ -1116,17 +1127,8 @@ export class Store {
       this.#patch(opened);
       return;
     }
-    let next = this.#state;
-    let patch: Partial<AppState> = {};
-    // The target is the lowest layer over the flow, so closing from the top never reaches it while others remain.
-    while (openLayers(next) - base > (next[screen] ? 1 : 0)) {
-      const step = closeTop(next);
-      if (step === null) break;
-      next = { ...next, ...step };
-      patch = { ...patch, ...step };
-    }
     const queueClosed = this.#state.queue && screen !== "queue";
-    this.#patch({ ...patch, ...opened });
+    this.#patch({ ...closedOver(this.#state, base, screen), ...opened });
     if (queueClosed) this.#older.close();
     if (over > 1) history.go(-(over - 1));
   }
