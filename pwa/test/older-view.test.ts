@@ -95,6 +95,7 @@ function state(
     queueNotice: null,
     startNowRefusal: null,
     pausing: false,
+    accountOpen: null,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],

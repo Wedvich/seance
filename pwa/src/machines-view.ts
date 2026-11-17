@@ -34,6 +34,7 @@ import {
   type Machine,
   type MachineStatus,
   type NewestQuota,
+  type PauseHold,
   type QuotaReading,
   type SchedulerAvailability,
   type SchedulerRole,
@@ -359,6 +360,13 @@ export interface AccountCard {
   readonly historyFrom: string | null;
   /** Whether a chart can be asked for: from `historyFrom`, or merged from the archive while it charts accounts. */
   readonly charts: boolean;
+  /**
+   * The "Open for work" switch: the leader's account hold, read off the queue's holds. Null while it cannot be
+   * flipped (no relay, no verified leader, or no queue read to know the holds by), `off` under a hold of any kind.
+   */
+  readonly openSwitch: "on" | "off" | null;
+  /** Why the account takes no new work: its hold in words; null while open or the holds are unknown. */
+  readonly hold: Timed | null;
 }
 
 export interface MachinesView {
@@ -668,6 +676,7 @@ function deriveAccounts(
   fleetQuota: readonly FleetQuotaEntry[],
   known: readonly KnownAccount[],
   archived: boolean,
+  holds: AccountHolds,
 ): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
@@ -715,6 +724,7 @@ function deriveAccounts(
     const plainName = accountNameIn(known, group.accountId);
     const where = `${plainName} · on ${[...group.machines].join(", ")}`;
     const historyFrom = historyHost(group, observer);
+    const held = holds.known ? accountHold(holds.holds, group.accountId, now) : undefined;
     return {
       accountId: group.accountId,
       alias: alias ?? null,
@@ -726,8 +736,35 @@ function deriveAccounts(
       observed: observedLine(quota, observer, now),
       historyFrom,
       charts: archived || historyFrom !== null,
+      openSwitch: !holds.known || !holds.switchable ? null : held === undefined ? "on" : "off",
+      hold: held === undefined ? null : holdLine(held, now),
     };
   });
+}
+
+/**
+ * The leader's holds as the account cards read them. `known` once a queue read landed, `switchable` while a pause
+ * or resume could also be sent (the relay is open and a verified leader leads).
+ */
+interface AccountHolds {
+  readonly known: boolean;
+  readonly switchable: boolean;
+  readonly holds: readonly PauseHold[];
+}
+
+/** The account's hold in force: a reset hold past its `resumeAt` has lifted, as the leader judges it (`pause.ts`). */
+function accountHold(holds: readonly PauseHold[], accountId: string, now: number): PauseHold | undefined {
+  return holds.find(
+    (hold) =>
+      hold.account === accountId && (hold.until === "resume" || (hold.resumeAt !== undefined && hold.resumeAt > now)),
+  );
+}
+
+function holdLine(hold: PauseHold, now: number): Timed {
+  if (hold.until === "resume") return timed`Closed to new work ${seen(hold.at, now)}. Running sessions keep going.`;
+  if (hold.resumeAt === undefined) return ["Closed to new work until its quota resets"];
+  const when = { text: formatUntil(hold.resumeAt, now).replace(/^resets /u, ""), at: hold.resumeAt };
+  return timed`Closed to new work until its quota resets (${when})`;
 }
 
 export function deriveMachines(
@@ -740,6 +777,8 @@ export function deriveMachines(
   /** The relay socket is open: a close is not offered without it, as `deriveCloseAvailability`. */
   relayOpen = true,
   drains: DrainInputs = NO_DRAINS,
+  /** The leader's holds from the last queue read; null before one landed, when no account's switch is offered. */
+  holds: readonly PauseHold[] | null = null,
 ): MachinesView {
   const known = knownAccounts(machines);
   const leader = {
@@ -751,7 +790,11 @@ export function deriveMachines(
     cards: machines.map((machine) =>
       machineCard(machine, now, scheduler, aliases, known, archive.machine, leader, drains),
     ),
-    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),
+    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account, {
+      known: holds !== null,
+      switchable: relayOpen && scheduler.kind === "ready",
+      holds: holds ?? [],
+    }),
     ranges: { machine: historyRanges(archive.machine), account: historyRanges(archive.account) },
   };
 }

@@ -74,6 +74,13 @@ export interface VerbSpec {
   readonly internal?: true;
 }
 
+/** `close` and `open`'s account form: the account's hold at the leader (DESIGN.md, "Closing an account"). */
+const ACCOUNT_FLAG: FlagSpec = {
+  flag: "--account",
+  value: "<account>",
+  help: "an account (alias, email or id) instead of a machine",
+};
+
 export interface CommandSpec {
   /** One line: help's first line for the command and its completion description. */
   readonly summary: string;
@@ -191,21 +198,28 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     details: [RELAY_NOTE],
   },
   close: {
-    summary: "close a machine to new scheduled work (default: this one)",
-    usage: "[<machine>] [--drain] [--now] [--wait]",
+    summary: "close a machine, or with --account an account, to new scheduled work (default: this machine)",
+    usage: "[<machine>] [--drain] [--now] [--wait] | --account <account>",
     details: [
       "where it and the leader support a soft close its running tasks finish where they are; --drain (or a plain close",
       "elsewhere) asks its sessions to pass themselves and has a leader that supports it pass what is left to other",
       "machines after 10 minutes; --drain or --now on a soft-closed machine starts its drain",
+      "--account <alias|email|id> closes that account on every machine instead: nothing new is placed on it, its",
+      "running sessions keep going and a task pinned to it waits; it takes no other word or flag",
       "over the relay, so needs a PSK this shell can read — a keyless box uses the PWA",
     ],
     flags: [
+      ACCOUNT_FLAG,
       { flag: "--drain", help: "pass its running tasks on, not only close it" },
       { flag: "--now", help: "implies --drain, and interrupts its sessions at once instead of after 5 minutes" },
       { flag: "--wait", help: "block until the machine is empty; exit 2 when only work that can't move is left" },
     ],
   },
-  open: { summary: "reopen a closed machine", usage: "[<machine>]" },
+  open: {
+    summary: "reopen a closed machine, or with --account a closed account",
+    usage: "[<machine>] | --account <account>",
+    flags: [ACCOUNT_FLAG],
+  },
   pass: {
     summary: "pass a running task to a successor (the app's Pass to successor)",
     usage: "<task-id>",

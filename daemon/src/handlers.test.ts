@@ -1715,6 +1715,8 @@ describe("a closed machine", () => {
       pass: unused,
       getTask: unused,
       amend: unused,
+      pause: unused,
+      resume: unused,
       listAccounts: unused,
       onStoreChanged: () => () => {},
     };

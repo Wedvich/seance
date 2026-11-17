@@ -103,6 +103,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     queueNotice: null,
     startNowRefusal: null,
     pausing: false,
+    accountOpen: null,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],

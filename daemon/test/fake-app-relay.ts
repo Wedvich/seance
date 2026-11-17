@@ -13,6 +13,7 @@ import {
   type Task,
   type TaskCreated,
   type PassReply,
+  type PauseReply,
   type TaskLookup,
   type TaskReply,
 } from "@seance/shared";
@@ -150,6 +151,8 @@ export function fakeRelay(
       return { ok: true, task: task === undefined ? null : { version: 1, task } };
     },
     amend: (request) => schedule<TaskReply | null>("amend", request),
+    pause: (request) => schedule<PauseReply | null>("pause", request),
+    resume: (request) => schedule<PauseReply | null>("resume", request),
     accounts: [],
     accountLists: 0,
     listAccounts: async (): Promise<AccountListing | StoreRefusal | null> => {

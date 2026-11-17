@@ -1,4 +1,5 @@
 import {
+  accountNameIn,
   CAPABILITIES,
   closedAt,
   drainStart,
@@ -10,14 +11,16 @@ import {
   QUEUE_MAX_TASKS,
   RequestFailure,
   failureReasonText,
+  knownAccounts,
   lastHeardAt,
   leaderCloseNote,
   leadsQueue,
+  schedulerErrorText,
   type AvailabilityRequest,
   type SessionsResponse,
   type Task,
 } from "@seance/shared";
-import { advertises, resolveMachine, type AutoEnqueued } from "./auto.ts";
+import { advertises, resolveAccount, resolveMachine, type AutoEnqueued } from "./auto.ts";
 import { SCHEDULER_NEEDS_NEWER_DAEMON, type Fleet, type FleetLease, type SchedulerLeg } from "./fleet.ts";
 import { RESTART_GRACE_MS } from "./local-client.ts";
 
@@ -52,6 +55,52 @@ const done = (text: string, closed?: AvailabilityOutcome["closed"]): Availabilit
   ...(closed === undefined ? {} : { closed }),
 });
 const failed = (text: string): AvailabilityOutcome => ({ ok: false, text });
+
+const KEYLESS_ACCOUNT_TEXT =
+  "not sent — closing or opening an account needs this machine's key, which is service-delivered here; use the PWA's Machines screen, or seanced on a machine whose key is readable";
+
+/**
+ * Closes an account to new scheduled work, or reopens it: an account hold until resumed at the leader (`pause`), or
+ * its `resume`, which lifts any hold on it, a reset hold included (DESIGN.md, "Closing an account"). The leader holds
+ * only placements, never a running session. `ref` is the account's id, email or alias, resolved as a pin's is. Only
+ * on a leg with a key of its own (`SchedulerLeg.holds`): the broker does not carry `pause`.
+ */
+export async function setAccountOpen(opts: {
+  readonly ref: string;
+  readonly open: boolean;
+  readonly lease: FleetLease;
+}): Promise<AutoEnqueued> {
+  const { lease, open } = opts;
+  const verb = open ? "open" : "close";
+  const leg = lease.scheduler;
+  if (leg?.holds === undefined) return failed(KEYLESS_ACCOUNT_TEXT);
+  const records = await leg.accounts();
+  const matched = resolveAccount(lease.machines, records, opts.ref, "account");
+  if ("error" in matched) return failed(matched.error);
+  const { accountId } = matched;
+  let reply;
+  try {
+    reply = open
+      ? await leg.holds.resume({ account: accountId })
+      : await leg.holds.pause({ until: "resume", account: accountId });
+  } catch (err) {
+    const why =
+      err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+    return failed(`${verb} failed: ${why}`);
+  }
+  if (reply === null)
+    return failed(`${verb} failed: the scheduler's answer was unreadable — it may or may not have landed`);
+  if ("ok" in reply) {
+    const note = isTransportError(reply.code) ? " — it may or may not have landed" : "";
+    return failed(`${verb} failed (${reply.code}): ${schedulerErrorText(reply.code)}${note}`);
+  }
+  const alias = records?.find((record) => record.accountId === accountId)?.alias ?? undefined;
+  const name = `${accountNameIn(knownAccounts(lease.machines), accountId, alias)} (${accountId})`;
+  if (open) return done(`${name} is open for work`);
+  return done(
+    `${name} is closed to new scheduled work: the scheduler places nothing new on it, a task pinned to it waits, and its running sessions keep going`,
+  );
+}
 
 /**
  * `ref` is a machine's name or deviceId, null for this machine, which is `selfId` in the registry. Always

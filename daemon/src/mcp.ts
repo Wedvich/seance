@@ -69,7 +69,7 @@ import {
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
-import { queueTasksFor, setMachineOpen } from "./availability-client.ts";
+import { queueTasksFor, setAccountOpen, setMachineOpen } from "./availability-client.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -1692,6 +1692,25 @@ export function buildMcpServer(
           ...(drain === undefined ? {} : { drain }),
           lease,
         });
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
+    "set_account_open",
+    {
+      title: "Close or reopen an account",
+      description:
+        "Close a Claude account to new scheduled work, or reopen it: the PWA's account Open for work switch. A closed account takes no new task from the scheduler on any machine: auto tasks are placed on the fleet's other accounts, and a task pinned to it waits until it reopens. Nothing running is touched: its sessions keep going, and a direct spawn still runs. Reopening also lifts a hold until the account's quota resets. Goes over the relay as an app-role client, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there. Needs a verified scheduler leader.",
+      inputSchema: z.strictObject({
+        account: z.string().describe("The account's alias, email or accountId, as list_machines names it"),
+        open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ account, open }) =>
+      withFleet(async (lease) => {
+        const outcome = await setAccountOpen({ ref: account, open, lease });
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );
