@@ -963,6 +963,13 @@ export class RelayClient {
    */
   #statuses = new Map<string, StatusHit>();
   /**
+   * deviceId -> the iv of the newest status asked for, set before its decrypt awaits. A decrypt
+   * that settles after a newer one was asked lands nothing: a push's snapshot opened slowly behind
+   * the frame that replaced it would otherwise overwrite it, and a status stamped for the blob
+   * before a re-register reads as none until the next beat — the leader routes nothing there.
+   */
+  #statusWanted = new Map<string, string>();
+  /**
    * deviceId -> the lastSeen we held when delivery failed (an `undeliverable`
    * refusal or a request timeout). `connected` is derived from live sockets and
    * can read true over an abruptly slept machine, so a failed delivery is the
@@ -982,6 +989,8 @@ export class RelayClient {
   #leader: SchedulerLeader | null = null;
   /** The leader's proof, opened once per iv: every push re-sends it. */
   #leadProof: LeadProofHit | null = null;
+  /** The iv of the newest proof asked for: a slower, older one must not land over it (as `#statusWanted`). */
+  #leadProofWanted: string | null = null;
   #state: RelayState = INITIAL_STATE;
   #socket: WebSocket | null = null;
   #attempt = 0;
@@ -1917,6 +1926,8 @@ export class RelayClient {
       if (entry.status !== undefined && hit?.iv === entry.status.iv) statuses.set(entry.deviceId, hit);
     }
     this.#statuses = statuses;
+    // Reset with the map: a decrypt begun before this push lands only if this push asks for it again.
+    this.#statusWanted = new Map();
     await Promise.all([
       this.#decryptLeadProof(leader),
       ...entries.map((entry) => this.#decryptInfo(entry)),
@@ -1990,6 +2001,7 @@ export class RelayClient {
    * by iv per machine, so a push re-sending the envelope costs no decrypt.
    */
   async #decryptStatus(deviceId: string, env: Envelope): Promise<void> {
+    this.#statusWanted.set(deviceId, env.iv);
     if (this.#statuses.get(deviceId)?.iv === env.iv) return;
     if (env.from !== deviceId) {
       this.#wireLog(
@@ -2008,6 +2020,7 @@ export class RelayClient {
       if (err instanceof OpMismatchError) this.#wireLog("dropped", `from=${quote(env.from)} reason=status-op`);
       // Otherwise not ours to read, like an info blob sealed with another key: steady state, not news.
     }
+    if (this.#statusWanted.get(deviceId) !== env.iv) return;
     // A snapshot that opened is the machine speaking — the same proof of life a
     // reply gives, and fresher than any mark a timeout left. A kept one clears
     // the mark too, harmlessly: it only arrives on an entry the relay already
@@ -2023,6 +2036,7 @@ export class RelayClient {
    */
   async #decryptLeadProof(leader: SchedulerLeader | null): Promise<void> {
     const env = leader?.proof;
+    this.#leadProofWanted = env?.iv ?? null;
     if (env === undefined || this.#leadProof?.iv === env.iv) return;
     let term: number | null = null;
     try {
@@ -2033,6 +2047,7 @@ export class RelayClient {
       if (err instanceof OpMismatchError) this.#wireLog("dropped", `from=${quote(env.from)} reason=lead-proof-op`);
       // Otherwise not sealed under this key: unverified, which the state says.
     }
+    if (this.#leadProofWanted !== env.iv) return;
     this.#leadProof = { iv: env.iv, from: env.from, term };
   }
 

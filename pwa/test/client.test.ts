@@ -754,6 +754,53 @@ async function statusEnvelope(deviceId: string, status: MachineStatus, withKey =
   return { t: "status", env: await seal(withKey, { to: APP_ID, from: deviceId }, plain) };
 }
 
+/**
+ * Holds the first WebCrypto decrypt whose opened plaintext `matches` until `release`, as a loaded
+ * runner's slow decrypt did (e2e/amend.test.ts's never-placed flake): WebCrypto is the boundary
+ * every open in the client crosses, so the client's own code runs unchanged around it.
+ */
+function holdDecrypt(matches: (plain: unknown) => boolean): {
+  readonly held: Promise<void>;
+  readonly release: () => void;
+  readonly restore: () => void;
+} {
+  const subtle = crypto.subtle;
+  const original = subtle.decrypt;
+  const real = original.bind(subtle);
+  const text = new TextDecoder();
+  let unblock = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  let reached = (): void => {};
+  const held = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let taken = false;
+  const parsed = (plain: ArrayBuffer): unknown => {
+    try {
+      return JSON.parse(text.decode(plain));
+    } catch {
+      return null;
+    }
+  };
+  subtle.decrypt = async (...args: Parameters<SubtleCrypto["decrypt"]>): Promise<ArrayBuffer> => {
+    const plain = await real(...args);
+    if (taken || !matches(parsed(plain))) return plain;
+    taken = true;
+    reached();
+    await gate;
+    return plain;
+  };
+  return {
+    held,
+    release: () => unblock(),
+    restore: (): void => {
+      subtle.decrypt = original;
+    },
+  };
+}
+
 function machineOf(state: RelayState, deviceId: string): RelayState["machines"][number] | undefined {
   return state.machines.find((m) => m.deviceId === deviceId);
 }
@@ -825,6 +872,53 @@ describe("status", () => {
       expect(machineOf(state, deviceId)).toMatchObject({ scannedAt: next, status: { at: 3, scan: next, mem: 60 } });
     } finally {
       daemon.close();
+      client.stop();
+    }
+  });
+
+  test("a pushed status that opens late never lands over the newer one a re-register's status brought", async () => {
+    const deviceId = await newDeviceId();
+    const info = machineInfo("Slow");
+    const daemon = await startFakeDaemon(relay, key, deviceId, info);
+    const { client, waitFor } = startClient();
+    let late: ReturnType<typeof startClient> | null = null;
+    let hold: ReturnType<typeof holdDecrypt> | null = null;
+    try {
+      await waitFor((s) => machineOf(s, deviceId)?.connected === true, "machine online");
+      daemon.client.send(await statusEnvelope(deviceId, { at: 5, scan: info.scannedAt }));
+      await waitFor((s) => machineOf(s, deviceId)?.status?.at === 5, "the relay keeps the first status");
+
+      // A client that connects now gets that status in its first push; its open is held.
+      hold = holdDecrypt(
+        (plain) => isRecord(plain) && plain.op === "status" && isRecord(plain.payload) && plain.payload.at === 5,
+      );
+      late = startClient();
+      await hold.held;
+      const next = info.scannedAt + 1;
+      const blob: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "machine-info",
+        payload: { ...info, scannedAt: next },
+      };
+      daemon.client.send(await register(deviceId, { info: await seal(key, { to: APP_ID, from: deviceId }, blob) }));
+      await late.waitFor((s) => machineOf(s, deviceId)?.scannedAt === next, "the re-register lands");
+      daemon.client.send(await statusEnvelope(deviceId, { at: 6, scan: next }));
+      await late.waitFor((s) => machineOf(s, deviceId)?.status?.at === 6, "the newer status lands");
+
+      hold.release();
+      // A non-event: the released open must change nothing, so there is nothing to poll for.
+      await Bun.sleep(300);
+      expect(machineOf(late.client.getState(), deviceId)?.status).toEqual({ at: 6, scan: next });
+    } finally {
+      hold?.release();
+      hold?.restore();
+      daemon.close();
+      late?.client.stop();
+      // Forgotten: the registry is capped and permanent, and this file runs close to the cap.
+      await waitFor((s) => machineOf(s, deviceId)?.connected !== true, "the machine gone");
+      client.forget(deviceId);
+      await waitFor((s) => machineOf(s, deviceId) === undefined, "the machine forgotten");
       client.stop();
     }
   });
@@ -1512,6 +1606,58 @@ describe("scheduler leg", () => {
       for (const id of ids) client.forget(id);
       await waitFor((s) => s.machines.every((m) => !ids.includes(m.deviceId)), "both forgotten");
       client.stop();
+    }
+  });
+
+  test("a lead proof that opens late never lands over the next term's: the new leader stays verified", async () => {
+    const leaderId = listed.legLeader;
+    const info = await seal(
+      key,
+      { to: APP_ID, from: leaderId },
+      { id: leaderId, ts: Date.now(), op: "machine-info", payload: machineInfo(leaderId) },
+    );
+    const lead = async (): Promise<{ socket: Awaited<ReturnType<typeof connectDaemon>>; term: number }> => {
+      const socket = await connectDaemon(relay);
+      socket.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info }));
+      const { term } = await socket.waitFor<{ t: "lead"; term: number }>("lead");
+      const proof = await seal(
+        key,
+        { to: APP_ID, from: leaderId },
+        { id: crypto.randomUUID(), ts: Date.now(), op: "lead-proof", payload: { term } },
+      );
+      socket.send({ t: "lead-proof", term, env: proof });
+      return { socket, term };
+    };
+    const watcher = startClient();
+    const first = await lead();
+    await watcher.waitFor((s) => s.scheduler.kind === "ready" && s.scheduler.term === first.term, "first verified");
+    let second: Awaited<ReturnType<typeof lead>> | null = null;
+    // A client that connects now gets the first term's proof in its first push; its open is held.
+    const hold = holdDecrypt(
+      (plain) =>
+        isRecord(plain) && plain.op === "lead-proof" && isRecord(plain.payload) && plain.payload.term === first.term,
+    );
+    const { client, waitFor } = startClient();
+    try {
+      await hold.held;
+      second = await lead();
+      const term = second.term;
+      await waitFor((s) => s.scheduler.kind === "ready" && s.scheduler.term === term, "the next term verified");
+
+      hold.release();
+      // A non-event: the released open must change nothing, so there is nothing to poll for.
+      await Bun.sleep(300);
+      expect(client.getState().scheduler).toMatchObject({ kind: "ready", term });
+    } finally {
+      hold.release();
+      hold.restore();
+      first.socket.close();
+      second?.socket.close();
+      await waitFor((s) => s.machines.every((m) => m.deviceId !== leaderId || !m.connected), "the leader gone");
+      client.forget(leaderId);
+      await waitFor((s) => s.machines.every((m) => m.deviceId !== leaderId), "the leader forgotten");
+      client.stop();
+      watcher.client.stop();
     }
   });
 });

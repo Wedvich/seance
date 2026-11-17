@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   CAPABILITIES,
   isRecord,
@@ -15,7 +15,7 @@ import { LazyRelay } from "../daemon/src/app-relay.ts";
 import { amendAuto } from "../daemon/src/auto.ts";
 import { relayFleet } from "../daemon/src/fleet.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
-import { killWindow, TOKEN, wsUrl, type Stack } from "./harness.ts";
+import { cancelTask, killWindow, takeLeakedTasks, TOKEN, wsUrl, type Stack } from "./harness.ts";
 import { startSuite, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
@@ -24,6 +24,10 @@ let stack: Stack;
 beforeAll(async () => {
   suite = await startSuite("e2e-amend");
   ({ stack } = suite);
+});
+
+afterEach(() => {
+  expect(takeLeakedTasks()).toEqual([]);
 });
 
 afterAll(async () => {
@@ -233,8 +237,8 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
     } finally {
       audit.mockRestore();
       // Cancelled before the resume, so nothing still waiting is placed on the way out.
-      await client.cancel(id).catch(() => null);
-      await client.cancel(dependent).catch(() => null);
+      await cancelTask(client, id);
+      await cancelTask(client, dependent);
       await client.resume().catch(() => null);
       if (window !== null) await killWindow(window);
       client.stop();
@@ -298,8 +302,8 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
       ).toHaveLength(1);
     } finally {
       audit.mockRestore();
-      await client.cancel(big).catch(() => null);
-      await client.cancel(small).catch(() => null);
+      await cancelTask(client, big);
+      await cancelTask(client, small);
       await client.resume().catch(() => null);
       client.stop();
     }
@@ -362,7 +366,7 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
         lease.release();
       }
     } finally {
-      await client.cancel(id).catch(() => null);
+      await cancelTask(client, id);
       await client.resume().catch(() => null);
       lazy.stop();
       client.stop();
