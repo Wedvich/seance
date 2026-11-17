@@ -174,7 +174,7 @@ describe("filter", () => {
       tasks: [],
       now: NOW,
       config: DEFAULT_CONFIG,
-      uncapped: true,
+      runNow: true,
     });
     expect(runNow.chosen).toBeNull();
     expect(codes(only(runNow))).toEqual(["draining"]);
@@ -197,7 +197,7 @@ describe("filter", () => {
       tasks: [],
       now: NOW,
       config: DEFAULT_CONFIG,
-      uncapped: true,
+      runNow: true,
     });
     expect(runNow.chosen).toBeNull();
     expect(codes(only(runNow))).toEqual(["closed"]);
@@ -796,7 +796,7 @@ describe("filter", () => {
       now: NOW,
       config: DEFAULT_CONFIG,
       limits: { fleet: 0 },
-      uncapped: true,
+      runNow: true,
     });
     expect(only(forced).rejected).toEqual([]);
   });
@@ -857,6 +857,41 @@ describe("filter", () => {
         [{ code: "paused", until: "resume", scope: "queue" }],
         [{ code: "paused", until: "resume", scope: "queue" }],
       ]);
+    });
+
+    test("run-now lifts the whole-queue hold, never an account's", () => {
+      const holds = [
+        { until: "resume", at: NOW - 1 },
+        { account: "org:a", until: "resume", at: NOW - 1 },
+      ] as const;
+      const decision = route({
+        task: task(),
+        machines: fleet,
+        tasks: [],
+        now: NOW,
+        config: DEFAULT_CONFIG,
+        holds,
+        runNow: true,
+      });
+      expect(decision.chosen?.deviceId).toBe("b");
+      expect(decision.candidates.find((c) => c.deviceId === "a")?.rejected).toEqual([
+        { code: "paused", until: "resume", scope: "account" },
+      ]);
+    });
+
+    test("run-now keeps a whole-queue hold that stands in for an unreadable record", () => {
+      const holds = [{ until: "resume", at: NOW - 1 }] as const;
+      const decision = route({
+        task: task(),
+        machines: fleet,
+        tasks: [],
+        now: NOW,
+        config: DEFAULT_CONFIG,
+        holds,
+        runNow: true,
+        pauseUnread: true,
+      });
+      expect(decision.chosen).toBeNull();
     });
 
     test("an account hold rejects that account's candidates only; an expired reset hold none", () => {
@@ -1288,7 +1323,7 @@ describe("trait_absent — a required trait is an exclave's own, and every one i
     });
   });
 
-  test("a pinned task and a run-now (uncapped) route filter too", () => {
+  test("a pinned task and a run-now route filter too", () => {
     const pinned = decide([plain(), atlas()], {
       task: task({ spec: spec({ requires: ["atlas"], pin: { deviceId: "b" } }) }),
     });
@@ -1302,7 +1337,7 @@ describe("trait_absent — a required trait is an exclave's own, and every one i
       tasks: [],
       now: NOW,
       config: DEFAULT_CONFIG,
-      uncapped: true,
+      runNow: true,
     });
     expect(runNow.chosen).toBeNull();
     expect(codes(only(runNow))).toEqual(["trait_absent"]);

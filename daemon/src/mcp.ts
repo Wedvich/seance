@@ -1188,7 +1188,7 @@ export function buildMcpServer(
     {
       title: "Start a queued scheduler task now",
       description:
-        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency limit — the app's Start now. Only the limit is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the limit like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
+        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency limit and a paused queue — the app's Start now. Only those are lifted (the queue stays paused for every other task): a paused account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the limit like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
       inputSchema: z.strictObject({ taskId: z.string().describe("The waiting task's id from get_queue") }),
       annotations: { readOnlyHint: false },
     },
@@ -1333,7 +1333,7 @@ export function buildMcpServer(
           .boolean()
           .optional()
           .describe(
-            "Start it now, past the fleet's concurrency limit, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only the limit is lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
+            "Start it now, past the fleet's concurrency limit and a paused queue, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only those are lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
           ),
       }),
       annotations: { readOnlyHint: false },

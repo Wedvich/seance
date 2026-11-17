@@ -128,6 +128,22 @@ describe("pause and resume", () => {
     expect(fleet.spawns).toHaveLength(1);
   });
 
+  test("run-now lifts a person's queue pause but not the stand-in for an unreadable record", async () => {
+    const store = new MemoryQueueStore();
+    store.plantPause("unopenable", 3);
+    const { fleet, scheduler } = setup(new FakeFleet([machine("a")]), store);
+    await scheduler.takeover();
+    const held = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.runNow(held.id)).toEqual({ ok: false, code: "unplaceable" });
+    expect(fleet.spawns).toEqual([]);
+
+    // A person's pause, written over it: run-now is the explicit start that pause waits for.
+    expect(await scheduler.resume({})).toMatchObject({ ok: true });
+    expect(await scheduler.pause({ until: "resume" })).toMatchObject({ ok: true });
+    expect(await scheduler.runNow(held.id)).toMatchObject({ ok: true, task: { state: "reserved" } });
+  });
+
   test("account holds stop one short of MAX_PAUSE_HOLDS, so a whole-queue pause always fits", async () => {
     const { scheduler } = setup();
     for (let i = 0; i < MAX_PAUSE_HOLDS - 1; i += 1) {

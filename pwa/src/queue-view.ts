@@ -44,6 +44,7 @@ import {
   derivePassAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
+  deriveRunNowPastPause,
   failedBody,
   formatSeen,
   seen,
@@ -300,10 +301,10 @@ function dotOf(task: Task): QueueDot | null {
  * `run-now` takes only a `ready` task and answers anything earlier `not_waiting`, so Start now
  * greys until then rather than offering a tap that is always refused. Shown still: it says why.
  */
-function startNowFor(task: Task): StartNowItem {
+function startNowFor(task: Task, pastPause: boolean): StartNowItem {
   if (task.state === "blocked") return { sub: "Waiting on the tasks it depends on", enabled: false };
   if (task.state === "queued") return { sub: "Waiting for the scheduler", enabled: false };
-  return decisionStartNowItem(task.decision ?? null);
+  return decisionStartNowItem(task.decision ?? null, pastPause);
 }
 
 /** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
@@ -536,7 +537,7 @@ function rowOf(
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
-  const item = startNowFor(task);
+  const item = startNowFor(task, deriveRunNowPastPause(state.relay));
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   const session = sessionOf(task);
   const autonomy = autonomyOf(task.spec);

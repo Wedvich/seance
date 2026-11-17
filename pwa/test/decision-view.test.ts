@@ -628,12 +628,14 @@ describe("waitingText and pinLine", () => {
 describe("startNowItem", () => {
   const GLOBAL: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
   const ACCOUNT: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
+  const PAUSED: Reason = { code: "paused", until: "resume", scope: "queue" };
+  const CLOSED: Reason = { code: "paused", until: "resume", scope: "account" };
   const ok = (chosen: Decision["chosen"], candidates: readonly Candidate[]) =>
     ({ kind: "ok", repo: "app", decision: { at: NOW, chosen, candidates } }) as const;
 
   test("names the machine and account the preview chose", () => {
     const preview = ok({ deviceId: "mac", exclave: "default", clone: "app" }, [scored("mac", "Mac", 1)]);
-    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue — spawn on Mac · default", enabled: true });
+    expect(startNowItem(preview, true)).toEqual({ sub: "Skip the queue — spawn on Mac · default", enabled: true });
   });
 
   test("is disabled when the preview turns every candidate down for more than the caps", () => {
@@ -641,15 +643,15 @@ describe("startNowItem", () => {
       rejected("lxc", "LXC", [{ code: "offline" }]),
       rejected("mac", "Mac", [GLOBAL, { code: "offline" }]),
     ]);
-    expect(startNowItem(preview)).toEqual({ sub: "No machine can take it right now", enabled: false });
-    expect(startNowItem(ok(null, []))).toEqual({ sub: "No machine can take it right now", enabled: false });
+    expect(startNowItem(preview, true)).toEqual({ sub: "No machine can take it right now", enabled: false });
+    expect(startNowItem(ok(null, []), true)).toEqual({ sub: "No machine can take it right now", enabled: false });
   });
 
   test("stays enabled where only the caps hold it, which is what run-now lifts", () => {
     const one = ok(null, [rejected("mac", "Mac", [GLOBAL, ACCOUNT]), rejected("lxc", "LXC", [{ code: "offline" }])]);
-    expect(startNowItem(one)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+    expect(startNowItem(one, true)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
     const two = ok(null, [rejected("mac", "Mac", [GLOBAL]), rejected("wsl", "WSL", [ACCOUNT])]);
-    expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency limit", enabled: true });
+    expect(startNowItem(two, true)).toEqual({ sub: "Skip the queue — past the concurrency limit", enabled: true });
   });
 
   test("a chosen target is not named while a cap-held candidate, unscored, may win run-now; nor are the caps", () => {
@@ -658,13 +660,34 @@ describe("startNowItem", () => {
       rejected("lxc", "LXC", [GLOBAL]),
     ]);
     // Mac would take it with the caps standing: "past the caps" would misdescribe that outcome.
-    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue", enabled: true });
+    expect(startNowItem(preview, true)).toEqual({ sub: "Skip the queue", enabled: true });
   });
 
   test("with no answer to go by it offers a plain skip", () => {
     const plain = { sub: "Skip the queue", enabled: true };
-    expect(startNowItem(null)).toEqual(plain);
-    expect(startNowItem({ kind: "loading", repo: "app" })).toEqual(plain);
-    expect(startNowItem({ kind: "failed", repo: "app", message: "No leader." })).toEqual(plain);
+    expect(startNowItem(null, true)).toEqual(plain);
+    expect(startNowItem({ kind: "loading", repo: "app" }, true)).toEqual(plain);
+    expect(startNowItem({ kind: "failed", repo: "app", message: "No leader." }, true)).toEqual(plain);
+  });
+
+  test("a whole-queue pause is lifted like the limit; an account's pause is not", () => {
+    const one = ok(null, [rejected("mac", "Mac", [PAUSED]), rejected("lxc", "LXC", [PAUSED, CLOSED])]);
+    expect(startNowItem(one, true)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+    const two = ok(null, [rejected("mac", "Mac", [PAUSED, GLOBAL]), rejected("wsl", "WSL", [PAUSED])]);
+    expect(startNowItem(two, true)).toEqual({
+      sub: "Skip the queue — past the pause and the concurrency limit",
+      enabled: true,
+    });
+    const pausedOnly = ok(null, [rejected("mac", "Mac", [PAUSED]), rejected("wsl", "WSL", [PAUSED])]);
+    expect(startNowItem(pausedOnly, true)).toEqual({ sub: "Skip the queue — past the pause", enabled: true });
+    const elsewhere = ok(null, [rejected("mac", "Mac", [PAUSED, { code: "offline" }])]);
+    expect(startNowItem(elsewhere, true)).toEqual({ sub: "No machine can take it right now", enabled: false });
+  });
+
+  test("a leader that keeps the pause greys it, saying the pause holds it", () => {
+    const preview = ok(null, [rejected("mac", "Mac", [PAUSED]), rejected("lxc", "LXC", [{ code: "offline" }])]);
+    expect(startNowItem(preview, false)).toEqual({ sub: "The queue is paused", enabled: false });
+    const capped = ok(null, [rejected("mac", "Mac", [GLOBAL])]);
+    expect(startNowItem(capped, false)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
   });
 });

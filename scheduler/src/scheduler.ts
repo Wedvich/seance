@@ -760,7 +760,7 @@ export class Scheduler {
   }
 
   /** `task` routed over the current fleet and queue, as a pass would. */
-  #route(task: Task, now: number, uncapped = false, attachments = false, release: readonly string[] = []): Decision {
+  #route(task: Task, now: number, runNow = false, attachments = false, release: readonly string[] = []): Decision {
     return capped(
       route({
         task,
@@ -769,11 +769,12 @@ export class Scheduler {
         now,
         config: this.#config,
         holds: this.#pause.holds,
+        pauseUnread: this.#pause.unread,
         limits: this.#limits.enforced(),
         fleetQuota: this.#fleetQuota(),
         // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
         released: release.length === 0 ? this.#released(now) : new Set([...this.#released(now), ...release]),
-        uncapped,
+        runNow,
         attachments,
       }),
     );
@@ -1321,9 +1322,10 @@ export class Scheduler {
   }
 
   /**
-   * Places a `ready` task now, past the fleet limit (`RouteInput.uncapped`)
-   * and nothing else: a pause, the quota line, disk, a pin and every other filter
-   * still hold it, answered `unplaceable` with nothing written. Once placed it
+   * Places a `ready` task now, past the fleet limit and the whole-queue pause
+   * (`RouteInput.runNow`) and nothing else: an account's hold, the quota line,
+   * disk, a pin and every other filter still hold it, answered `unplaceable` with
+   * nothing written. The pause stays: the next pass places nothing else. Once placed it
    * counts toward the limit like any task, so the fleet may run over it until
    * the count drains — as when a machine wakes with released slots. One-shot:
    * nothing on the record says it was forced, so a takeover mid-way leaves it

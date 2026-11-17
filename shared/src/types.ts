@@ -1127,6 +1127,9 @@ export interface MachineInfo {
  * so a second Continue would resume a session a continuation already owns.
  * `runNow`: as a leader, answers `run-now` — what a client checks of the
  * verified leader before offering it (an older one refuses the op as unknown).
+ * `runNowPaused`: as a leader, `run-now` places past a whole-queue pause too. A client
+ * offers Start now for a task the pause alone holds only to a verified leader advertising
+ * it: an older one answers `unplaceable`.
  * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
  * leader, routes, dispatches and leans them — what the PWA checks of the verified
  * leader before offering to attach. One build does both halves.
@@ -1197,6 +1200,7 @@ export const CAPABILITIES = {
   continueSession: "continueSession",
   continueHandoff: "continueHandoff",
   runNow: "runNow",
+  runNowPaused: "runNowPaused",
   attachments: "attachments",
   authHealth: "authHealth",
   traits: "traits",
@@ -3799,7 +3803,7 @@ export const SCHEDULER_ERROR_CODES = [
   "finished",
   /** `run-now`: the task is not `ready` — waiting on admission or its deps, or already placed. */
   "not_waiting",
-  /** `run-now`: something besides the concurrency limit (a pause, quota, a pin, …) keeps it from every machine. */
+  /** `run-now`: something besides the concurrency limit (an account's pause, an unreadable pause record or an older leader's queue pause, quota, a pin, …) keeps it from every machine. */
   "unplaceable",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",

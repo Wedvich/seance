@@ -11,6 +11,7 @@ import {
   type Decision,
   type Machine,
   type QuotaBasis,
+  type Reason,
   type Score,
   type Task,
 } from "@seance/shared";
@@ -209,8 +210,6 @@ export function describeDecision(
   };
 }
 
-const CAPS_ONLY_SUB = "Skip the queue — past the concurrency limit";
-
 /** The Queue button's Start now row: what skipping the queue would do, read off the placement preview. */
 export interface StartNowItem {
   readonly sub: string;
@@ -218,35 +217,52 @@ export interface StartNowItem {
 }
 
 /**
- * The preview routes with the limit applied, so a candidate turned down for
- * `cap_reached` alone is one `run-now` would take; anything else it rejects
- * holds Start now too. No preview to go by (asking, failed, a pinned form) is
- * no reason to block a tap the leader answers for itself.
+ * The preview routes with the limit and the pause applied, so a candidate turned
+ * down for what `run-now` lifts alone (`liftable`) is one it would take; anything
+ * else it rejects holds Start now too. No preview to go by (asking, failed, a
+ * pinned form) is no reason to block a tap the leader answers for itself.
+ * `pastPause`: the verified leader's `run-now` lifts a whole-queue pause
+ * (`CAPABILITIES.runNowPaused`).
  */
-export function startNowItem(preview: PreviewState | null): StartNowItem {
-  return decisionStartNowItem(preview?.kind === "ok" ? preview.decision : null);
+export function startNowItem(preview: PreviewState | null, pastPause: boolean): StartNowItem {
+  return decisionStartNowItem(preview?.kind === "ok" ? preview.decision : null, pastPause);
 }
 
 /** `startNowItem` for a task already queued: its latest decision, if the leader has made one. */
-export function decisionStartNowItem(decision: Decision | null): StartNowItem {
+export function decisionStartNowItem(decision: Decision | null, pastPause: boolean): StartNowItem {
   const plain = { sub: "Skip the queue", enabled: true };
   if (decision === null) return plain;
   const chosen = chosenName(decision);
-  const capped = decision.candidates.filter(heldByCapsAlone);
-  // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
-  if (chosen !== null)
-    return capped.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
-  const [only] = capped;
-  if (only === undefined) return { sub: "No machine can take it right now", enabled: false };
-  return {
-    sub: capped.length === 1 ? `Skip the queue — spawn on ${where(only)}` : CAPS_ONLY_SUB,
-    enabled: true,
-  };
+  const held = decision.candidates.filter((c) => liftable(c, pastPause));
+  // `run-now` weighs the held candidates too, unscored in the preview, so the target it picks is unknown.
+  if (chosen !== null) return held.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
+  const [only] = held;
+  if (only === undefined) {
+    // A leader that keeps the pause: say the pause holds it, not that no machine could take it.
+    const pausedAlone = !pastPause && decision.candidates.some((c) => liftable(c, true));
+    return { sub: pausedAlone ? "The queue is paused" : "No machine can take it right now", enabled: false };
+  }
+  if (held.length === 1) return { sub: `Skip the queue — spawn on ${where(only)}`, enabled: true };
+  const past = [
+    held.some((c) => c.rejected.some(isQueuePause)) ? "the pause" : null,
+    held.some((c) => c.rejected.some((r) => r.code === "cap_reached")) ? "the concurrency limit" : null,
+  ].filter((part) => part !== null);
+  return { sub: `Skip the queue — past ${past.join(" and ")}`, enabled: true };
 }
 
-/** Turned down for `cap_reached` and nothing else: a candidate `run-now`, which lifts the limit, would weigh. */
-export function heldByCapsAlone(candidate: Candidate): boolean {
-  return candidate.rejected.length > 0 && candidate.rejected.every((r) => r.code === "cap_reached");
+function isQueuePause(reason: Reason): boolean {
+  return reason.code === "paused" && reason.scope === "queue";
+}
+
+/**
+ * Turned down only for what `run-now` lifts: the fleet limit, and with `pastPause` a whole-queue
+ * pause. An account's pause is a person closing that account, which `run-now` keeps.
+ */
+function liftable(candidate: Candidate, pastPause: boolean): boolean {
+  return (
+    candidate.rejected.length > 0 &&
+    candidate.rejected.every((r) => r.code === "cap_reached" || (pastPause && isQueuePause(r)))
+  );
 }
 
 /**

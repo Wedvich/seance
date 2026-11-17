@@ -253,7 +253,7 @@ const RUN_NOW_REFUSALS: Record<Exclude<RunNowResult, { readonly ok: true }>["cod
   not_waiting: schedulerError("not_waiting", "the task is not ready: it waits on admission or its deps, or is placed"),
   unplaceable: schedulerError(
     "unplaceable",
-    "past the concurrency limit it still places nowhere; its decision says why",
+    "past the concurrency limit (and a person's queue pause) it still places nowhere; its decision says why",
   ),
   conflict: schedulerError("conflict", "the task changed while it was placed; ask again"),
 };
