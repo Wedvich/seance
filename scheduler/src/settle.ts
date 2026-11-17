@@ -10,7 +10,7 @@ import {
   type TaskProgress,
   type TaskStack,
 } from "@seance/shared";
-import { ended, progressed, reportedPr } from "./done.ts";
+import { ended, progressed, reportedPr, reportSettles } from "./done.ts";
 import { UNDELIVERED, UNREACHABLE, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
 import {
   advance,
@@ -170,12 +170,14 @@ export function waitsForExit(
 
 /**
  * A session's own `done` report (#21): it settles its task `done` by `reported`,
- * only under `until: "reported"` and only from the machine the task was placed
- * (or reserved) on — a task is moved only by the machine it was given. Under
- * `until: "merged"` it is ignored, so a switch is one line here and in `done.ts`.
+ * under `until: "reported"`, or under `until: "merged"` while neither the task
+ * nor the event holds a PR (`reportSettles`), and only from the machine the task
+ * was placed (or reserved) on — a task is moved only by the machine it was given.
+ * A report beside a PR under `until: "merged"` is ignored: the merge settles it.
  */
 function reported(task: Task, from: SessionSource | undefined, prUrl: string | undefined): Task | null {
-  if (task.spec.until !== "reported" || from === undefined) return null;
+  if (from === undefined) return null;
+  if (task.spec.until !== "reported" && (prUrl !== undefined || !reportSettles(task))) return null;
   const pr = factsOf(task, from, prUrl);
   if (task.state === "reserved") {
     const at = task.reservation;

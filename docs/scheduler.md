@@ -506,8 +506,9 @@ of M4 has landed.
     to a leader advertising `CAPABILITIES.reportedDone`. It is the first act session events
     gain beyond ingest, so it is a threat-model change: DESIGN.md records it (_Local op socket_,
     "Session events", and _Threat model_). The daemon notes the report in its launch ledger and
-    forwards it whatever the task's `until`; the leader settles only a `reported` task, from the
-    machine it was placed on, and ignores it otherwise. The slot is freed at the report while the
+    forwards it whatever the task's `until`; the leader settles a `reported` task, or (amended
+    2026-11-17) a `merged` one holding no PR, from the machine it was placed on, and ignores it
+    otherwise. The slot is freed at the report while the
     session may still run, and a session that cannot call the tool (a permission prompt, plan
     mode) is settled by `mark-done`. A session that lies about being done can do no more than one
     that exits. `mark-done` stays the manual override.

@@ -248,7 +248,7 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
       await pollUntil(async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()) !== "", "the report");
       expect(JSON.parse(await Bun.file(out).text())).toEqual({
         ok: true,
-        text: "sent — settles the task if it was queued to settle on its report",
+        text: "sent — settles the task if it was queued to settle on its report or holds no pull request; one holding a pull request waits for its merge",
       });
       await pollUntil(
         async () => (await stack.queue().get(predecessor))?.body?.state === "done",
@@ -843,7 +843,8 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
       };
 
       // Dirty first. The launch may still be in flight (the stub never registers), which the machine answers
-      // `not_launched`: ask again until it answers about the worktree, with nothing written after each refusal.
+      // `not_launched`, and the leader `dispatching` while it still holds the reservation (a slow runner):
+      // ask again until it answers about the worktree, with nothing written after each refusal.
       await Bun.write(join(worktree, "dirty.txt"), "uncommitted\n");
       let refusal: Awaited<ReturnType<typeof app.client.pass>> = null;
       for (let i = 0; i < 40; i++) {
@@ -851,7 +852,9 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
         refusal = await app.client.pass(taskId);
         // oxlint-disable-next-line no-await-in-loop -- the same
         await unchanged();
-        if (refusal !== null && "ok" in refusal && refusal.code !== "not_launched") break;
+        if (refusal !== null && "ok" in refusal && refusal.code !== "not_launched" && refusal.code !== "dispatching") {
+          break;
+        }
         // oxlint-disable-next-line no-await-in-loop -- a retry delay, not an assertion's wait
         await Bun.sleep(250);
       }

@@ -3225,7 +3225,9 @@ describe("report_task_done", () => {
     const { tools } = await client.listTools();
     const tool = tools.find((t) => t.name === "report_task_done");
     expect(tool?.annotations?.readOnlyHint).toBe(false);
-    expect(tool?.description).toContain("only when the task's prompt asks you to");
+    expect(tool?.description).toContain("when the task's prompt asks you to");
+    // A PR-less session whose work went to a task it queued is told to report too.
+    expect(tool?.description).toContain("opened no pull request");
     lazy.stop();
   });
 
