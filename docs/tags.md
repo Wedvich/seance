@@ -29,9 +29,9 @@ session ids) and docs/orchestrator.md (the display-only external `ref`).
   not `ours`. The direction is that Séance picks up every session in its tmux server, not only task-backed ones.
   docs/presence.md's PR 1 builds it for `self.doing` (its O4).
 
-**Proposed beyond T1, for the owner to confirm:** two task-scope namespaces T1 did not name, `creator.*` (whoever
+**Decided by the owner 2026-11-17, beyond T1** (open question 7): two task-scope namespaces T1 did not name, `creator.*` (whoever
 enqueues, at create only) and `scheduler.*` (the leader; no keys in v1). `creator.*` has no single writer: any app-role
-client that enqueues writes it, so it is trusted as a task's title is, no more (§6.3). Open question 7.
+client that enqueues writes it, so it is trusted as a task's title is, no more (§6.3).
 
 ## Problem
 
@@ -109,7 +109,7 @@ grammar, caps and parsers, and this section stays as their rationale.
 | `self.*`           | process                | the session, through MCP `set_self_tag` (#526), bound by peer pid    | `doing` (#526), `name` (this spec); any other suffix refused `unknown_key` in v1           |
 | `adapter.<name>.*` | conversation           | that adapter, over its own stdin (§8.4)                              | any suffix, opaque value                                                                   |
 | `owner.*`          | conversation, or task  | the owner, through the PWA only, sealed `from: "app"` (§3.1, §5.2)   | `label` known; any other suffix opaque                                                     |
-| `creator.*`        | task                   | whoever enqueues the task, at create only (§5.2); proposed           | `ref`, `ref-url` known; any other suffix opaque                                            |
+| `creator.*`        | task                   | whoever enqueues the task, at create only (§5.2)                     | `ref`, `ref-url` known; any other suffix opaque                                            |
 | `scheduler.*`      | task                   | the leader, through the one task sealer; proposed                    | known keys only; none in v1 (reserved, so that a leader-made fact never needs a new field) |
 
 - **Values.** Every value passes the printable-text rule, `displayLine` (#526 builds it in `shared/src/messages.ts`;
@@ -608,7 +608,7 @@ Wording this changes, each in the PR that builds it:
 second:
 
 - **D1.0**: "never in a task record" holds for session tags; task tags are this spec's §5. The namespace table gains
-  `creator.*` and `scheduler.*` (proposed) and points here.
+  `creator.*` and `scheduler.*` (decided 2026-11-17) and points here.
 - **D1.1**: the `untracked` refusal for a hand-started pane goes (§3.3), and so does its test; "no `Bound.session`
   walk is needed" becomes the `Bound.session` key (§3.2).
 - **D1.2**: `TAGS_PER_PANE_MAX` counts non-adapter session tags (§2.1); `displayLine` moves to `shared/src/tags.ts`.
@@ -631,9 +631,8 @@ second:
    _Recommend yes, with orchestrator.md's project-wide read_, not in this spec's PRs.
 6. **`agent.kind` for Codex**: whether the daemon can corroborate it as it does for `claude` (`processNames`).
    Part of docs/agents.md's spike.
-7. **`creator.*` and `scheduler.*`** (beyond T1's five namespaces). _Recommend both_: `creator.*` is where `linear`
+7. **`creator.*` and `scheduler.*`** (beyond T1's five namespaces). **Decided 2026-11-17: both.** `creator.*` is where `linear`
    and orchestrator.md's `ref` go, and `scheduler.*` reserves a slot so a leader-made display fact needs no new field.
-   If the owner prefers T1's five only, `creator.ref` becomes a plain spec field and §5 shrinks to `owner.*`.
 
 ## Spikes before building
 
