@@ -12408,7 +12408,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   retention on, and stopping it undoes both, so a machine with no seat keeps and samples nothing.
   The custodian decides when a round is due (C14) and what its `sessions` verb reports (C23, C24) from facts the
   daemon keeps per pane séance started (`ours`, the `--remote-control` start-command match, now also a field of
-  the binding's own `list-panes` read, `BoundPane.ours`), tasked or not, **in memory only**:
+  the binding's own `list-panes` read, `BoundPane.ours`), tasked or not, in memory and, from 2026-11-17, in a file the
+  daemon writes so a restart can take them back (below):
   - **The last state.** Every bound frame carrying a state, untasked panes' included (before this they were
     dropped after the `/usage` poke), is handed to the tracker (`retain`) before the untasked return and before
     any reply is chosen: the state, when the current run of it began, and whether the frame was an `idle`
@@ -12417,8 +12418,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     never retained**, tasked or not: it is a report the session sends mid-turn, not a state it rests in, and an
     untasked one is refused `untasked` anyway. Hand-off and pass frames carry no state and are not retained.
     Nothing is retained once ingest has stopped. The tracker is one per process, like `endedTasksFor`: a config
-    reload's stop and start keeps the facts, only a process restart loses them. A pane with
-    no frame since this process started reads `state: null`: C24's `unobserved`, never closed on the screen alone.
+    reload's stop and start keeps the facts, and a process restart takes back only what the file below confirms. A
+    pane with no frame since this process started, and none taken back, reads `state: null`: C24's `unobserved`,
+    never closed on the screen alone.
   - **When the screen last changed.** Once a minute, one `list-panes` (the binding's format, through
     `readPanePids`, which unlike `listPanePids` throws on a failed read) and one `capture-pane` of the visible
     screen, no history, per live `ours` pane, one capture at a time; none when there is none. A capture
@@ -12426,8 +12428,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     normalised (below), hashed (`Bun.hash`) at once and the text dropped: `screenSince` moves when the hash differs from the last
     one, and `sampledAt` says when it was last captured, so a reader can tell a stalled sampler from a still
     screen. The first sample of a pane counts as a change, so `screenSince` is how long the screen has been
-    still as far as this process has seen, never longer: after a daemon restart nothing looks at rest earlier
-    than it is. A pass asked for while one runs joins it, so a slow tmux never stacks passes.
+    still as far as this process has seen, never longer, bar an entry taken back across a restart (below), whose
+    unchanged hash is what shows the screen stood still through the gap. A pass asked for while one runs joins it,
+    so a slow tmux never stacks passes.
   - **What counts as unchanged** (`normaliseScreen`). A busy Claude repaints its own chrome with no work
     behind it, and a session hung inside a command is a ticking spinner, so hashing the screen verbatim would
     never read it as still (C14's "unchanged for `everyMinutes`", C27's interrupt). The hash is of the screen
@@ -12445,6 +12448,32 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     list as a live `ours` pane, or lists under another pid (a reused `%n` must not show the old pane's state) (so a dead pane's entry goes too: C24 closes a dead pane without these facts),
     except one made after the listing began, which may be a pane newer than it. A failed listing prunes nothing.
     A failed capture leaves the entry as it was.
+  - **Across a restart** (`custodian/activity.json`, `daemon/src/pane-activity-store.ts`; built 2026-11-17). An
+    idle session sends no frame, so with memory alone every session already at rest when the daemon restarted
+    read `unobserved` until its next turn, which a finished one never takes: a day of fleet auto-updates left
+    finished, merged sessions piling up that no round could close. The daemon, not the round (sandboxed and
+    read-only), writes each entry that has a state and a screen hash: pane id, the pane process's pid **and start
+    time** (`processStart`), state, `stateSince`, `turnEnded`, the normalised screen's hash and `screenSince`; never
+    screen text. One write at a time, 0600 in the 0700 `custodian/` dir through `writeAtomic`, debounced
+    (`SAVE_DELAY_MS`) after a frame or a pass changes them; a seat's stop writes at once what was waiting and the
+    daemon's `stop` waits for it, as it does for state.json's (#525). The file is read once per process, at the
+    seat's first pass or write, so no write replaces it before it was read. A frame since this process began beats
+    the file's entry for that pane. A reloaded entry is **provisional**, hidden from every reader (`activity` null,
+    left out of `all`, so `close` answers `unobserved` and the due check passes it over), until a sample: the
+    daemon was down for seconds and may have missed a whole turn, `busy` frame and all. It is dropped when its pane
+    is gone or not `ours`, under another pid, or under the same pid with another start time (tmux reuses `%n` after
+    a server restart, the kernel reuses pids; a start time that cannot be read matches nothing); a capture whose hash
+    differs from the saved one drops it too and the pane starts afresh, and only an equal hash makes it an ordinary
+    entry again, keeping its original `stateSince`, `turnEnded` and `screenSince`, so C24's grace counts from when
+    the session really went idle. A frame for a provisional pane starts a fresh entry. `forgetStates` (the first
+    seat's take) leaves provisional entries alone: the confirming sample is what covers their gap. A missing file
+    is an empty start; an unreadable or corrupt one is the same, warned once, and never fails the start; a
+    malformed entry is dropped alone. `retainedSince` reaches back to the oldest confirmed entry's `stateSince`
+    (`restoredSince`). Rejected: the round writing it (it cannot, and must not, write the state dir); keying by pane
+    id and pid alone (a reused pid after a reboot would hand an old session's idle to a new one); trusting a
+    reloaded state outright (a turn missed in the gap would read as rest, and `close` would end a session that just
+    did work); having the `session-events` mod re-announce its state when the daemon reconnects (a possible later
+    cross-check; it needs a mod change in every exclave, where this needs none).
   - **Read API:** `activity(paneId)` → `{state, stateSince, turnEnded, screenSince, sampledAt}`, or null for a
     pane not tracked (foreign, gone, or neither sampled nor heard from). Its readers are the seat's due check
     (`roundDue`) and, from custodian 4, the `sessions` and `close` verbs (the same facts, through the seat's tracker).
@@ -12452,8 +12481,10 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     (the frame names nothing, except on a host with no peer pid, where its `pane` decides, as above), only the state and `turnEnded` are kept, nothing is run, sent, forwarded or
     persisted, and no reply, forward, coalescing, hand-off, pass or drain behaviour depends on it (`onState`
     still sees tasked frames only). The sampler's subprocesses are fixed-argv tmux reads with a validated `%n`
-    target. The screen's text is never kept, logged or sent; what stays is a 64-bit hash and timestamps in this
-    process's memory. A same-uid process can make a pane's facts say what it likes (it can send frames from
+    target. The screen's text is never kept, written, logged or sent; what stays is a 64-bit hash and timestamps,
+    in memory and in the daemon's own 0600 `custodian/activity.json` (the state dir a round's sandbox masks), which
+    only the daemon reads, and only into these facts. A same-uid process could write that file, which buys no more
+    than sending frames does (below), and a reloaded entry still has to match the pane's live process and screen. A same-uid process can make a pane's facts say what it likes (it can send frames from
     that pane, or type into it), which is the residual already accepted above, and those facts will bound only
     what the custodian's own verbs allow (docs/custodian.md, C19).
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
@@ -12781,7 +12812,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   (`"ok"` or its refusal code), and **the session's counts** (`nudges`, `interrupted`: C30, below; zero for a
   session with none). It first prunes the flags file and the counts against the panes in the tmux server (below). It adds the
   time retention began (`retainedSince`: a pane with no state before it is "unobserved after a restart", not a
-  hung one) and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
+  hung one; from 2026-11-17 it reaches back to the oldest entry a restart took back from `custodian/activity.json`
+  and a sample confirmed, and a provisional one reads as no state until then: "Per-pane retention and the screen
+  sampler") and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
   screen text is returned: a screen is read in memory to judge a close and dropped. Classification runs four at a
   time.
 - **`capture` (4b)** answers the bottom of one pane's visible screen as plain text (`capture-pane` with no attributes: the

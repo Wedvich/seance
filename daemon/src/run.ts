@@ -48,7 +48,7 @@ import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
-import { startCapabilities, type CustodianHost } from "./run-capabilities.ts";
+import { paneActivitySettled, startCapabilities, type CustodianHost } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { checkoutRoot, readSource } from "./selfsource.ts";
@@ -897,6 +897,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         if (tail !== saving) await drain();
       };
       await drain();
+      // The custodian's seat released the tracker above, which wrote at once whatever was waiting out its delay.
+      await paneActivitySettled();
       await runtime;
     },
     updater,

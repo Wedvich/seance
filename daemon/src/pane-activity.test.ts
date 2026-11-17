@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { pollUntil } from "../test/fixtures.ts";
-import { createPaneActivity, createPaneRetention, normaliseScreen, type TrackedPane } from "./pane-activity.ts";
+import type { SavedActivity } from "./pane-activity-store.ts";
+import {
+  createPaneActivity,
+  createPaneRetention,
+  normaliseScreen,
+  type PaneActivityTracker,
+  type TrackedPane,
+} from "./pane-activity.ts";
 
 const pane = (id: string, extra: Partial<TrackedPane> = {}): TrackedPane => ({
   id,
@@ -359,5 +366,181 @@ describe("retention", () => {
     const stopped = captures;
     await Bun.sleep(30);
     expect(captures).toBe(stopped);
+  });
+});
+
+describe("persistence across a restart", () => {
+  /** One file, two processes: the first writes it and stops, the second starts from it. */
+  function restartable() {
+    let saved: readonly SavedActivity[] = [];
+    const saves: (readonly SavedActivity[])[] = [];
+    let loads = 0;
+    const starts = new Map<number, string>([[100, "s100"]]);
+    const store = {
+      load: (): Promise<readonly SavedActivity[]> => {
+        loads += 1;
+        return Promise.resolve(saved);
+      },
+      save: (panes: readonly SavedActivity[]): Promise<void> => {
+        saved = panes;
+        saves.push(panes);
+        return Promise.resolve();
+      },
+    };
+    let clock = 1_000;
+    const screens = new Map<string, string | null>();
+    let panes: readonly TrackedPane[] = [pane("%1")];
+    const make = (): PaneActivityTracker =>
+      createPaneActivity({
+        panes: () => Promise.resolve(panes),
+        capture: (id) => Promise.resolve(screens.get(id) ?? null),
+        now: () => clock,
+        processStart: (pid) => starts.get(pid) ?? null,
+        store,
+        saveDelayMs: 1,
+      });
+    return {
+      make,
+      screens,
+      starts,
+      saves,
+      loads: (): number => loads,
+      advance: (ms: number): void => {
+        clock += ms;
+      },
+      setPanes: (next: readonly TrackedPane[]): void => {
+        panes = next;
+      },
+    };
+  }
+
+  /** A session that ended its turn at 1_000 and has sat at its prompt since, written down by a first process. */
+  async function atRest(r: ReturnType<typeof restartable>): Promise<void> {
+    const first = r.make();
+    r.screens.set("%1", "done. >");
+    first.observe(pane("%1"), "idle", true);
+    await first.sample();
+    first.stop();
+    await first.settled();
+    expect(r.saves.at(-1)).toEqual([
+      {
+        pane: "%1",
+        pid: 100,
+        start: "s100",
+        state: "idle",
+        stateSince: 1_000,
+        turnEnded: true,
+        hash: expect.any(String),
+        screenSince: 1_000,
+      },
+    ]);
+  }
+
+  test("a pane at rest is taken back once a sample finds its screen unchanged, with its original times", async () => {
+    const r = restartable();
+    await atRest(r);
+    r.advance(3_600_000);
+    const second = r.make();
+    // Before that sample it is hidden: the daemon was down and may have missed a turn.
+    expect(second.activity("%1")).toBeNull();
+    await second.sample();
+    expect(second.activity("%1")).toEqual({
+      state: "idle",
+      stateSince: 1_000,
+      turnEnded: true,
+      screenSince: 1_000,
+      sampledAt: 3_601_000,
+    });
+    expect(second.all().map((each) => each.pane)).toEqual(["%1"]);
+    expect(second.restoredSince()).toBe(1_000);
+    // Once per process: the first one's and the second one's.
+    expect(r.loads()).toBe(2);
+  });
+
+  test("a screen that moved while the daemon was down drops what the file said", async () => {
+    const r = restartable();
+    await atRest(r);
+    r.screens.set("%1", "done. > another turn's output");
+    r.advance(60_000);
+    const second = r.make();
+    await second.sample();
+    expect(second.activity("%1")).toEqual({
+      state: null,
+      stateSince: null,
+      turnEnded: false,
+      screenSince: 61_000,
+      sampledAt: 61_000,
+    });
+    expect(second.restoredSince()).toBeNull();
+  });
+
+  test("a pane gone, under another pid, or the same pid under another process is never taken back", async () => {
+    for (const change of ["gone", "pid", "start"] as const) {
+      const r = restartable();
+      // oxlint-disable-next-line no-await-in-loop -- each case is its own file and clock
+      await atRest(r);
+      if (change === "gone") r.setPanes([]);
+      if (change === "pid") {
+        r.starts.set(200, "s200");
+        r.setPanes([pane("%1", { pid: 200 })]);
+      }
+      if (change === "start") r.starts.set(100, "s100-later");
+      const second = r.make();
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await second.sample();
+      expect(second.activity("%1")?.state ?? null).toBeNull();
+    }
+  });
+
+  test("a capture that fails leaves the entry hidden until one succeeds", async () => {
+    const r = restartable();
+    await atRest(r);
+    r.screens.set("%1", null);
+    const second = r.make();
+    await second.sample();
+    expect(second.activity("%1")).toBeNull();
+    r.screens.set("%1", "done. >");
+    await second.sample();
+    expect(second.activity("%1")).toMatchObject({ state: "idle", stateSince: 1_000 });
+  });
+
+  test("a frame after the restart replaces the entry, and the next write carries it", async () => {
+    const r = restartable();
+    await atRest(r);
+    r.advance(5_000);
+    const second = r.make();
+    second.observe(pane("%1"), "busy", false);
+    await second.sample();
+    expect(second.activity("%1")).toMatchObject({ state: "busy", stateSince: 6_000 });
+    second.stop();
+    await second.settled();
+    expect(r.saves.at(-1)).toMatchObject([{ pane: "%1", state: "busy", stateSince: 6_000 }]);
+  });
+
+  test("forgetStates keeps a provisional entry, and a write before the first sample keeps the file's entries", async () => {
+    const r = restartable();
+    await atRest(r);
+    const second = r.make();
+    second.forgetStates();
+    // A pane never sampled has no hash yet, so it is not written; the reloaded one is.
+    second.observe(pane("%2", { pid: 300 }), "busy", false);
+    second.stop();
+    await second.settled();
+    expect(r.saves.at(-1)?.map((each) => each.pane)).toEqual(["%1"]);
+    await second.sample();
+    expect(second.activity("%1")).toMatchObject({ state: "idle", stateSince: 1_000 });
+  });
+
+  test("changes wait out the delay and land in one write", async () => {
+    const r = restartable();
+    const tracker = r.make();
+    r.screens.set("%1", "x");
+    await tracker.sample();
+    tracker.observe(pane("%1"), "busy", false);
+    tracker.observe(pane("%1"), "idle", true);
+    await pollUntil(() => r.saves.length > 0, "the delayed write landed");
+    await tracker.settled();
+    expect(r.saves).toHaveLength(1);
+    expect(r.saves[0]).toMatchObject([{ pane: "%1", state: "idle", turnEnded: true }]);
   });
 });

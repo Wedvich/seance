@@ -72,7 +72,14 @@ import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { createMessages, type Messages } from "./messages.ts";
-import { custodianRoundsPath, custodianSessionsPath, pruneLogPath, reapRefusalsPath } from "./paths.ts";
+import {
+  custodianActivityPath,
+  custodianRoundsPath,
+  custodianSessionsPath,
+  pruneLogPath,
+  reapRefusalsPath,
+} from "./paths.ts";
+import { readSavedActivity, writeSavedActivity } from "./pane-activity-store.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import type { RelayClient } from "./relay-client.ts";
@@ -196,12 +203,24 @@ const fleetBroker: DaemonCapability = (ctx) => {
  * The custodian's per-pane facts (C15), one per process like `endedTasksFor`: a config reload restarts the daemon in
  * process, and a tracker per instance would forget every pane's state at each one. Its reader is the seat's due check
  * (`custodianSeat`); `paneRetention` holds it by count, so an outgoing instance's stop never halts the incoming
- * one's retention or sampling, and no frame is retained while no seat holds it.
+ * one's retention or sampling, and no frame is retained while no seat holds it. Its facts outlive the process in
+ * `custodian/activity.json`, so sessions already at rest stay closable across a restart.
  */
 const paneActivity = createPaneActivity({
   panes: readPanePids,
   capture: (paneId) => capturePane(paneId, { history: false }),
+  store: {
+    load: () => readSavedActivity(custodianActivityPath(), (line) => log.warn(line)),
+    save: (panes) =>
+      writeSavedActivity(custodianActivityPath(), panes).catch((err: unknown) => {
+        log.warn(`custodian: could not write pane activity: ${String(err)}`);
+        throw err;
+      }),
+  },
 });
+
+/** Settles once the pane-activity writes begun have landed: `stop` waits for it, as it does for state.json's. */
+export const paneActivitySettled = (): Promise<void> => paneActivity.settled();
 const paneRetention = createPaneRetention(paneActivity);
 
 /** Per daemon instance: the session-events instance whose marks the due check reads. */
@@ -515,7 +534,9 @@ const custodianSeat: DaemonCapability = (ctx) => {
           activity: paneActivity.activity,
           sample: paneActivity.sample,
           activityNow: paneActivity.now,
-          retainedSince: () => retainedSince,
+          // A restored entry a sample confirmed carries facts from before this process: retention reaches back to it.
+          retainedSince: () =>
+            retainedSince === null ? null : Math.min(retainedSince, paneActivity.restoredSince() ?? retainedSince),
           untouchable,
           tasks: ctx.endedTasks,
           readPr: createPrReader({ now: ctx.now }),
