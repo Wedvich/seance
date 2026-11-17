@@ -540,6 +540,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         async () => (await stack.queue().get(requiredId))?.body?.state === "running",
         "the required task to run",
         20_000,
+        async () => {
+          const stored = (await stack.queue().get(requiredId))?.body;
+          return `stored: ${JSON.stringify({ state: stored?.state, decision: stored?.decision })}`;
+        },
       );
       const body = (await stack.queue().get(requiredId))?.body;
       expect(body?.assignment?.deviceId).toBe(second.deviceId);

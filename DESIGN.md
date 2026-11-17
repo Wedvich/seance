@@ -6799,7 +6799,11 @@ of this section built.
   was ~20%, and with the long gap that reading became the average outright). It is caught by the
   counted time per core falling short of half the wall time, and its baseline restarts. The
   other is shorter than `MIN_CPU_WINDOW_MS` (5s), like the tick a register forces a second
-  after the last; its baseline stays, so the next tick measures across both. A failed collector drops its field and stores no
+  after the last; its baseline stays, so the next tick measures across both. A status with neither cpu nor mem
+  is `pressure_unknown` to the router, and a fresh daemon's first ones always lack cpu, so where mem fails as well
+  (the macOS exec, under load) the machine took no work until the next beat, up to an interval away: the status that
+  goes out without either is followed by one more `MIN_CPU_WINDOW_MS` later, through the refresh that waits out the
+  relay's floor — once per stretch without pressure, so a host that never reads it sends one status more, not one per floor. A failed collector drops its field and stores no
   sample rather than repeating its average, and the next reading eases from
   that average over the whole gap since the last good one. Rejected for macOS:
   free + inactive + speculative pages
