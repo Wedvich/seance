@@ -4,6 +4,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   accountNameIn,
+  agentVisibleTags,
   CAPABILITIES,
   MESSAGE_KINDS,
   MESSAGE_MAX,
@@ -54,6 +55,7 @@ import {
   type SchedulerAvailability,
   TASK_PHASES,
   type DrainView,
+  type SessionEntry,
   type SessionsResponse,
   type SpawnClient,
   type Task,
@@ -499,7 +501,14 @@ function localFailureText(op: string, err: unknown): string {
  */
 function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
   if ("ok" in reply) return errorResult(`get_sessions failed (${reply.code}): ${reply.message}`);
-  return textResult(JSON.stringify(reply.sessions, null, 2));
+  return textResult(JSON.stringify(reply.sessions.map(agentVisibleSession), null, 2));
+}
+
+/** A session as another agent's context may see it: its tags cut to the allowlist (docs/tags.md §6.3). */
+function agentVisibleSession(entry: SessionEntry): SessionEntry {
+  const { tags, ...rest } = entry;
+  const visible = agentVisibleTags(tags);
+  return visible === undefined ? rest : { ...rest, tags: visible };
 }
 
 /** One line per failure whichever transport carried it: a brokered `RequestFailure` renders as the direct one does. */

@@ -1,7 +1,7 @@
-import { constants } from "node:fs";
-import { open, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { isRecord, isRemoteSessionId } from "@seance/shared";
+import { isRemoteSessionId } from "@seance/shared";
+import { readSessionFile } from "./agent-session-file.ts";
 import { parentLookup } from "./peer.ts";
 
 /**
@@ -21,7 +21,6 @@ import { parentLookup } from "./peer.ts";
  */
 
 const SESSION_FILE = /^(\d{1,10})\.json$/u;
-const MAX_FILE_BYTES = 64 * 1024;
 
 export async function roundRemoteId(
   configDir: string,
@@ -48,27 +47,12 @@ export async function roundRemoteId(
 
 /**
  * The file is the round's Claude Code's to write, and any same-uid process's (4b masks the config dir from the round's
- * Bash, drilled), so it is opened as untrusted: no symlink followed, no blocking
- * on a FIFO, and only a regular file read, at most `MAX_FILE_BYTES` of it — all checked on the opened descriptor.
+ * Bash, drilled), so it is opened as untrusted (`readSessionFile`).
  */
 async function idOf(path: string, pid: number, roundStartedAt: number): Promise<string | null> {
-  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-  const handle = await open(path, flags).catch(() => null);
-  if (handle === null) return null;
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null;
-    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > MAX_FILE_BYTES) return null;
-    const raw: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
-    if (!isRecord(raw) || raw["pid"] !== pid) return null;
-    const { startedAt, bridgeSessionId } = raw;
-    if (typeof startedAt !== "number" || startedAt < roundStartedAt) return null;
-    return isRemoteSessionId(bridgeSessionId) ? bridgeSessionId : null;
-  } catch {
-    return null;
-  } finally {
-    await handle.close();
-  }
+  const raw = await readSessionFile(path);
+  if (raw === null || raw["pid"] !== pid) return null;
+  const { startedAt, bridgeSessionId } = raw;
+  if (typeof startedAt !== "number" || startedAt < roundStartedAt) return null;
+  return isRemoteSessionId(bridgeSessionId) ? bridgeSessionId : null;
 }

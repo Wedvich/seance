@@ -6,7 +6,10 @@ import type { EngineInterface, Register } from "claude-code";
  * the PR it opened. Each report is one `session-event` run of this checkout's
  * daemon CLI (`daemonMain`) with the event as JSON on stdin. The daemon trusts
  * none of it about *which* session this is — it binds the report to a tmux pane
- * by this process tree — so nothing here names a session or a task.
+ * by this process tree — so nothing here names a pane or a task. Every report
+ * also carries `agent` (`agentOf`): this process's conversation id and bridge id
+ * as claims, which the daemon verifies from its own sources and binds nothing by
+ * (docs/tags.md §4).
  *
  * Engine events only, never `classic.*`: on Team/Enterprise orgs a built-in
  * plugin sits above every installed one on the classic chain and passes each
@@ -64,6 +67,13 @@ interface Report {
   readonly tool?: string;
 }
 
+/** Who is reporting, as this process sees it at the report: claims the daemon verifies, never trusts (docs/tags.md §4). */
+interface Agent {
+  readonly kind: "claude";
+  readonly session?: string;
+  readonly remote?: string;
+}
+
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
 const SEND_TIMEOUT_MS = 3_000;
 
@@ -100,11 +110,28 @@ async function report($: EngineInterface, body: Report): Promise<void> {
   // per event. The daemon still decides the binding for every report that goes out.
   const pane = await $.env.get("TMUX_PANE");
   if (pane === undefined || pane === "") return;
+  const agent = await agentOf($);
   // Bun by bare name, as `update.ts` does: resolved at use, never recorded.
   await $.process.run(["bun", daemonMain($.plugin.root), "session-event"], {
-    stdin: JSON.stringify(body),
+    stdin: JSON.stringify({ ...body, agent }),
     timeoutMs: SEND_TIMEOUT_MS,
   });
+}
+
+/**
+ * Read at each report, never cached: `/clear` and `/resume` move the conversation under the same process, and the
+ * bridge connects mid-session. An unreadable one is left out, never guessed; the kind is always known.
+ */
+async function agentOf($: EngineInterface): Promise<Agent> {
+  const [session, remote] = await Promise.all([
+    $.session.id().catch(() => undefined),
+    $.env.get("CLAUDE_CODE_BRIDGE_SESSION_ID").catch(() => undefined),
+  ]);
+  return {
+    kind: "claude",
+    ...(session === undefined || session === "" ? {} : { session }),
+    ...(remote === undefined || remote === "" ? {} : { remote }),
+  };
 }
 
 /**

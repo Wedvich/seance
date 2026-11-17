@@ -55,6 +55,37 @@ describe("parseSessionEventFrame", () => {
       state: "idle",
     });
   });
+
+  test("`agent` keeps each claim its parser passes, may ride alone, and an unknown key drops the field, never the frame", () => {
+    const agent = { kind: "claude", session: SESSION, remote: "session_01Abc" } as const;
+    expect(parseSessionEventFrame(frame({ agent }))).toEqual({ v: 1, kind: "session-event", agent });
+    // A bad value drops that claim alone.
+    expect(
+      parseSessionEventFrame(
+        frame({ state: "busy", agent: { kind: "codex", session: SESSION.toUpperCase(), remote: "session_01Abc" } }),
+      ),
+    ).toEqual({ v: 1, kind: "session-event", state: "busy", agent: { remote: "session_01Abc" } });
+    // A full key is never re-homed, and any key it does not know drops the field.
+    expect(parseSessionEventFrame(frame({ state: "busy", agent: { "agent.session": SESSION } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "busy",
+    });
+    expect(parseSessionEventFrame(frame({ state: "busy", agent: { session: SESSION, mood: "x" } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "busy",
+    });
+    // Nothing kept and nothing else to report: no frame.
+    expect(parseSessionEventFrame(frame({ agent: { kind: "codex" } }))).toBeNull();
+    // A stop note carries the hook's claim too.
+    expect(parseSessionEventFrame(frame({ stop: { background: {} }, agent: { session: SESSION } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      stop: { background: {} },
+      agent: { session: SESSION },
+    });
+  });
 });
 
 describe("activity", () => {

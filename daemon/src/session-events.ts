@@ -7,6 +7,7 @@ import {
   type IdleNote,
   isRemoteSessionId,
   isSessionState,
+  parseTagValue,
   isTaskId,
   quote,
   SESSIONS_MAX_PROGRESS,
@@ -22,12 +23,14 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { claudeProcessOf } from "./claude-process.ts";
+import type { AgentClaim, Conversations } from "./conversations.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
 import { LaunchLedger, pathOwners, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import type { OomProbe } from "./oom-kill.ts";
-import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
+import { ancestorBelow, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import {
   SESSION_EVENT_KIND,
   SESSION_EVENT_VERSION,
@@ -73,8 +76,18 @@ export interface SessionEventFrame {
   /** Absent only on an older mod's rate-limit report: activity, nothing else. */
   readonly state?: SessionState;
   readonly prUrl?: string;
-  /** `$CLAUDE_CODE_BRIDGE_SESSION_ID` as the session saw it — kept only as `isRemoteSessionId` passes it. */
+  /**
+   * `$CLAUDE_CODE_BRIDGE_SESSION_ID` as the session saw it — kept only as `isRemoteSessionId` passes it. `agent.remote`'s
+   * fallback (docs/tags.md §7), read only when the frame carries no `agent.remote`.
+   */
   readonly remoteSession?: string;
+  /**
+   * The agent's own claims about the session it runs in (docs/tags.md §3.1), on every report the mod and the settings
+   * hooks send: its kind, its conversation id and Remote Control's id, as bare suffixes, each kept only as its parser
+   * passes it (`parseAgentClaim`). Claims, not facts: the conversation id counts only once the daemon's own sources
+   * verify it (`conversations.ts`). May ride alone, with no state.
+   */
+  readonly agent?: AgentClaim;
   /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
   /** `hand_off_task`'s: close this session at the end of its turn, its PR left to the scheduler. Carries no state. */
@@ -111,6 +124,30 @@ export function isSessionEventFrameKind(raw: unknown): boolean {
 
 const MAX_FIELD = 64;
 
+/** The `agent` suffixes a frame may carry, with the scope each one's key lives at (`shared/src/tags.ts`). */
+const AGENT_KEYS = { kind: "conversation", session: "conversation", remote: "process" } as const;
+
+const isAgentKey = (key: string): key is keyof typeof AGENT_KEYS => Object.hasOwn(AGENT_KEYS, key);
+
+/**
+ * A frame's `agent`: only the bare suffixes `kind`, `session` and `remote`, each kept as its parser passes it and
+ * dropped alone otherwise. Any other key (a full key such as `agent.session` included: never re-homed) drops the whole
+ * field, never the frame. Undefined when nothing is kept.
+ */
+export function parseAgentClaim(raw: unknown): AgentClaim | undefined {
+  if (!isRecord(raw)) return undefined;
+  const kept: { kind?: "claude"; session?: string; remote?: string } = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isAgentKey(key)) return undefined;
+    const parsed = parseTagValue(`agent.${key}`, value, AGENT_KEYS[key]);
+    if (parsed === null || parsed === "") continue;
+    if (key === "kind") {
+      if (parsed === "claude") kept.kind = parsed;
+    } else kept[key] = parsed;
+  }
+  return Object.keys(kept).length === 0 ? undefined : kept;
+}
+
 /**
  * A frame with no `state` is still read when it carries `rateLimits`: a session
  * started before the mod dropped its rate-limit tap keeps that hook loaded until
@@ -125,6 +162,7 @@ const MAX_FIELD = 64;
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
   const { state, prUrl, remoteSession, rateLimits, pane, handoff, pass, record, turnEnded, reason, tool, stop } = raw;
+  const agent = parseAgentClaim(raw["agent"]);
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (stop !== undefined) {
     // Alone, as a hand-off is: a note is never a state, so no ingest path can read one as a turn's end.
@@ -134,6 +172,7 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
       kind: SESSION_EVENT_KIND,
       stop: parseIdleNote(stop),
       ...(pane === undefined ? {} : { pane }),
+      ...(agent === undefined ? {} : { agent }),
     };
   }
   if (pass !== undefined) {
@@ -162,13 +201,14 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (remoteSession !== undefined && typeof remoteSession !== "string") return null;
   if (turnEnded !== undefined && (turnEnded !== true || state !== "idle")) return null;
-  if (state === undefined && rateLimits === undefined) return null;
+  if (state === undefined && rateLimits === undefined && agent === undefined) return null;
   return {
     v: SESSION_EVENT_VERSION,
     kind: SESSION_EVENT_KIND,
     ...(state === undefined ? {} : { state }),
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(remoteSession === undefined ? {} : { remoteSession }),
+    ...(agent === undefined ? {} : { agent }),
     ...(pane === undefined ? {} : { pane }),
     ...(turnEnded === true ? { turnEnded } : {}),
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
@@ -599,6 +639,11 @@ export class EndedTasks {
     return this.#launches.get(taskId)?.prUrl ?? this.#ledger.notes().find((n) => n.taskId === taskId)?.prUrl;
   }
 
+  /** The conversation id this daemon launched the task under (`--session-id`, or the one it resumed): `agent.session`'s second source. */
+  launchSession(taskId: string): string | undefined {
+    return this.#ledger.notes().find((n) => n.taskId === taskId)?.session;
+  }
+
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
   async notePr(taskId: string, prUrl: string): Promise<void> {
     const launches = this.#launches.get(taskId);
@@ -930,6 +975,12 @@ export interface SessionEventDeps {
    */
   readonly retain?: (pane: BoundPane, state: TrackedState, turnEnded: boolean) => void;
   /**
+   * Session identity and the process and conversation tags (`conversations.ts`): every bound report's state and
+   * `agent` claims, retained against the peer's `claude` process. Retention, never an act; not awaited, so no reply
+   * depends on it.
+   */
+  readonly conversations?: Conversations;
+  /**
    * A session's own pass (`pass_to_successor`), all of it the host's: the push the pass asks for (audited under
    * its own origin), the report to the scheduler, and the close at a turn's end, which only
    * `armPassClose` lets run. Absent, a pass is answered `unsupported`.
@@ -1182,15 +1233,45 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
 
   const hostNamesPeers = deps.hostNamesPeers ?? peerPidSupported;
 
-  const bind = async (frame: SessionEventFrame, peer: number | null): Promise<BoundPane | null> => {
+  /** The pane, and the pids from the peer up to it, peer first; `below` is null through the `pane` fallback (no peer). */
+  const bind = async (
+    frame: SessionEventFrame,
+    peer: number | null,
+  ): Promise<{ readonly pane: BoundPane; readonly below: readonly number[] | null } | null> => {
     // Per host, never per connection: a sender the kernel could not name here is refused.
     if (peer === null && hostNamesPeers()) return null;
     const live = (await deps.panes()).filter((pane) => !pane.dead);
     // A pane gone, or its `%n` under another process (a tmux server restart reuses ids), takes its note with it.
     const pids = new Map(live.map((pane) => [pane.id, pane.pid]));
     for (const [id, held] of notes) if (pids.get(id) !== held.pid) notes.delete(id);
-    if (peer === null) return live.find((pane) => pane.id === frame.pane) ?? null;
-    return ancestorIn(peer, new Map(live.map((pane) => [pane.pid, pane])));
+    if (peer === null) {
+      const named = live.find((pane) => pane.id === frame.pane);
+      return named === undefined ? null : { pane: named, below: null };
+    }
+    const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
+    return found === null ? null : { pane: found.hit, below: found.below };
+  };
+
+  /** Retention, never awaited by the reply: against the peer's `claude`, or the pane's own process through the fallback. */
+  const retainClaims = (pane: BoundPane, below: readonly number[] | null, frame: SessionEventFrame): void => {
+    const table = deps.conversations;
+    // A `done` report is a task act, not a state: only its claims are retained.
+    const state = frame.state === "done" ? undefined : frame.state;
+    if (table === undefined || stopped || (state === undefined && frame.agent === undefined)) return;
+    const remote = frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : undefined);
+    const agent: AgentClaim | undefined =
+      frame.agent === undefined && remote === undefined
+        ? undefined
+        : { ...frame.agent, ...(remote === undefined ? {} : { remote }) };
+    void (async (): Promise<void> => {
+      const process = below === null ? null : await claudeProcessOf([...below, pane.pid]);
+      await table.report(pane, process, below === null, {
+        ...(state === undefined ? {} : { state }),
+        ...(frame.turnEnded === true ? { turnEnded: true } : {}),
+        ...(frame.reason === undefined ? {} : { reason: frame.reason }),
+        ...(agent === undefined ? {} : { agent }),
+      });
+    })().catch((err: unknown) => log.warn(`local socket: session identity read failed (${String(err)})`));
   };
 
   return {
@@ -1200,17 +1281,19 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         log.warn("local socket: dropped a malformed session-event frame");
         return { ok: false, code: "invalid" };
       }
-      const pane = await bind(frame, peer);
-      if (pane === null) {
+      const bound = await bind(frame, peer);
+      if (bound === null) {
         // Info: a claude run outside tmux, or a background session, is ordinary.
         log.info(`local socket: session-event from pid=${peer ?? "unknown"} matched no live pane — dropped`);
         return { ok: false, code: "unbound" };
       }
+      const { pane } = bound;
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
       if (frame.handoff === true) return markHandoff(pane);
       if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
+      retainClaims(pane, bound.below, frame);
       if (frame.stop !== undefined) return takeNote(pane, exclave, frame.stop, at);
       // Before the untasked return: an untasked pane's state is retained too, and goes nowhere else.
       if (!stopped && frame.state !== undefined && frame.state !== "done") {
@@ -1245,8 +1328,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       // An `ended` the leader cannot match to a PR waits for the exit, and settles `done` if the machine goes
       // first: so it carries the PR this pane's own launch noted, in case the event that carried it was lost.
       const sentPr = prUrl ?? (frame.state === "ended" ? (deps.ended.notedPr(pane.taskId) ?? null) : null);
-      const remoteSession = isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null;
-      if (frame.remoteSession !== undefined && remoteSession === null) {
+      // `agent.remote` first, `remoteSession` its fallback (docs/tags.md §7): one rule, `isRemoteSessionId`, for both.
+      const remoteSession =
+        frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null);
+      if (frame.agent?.remote === undefined && frame.remoteSession !== undefined && remoteSession === null) {
         log.warn(
           `local socket: session-event pane=${quote(pane.id)} carried a malformed remote session id — dropped it`,
         );
