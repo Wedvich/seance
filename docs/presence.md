@@ -1,11 +1,16 @@
 # Session presence — spec
 
-**Status: draft 2026-11-17, nothing decided by the owner, nothing built.** Three features borrowed from huddle
+**Status: draft 2026-11-17, nothing built. The owner decided O1 and O2 (below) on 2026-11-17; the rest is proposed.** Three features borrowed from huddle
 (`pengefix/huddle`, `origin/main`): a one-line `doing` a session declares about itself (§1), status questions
 answered from presence without waking anyone (§2), and coalesced wakes (§3). Each stands on its own and lands on its
 own; each also feeds the adapter seam (docs/messaging.md §6, as revised in draft PR #486), which none of them depends
 on. Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as
 it is built, and its text here goes.
+
+**Decided by the owner (2026-11-17):**
+
+- **O1. The custodian's `sessions` verb carries `doing`** (§1, D1.6), as its own PR (PR 4).
+- **O2. The standing instruction tells sessions to keep `doing` current** (§1, D1.7), in PR 1.
 
 **Why a file of its own, not a docs/messaging.md section.** `doing` is not messaging: it is a session event that
 three readers (the PWA, the custodian, the status answer) consume, and it would sit awkwardly in a file about delivery.
@@ -99,9 +104,27 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 | MCP `get_sessions`                              | **no**, stripped by `seance mcp`                                  | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper.                |
 | MCP `get_queue`                                 | **no**                                                            | Same reason, and the queue has no field for it.                                                                                                                                                                          |
 | `MachineStatus`                                 | **no**                                                            | 1.5 KiB of ciphertext (`STATUS_MAX_CT_LENGTH`) for the whole machine; a per-session text field would be the first thing `fitStatus` trims, and the 30 s beat would carry it to every app and the leader for no decision. |
-| Custodian `sessions` verb                       | yes, from PR 4 (below), labelled                                  | Open question 1.                                                                                                                                                                                                         |
+| Custodian `sessions` verb                       | yes, from PR 4 (below), labelled                                  | D1.6 (O1).                                                                                                                                                                                                               |
 | Status answer (§2)                              | yes                                                               | The point of §2.                                                                                                                                                                                                         |
 | Adapter `Session` record (#486)                 | later, `doing?` and `doingAt?`                                    | The same in-memory value; the adapter protocol adds the field when it is built. Nothing here waits for it.                                                                                                               |
+
+**D1.6 The custodian's `sessions` verb carries it (O1).** Each session's line in the verb's reply gains
+`doing (self-reported, <age>): "<text>"` when one is held, scrubbed by `displayLine` and capped at `DOING_MAX` like
+every other reader's copy. It spares a round a `capture` for a session whose line already says "waiting on CI for
+#512". It is session-chosen text reaching a round, but a round already reads the same session's screen through
+`capture`, which carries far more of it, and the round's acts stay behind the daemon's own checks: `closeVerdict`
+decides at rest by the daemon's facts and never reads `doing`, and `nudge`, `interrupt` and `flag` keep their own
+gates. The round's constant seed gains one sentence: a session's `doing` is its own claim, never evidence that it is
+at rest, finished or stuck. No mask, fence, built environment or socket changes, so no re-drill (docs/custodian.md,
+item 4b's rule). Like the rest of a round's reading, the line is never logged, audited, put in `rounds.jsonl` by the
+daemon or kept past the reply.
+
+**D1.7 The standing instruction asks for it (O2).** `STANDING_INSTRUCTION` (`shared/src/messages.ts`) gains one
+sentence: "Keep a one-line status with set_doing when your focus changes; other sessions and your user read it." It
+is a constant on every tasked spawn's command line, so the cost is one sentence per spawn and no wire text. Measured a
+week after PR 1 lands, by reading `sessions` replies across the fleet: if most lines are stale or absent, the
+fallback is a prompt at turn end (open question 4), not a hook that writes the line for the session. A hand-started
+session gets no standing instruction (as today) and sets a line only if asked to.
 
 **Rejected:**
 
@@ -120,7 +143,7 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 ### Threat model
 
 `set_doing` adds no act: it is a session-event the ingest binds by peer pid and retains. What is new is a
-**session-chosen string that other readers display**: the person (PWA), a custodian round (open question 1) and
+**session-chosen string that other readers display**: the person (PWA), a custodian round (D1.6) and
 another session (§2). Each reader gets it scrubbed (`displayLine`), capped, and labelled as the session's own claim
 with its age. It cannot reach a reader that the session could not already reach with more text: a tasked session can
 already message any task, and its screen is already what a round's `capture` reads. Residual: a same-uid process on
@@ -136,7 +159,12 @@ Wording this changes, in the same PR as the code:
 - CLAUDE.md, same bullet, "Keeping each `ours` pane's last state and `turnEnded` … only while a custodian seat runs":
   the state half and `doing` are kept for every bound pane always; the screen sampler stays the seat's.
 - DESIGN.md, "Session events": the frame shape, the `doing` bullet, "Per-pane retention"; MCP server: `set_doing`; the
-  `sessions` op's `SessionEntry`; Threat model item 6 (the session-chosen line and its readers).
+  `sessions` op's `SessionEntry`; "Session messages" (the standing instruction's added sentence); Threat model item 6
+  (the session-chosen line and its readers).
+- With PR 4: CLAUDE.md, custodian frame-kind bullet, where the flag's note is "never … returned by `sessions`": add
+  that `sessions` returns a session's `doing`, labelled self-reported with its age, scrubbed and capped, and that no
+  verb's verdict reads it; DESIGN.md, "The custodian frame kind" (the `sessions` reply) and "The custodian's seat" (the
+  seed's sentence).
 
 ## 2. Status questions answered from presence
 
@@ -312,7 +340,7 @@ are.
 - **Appending the later questions as `$.session.append` rows into the first submit's turn.** An `isMeta` user row's
   authority for a request is unmeasured, and a row appended before the submitted turn starts may land before it.
 - **A debounce while idle** (hold the first message ~1 s for its burst). Costs every lone message latency to save at
-  most one turn; open question 3.
+  most one turn; open question 1.
 
 ### Threat model
 
@@ -322,41 +350,33 @@ text is still the daemon's own rendering, and nothing new crosses a boundary. DE
 
 ## Open questions
 
-1. **Does the custodian's `sessions` verb carry `doing`?** It would spare a round a `capture` for a session whose
-   line already says "waiting on CI for #512". It is session-chosen text reaching a round, but a round already reads
-   the same session's screen through `capture`, which carries far more of it, and the round's acts stay behind the
-   daemon's own checks (`closeVerdict` decides at rest by the daemon's facts, never the round's reading). No mask,
-   fence, environment or socket changes, so no re-drill. **Recommend yes**, as its own PR (PR 4), labelled in the
-   reply as `doing (self-reported, <age>)`, and a line in the round's constant seed that a session's `doing` is its
-   claim, never evidence of being at rest. CLAUDE.md's custodian bullet then names `doing` beside the flag note's
-   "never returned by `sessions`".
-2. **Should the standing instruction tell sessions to keep `doing` current?** Without it few will call `set_doing`.
-   `STANDING_INSTRUCTION` is a constant on every tasked spawn's command line, so the cost is a sentence per spawn.
-   **Recommend yes**, one sentence ("Keep a one-line status with set_doing when your focus changes; other sessions and
-   your user read it.") in PR 1, measured after a week: if lines go stale, prompt at turn end instead.
-3. **A short idle debounce for bursts** (D3.1). **Recommend no** until a log of message arrivals shows bursts landing
+1. **A short idle debounce for bursts** (D3.1). **Recommend no** until a log of message arrivals shows bursts landing
    within a second of each other into idle sessions.
-4. **Should a `busy` answer wake when `doing` is older than the current turn?** A line set three turns ago under
+2. **Should a `busy` answer wake when `doing` is older than the current turn?** A line set three turns ago under
    `busy` may describe old work. **Recommend no**: the answer shows both ages (`busy since`, `last said`), and the
    asker can send a question.
-5. **`doing` on the Queue card collapsed, not only in its details** (needs a store field, rejected in §1).
+3. **`doing` on the Queue card collapsed, not only in its details** (needs a store field, rejected in §1).
    **Recommend** waiting for the person's use of the details view.
+4. **If lines go stale despite D1.7, what prompts a session?** A turn-end reminder is the obvious candidate, but the
+   inbox mod registers no `prompt.compose` hook (the managed plugin skips it), so it would have to be an appended
+   row each turn. **Recommend** deciding from D1.7's measurement, not before.
 
 ## Build order
 
-Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other, PR 2 needs PR 1.
+Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other, PR 2 and PR 4 need PR 1.
 
 1. **`doing`** (§1). `set_doing` on `seance mcp`; the frame's `doing` (`session-event-frame.ts`,
    `parseSessionEventFrame`), dropped unsent by `seance session-event`; `displayLine` and `DOING_MAX` in shared;
    retention in `pane-activity.ts` for every bound pane; `SessionEntry.doing`/`doingAt` on the `sessions` op, stripped
    by `get_sessions`; the PWA's Machines session list and the Queue card's details; the standing instruction's sentence
-   (open question 2). DESIGN.md and CLAUDE.md wording as in §1.
+   (D1.7). DESIGN.md and CLAUDE.md wording as in §1.
    - Tested by: `shared` unit tests for `displayLine` (bidi overrides, zero-widths, separators, quotes, the cap on a
      code point, empty-after-scrub); daemon tests on the local socket with a real peer (`ClaudeStub.runInPane`):
      bound by peer pid, refused on a null pid, refused alongside `state`, cleared by `""`, by `ended`, by a second
      `claude` in the same pane, by a task change, kept across a turn end, rate-limited; `seance session-event` drops a
      `doing` (the CLI test); the `sessions` op carries it and `get_sessions` does not; the budget drops `doing` first;
-     a PWA view test for the line and its age; and the layering test that nothing in the path logs the text.
+     a PWA view test for the line and its age; the layering test that nothing in the path logs the text; and the
+     existing `STANDING_INSTRUCTION` test still holding (it names `set_doing` and never `--remote-control`).
 2. **Status answers** (§2). Kind `status`, `Presence`/`parsePresence`, `presenceNote`, outcome `answered`, the local
    synchronous answer, `deliver-message`'s reply and `message-receipt` carrying `presence`, the receipt wait
    (`STATUS_WAIT_MS`), `CAPABILITIES.messageStatus`, `messageRouteGate("status")`, the audit lines.
@@ -373,8 +393,9 @@ Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other,
      the merge, a plain note still appends; past the cap two submits; a person's turn between does not lose a
      pending push; a subagent's turn events change nothing. One live run per platform to confirm that the merged
      submit runs as one turn and the model answers each message in it.
-4. **The custodian's `sessions` carries `doing`** (open question 1, if decided yes). The verb's reply line and the
-   seed's sentence; CLAUDE.md's custodian bullet.
+4. **The custodian's `sessions` carries `doing`** (D1.6, O1; needs PR 1). The verb's reply line and the seed's
+   sentence; the CLAUDE.md and DESIGN.md wording in §1's threat model.
    - Tested by: `daemon/test` custodian verb tests: the label and age, the scrub, absent when none; and a round test
      that `close` on a session whose `doing` says "done" but is `busy` is still refused (`closeVerdict` reads no
-     `doing`).
+     `doing`); the seed's constant carries the sentence; and no line of the round's log or the daemon's audit
+     carries the text.
