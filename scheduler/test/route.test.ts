@@ -1439,13 +1439,19 @@ describe("a continue task", () => {
     machine("b", { capabilities: capable }),
   ];
 
-  test("only the exact machine, exclave and clone is left; the rest say it ran elsewhere", () => {
-    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "app-2" }) });
+  test("only the exact machine, exclave and clone is left; the rest say only that it ran elsewhere", () => {
+    // `c` has no clone of the repo at all: still elsewhere alone, since that is the reason it is not the target.
+    const bare = machine("c", { capabilities: capable, repos: [] });
+    const decision = decide([...fleet(), bare], {
+      task: continuing({ deviceId: "a", exclave: "main", clone: "app-2" }),
+    });
     expect(decision.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app-2" });
     const reasons = reasonsOf(decision);
     expect(reasons["a/main"]).toEqual([]);
-    expect(reasons["a/work"]).toContainEqual({ code: "continue_elsewhere" });
-    expect(reasons["b/main"]).toContainEqual({ code: "continue_elsewhere" });
+    // Each of these has a clone of the repo, just not the named one: no `repo_absent` claiming otherwise.
+    expect(reasons["a/work"]).toEqual([{ code: "continue_elsewhere" }]);
+    expect(reasons["b/main"]).toEqual([{ code: "continue_elsewhere" }]);
+    expect(reasons["c/main"]).toEqual([{ code: "continue_elsewhere" }]);
   });
 
   test("the named clone is judged on its own skills: another clone's project skill does not stand in", () => {
@@ -1474,10 +1480,12 @@ describe("a continue task", () => {
     expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
   });
 
-  test("a clone the target no longer has is repo_absent", () => {
+  test("a clone the target no longer has is continue_clone_gone there, and elsewhere stays elsewhere", () => {
     const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "gone" }) });
     expect(decision.chosen).toBeNull();
-    expect(reasonsOf(decision)["a/main"]).toEqual([{ code: "repo_absent" }]);
+    const reasons = reasonsOf(decision);
+    expect(reasons["a/main"]).toEqual([{ code: "continue_clone_gone" }]);
+    expect(reasons["a/work"]).toEqual([{ code: "continue_elsewhere" }]);
   });
 
   test("an ordinary task is not held to any of it", () => {

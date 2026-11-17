@@ -1442,6 +1442,7 @@ function parseReason(value: unknown): Reason | null {
     case "pressure_unknown":
     case "repo_absent":
     case "continue_elsewhere":
+    case "continue_clone_gone":
     case "predecessor_account":
     case "continue_unsupported":
     case "attachments_unsupported":

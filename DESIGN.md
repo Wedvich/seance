@@ -3567,7 +3567,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   machine that does not advertise both `CAPABILITIES.continueTask` and `continueSession` is
   `continue_unsupported` (so an older daemon, one without the mode or one that would run `--continue`,
   is never routed one), `judge` picks the clone by name rather than by skills and rejects another
-  exclave `continue_elsewhere`, and a clone the machine no longer has is `repo_absent`. Every other filter,
+  exclave `continue_elsewhere`, and a clone the target exclave no longer lists by that name is `continue_clone_gone`
+  (2026-11-17; `repo_absent` before, which read as "no clone of this repo there" on a machine that had one). A
+  candidate already `continue_elsewhere` gets neither: elsewhere is the whole reason, and `repo_absent` beside it
+  claimed every other machine lacked the repo even where it was cloned under another name. Every other filter,
   cap and score applies as to any task. The dispatch adds `continues: <old id>` to the spawn request.
   A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict). A continuation
   that stays unplaceable expires `continue_expired` after `continueExpiryMs` ("Expiry").
@@ -7862,7 +7865,7 @@ fields carry over), under the same gates.
   re-offer X; the loser is refused `not_continuable` all the same), and the daemon's per-path lock and
   live-pane check refuse the second with `not_continuable`. Residuals, each accepted:
   - _A `ready` continuation that is never placed_ (the target re-keyed, the clone gone, a daemon rolled
-    back; reasons `continue_elsewhere`, `repo_absent` or `continue_unsupported`) no longer waits for a hand
+    back; reasons `continue_elsewhere`, `continue_clone_gone` or `continue_unsupported`) no longer waits for a hand
     cancel: past `SchedulerConfig.continueExpiryMs` (4 days, fixed in `DEFAULT_CONFIG`, below the ledger's
     age, docs/scheduler.md Settled defaults 19) since `createdAt` it fails `continue_expired` (Scheduler,
     "Expiry"). Meanwhile it withholds the old task's offer, and cancelling it (unplaced) releases it. The old task may then be offered again, while its machine still holds its launch (the ledger
@@ -7894,6 +7897,29 @@ fields carry over), under the same gates.
     so reap (default `minAgeDays`) may remove it while Continue is still offered; its merged-branch sweep
     takes the branch with it, so the daemon then refuses "its worktree … and its branch are both gone", an
     expected refusal (a branch the sweep kept is re-added: "Re-adding a removed worktree").
+
+- **A session refused as gone is not offered again** (2026-11-17). Of the `not_continuable` refusals, "worktree and
+  branch both gone" is the one no retry on that session gets past: the re-add never checks out origin's ref, so
+  nothing brings the worktree back. Before, the refused continuation counted as unlanded and the offer returned, and
+  each tap queued a task that waited for the machine and failed the same way (seen on an Unblock, after its first
+  try had failed so). `continueOffer` now withholds the offer, failed, cancelled and blocked alike, while `tasks`
+  holds a continuation of the session it would resume (`goneContinuation`: the leader's pointer, else the task)
+  failed `not_continuable` with the daemon's words `WORKTREE_AND_BRANCH_GONE` (`shared/src/continue-task.ts`; the
+  daemon builds its message around that constant, and an older daemon's message already carries the same words),
+  naming that task. The Queue card says "Can't continue: its worktree and its branch are gone" in the line that
+  otherwise names a waiting continuation, with no reveal (the refused card may sit in Older); the daemon's message,
+  with the path, stays on the refused card. Every other refusal (a lock, an open session, the reap lock) can clear,
+  so it still re-offers.
+  - _Matched by words, not a code._ A new spawn error code would need a leader that knows it, or an older one's
+    verdict leaves the task reserved; a field on the failure would need a new leader and parser. The words are one
+    exported constant, so they drift only by an edit that a test fails on (`daemon/test/spawn.test.ts` asserts the
+    refusal carries it). A changed constant against an older daemon reads its refusal as passing: one more re-offer,
+    the old behaviour.
+  - _Fallen off the list._ A refused continuation past `QUEUE_MAX_TASKS` is missed and the offer stands, as before.
+  - _Rejected for now: a fresh session on the PR's branch_ in place of an Unblock that cannot resume. A fresh
+    worktree on any machine with the repo, its session checking out the PR head itself as a successor does, is a
+    different act from a continuation (which never checks out origin's ref on the spawn path) and needs leader
+    and state work; left for a later change.
 
 - **Moved out of Rejected:** the daemon refusing any task whose path a newer ledger note owns. The objection
   was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
@@ -10579,7 +10605,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   in the queue. A waiting one hides the button and puts "Continuing as <its title> · waiting" on the old
   card, a line that scrolls the queue to its card (centred in the list's own scroll container, not
   `scrollIntoView`, which would shift the page on a phone); when it fails unplaced (any failure outside the landed list, e.g. `not_continuable`,
-  `continue_expired`) or is cancelled before placement, the button comes back. The tap re-checks the leader and the offer before
+  `continue_expired`) or is cancelled before placement, the button comes back, unless it was refused because the
+  worktree and branch are both gone (2026-11-17, Daemon, "Continuing a session"): the card then says "Can't
+  continue: its worktree and its branch are gone" and offers nothing. The tap re-checks the leader and the offer before
   writing, since either may have changed since the card was drawn, then writes the continuation spec with
   `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
   a store answer becomes the screen's notice. On an `awaiting-merge` card whose PR is blocked (2026-11-12,

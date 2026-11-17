@@ -41,6 +41,14 @@ const LANDED_FAILURES: ReadonlySet<string> = new Set<TaskFailureCode>([
   "merge_expired",
 ]);
 
+/**
+ * The words of the daemon's `not_continuable` refusal when a continuation's worktree and local branch are both gone
+ * (`readdWorktree`, which never checks out origin's ref). The daemon builds its message around them and the offer
+ * looks for them: that refusal is the one that no retry on the same session can get past, where a held lock or an
+ * open session can clear. Changing them makes an older daemon's refusal read as a passing one, which only re-offers.
+ */
+export const WORKTREE_AND_BRANCH_GONE = "and its branch are both gone";
+
 /** The failures whose session can be resumed: it died, or its window was closed from outside. */
 const RESUMABLE_FAILURES: ReadonlySet<string> = new Set<TaskFailureCode>(["session_failed", "session_closed"]);
 
@@ -131,6 +139,27 @@ export function continuationUnderway(task: Task, tasks: readonly Task[]): boolea
   return false;
 }
 
+/**
+ * A continuation of `task`'s session, among `tasks`, that its machine refused because the worktree and branch are
+ * both gone: nothing is left to resume in, so the offer stops. The session is the leader's pointer's, else the task's
+ * own. A refused continuation never landed, so the session it named still holds. Fallen off a bounded list, it is
+ * missed and the offer stands: one more refusal, as before.
+ */
+export function goneContinuation(task: Task, tasks: readonly Task[]): Task | undefined {
+  const session = task.continuedBy?.task ?? task.id;
+  return tasks.find(
+    (other) =>
+      other.spec.continues?.task === session &&
+      other.state === "failed" &&
+      other.failure?.code === "not_continuable" &&
+      other.failure.message.includes(WORKTREE_AND_BRANCH_GONE),
+  );
+}
+
+function goneReason(gone: Task): string {
+  return `task ${gone.id} could not continue it: its worktree and its branch are both gone, so nothing is left to resume`;
+}
+
 /** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */
 function sessionResumable(task: Task): boolean {
   if (task.state === "cancelled") return task.assignment !== undefined && task.endedAt === undefined;
@@ -197,6 +226,8 @@ export function continueOffer(
   if (waiting !== undefined) {
     return { ok: false, reason: `already continuing as task ${waiting.id}, which is still waiting in the queue` };
   }
+  const gone = goneContinuation(task, tasks);
+  if (gone !== undefined) return { ok: false, reason: goneReason(gone) };
   const placed = placement(task, machines);
   if (!placed.ok) return placed;
   if (task.state === "cancelled" && !placed.machine.capabilities?.includes(CAPABILITIES.continueCancelled)) {
@@ -258,6 +289,8 @@ function blockedOffer(
   if (task.continuedBy?.live === true || continuationUnderway(task, tasks)) {
     return { ok: false, reason: "a continuation of it is still waiting or running" };
   }
+  const gone = goneContinuation(task, tasks);
+  if (gone !== undefined) return { ok: false, reason: goneReason(gone) };
   const resumes = task.continuedBy?.task ?? task.id;
   const since = task.continuedBy?.createdAt ?? task.createdAt;
   // The ledger evicts by launch time, `createdAt` is never later than the launch: this stops early, never late.

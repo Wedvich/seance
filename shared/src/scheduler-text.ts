@@ -143,6 +143,8 @@ export function reasonText(reason: Reason): string {
       return "no clone of this repo there";
     case "continue_elsewhere":
       return "the session it continues ran elsewhere";
+    case "continue_clone_gone":
+      return "the clone the session it continues ran in is no longer there";
     case "predecessor_account":
       return "the account whose usage ran out is not where the work goes on";
     case "continue_unsupported":
