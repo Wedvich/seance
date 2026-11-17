@@ -9922,8 +9922,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
     older alert's task is merged in by that read). The Queue screen scrolls to that row once it
     is listed (opening the collapsed Asleep section first when the row is there), marks it for
     three seconds (a steady ring under reduced motion, not a fade) and clears the focus. The
-    focus is the store's state, cleared only by that act or by the screen closing
-    (`#closeTopLayer`, `followUp`): never by the component's own unmount, since a callback that
+    focus is the store's state, cleared only by that act, by the screen closing
+    (`#closeTopLayer`, or a menu switch to Machines, which closes it through the same `closeTop`) or by `followUp`: never by the component's own unmount, since a callback that
     is a new closure each render would run an unmount effect on every re-render and drop the
     focus before its row is listed. Residual: in the desktop layout the Queue is a
     column that never closes, so a focus whose task is never listed (pruned since) stays until
@@ -9973,9 +9973,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   verdict, the Settings dialog and the phone's Queue and Machines screens all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app. Queue and Machines share one entry
   over the prompt flow (the verdict included): opening either closes whatever sits over that flow — the other
-  screen, Settings, a sheet, the rename dialog — in one patch and keeps the lowest of their entries
-  (`history.go` past the rest), so back from either lands on Prompt and switching never stacks. Settings opens over
-  whichever screen shows and closes first. The menu's Prompt goes back past every layer, the verdict too, landing on
+  screen, a sheet, the rename dialog — in one patch and keeps the lowest of their entries
+  (`history.go` past the rest, less any close already asked for and not yet delivered), so back from either lands on
+  Prompt and switching never stacks. Settings is the exception: it holds unsaved credential edits, so a link that
+  arrives while it is open switches the screen beneath it and leaves it up (one entry more, pushed when none
+  was spare); Settings opens over whichever screen shows and closes first. On the desk Machines is a column, not a
+  screen: its link is one invisible entry and closes nothing. The menu's Prompt goes back past every layer, the verdict too, landing on
   the form where the verdict's "Back to prompt" does; back from a Queue opened over a verdict still steps to it.
   History outlives the document, though: a reload (a service-worker update, saving
   credentials) or Android restoring a discarded PWA resumes on a layer entry with

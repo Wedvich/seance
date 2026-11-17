@@ -167,7 +167,7 @@ function closeTop(state: AppState): Partial<AppState> | null {
   }
   // Opened over the Queue screen, so it closes first.
   if (state.older.sheet !== null) return { older: { ...state.older, sheet: null } };
-  // The modal over every screen: opening Queue or Machines closes it, so it is never under one.
+  // The modal over every screen (a link opens a screen beneath it), so it closes before any of them.
   if (state.settings) return { settings: false };
   if (state.machines) return { machines: false, history: null };
   // Opened over a verdict, never under one, so it closes first.
@@ -866,7 +866,13 @@ export class Store {
 
   /** The phone's Machines screen, from the header menu or a link (`#openScreen`). */
   openMachines(): void {
-    this.#openScreen("machines");
+    // Already a column beside the form: a layer there is an invisible back stop, and closes nothing.
+    if (this.#state.wide) {
+      if (!this.#state.machines) this.#pushLayer();
+      this.#patch({ machines: true });
+    } else {
+      this.#openScreen("machines");
+    }
     this.#refreshClosedSessions();
   }
 
@@ -1055,7 +1061,7 @@ export class Store {
   /** Always via history, so the entry pushed when the layer opened is consumed. */
   dismissLayer(): void {
     if (this.#openLayers() === 0) return;
-    history.back();
+    this.#back();
   }
 
   /**
@@ -1068,6 +1074,7 @@ export class Store {
     this.#held = false;
     this.#renameClosing = false;
     this.#olderSheetClosing = false;
+    this.#pendingBacks = 0;
     const entry = layerEntry(history.state);
     const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
     while (this.#openLayers() > depth) this.#closeTopLayer();
@@ -1076,6 +1083,17 @@ export class Store {
 
   #openLayers(): number {
     return openLayers(this.#state);
+  }
+
+  /**
+   * Layers whose close was asked for by `#back` and not yet delivered: the state still counts them, and
+   * their traversal pops their entry, so a `history.go` computed from the state must not pop it again.
+   */
+  #pendingBacks = 0;
+
+  #back(): void {
+    this.#pendingBacks += 1;
+    history.back();
   }
 
   /** Before the patch that opens the layer, so the depth counts it. */
@@ -1090,7 +1108,7 @@ export class Store {
   #releaseHeld(): void {
     if (!this.#held) return;
     this.#held = false;
-    history.back();
+    this.#back();
   }
 
   /**
@@ -1121,21 +1139,22 @@ export class Store {
   #openScreen(screen: "queue" | "machines"): void {
     const opened: Partial<AppState> = screen === "queue" ? { queue: true } : { machines: true };
     const base = this.#state.verdict === null ? 0 : 1;
-    const over = this.#openLayers() - base;
-    if (over === 0) {
-      this.#pushLayer();
-      this.#patch(opened);
-      return;
-    }
+    const before = this.#openLayers();
+    // Settings holds unsaved credential edits and is the modal over every screen: the screen opens
+    // beneath it rather than closing it (closedOver sees the state without it).
+    const patch = { ...closedOver({ ...this.#state, settings: false }, base, screen), ...opened };
+    const after = openLayers({ ...this.#state, ...patch });
     const queueClosed = this.#state.queue && screen !== "queue";
-    this.#patch({ ...closedOver(this.#state, base, screen), ...opened });
+    if (after > before) this.#pushLayer();
+    this.#patch(patch);
     if (queueClosed) this.#older.close();
-    if (over > 1) history.go(-(over - 1));
+    const surplus = before - after - this.#pendingBacks;
+    if (surplus > 0) history.go(-surplus);
   }
 
   /** The menu's Prompt: everything over the form closes, a verdict too, so it lands where "Back to prompt" does. */
   showPrompt(): void {
-    const open = this.#openLayers();
+    const open = this.#openLayers() - this.#pendingBacks;
     if (open > 0) history.go(-open);
   }
 
@@ -1181,7 +1200,7 @@ export class Store {
   closeOlderSheet(): void {
     if (this.#state.older.sheet === null || this.#olderSheetClosing) return;
     this.#olderSheetClosing = true;
-    history.back();
+    this.#back();
   }
 
   /** Set from asking for the rename layer's back until the traversal lands, so a second ask pops nothing more. */
@@ -1191,7 +1210,7 @@ export class Store {
   closeAccountRename(): void {
     if (this.#state.accounts.renaming === null || this.#renameClosing) return;
     this.#renameClosing = true;
-    history.back();
+    this.#back();
   }
 
   /** The rename dialog for an account: a layer like the sheets, so back closes it. */

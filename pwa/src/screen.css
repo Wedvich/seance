@@ -2714,6 +2714,20 @@
   background: var(--bg);
 }
 
+/* Top-aligned so a subtitle that wraps (Machines') grows the title block alone: the pill and the
+   Queue's ↻ keep one position across the three screens. The title block is at least the pill's
+   height (44px), centred in it, so a short title sits where it did when the header centred. */
+.phone-header {
+  align-items: flex-start;
+}
+
+.phone-heading {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 44px;
+}
+
 /* The phone's screen body, under the one header the three screens share. */
 .phone-body {
   flex: 1 1 0;

@@ -287,7 +287,7 @@ describe("layers and history", () => {
     expect(fake.index()).toBe(0);
   });
 
-  test("Settings over a screen closes first, and a screen opened over Settings takes its entry", () => {
+  test("Settings over a screen closes first, and a screen opened over Settings goes beneath it", () => {
     fake = fakeHistory();
     const store = new Store(idleClient());
 
@@ -298,16 +298,113 @@ describe("layers and history", () => {
     expect(store.getState()).toMatchObject({ machines: true, settings: false });
     expect(fake.index()).toBe(1);
 
+    // A deep link while Settings holds unsaved credentials: Settings stays up, the screen switches beneath it.
     store.openSettings();
     store.openQueue();
     fake.settle(store);
-    expect(store.getState()).toMatchObject({ queue: true, machines: false, settings: false });
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, settings: true });
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, settings: false });
     expect(fake.index()).toBe(1);
 
     store.dismissLayer();
     fake.settle(store);
     expect(store.getState()).toMatchObject({ queue: false, settings: false });
     expect(fake.index()).toBe(0);
+  });
+
+  test("a screen opened over Settings on the form takes an entry of its own", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: true });
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: false });
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a switch right after a dialog's close was asked pops no entry twice", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.closeAccountRename();
+    store.openQueue();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, accounts: { renaming: null } });
+    expect(fake.index()).toBe(1);
+  });
+
+  test("the menu's Prompt right after a dialog's close was asked lands on the form once", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.closeAccountRename();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: false, accounts: { renaming: null } });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("showPrompt with nothing open traverses nothing, and from Machines lands on the form", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.showPrompt();
+    fake.settle(store);
+    expect(fake.index()).toBe(0);
+
+    store.openMachines();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("on a desk Machines opens as one invisible entry and closes nothing over it", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+    store.setWide(true);
+
+    store.openSettings();
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: true });
+    expect(fake.index()).toBe(2);
+  });
+
+  test("a switch away from the Queue with Older's sheet open gives back both entries and clears the focus", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.focusTask("t-1");
+    store.openQueue();
+    store.openOlderSheet("repo");
+    expect(fake.index()).toBe(2);
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({
+      queue: false,
+      machines: true,
+      focusedTask: null,
+      older: { sheet: null },
+    });
+    expect(fake.index()).toBe(1);
   });
 
   test("a switch closes the dialog over the screen it leaves and gives back that dialog's entry", () => {

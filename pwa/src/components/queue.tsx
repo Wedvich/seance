@@ -72,7 +72,7 @@ export function QueueScreen(props: {
   /**
    * The focus was acted on: the store forgets it. Only here, never on unmount: a callback that is a new
    * closure each render would make an unmount effect run on every re-render and drop a focus whose row
-   * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`).
+   * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`, or a switch to Machines).
    */
   onFocused: () => void;
   onCancel: (taskId: string) => void;

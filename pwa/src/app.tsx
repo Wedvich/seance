@@ -230,7 +230,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
   const pane = screen === "queue" ? queue() : screen === "machines" ? machines() : prompt();
   return (
     <div className="stage">
-      <div className="screen stage-panel screen-base-host" hidden={settingsOpen}>
+      <main className="screen stage-panel screen-base-host" hidden={settingsOpen}>
         {pane.heading !== null && (
           <header className="header phone-header">
             <div key={screen} className="phone-heading">
@@ -250,10 +250,10 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
             </div>
           </header>
         )}
-        <main key={screen} className="screen phone-body">
+        <div key={screen} className="screen phone-body">
           {pane.body}
-        </main>
-      </div>
+        </div>
+      </main>
       {settings}
     </div>
   );
