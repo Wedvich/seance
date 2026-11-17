@@ -158,6 +158,12 @@ export class RelayClient {
    * rejection is the one reason it resigns.
    */
   #resigned = false;
+  /**
+   * The last register's build and send; each register begins only once it has settled. The relay keeps
+   * whichever register lands last, and two built side by side (the boot one and a boot rescan's) could
+   * finish their seal and signature in either order, leaving the older blob standing until the next one.
+   */
+  #registerChain: Promise<unknown> = Promise.resolve();
   #stopped = false;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -416,11 +422,18 @@ export class RelayClient {
     return true;
   }
 
-  /** Whether the frame left on the socket it was built for. */
-  async #register(): Promise<boolean> {
-    // Bound before the awaits: a redial meanwhile must not get this socket's
+  /** Whether the frame left on the socket it was built for. Built and sent in call order (`#registerChain`). */
+  #register(): Promise<boolean> {
+    // Bound before the wait: a redial meanwhile must not get this socket's
     // register, nor `#registered` before its own one has left.
     const ws = this.#ws;
+    const next = this.#registerChain.then(() => this.#sendRegister(ws));
+    this.#registerChain = next.catch(() => undefined);
+    return next;
+  }
+
+  async #sendRegister(ws: WebSocket | null): Promise<boolean> {
+    if (ws === null || this.#ws !== ws) return false;
     const { identity } = this.#opts;
     const info = await this.#opts.buildInfo();
     // Signed fresh each time: the relay bounds the timestamp, so a frame built
