@@ -3,7 +3,7 @@ import type { MachineStatus } from "@seance/shared";
 import type { Config } from "./config.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import { startStatusLoop, type StatusLoop } from "./run-collectors.ts";
-import type { HostProbe, Registered } from "./telemetry.ts";
+import { MIN_CPU_WINDOW_MS, type HostProbe, type Registered } from "./telemetry.ts";
 
 const GiB = 2 ** 30;
 const FLOOR_MS = 300;
@@ -292,5 +292,68 @@ describe("startStatusLoop beat", () => {
     expect(sent).toHaveLength(4);
     expect((sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0)).toBe(INTERVAL_MS + 150);
     expect(onSlot(sent[3]?.atMs ?? 1)).toBe(true);
+  });
+});
+
+describe("startStatusLoop pressure follow-up", () => {
+  /** One core whose counters run with the fake clock, half busy; memory never answers (a failed sysctl). */
+  const cpuOnly: HostProbe = {
+    ...probe,
+    cpu: () => {
+      const elapsed = Date.now() - BASE_MS;
+      return { busy: elapsed / 2, idle: elapsed / 2, cores: 1 };
+    },
+    memory: async () => null,
+  };
+
+  function startWith(host: HostProbe): { readonly loop: StatusLoop; readonly sent: Sent[] } {
+    const sent: Sent[] = [];
+    const loop = startStatusLoop(
+      MetricsStore.memory(),
+      {
+        config,
+        registered: () => registered,
+        sessions: async () => [],
+        now: Date.now,
+        httpFetch: () => Promise.reject(new Error("no network in this test")),
+        probe: host,
+      },
+      {
+        ...QUIET,
+        connected: () => true,
+        send: async (status) => {
+          sent.push({ status, atMs: Date.now() });
+          return true;
+        },
+      },
+    );
+    running = loop;
+    return { loop, sent };
+  }
+
+  test("a fresh daemon's status with no pressure is followed by one that has it, long before the next beat", async () => {
+    const { loop, sent } = startWith(cpuOnly);
+    loop.sampleNow();
+    await settle();
+    expect(sent).toHaveLength(1);
+    // The first tick is the cpu baseline, and memory failed: routing reads this as `pressure_unknown`.
+    expect(sent[0]?.status.cpu).toBeUndefined();
+    expect(sent[0]?.status.mem).toBeUndefined();
+
+    await advance(MIN_CPU_WINDOW_MS + FLOOR_MS);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.status.cpu).toBe(50);
+    // Not the beat: QUIET's interval is far off, so only the follow-up can have sent it.
+    expect((sent[1]?.atMs ?? 0) - BASE_MS).toBeLessThan(QUIET.intervalMs);
+  });
+
+  test("a host that never answers pressure gets one follow-up per loss, not one per status", async () => {
+    const { loop, sent } = startWith({ ...cpuOnly, cpu: () => null });
+    loop.sampleNow();
+    await settle();
+    await advance(MIN_CPU_WINDOW_MS + FLOOR_MS);
+    expect(sent).toHaveLength(2);
+    await advance((MIN_CPU_WINDOW_MS + FLOOR_MS) * 4);
+    expect(sent).toHaveLength(2);
   });
 });
