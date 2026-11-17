@@ -232,12 +232,16 @@ export function MenuItem(props: {
   destructive?: boolean;
   attention?: boolean;
   keepOpen?: boolean;
+  /** The page this item names is the one showing (`aria-current="page"`). */
+  current?: boolean;
 }): JSX.Element {
   const close = useContext(CloseMenu);
+  const current = props.current === true;
   const className = [
     "menu-item",
     props.sub !== undefined && "menu-item-with-sub",
     props.destructive === true && "menu-item-destructive",
+    current && "menu-item-current",
   ]
     .filter(Boolean)
     .join(" ");
@@ -282,6 +286,7 @@ export function MenuItem(props: {
       className={className}
       role="menuitem"
       aria-disabled={disabled ? "true" : undefined}
+      aria-current={current ? "page" : undefined}
       onClick={pick}
     >
       {body}

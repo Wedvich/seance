@@ -82,11 +82,23 @@ const kind = (from: Partial<AppState>, to: Partial<AppState>): string | null =>
   transitionKind(screenKey(state(from)), screenKey(state(to)));
 
 describe("transitionKind", () => {
-  test("a phone layer opening is a push, closing it a pop", () => {
-    for (const layer of ["queue", "machines", "settings"] as const) {
-      expect(kind({}, { [layer]: true })).toBe("push");
-      expect(kind({ [layer]: true }, {})).toBe("pop");
+  test("on a phone Settings is pushed over any screen and popped back to it", () => {
+    for (const screen of [{}, { queue: true }, { machines: true }, { verdict: OK }]) {
+      expect(kind(screen, { ...screen, settings: true })).toBe("push");
+      expect(kind({ ...screen, settings: true }, screen)).toBe("pop");
     }
+  });
+
+  test("moving between the phone's prompt, Queue and Machines is a switch, either way", () => {
+    expect(kind({}, { queue: true })).toBe("switch");
+    expect(kind({ queue: true }, {})).toBe("switch");
+    expect(kind({ queue: true }, { machines: true })).toBe("switch");
+    expect(kind({ machines: true }, { queue: true })).toBe("switch");
+    expect(kind({ verdict: OK }, { verdict: OK, queue: true })).toBe("switch");
+  });
+
+  test("a screen opened over Settings, which closes it, is a pop", () => {
+    expect(kind({ settings: true }, { machines: true })).toBe("pop");
   });
 
   test("the form gives way to a verdict and comes back from one", () => {
@@ -123,10 +135,12 @@ describe("transitionKind", () => {
     expect(kind({ wide: true, settings: true }, { wide: true })).toBe("modal-out");
     expect(kind({ wide: true }, { wide: true, queue: true })).toBeNull();
     expect(kind({ wide: true, machines: true }, { wide: true })).toBeNull();
+    expect(kind({ wide: true, machines: true }, { wide: true, machines: true, verdict: OK })).toBe("verdict-in");
   });
 
-  test("closing a layer and the verdict in one popstate is a pop", () => {
-    expect(kind({ queue: true, verdict: OK }, {})).toBe("pop");
+  test("closing the Queue and the verdict in one popstate is one switch", () => {
+    expect(kind({ queue: true, verdict: OK }, {})).toBe("switch");
+    expect(kind({ queue: true, verdict: OK }, { verdict: OK })).toBe("switch");
   });
 
   test("a verdict landing under a phone layer is not animated", () => {
@@ -199,7 +213,7 @@ describe("TransitionRunner", () => {
   test("a screen change waits for the update callback, whose promise is the commit", async () => {
     const f = fake();
     new TransitionRunner(FORM, f.deps).offer("queue", QUEUE);
-    expect(f.starts.map((s) => s.types)).toEqual([["push"]]);
+    expect(f.starts.map((s) => s.types)).toEqual([["switch"]]);
     expect(f.applied).toEqual([]);
     await f.starts[0]?.update();
     expect(f.applied).toEqual(["queue"]);
@@ -261,7 +275,7 @@ describe("TransitionRunner", () => {
     runner.offer("queue", QUEUE);
     await f.starts[0]?.update();
     runner.offer("form", FORM);
-    expect(f.starts.map((s) => s.types)).toEqual([["push"], ["pop"]]);
+    expect(f.starts.map((s) => s.types)).toEqual([["switch"], ["switch"]]);
     await f.starts[1]?.update();
     expect(f.applied).toEqual(["queue", "form"]);
     // The first's callback running again (or late) has nothing left to apply.

@@ -2714,10 +2714,17 @@
   background: var(--bg);
 }
 
+/* The phone's screen body, under the one header the three screens share. */
+.phone-body {
+  flex: 1 1 0;
+  height: auto;
+}
+
 /* Screen motion is the View Transition API, started by transition.ts with one
    type per kind. Names and classes exist only while a transition runs, so an
    idle panel is never a stacking context because of one, and a duplicate name
-   (which aborts a transition) can only come from these two hosts. */
+   (which aborts a transition) can only come from these two hosts and the phone
+   header's parts below, each of which exists once. */
 :root:active-view-transition .screen-base-host {
   view-transition-name: screen-base;
   view-transition-class: screen;
@@ -2730,9 +2737,93 @@
 
 /* The base is an opaque panel, so no root crossfade under it. The modal types
    keep root's default: it carries the desk dialog's backdrop. */
-:root:active-view-transition-type(push, pop, verdict-in, verdict-out)::view-transition-old(root),
-:root:active-view-transition-type(push, pop, verdict-in, verdict-out)::view-transition-new(root) {
+:root:active-view-transition-type(push, pop, switch, verdict-in, verdict-out)::view-transition-old(root),
+:root:active-view-transition-type(push, pop, switch, verdict-in, verdict-out)::view-transition-new(root) {
   animation: none;
+}
+
+/* A switch between the phone's peer screens moves only what changes: the
+   header's title block, the Queue's ↻ and the body. The pill is named so it
+   is held still rather than cross-faded with the header around it. */
+:root:active-view-transition-type(switch) .phone-heading {
+  view-transition-name: head-title;
+}
+
+:root:active-view-transition-type(switch) .phone-header .queue-refresh {
+  view-transition-name: head-action;
+}
+
+:root:active-view-transition-type(switch) .phone-header .relay-group {
+  view-transition-name: head-pill;
+}
+
+:root:active-view-transition-type(switch) .phone-body {
+  view-transition-name: screen-body;
+}
+
+/* What is left of the panel (the header's surface, the stage) is the same on
+   both sides unless a verdict drops the header; the crossfade covers that. */
+:root:active-view-transition-type(switch)::view-transition-old(screen-base),
+:root:active-view-transition-type(switch)::view-transition-new(screen-base) {
+  animation-duration: 0.2s;
+}
+
+/* The groups jump to the new box: titles differ in width, and a morph would
+   stretch the old text into it. Each image keeps its own size, top-left. */
+:root:active-view-transition-type(switch)::view-transition-group(head-title),
+:root:active-view-transition-type(switch)::view-transition-group(screen-body),
+:root:active-view-transition-type(switch)::view-transition-group(head-pill) {
+  animation: none;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-title),
+:root:active-view-transition-type(switch)::view-transition-new(head-title) {
+  inline-size: auto;
+  block-size: auto;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-title) {
+  animation: vt-head-out 0.2s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(head-title) {
+  animation: vt-head-in 0.2s ease-out both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-action) {
+  animation: vt-fade-out 0.2s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(head-action) {
+  animation: vt-fade-in 0.2s ease-out both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(screen-body) {
+  animation: vt-fade-out 0.15s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(screen-body) {
+  animation: vt-body-in 0.22s ease-out both;
+}
+
+/* Both images at full opacity would add up under plus-lighter: the new one
+   stands alone. Only a header appearing or leaving (a verdict) fades the pill. */
+:root:active-view-transition-type(switch)::view-transition-new(head-pill) {
+  animation: none;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-pill) {
+  animation: none;
+  opacity: 0;
+}
+
+:root:active-view-transition-type(switch)::view-transition-old(head-pill):only-child {
+  opacity: 1;
+  animation: vt-fade-out 0.2s ease-in both;
+}
+
+:root:active-view-transition-type(switch)::view-transition-new(head-pill):only-child {
+  animation: vt-fade-in 0.2s ease-out both;
 }
 
 /* An exit-only group paints after an entering one; the layer must stay on top. */
@@ -2837,6 +2928,27 @@
 @keyframes vt-fade-in {
   from {
     opacity: 0;
+  }
+}
+
+@keyframes vt-head-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes vt-head-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@keyframes vt-body-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
   }
 }
 
@@ -3401,6 +3513,12 @@
   color: var(--err);
 }
 
+/* The page showing: picking it only closes the menu. */
+.menu-item-current {
+  background: color-mix(in oklab, var(--acc) 14%, transparent);
+  color: var(--acc);
+}
+
 /* The label and icon dim; a sub-line stays at full `--fg2`, as it may be the only word on why. */
 .menu-item[aria-disabled="true"] .menu-icon,
 .menu-item[aria-disabled="true"] .menu-label {
@@ -3431,8 +3549,9 @@
   color: var(--fg2);
 }
 
-/* The icon follows the label's red. */
-.menu-item-destructive .menu-icon {
+/* The icon follows the label's red, or the current page's accent. */
+.menu-item-destructive .menu-icon,
+.menu-item-current .menu-icon {
   color: currentColor;
 }
 

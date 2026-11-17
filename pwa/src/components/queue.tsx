@@ -13,10 +13,8 @@ import {
 import { OLDER_TITLE, type OlderSheetView, type OlderView } from "../older-view.ts";
 import { centeredScrollTop } from "../scroll.ts";
 import type { OlderPick, OlderSheet } from "../state.ts";
-import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } from "./menu.tsx";
-import { RelaySettings } from "./relay-dot.tsx";
 import { Sheet, SheetItem, TileButton, useSheetExit } from "./sheet.tsx";
 import { Toast } from "./toast.tsx";
 import { Time, TimedText } from "./timed.tsx";
@@ -38,14 +36,32 @@ const ARM_MS = 4_000;
 /** How long a notification's row stays marked. */
 const MARK_MS = 3_000;
 
+/** The Queue's title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+export function QueueHeading(props: { summary: string | null }): JSX.Element {
+  return (
+    <div>
+      <h1 className="header-title">Queue</h1>
+      {props.summary !== null && <p className="header-meta">{props.summary}</p>}
+    </div>
+  );
+}
+
+/** The one screen-specific header control: re-reads the queue (and Older's first page). */
+export function QueueRefresh(props: { onRefresh: () => void }): JSX.Element {
+  return (
+    <button type="button" className="queue-refresh" onClick={props.onRefresh} aria-label="Refresh the queue">
+      ↻
+    </button>
+  );
+}
+
 /**
- * Reached from the spawn form's header: what the scheduler holds, by what each
+ * Reached from the phone's header menu, or a desk column: what the scheduler holds, by what each
  * task needs from the person, with a way to cancel, mark done, or hold the
  * whole queue. Everything it shows is `deriveQueue`'s; this lays it out.
  */
 export function QueueScreen(props: {
   view: QueueScreenView;
-  relayState: ConnectionState;
   /** The last action's refusal or failure, as a sentence. */
   notice: string | null;
   onDismissNotice: () => void;
@@ -59,9 +75,6 @@ export function QueueScreen(props: {
    * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`).
    */
   onFocused: () => void;
-  /** Absent in the desktop layout, where the screen is a column rather than a layer. */
-  onDismiss?: () => void;
-  onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
   /** Places a task the concurrency caps alone hold, past them. */
@@ -75,13 +88,11 @@ export function QueueScreen(props: {
   onPause: () => void;
   onResume: (account?: string) => void;
   onDiscard: () => void;
-  /** Desktop layout only: the queue is the rightmost column, so the settings pill moves to its header. */
-  onOpenSettings?: () => void;
   /** The archive's tasks past Finished; null while no archivist is online, and nothing of it renders (A35). */
   older: OlderView | null;
   olderActions: OlderActions;
 }): JSX.Element {
-  const { view, relayState, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
+  const { view, notice, pausing, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
   // Memory only: persist.ts keeps the spawn form's record, no place for a view's open/closed.
   const [asleepOpen, setAsleepOpen] = useState(false);
@@ -187,26 +198,6 @@ export function QueueScreen(props: {
 
   return (
     <>
-      <header className="header">
-        <div className="header-lead">
-          {onDismiss !== undefined && (
-            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-              ‹
-            </button>
-          )}
-          <div>
-            <h1 className="header-title">Queue</h1>
-            {view.summary !== null && <p className="header-meta">{view.summary}</p>}
-          </div>
-        </div>
-        <div className="header-actions">
-          <button type="button" className="queue-refresh" onClick={onRefresh} aria-label="Refresh the queue">
-            ↻
-          </button>
-          {props.onOpenSettings !== undefined && <RelaySettings state={relayState} onClick={props.onOpenSettings} />}
-        </div>
-      </header>
-
       <div className="fleet" ref={list}>
         {view.holds.map((hold) => (
           <div key={hold.key} className="banner card">

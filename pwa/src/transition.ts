@@ -6,9 +6,20 @@ import type { AppState } from "./view.ts";
  * selects on through `:active-view-transition-type(…)`. Exported so a test can
  * hold the stylesheet to it: a typo'd type would silently never match.
  */
-export const TRANSITION_KINDS = ["push", "pop", "verdict-in", "verdict-out", "modal-in", "modal-out"] as const;
+export const TRANSITION_KINDS = [
+  "push",
+  "pop",
+  "switch",
+  "verdict-in",
+  "verdict-out",
+  "modal-in",
+  "modal-out",
+] as const;
 
 export type TransitionKind = (typeof TRANSITION_KINDS)[number];
+
+/** The phone's three peer screens under its one header; the verdict belongs to the prompt's. */
+export type Screen = "prompt" | "queue" | "machines";
 
 /**
  * What decides whether a store change is a screen change. Screen identity
@@ -16,19 +27,19 @@ export type TransitionKind = (typeof TRANSITION_KINDS)[number];
  * page for a capture frame.
  */
 export interface ScreenKey {
-  readonly depth: 0 | 1;
-  readonly layer: "settings" | "queue" | "machines" | null;
+  readonly screen: Screen;
+  /** The modal over every screen. */
+  readonly settings: boolean;
   /** Mirrors VerdictView's key in app.tsx: a queued task by id, so its polls are not a change; any other verdict by object. */
   readonly verdict: string | Verdict | null;
   readonly wide: boolean;
 }
 
 export function screenKey(state: AppState): ScreenKey {
-  const layer = state.queue ? "queue" : state.machines ? "machines" : state.settings ? "settings" : null;
   const { verdict } = state;
   return {
-    depth: layer === null ? 0 : 1,
-    layer,
+    screen: state.queue ? "queue" : state.machines ? "machines" : "prompt",
+    settings: state.settings,
     verdict: verdict === null ? null : verdict.kind === "queued" ? `queued:${verdict.task.id}` : verdict,
     wide: state.wide,
   };
@@ -37,17 +48,17 @@ export function screenKey(state: AppState): ScreenKey {
 export function transitionKind(prev: ScreenKey, next: ScreenKey): TransitionKind | null {
   // A layout flip re-renders everything at once; there is nothing to slide between.
   if (prev.wide !== next.wide) return null;
-  // Depth wins over a verdict change, so one popstate closing the Queue and the verdict is a pop.
-  if (prev.depth !== next.depth) {
-    const pushing = next.depth > prev.depth;
-    if (!next.wide) return pushing ? "push" : "pop";
-    // On a desk Queue and Machines are columns, always on screen; only Settings is a layer.
-    const layer = pushing ? next.layer : prev.layer;
-    if (layer !== "settings") return null;
-    return pushing ? "modal-in" : "modal-out";
+  if (prev.settings !== next.settings) {
+    if (next.wide) return next.settings ? "modal-in" : "modal-out";
+    return next.settings ? "push" : "pop";
   }
-  // A verdict under a phone layer is not on screen, and on a desk it sits behind the modal.
-  if (next.depth !== 0 || prev.verdict === next.verdict) return null;
+  // Under the modal nothing shows; on a desk Queue and Machines are columns, always on screen.
+  if (next.settings) return null;
+  // A screen change wins over a verdict change, so one popstate closing the Queue and the verdict is one switch.
+  if (prev.screen !== next.screen) return next.wide ? null : "switch";
+  // A verdict under a phone screen is not on screen.
+  if (next.screen !== "prompt" && !next.wide) return null;
+  if (prev.verdict === next.verdict) return null;
   if (prev.verdict === null) return "verdict-in";
   if (next.verdict === null) return "verdict-out";
   return null;

@@ -37,8 +37,30 @@ const CHART_HEIGHT = 120;
 /** Series beyond the palette wrap around; a quota panel past five is already hard to read. */
 const PALETTE_SIZE = 5;
 
+/** The Machines title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+export function MachinesHeading(props: {
+  relayLine: string;
+  relayState: ConnectionState;
+  /** The registry is authoritative (`RelayState.registrySettled`). */
+  settled: boolean;
+  /** `MachinesView.scheduler`: who leads, or that nobody does. */
+  scheduler: string;
+}): JSX.Element {
+  const { relayLine, relayState, settled, scheduler } = props;
+  return (
+    <div>
+      <h1 className="header-title">Machines</h1>
+      <p className="header-meta header-status">
+        <RelayDot state={relayState} />
+        {/* One text node: the flex gap would otherwise split the " · ". Unsettled, the scheduler is still its initial "none"; offline, it is stale. */}
+        {settled && relayState === "connected" ? `${relayLine} · ${scheduler}` : relayLine}
+      </p>
+    </div>
+  );
+}
+
 /**
- * Reached from settings, stacked over it: every machine's pressure and
+ * Reached from the phone's header menu, or a desk column: every machine's pressure and
  * exclaves, then quota per account across the fleet. Charts follow the same
  * split — pressure under a machine, quota under an account — one open at a
  * time, under the card it belongs to.
@@ -47,8 +69,6 @@ export function MachinesScreen(props: {
   view: MachinesView;
   /** The archivist's own card, after the machines; null with no archivist in the registry. */
   archivist: ArchivistCard | null;
-  relayLine: string;
-  relayState: ConnectionState;
   /** The registry is authoritative (`RelayState.registrySettled`). */
   settled: boolean;
   history: HistoryView | null;
@@ -70,8 +90,6 @@ export function MachinesScreen(props: {
   drainSheet: (machine: Machine) => readonly string[];
   /** Reads a machine's sessions and the queue afresh: asked as the confirm sheet opens. */
   onReadDrain: (deviceId: string) => void;
-  /** Absent in the desktop layout, where the screen is a column rather than a layer. */
-  onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
   onOpenRename: (accountId: string) => void;
@@ -83,8 +101,6 @@ export function MachinesScreen(props: {
   const {
     view,
     archivist,
-    relayLine,
-    relayState,
     settled,
     history,
     accounts,
@@ -96,7 +112,6 @@ export function MachinesScreen(props: {
     closeSheet,
     drainSheet,
     onReadDrain,
-    onDismiss,
     onShowHistory,
     onHideHistory,
     onOpenRename,
@@ -123,24 +138,6 @@ export function MachinesScreen(props: {
     renaming === null ? undefined : (found ?? (seen.current?.accountId === renaming ? seen.current : undefined));
   return (
     <>
-      <header className="header">
-        <div className="header-lead">
-          {onDismiss !== undefined && (
-            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-              ‹
-            </button>
-          )}
-          <div>
-            <h1 className="header-title">Machines</h1>
-            <p className="header-meta header-status">
-              <RelayDot state={relayState} />
-              {/* One text node: the flex gap would otherwise split the " · ". Unsettled, the scheduler is still its initial "none"; offline, it is stale. */}
-              {settled && relayState === "connected" ? `${relayLine} · ${view.scheduler}` : relayLine}
-            </p>
-          </div>
-        </div>
-      </header>
-
       <div className="fleet">
         {/* Unsettled, an empty list means "no push yet", not "no machines" — the store's rule too. */}
         {view.cards.length === 0 && (
