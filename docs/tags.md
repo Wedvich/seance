@@ -1,6 +1,6 @@
 # Tags, session identity and the adapter subscription — spec
 
-**Status: draft 2026-11-17, nothing built.** The owner decided T1–T3 (below) on 2026-11-17; everything else is
+**Status: draft 2026-11-17, nothing built.** The owner decided T1–T4 (below) on 2026-11-17; everything else is
 proposed, with a recommendation where there is a choice. Two drafts build on this file: docs/presence.md (draft PR
 #526: `self.doing`, `set_self_tag`, the `tags` map on `SessionEntry`), which already fixes the first key and must stay
 valid under this model, and docs/messaging.md §6 (draft PR #486: the adapter seam), whose `Session` record, addressing
@@ -23,6 +23,9 @@ session ids) and docs/orchestrator.md (the display-only external `ref`).
   name is chosen by precedence **owner label > task title > `self.name` > window**, the source marked whenever it is
   not the owner's or the task's. Push notifications never show a tag.
 - **T3. Tags are specified together with session identity and the adapter subscription**, in this file.
+- **T4. Retention covers hand-started sessions** (§3.3), decided 2026-11-17: the gate is a bound `claude` process,
+  not `ours`. The direction is that Séance picks up every session in its tmux server, not only task-backed ones.
+  docs/presence.md's PR 1 builds it for `self.doing` (its O4).
 
 **Proposed beyond T1, for the owner to confirm:** two task-scope namespaces T1 did not name, `creator.*` (whoever
 enqueues, at create only) and `scheduler.*` (the leader; no keys in v1). `creator.*` has no single writer: any app-role
@@ -213,7 +216,7 @@ retention line ("Keeping each `ours` pane's last state and `turnEnded` … only 
 hand-started session in the daemon's own tmux server is exactly what an adapter most needs: it is how a person joins a
 tool by hand.
 
-**Recommend lifting it, with the gate moved from `ours` to "a bound `claude` session".** Retention (state, `reason`,
+**Lift it, with the gate moved from `ours` to "a bound `claude` session"** (T4, decided). Retention (state, `reason`,
 process and conversation tags) is kept for any pane whose peer resolves to a `claude` process on its chain
 (`Bound.session` non-null, "Replies by handle"), tasked or not, `ours` or not. A peer with no `claude` on its chain
 (a shell's child) still sends what it sends today, and gets no retention.

@@ -1,6 +1,6 @@
 # Session presence — spec
 
-**Status: draft 2026-11-17, nothing built. The owner decided O1 and O2 (below) on 2026-11-17; the rest is proposed.** Three features borrowed from huddle
+**Status: draft 2026-11-17, nothing built. The owner decided O1–O4 (below) on 2026-11-17; the rest is proposed.** Three features borrowed from huddle
 (`pengefix/huddle`, `origin/main`): a one-line `self.doing` tag a session declares about itself (§1), status questions
 answered from presence without waking anyone (§2), and coalesced wakes (§3). Each stands on its own and lands on its
 own; each also feeds the adapter seam (docs/messaging.md §6, #486), which none of them depends on. It builds on
@@ -13,6 +13,9 @@ it is built, and its text here goes.
 - **O2. The standing instruction tells sessions to keep `doing` current** (§1, D1.7), in PR 1.
 - **O3. `doing` is the first tag of the session-tags model, `self.doing`, not a standalone field** (§1, D1.0),
   recorded as T1 in docs/tags.md (#533). The tags model is that file's, not this one's.
+- **O4. Hand-started sessions get `self.doing` and retention too** (§1, D1.1, D1.3): the gate is a bound `claude`
+  process, not `ours`, as docs/tags.md §3.3 recommended, in PR 1. The owner's direction is that Séance picks up every
+  session in its tmux server, not only task-backed ones.
 
 **Depends on, for the general model only: docs/tags.md.** It defines tags, their writer namespaces and scopes, session
 identity and the `self.*` setter in general. `self.doing` here is buildable before its PR 1: this file's PR 1 builds
@@ -100,18 +103,17 @@ makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carry
   (`peerPidSupported`) or for a null pid, `set_self_tag` is refused `unbound`, as `message` and `inbox` are. A state
   report falls back to a claimed pane because a wrong state is corrected by the next report; a line other readers
   display is not, so it gets the stricter rule.
-- **Only a pane séance started (`ours`), tasked or not.** That is the set `pane-activity.ts` already retains
-  (`observe` skips any other pane, `session-events.ts`'s `BoundPane.ours`). A hand-started session in a pane of its own
-  is refused `untracked`: retaining state for panes séance did not start would widen what CLAUDE.md lets the daemon
-  keep, for a line only the Machines list would show. docs/tags.md §3.3 recommends lifting this to "any pane whose
-  peer resolves to a `claude` process" (`Bound.session` non-null), not decided yet. If the owner decides it before
-  PR 1 is built, PR 1 takes it: the `untracked` refusal and its test go, and the wording in this section's Threat
-  model changes as docs/tags.md's Threat model says. If not, PR 1 ships `ours` only and docs/tags.md's PR 1 lifts it.
+- **Any pane whose peer resolves to a `claude` process, `ours` or hand-started, tasked or not (O4).** The gate is
+  `Bound.session` non-null ("Replies by handle": the innermost process on the peer's chain called `claude`), as
+  docs/tags.md §3.3 decided. A peer with no `claude` on its chain (a shell's child running `seance mcp` by hand) is
+  refused `unbound`, since there is no process to hold the line against. Today `pane-activity.ts` retains only `ours`
+  panes (`observe` skips the rest); PR 1 widens retention to this gate (D1.3), which is the CLAUDE.md change in this
+  section's Threat model. Sessions outside the daemon's tmux server stay out: no pane binds them (docs/tags.md §3.3).
 - **Bound to the `claude` process, keyed on `Bound.session`** (`<pid>:<start time>`, "Replies by handle";
   docs/tags.md §3.2). In an `ours` pane `claude` is the pane process itself, so the key and the pane pid agree and a
-  `claude` restart is a respawned pane (D1.4). Keying on `Bound.session` from PR 1 costs one walk the message path
-  already makes and is what keeps a restarted `claude` under a surviving shell from inheriting the last one's line,
-  once hand-started panes are in.
+  `claude` restart is a respawned pane (D1.4). In a hand-started pane the pane process is the shell, which outlives a
+  restarted `claude`, so the pane pid would carry one `claude`'s line onto the next; the `Bound.session` key does not.
+  It costs one walk the message path already makes.
 
 **D1.2 The value is scrubbed, capped and display-only.**
 
@@ -135,8 +137,11 @@ makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carry
 gains `reason` (the last `needs-input` reason, which the tracker does not keep today; §2 needs it) and
 `tags: Map<string, { value, at }>` (full keys; `self.doing` alone in PR 1), with the `Bound.session` and `taskId`
 the entry was bound under (D1.1). Today that tracker runs only while a custodian seat does; §1 and §2 need
-the state half always, so **state, `reason` and `doing` retention run unconditionally for every `ours` pane**, and the
-screen sampler stays the custodian's alone. Retention, not an act, as now.
+the state half always, so **state, `reason` and `doing` retention run unconditionally for every pane bound to a
+`claude` process (O4)**, and the screen sampler stays the custodian's alone and `ours` only. Retention, not an act,
+as now: every custodian verb, the drain ask and the handoff still require `ours` and a launch-ledger task, so a
+hand-started pane's retained entry is read only by the `sessions` op and the PWA; the custodian's readers of
+`PaneActivity` filter to `ours` as they do today.
 
 - **Pruning without the sampler.** Today entries are dropped only by the sampler's pass. Without a seat, the
   tracker prunes on every pane listing the daemon already makes for another reason (each session-event bind, each
@@ -153,7 +158,8 @@ screen sampler stays the custodian's alone. Retention, not an act, as now.
 
 - `set_self_tag` for `doing` with `""`;
 - `ended` for the pane, or the pane gone from tmux;
-- the bound `claude` process gone (in an `ours` pane, a respawned pane), or a different task on it
+- the bound `claude` process gone (in an `ours` pane, a respawned pane; in a hand-started one, `claude` exiting to
+  its shell, since no `ended` fires for an untasked pane), or a different task on it
   (`@seance-task` changed), found at the next listing (D1.3);
 - a daemon restart.
 
@@ -243,20 +249,27 @@ already message any task, and its screen is already what a round's `capture` rea
 the machine can set a pane's line (as it can a pane's state today); it lies only to readers who already treat it as a
 claim.
 
+**Hand-started panes (O4).** The daemon now keeps per-pane memory for panes it did not start: state, `reason` and
+`self.doing`, bounded by the caps and the panes in its server, pruned at its listings. It gains no act on them (D1.3),
+and a hand-started session is untasked, so §2 never answers for it and the custodian never lists it. What changes is
+that a same-uid process typing `claude` in the daemon's tmux server can put a line on the Machines screen; it could
+already put a pane and a window title there.
+
 Wording this changes, in the same PR as the code:
 
 - CLAUDE.md, local-socket bullet, "The frame's other carried claims are `remoteSession` …, `reason` …, `tool` …":
   add `self` (the `self.*` tags, today `self.doing` alone): sent only by `set_self_tag` (`seance session-event`
   drops it unsent), never binds, routes or authorizes anything, bound only by the kernel-reported
-  peer pid (never the frame's `pane`, refused `unbound` where the host names no peer), only for an `ours` pane, held
+  peer pid (never the frame's `pane`, refused `unbound` where the host names no peer or no `claude` is on the peer's
+  chain), kept against the bound `claude` process (`Bound.session`), held
   to `displayLine`, `TAG_VALUE_MAX` and the key pattern, display-only, memory only, never logged, audited, persisted or in `MachineStatus`,
   a store record, a `sessions` reply to the scheduler, `get_sessions` or `get_queue`.
 - CLAUDE.md, same bullet, "Keeping each `ours` pane's last state and `turnEnded` … only while a custodian seat runs":
-  state, `reason` and `doing` are kept for every `ours` pane always, pruned at the daemon's pane listings; the screen
-  sampler stays the seat's.
+  "Keeping each pane's last state, `turnEnded`, `reason` and `self.*` whose peer resolves to a `claude` process
+  (`Bound.session`), `ours` or not, tasked or not, keyed on that process and pruned at the daemon's pane listings"; the
+  screen sampler stays the seat's and `ours` only, and no act reads a non-`ours` entry.
 - docs/tags.md's Threat model takes over this wording for every namespace when its PR 1 lands (widening `self` to the
-  keys it accepts and, if decided, the retention line from `ours` to a bound `claude` process); until then it names
-  `self.doing` alone.
+  keys it accepts and adding the conversation table); until then it names `self.doing` alone.
 - DESIGN.md, "Session events": the frame shape, the `self` bullet, "Per-pane retention"; MCP server: `set_self_tag`; the
   `sessions` op's `SessionEntry`; "Session messages" (the standing instruction's added sentence); Threat model item 6
   (the session-chosen line and its readers).
@@ -501,13 +514,15 @@ Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other,
 1. **`self.doing`** (§1). `set_self_tag` on `seance mcp` (key `doing` only); the frame's `self` (`session-event-frame.ts`,
    `parseSessionEventFrame`), dropped unsent by `seance session-event`; `displayLine`, `TAG_VALUE_MAX`, the key
    pattern and the caps in `shared/src/tags.ts` (created here unless docs/tags.md's PR 1 landed first);
-   retention in `pane-activity.ts` for every `ours` pane, keyed on `Bound.session`; `SessionEntry.tags` on the `sessions` op, stripped
+   retention in `pane-activity.ts` for every pane bound to a `claude` process, `ours` or hand-started, keyed on `Bound.session`; `SessionEntry.tags` on the `sessions` op, stripped
    by `get_sessions`; the PWA's Machines session list and the Queue card's details; the standing instruction's sentence
    (D1.7). DESIGN.md and CLAUDE.md wording as in §1.
    - Tested by: `shared` unit tests for `displayLine` (bidi overrides, zero-widths, separators, quotes, the cap on a
      code point, empty-after-scrub); daemon tests on the local socket with a real peer (`ClaudeStub.runInPane`):
      bound by peer pid, refused `unbound` on a null pid and on a host that names no peer (even with a `pane`),
-     refused `untracked` for a hand-started (not `ours`) pane (unless docs/tags.md §3.3 is decided first), refused alongside `state`, cleared by `""`, by `ended`,
+     kept for a hand-started pane running a `claude` stub and refused `unbound` for a shell's child with no `claude` on its
+     chain, a `claude` restarted under the same shell starting with no line, the custodian's `sessions` still listing
+     no hand-started pane, refused alongside `state`, cleared by `""`, by `ended`,
      by a respawned pane and by a task change found at the next listing with no custodian seat running (the pruning
      path), kept across a turn end, rate-limited, any key but `doing` refused `unknown_key`, a value cut at 256
      bytes on a code point boundary; every `tags` parser (`SessionEntry`, `Presence`) dropping an unknown key and keeping
