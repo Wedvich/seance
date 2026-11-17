@@ -60,7 +60,7 @@ export type Tone = "fg2" | "err";
 export type ConnectionState = "connected" | "connecting" | "offline";
 
 /**
- * A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike.
+ * A status dot: green online, blue for `auto`, a hollow grey ring otherwise — on the tile and its sheet row alike.
  * `unreachable` is the relay's own hollow red, worn while the relay is unreachable: the registry
  * then is the last one heard, so a green dot would claim a presence nobody can see.
  */

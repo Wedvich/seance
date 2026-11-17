@@ -12997,8 +12997,10 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
 - **The row** shows the state, when the last round ended (`last round ended 3h ago`, or `no round yet`), the counts
   (`closed 3 · nudged 1 · flagged 2`, `closed 0` reading `nothing closed`), `failing` in the warn colour, and, while
   running with a valid `rc`, an `Open round` link. Each part is one unbreakable span, so a 390px card wraps between parts.
-  A machine advertising the capability whose status has no `cu` (not in yet, an older daemon, or an asleep machine, which
-  reads through `liveStatus`) shows `no report yet`.
+  A connected machine advertising the capability whose status has no `cu` (not in yet, an older daemon) shows
+  `no report yet`. An asleep machine's card shows no custodian row at all, and no session counts on its exclave rows:
+  its last status is stale, and a `—` per row or a row that can only say `no report yet` is noise on a card that already
+  says asleep.
 - **The live link.** The round runs with `--setting-sources project`, so the session-events mod never runs in it, its pane
   is skipped by every pane reader, and C24 keeps session ids off the custodian frame: no session event can carry the id
   (the one "The remote session id" above describes). The daemon reads it instead (`roundRemoteId`): from
