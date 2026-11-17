@@ -10034,6 +10034,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   header, one tap fewer between screens, for the vertical space it takes and for stacking a second bar
   under the screens' own footers. Before it, Queue and Machines were back-out layers and the menu lived
   on the prompt screen alone, so Queue to Machines took three taps.
+  Decided (2026-11-17): a deep link (a notification tap, `/?task=`, `/?screen=machines`) that lands while
+  Settings is open switches the screen beneath Settings and leaves Settings up, since Settings may hold
+  unsaved credential edits; the cost is that the tap shows no change until Settings closes, which a cue
+  would answer later. A task link's Queue focus waits for Settings to close (`visibleFocus`), so the row
+  is scrolled to and marked when the Queue is first seen.
 - **A relative time shows its timestamp on hover.** "6m ago" and "resets in 2h" stay coarse on
   the page; a mouse resting on one opens a small styled tip with the full timestamp in Norwegian form (24-hour, viewer's zone), to
   the second (`tooltip.ts`), not the browser's `title`. View models keep the instant beside the

@@ -21,7 +21,7 @@ import { archiveCharts } from "./state.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
-import { screenKey, TransitionRunner } from "./transition.ts";
+import { screenKey, TransitionRunner, visibleFocus } from "./transition.ts";
 import { deriveDrainAvailability, deriveView, type AppState } from "./view.ts";
 
 export function App(props: { store: Store; push: PushClient }): JSX.Element {
@@ -104,7 +104,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onDismissNotice={() => store.dismissQueueNotice()}
           pausing={state.pausing}
           discarding={state.discarding}
-          focusedTask={state.focusedTask}
+          focusedTask={visibleFocus(state)}
           onFocused={() => store.clearFocus()}
           onCancel={(id) => void store.cancelTask(id)}
           onMarkDone={(id) => void store.markDone(id)}

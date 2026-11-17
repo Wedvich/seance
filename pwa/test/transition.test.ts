@@ -16,6 +16,7 @@ import {
   transitionKind,
   type TransitionDeps,
   type TransitionOptions,
+  visibleFocus,
 } from "../src/transition.ts";
 import type { AppState } from "../src/view.ts";
 
@@ -371,5 +372,17 @@ describe("the view-transition stylesheet", () => {
     expect(clamp).toContain("::view-transition-group(*)");
     expect(clamp).toContain("::view-transition-old(*)");
     expect(clamp).toContain("::view-transition-new(*)");
+  });
+});
+
+describe("visibleFocus", () => {
+  test("a phone holds the focus back while Settings covers the Queue, and gives it once it closes", () => {
+    expect(visibleFocus(state({ queue: true, focusedTask: "t-1", settings: true, wide: false }))).toBeNull();
+    expect(visibleFocus(state({ queue: true, focusedTask: "t-1", settings: false, wide: false }))).toBe("t-1");
+  });
+
+  test("a desk's columns stay visible behind Settings, so the focus applies at once", () => {
+    expect(visibleFocus(state({ focusedTask: "t-1", settings: true, wide: true }))).toBe("t-1");
+    expect(visibleFocus(state({ focusedTask: null, settings: false, wide: false }))).toBeNull();
   });
 });

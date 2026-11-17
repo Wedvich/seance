@@ -1074,7 +1074,8 @@ export class Store {
     this.#held = false;
     this.#renameClosing = false;
     this.#olderSheetClosing = false;
-    this.#pendingBacks = 0;
+    // One delivered traversal, not all: a second back may still be in flight.
+    this.#pendingBacks = Math.max(0, this.#pendingBacks - 1);
     const entry = layerEntry(history.state);
     const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
     while (this.#openLayers() > depth) this.#closeTopLayer();
@@ -1108,7 +1109,8 @@ export class Store {
   #releaseHeld(): void {
     if (!this.#held) return;
     this.#held = false;
-    this.#back();
+    // The held entry's layer is already closed in the state, so it is no pending close to net out of a go.
+    history.back();
   }
 
   /**
@@ -1133,8 +1135,9 @@ export class Store {
   /**
    * Queue and Machines are the phone's peers of the prompt screen: one entry over its flow (the verdict
    * included) between them, never one stacked on the other. Whatever sits over that flow — the other
-   * screen, Settings, a sheet, a dialog — closes in one patch, so the switch is one screen change, and
-   * the lowest of their entries is kept for the target; back from either lands on Prompt.
+   * screen, a sheet, a dialog — closes in one patch, so the switch is one screen change, and the lowest
+   * of their entries is kept for the target; back from either lands on Prompt. Settings is the exception:
+   * it stays up over the new screen (unsaved credentials), and back from it lands on that screen first.
    */
   #openScreen(screen: "queue" | "machines"): void {
     const opened: Partial<AppState> = screen === "queue" ? { queue: true } : { machines: true };

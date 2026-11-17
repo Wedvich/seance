@@ -45,6 +45,15 @@ export function screenKey(state: AppState): ScreenKey {
   };
 }
 
+/**
+ * The task the Queue should bring into view. The phone's page is display: none under Settings, where the
+ * row can be neither scrolled to nor seen, so the focus waits (the Queue clears it once it has applied it)
+ * until Settings closes, or the mark would expire unseen. On a desk the columns stay visible behind it.
+ */
+export function visibleFocus(state: AppState): string | null {
+  return state.settings && !state.wide ? null : state.focusedTask;
+}
+
 export function transitionKind(prev: ScreenKey, next: ScreenKey): TransitionKind | null {
   // A layout flip re-renders everything at once; there is nothing to slide between.
   if (prev.wide !== next.wide) return null;

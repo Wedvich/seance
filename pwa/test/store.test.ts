@@ -361,6 +361,90 @@ describe("layers and history", () => {
     expect(fake.index()).toBe(0);
   });
 
+  test("a second back still in flight keeps the first one's popstate from clearing the count", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openAccountRename("acct-a");
+    store.dismissLayer();
+    store.dismissLayer();
+    store.showPrompt();
+    fake.settleOne(store);
+    expect(store.getState()).toMatchObject({ machines: true, accounts: { renaming: null } });
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a link while Settings' own close is still pending shows the linked screen, then Prompt", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openMachines();
+    store.openSettings();
+    store.dismissLayer();
+    store.openQueue();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: true, machines: false, settings: false });
+    expect(fake.index()).toBe(1);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false, settings: false });
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a link while Settings is open over a verdict opens beneath it; back reaches the screen, then the verdict", async () => {
+    fake = fakeHistory();
+    const { store } = await followedAndListed(new ScriptedClient());
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ queue: false });
+    expect(store.getState().verdict).not.toBeNull();
+    expect(fake.index()).toBe(1);
+
+    store.openSettings();
+    store.openMachines();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: true });
+    expect(fake.index()).toBe(3);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, settings: false });
+    expect(fake.index()).toBe(2);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(store.getState().verdict).not.toBeNull();
+    expect(fake.index()).toBe(1);
+  });
+
+  test("the menu's Prompt right after a retry gave its held entry back still closes the screen opened since", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient();
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.spawn();
+    const failed = store.getState().verdict;
+    if (failed?.kind !== "unqueued") throw new Error("expected unqueued");
+    fake.settle(store);
+
+    // A retry with nothing to put ends without a verdict: the held entry is given back.
+    store.retrySpawn({ kind: "unqueued", message: failed.message, mayHaveLanded: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    store.openMachines();
+    store.showPrompt();
+    fake.settle(store);
+    expect(store.getState().machines).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
   test("showPrompt with nothing open traverses nothing, and from Machines lands on the form", () => {
     fake = fakeHistory();
     const store = new Store(idleClient());
