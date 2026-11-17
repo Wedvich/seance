@@ -51,14 +51,17 @@ What Séance has today, and the gap each section closes:
 or `done`; one that does is refused `invalid`. `seance session-event` (the mod's CLI path) drops a frame carrying
 `doing` unsent, as it drops `done`, `handoff` and `pass`: the mod's hooks never set it.
 
-- **Bound by the kernel-reported peer pid, never by a field**, like every session-event frame: the peer is the
-  `seance mcp` process, whose ancestor chain names the pane. The frame's `pane` decides only on a host that names no
-  peer at all (`peerPidSupported`), as for state reports.
-- **Bound to the `claude` process too** (`Bound.session` from "Replies by handle": the innermost `claude` on the
-  peer's chain, `<pid>:<start>`). A pane with no `claude` on the chain is refused `unbound`: a `doing` belongs to a
-  session, and the shell a hand-started session runs under outlives its `claude`.
-- **Tasked and untasked panes alike.** An untasked session's line shows on the Machines screen's session list; only a
-  task is reachable by a status question (§2), so nothing else reads it there.
+- **Bound by the kernel-reported peer pid only, never by a field**: the peer is the `seance mcp` process, whose
+  ancestor chain names the pane. Unlike a state report, the frame's `pane` never decides: on a host that names no peer
+  (`peerPidSupported`) or for a null pid, `set_doing` is refused `unbound`, as `message` and `inbox` are. A state
+  report falls back to a claimed pane because a wrong state is corrected by the next report; a line other readers
+  display is not, so it gets the stricter rule.
+- **Only a pane séance started (`ours`), tasked or not.** That is the set `pane-activity.ts` already retains
+  (`observe` skips any other pane, `session-events.ts`'s `BoundPane.ours`). A hand-started session in a pane of its own
+  is refused `untracked`: retaining state for panes séance did not start would widen what CLAUDE.md lets the daemon
+  keep, for a line only the Machines list would show. Widening it later is the same kind of change as any retention.
+- **Bound to the pane's process.** In an `ours` pane `claude` is the pane process itself, so the stored `pid` is the
+  pane's; a `claude` restart is a respawned pane with a new pid (D1.4). No `Bound.session` walk is needed.
 
 **D1.2 The text is scrubbed, capped and display-only.**
 
@@ -76,18 +79,28 @@ or `done`; one that does is refused `invalid`. `seance session-event` (the mod's
   set, so this only bounds a looping session's churn of the PWA's next read.
 
 **D1.3 Kept in the daemon's memory only, beside the pane's state.** `PaneActivity` (`daemon/src/pane-activity.ts`)
-gains `doing: { text, at, session } | null`. Today that tracker runs only while a custodian seat does; §1 and §2 need
-the state half always, so **the state and `doing` retention run unconditionally for every bound pane**, and the
-screen sampler stays the custodian's alone. Retention, not an act, as now. Not persisted: a daemon restart forgets
-every `doing`, and a session that wants one back sets it again.
+gains `reason` (the last `needs-input` reason, which the tracker does not keep today; §2 needs it) and
+`doing: { text, at, pid, taskId } | null`. Today that tracker runs only while a custodian seat does; §1 and §2 need
+the state half always, so **state, `reason` and `doing` retention run unconditionally for every `ours` pane**, and the
+screen sampler stays the custodian's alone. Retention, not an act, as now.
+
+- **Pruning without the sampler.** Today entries are dropped only by the sampler's pass. Without a seat, the
+  tracker prunes on every pane listing the daemon already makes for another reason (each session-event bind, each
+  `sessions` op, each message delivery): an entry whose pane is absent, whose pane pid differs from the stored `pid`,
+  or whose `@seance-task` differs from the stored `taskId` is dropped. A machine with no session activity and no
+  reads keeps a few stale entries until the next listing, which is bounded by the number of panes it ever had.
+- **Not persisted.** A daemon restart forgets every `doing` and every state. A session at rest sends no frame until
+  its next turn, so after a restart an idle session reads `state unknown` with no line (§2) until it is next busy.
+  This also undercounts lines in D1.7's measurement; the measurement reads only sessions that ran a turn since the
+  daemon's last start.
 
 **D1.4 How it clears.** Not at a turn's end: an idle session's last `doing` is what a status question most wants
 ("last said, 40 minutes ago: waiting on CI for #512"), which is huddle's "last doing". It clears on:
 
 - `set_doing` with `""`;
 - `ended` for the pane, or the pane gone from tmux;
-- a different `claude` process in the pane (the stored `session` no longer matches the bound one: `/exit` then
-  `claude --resume`), or a different task on it (`@seance-task` changed);
+- a different pane process (the stored `pid` no longer matches: the pane was respawned), or a different task on it
+  (`@seance-task` changed), found at the next listing (D1.3);
 - a daemon restart.
 
 An in-process `/clear` or `/resume` keeps it (the mod reports neither, and `@seance-task` does not change); every
@@ -98,25 +111,50 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 
 | Surface                                         | Carries `doing`?                                                  | Why                                                                                                                                                                                                                      |
 | ----------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `sessions` op (`SessionEntry.doing`, `doingAt`) | yes                                                               | The app-role reply the PWA's Machines screen already reads; sealed to the app. Dropped first when the reply would pass `REPLY_JSON_BUDGET` (120 code points × a list of sessions can matter on a busy box).              |
+| `sessions` op (`SessionEntry.doing`, `doingAt`) | yes, to an app only                                               | D1.5a.                                                                                                                                                                                                                   |
 | PWA Machines session list                       | yes, with its age                                                 | Rendered as text (Preact escapes), on its own line, prefixed "doing:".                                                                                                                                                   |
 | PWA Queue screen, a running task's card         | yes, read from its machine's `sessions` reply, joined on `taskId` | Fetched when the card's details open, not on every queue push. No store field (rejected below).                                                                                                                          |
-| MCP `get_sessions`                              | **no**, stripped by `seance mcp`                                  | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper.                |
+| MCP `get_sessions`                              | **no**, projected out by `seance mcp`                             | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper. D1.5a.         |
 | MCP `get_queue`                                 | **no**                                                            | Same reason, and the queue has no field for it.                                                                                                                                                                          |
 | `MachineStatus`                                 | **no**                                                            | 1.5 KiB of ciphertext (`STATUS_MAX_CT_LENGTH`) for the whole machine; a per-session text field would be the first thing `fitStatus` trims, and the 30 s beat would carry it to every app and the leader for no decision. |
 | Custodian `sessions` verb                       | yes, from PR 4 (below), labelled                                  | D1.6 (O1).                                                                                                                                                                                                               |
 | Status answer (§2)                              | yes                                                               | The point of §2.                                                                                                                                                                                                         |
 | Adapter `Session` record (#486)                 | later, `doing?` and `doingAt?`                                    | The same in-memory value; the adapter protocol adds the field when it is built. Nothing here waits for it.                                                                                                               |
 
-**D1.6 The custodian's `sessions` verb carries it (O1).** Each session's line in the verb's reply gains
-`doing (self-reported, <age>): "<text>"` when one is held, scrubbed by `displayLine` and capped at `DOING_MAX` like
-every other reader's copy. It spares a round a `capture` for a session whose line already says "waiting on CI for
+**D1.5a The `sessions` op has three readers, and only the PWA gets `doing`.**
+
+- **The scheduler.** The leader's sweep reads `sessions` (`REPLY_JSON_BUDGET`'s comment, `shared/src/types.ts`). A
+  `sessions` request sealed `from` the scheduler (or the leader's in-process call) gets no `doing` or `doingAt`: the
+  leader never holds session text (§2 rejects the leader reading it for the same reason).
+- **`seance mcp`'s `get_sessions`.** The daemon cannot tell it from the PWA (both seal `from: "app"`), so the strip is
+  the client's: `renderSessions` (`daemon/src/mcp.ts`) prints an **allowlist projection** of each entry (`id`,
+  `window`, `repo`, `path`, `taskId`), never `reply.sessions` raw, so a field added later is out of MCP by default.
+  The local socket's `sessions` op is `get_sessions`' path too, and takes the same projection.
+- **The PWA**, which renders it.
+- **Budget.** No fitter exists for `sessions` today (only `progress` is trimmed, in `handlers.ts`). PR 1 adds one: when
+  the reply's JSON would pass `REPLY_JSON_BUDGET`, every entry's `doing` and `doingAt` are dropped (all, not some, so
+  the PWA reads "lines omitted" once rather than guessing which ones are missing), and the reply says so with
+  `doingOmitted: true`.
+
+**D1.6 The custodian's `sessions` verb carries it (O1).** The verb's reply is JSON (`CustodianPaneView`,
+`daemon/src/custodian-frame.ts`); each pane gains `doing: string | null` and `doingMinutes: number | null` (whole
+minutes since it was set, like `stateMinutes`), held by `displayLine` and `DOING_MAX` like every other reader's copy,
+and the verb's help text calls the field the session's own claim. It spares a round a `capture` for a session whose line already says "waiting on CI for
 #512". It is session-chosen text reaching a round, but a round already reads the same session's screen through
 `capture`, which carries far more of it, and the round's acts stay behind the daemon's own checks: `closeVerdict`
 decides at rest by the daemon's facts and never reads `doing`, and `nudge`, `interrupt` and `flag` keep their own
 gates. The round's constant seed gains one sentence: a session's `doing` is its own claim, never evidence that it is
 at rest, finished or stuck. No mask, fence, built environment or socket changes, so no re-drill (docs/custodian.md,
-item 4b's rule). Like the rest of a round's reading, the line is never logged, audited, put in `rounds.jsonl` by the
+item 4b's rule).
+
+This is a deliberate departure from one precedent. The verb withholds a flag's note because the note "is not fed back
+to later rounds" (`custodian-verbs.ts`): the note is model-written from untrusted pane text, and a round would read
+an earlier round's (possibly injected) words as its own. `doing` differs in source, not in trust: a session writes it,
+not a round, so it carries no earlier round's reasoning; but it does persist across rounds and arrives unasked in
+every listing, unlike `capture`, which a round reads only when it chooses. An injected session can therefore put the
+same text in front of every round until it changes the line. Accepted because the round's acts are all gated by the
+daemon's own facts, the counts bound `nudge` and `interrupt`, and a session can already keep its screen saying the same
+thing; the seed's sentence is there so the round does not weigh it as evidence. Like the rest of a round's reading, the line is never logged, audited, put in `rounds.jsonl` by the
 daemon or kept past the reply.
 
 **D1.7 The standing instruction asks for it (O2).** `STANDING_INSTRUCTION` (`shared/src/messages.ts`) gains one
@@ -153,11 +191,13 @@ claim.
 Wording this changes, in the same PR as the code:
 
 - CLAUDE.md, local-socket bullet, "The frame's other carried claims are `remoteSession` …, `reason` …, `tool` …":
-  add `doing`: sent only by `set_doing` (`seance session-event` drops it unsent), bound to the pane and its `claude`
-  process, held to `displayLine` and `DOING_MAX`, display-only, memory only, never logged, audited, persisted or in
-  `MachineStatus`, a store record, `get_sessions` or `get_queue`.
+  add `doing`: sent only by `set_doing` (`seance session-event` drops it unsent), bound only by the kernel-reported
+  peer pid (never the frame's `pane`, refused `unbound` where the host names no peer), only for an `ours` pane, held
+  to `displayLine` and `DOING_MAX`, display-only, memory only, never logged, audited, persisted or in `MachineStatus`,
+  a store record, a `sessions` reply to the scheduler, `get_sessions` or `get_queue`.
 - CLAUDE.md, same bullet, "Keeping each `ours` pane's last state and `turnEnded` … only while a custodian seat runs":
-  the state half and `doing` are kept for every bound pane always; the screen sampler stays the seat's.
+  state, `reason` and `doing` are kept for every `ours` pane always, pruned at the daemon's pane listings; the screen
+  sampler stays the seat's.
 - DESIGN.md, "Session events": the frame shape, the `doing` bullet, "Per-pane retention"; MCP server: `set_doing`; the
   `sessions` op's `SessionEntry`; "Session messages" (the standing instruction's added sentence); Threat model item 6
   (the session-chosen line and its readers).
@@ -177,12 +217,17 @@ knows.
 
 ### Decisions
 
-**D2.1 A new message kind, `status`, never a flag on `question`.** `send_message { to, kind: "status" }`, no text
-(a `status` carrying text is refused `invalid`). It addresses a task only (`to`), never a reply by handle: a session
-with no task has no presence anyone asks about.
+**D2.1 A new message kind, `status`, never a flag on `question`.** `send_message { to, kind: "status" }`, no text.
+It addresses a task only (`to`), never a reply by handle: a session with no task has no presence anyone asks about.
 
-- A kind is refused by an older parser (`isMessageKind`), so a mixed fleet fails closed: the asker hears `invalid` or
-  `unsupported` and nothing is delivered. A flag (`presence: true` on a `question`) would be dropped by an older
+- **Wire shape.** `text` is absent on every frame that carries a `status` (`message`, `session-message`,
+  `deliver-message`); `parseMessageFrame` and the two op parsers take `kind: "status"` only without `text`,
+  `inReplyTo` or `replyTo`, and any other `kind` still requires non-empty `text` (`message-frame.ts`). A `status`
+  mints no reply handle: no `sent` or `received` entry, since nothing is placed in a pane that could answer it.
+- **Skew.** An older daemon's `parseMessageFrame` refuses the kind (`isMessageKind`), so a local asker hears
+  `invalid` and nothing is delivered. An older **leader** is different: it drops an unparseable `session-message` with
+  no receipt, so an ungated asker would wait and hear nothing. That is why the client gate (D2.5) is required, not
+  belt-and-braces: across machines a `status` is sent only to a verified leader advertising `messageStatus`. A flag (`presence: true` on a `question`) would be dropped by an older
   daemon's or leader's parser and the question delivered: the wake the flag exists to avoid.
 - **No `wake` on it.** Huddle's `status-ask` carries `wake` because its kinds are fixed per item. Séance's sender
   picks the authority per message (owner's decision, docs/messaging.md): to ask the session itself, send a `question`.
@@ -190,7 +235,7 @@ with no task has no presence anyone asks about.
 
 **D2.2 The target's daemon answers, always, and nothing is placed in the target's pane.** It holds the facts: the
 pane, its task (`@seance-task`, checked against its launch ledger), the retained state, `stateSince`, `turnEnded`,
-`reason` and `doing` (§1, D1.3). The leader never answers from its own record of a session's state: it is a step
+`reason` and `doing` (§1, D1.3, which adds `reason` to the tracker; it is not retained today). The leader never answers from its own record of a session's state: it is a step
 behind the daemon, and it would have to keep presence text it must not. The answer, by state:
 
 | Target                                | Answer                                                                                                        |
@@ -237,10 +282,18 @@ then `"send"`) and `session-message` carry `kind: "status"`. The leader resolves
 `presence` never in a log, audit, `progress` or push (D2, docs/messaging.md, holds: nothing is held at rest).
 
 - **The asker's daemon waits for the receipt.** For a `status` sent with `route: "send"`, the daemon holds the
-  `message` frame's reply for up to `STATUS_WAIT_MS` (8 s) for the receipt naming that message id. In time: the
-  reply is `answered` with `presence`, and the receipt is not also delivered as a note. Late: the reply is `routed`,
-  and the receipt, when it comes, is one `presenceNote` appended to the sender's pane like any receipt (a note, no
-  wake: the asker can ask again, and a stale status is worth less than the turn).
+  `message` frame's reply for up to `STATUS_WAIT_MS` (3 s) for the receipt naming that message id. 3 s, because
+  `send_message`'s own socket exchange gives up at 5 s (`SEND_TIMEOUT_MS`, `daemon/src/send-message.ts`) and the
+  reply must reach it first; a leader round trip is well under a second when both legs are up. The waiter is
+  registered **before** the route call, since an in-process leader's receipt can arrive before `route` returns.
+  In time: the reply is `answered` with `presence`, and the receipt is not also delivered as a note. Late, or the
+  caller's connection closed during the wait (the waiter is dropped on close): the reply, if anyone still reads it, is
+  `routed`, and the receipt, when it comes, is one `presenceNote` appended to the sender's pane like any receipt (a
+  note, no wake: the asker can ask again, and a stale status is worth less than the turn).
+- **The leader parses, never copies.** The target's reply is read by `parsePresence` into a fresh value, and its
+  `presence.task` must equal the task the leader's own resolution chose; a malformed or mismatched `presence` makes
+  the receipt carry outcome `unknown` with no `presence`, never a pass-through. The asker's daemon parses the receipt's
+  `presence` again before rendering.
 - **Gate.** A target daemon answers `status` only when it advertises `CAPABILITIES.messageStatus`; the leader forwards
   `status` only to such a machine and answers `unsupported` otherwise (never forwarding it as a `question`, which an
   older daemon's parser would refuse anyway). A client sends `status` across machines only to a verified leader
@@ -275,8 +328,9 @@ New: **the daemon answers on a session's behalf**, and **a receipt carries more 
 - `presence`'s only free text is `doing`, which its session chose to show (§1), scrubbed at both ends. A session's
   status can be read by any session in the fleet that can message it: the same set that can already send it a
   question and get an answer. The person's own surfaces see it too.
-- The leader acts on a `deliver-message` reply's `presence` only by copying it into the receipt for the machine that
-  sealed the message; it never keeps, logs or pushes it.
+- The leader acts on a `deliver-message` reply's `presence` only by parsing it into a fresh value bound to the task
+  it resolved and putting that in the receipt for the machine that sealed the message; it never keeps, logs or pushes
+  it.
 
 Wording this changes:
 
@@ -314,6 +368,11 @@ mod already tracks the main loop's turns (`turn.start`/`turn.complete` with `age
   the separator `read_messages` already uses (`\n\n---\n\n`), which sets `submitted` again.
 - The main `turn.start` clears `submitted` (the queued submit's text is fixed by then; if the turn was the person's
   own, the next `turn.complete` still drains, so nothing is lost and at worst one extra turn runs).
+- **A refused submit clears `submitted` and drains.** `submit()` swallows a rejection today (a plugin above refused,
+  or the session is going). Under coalescing that would leave `submitted` set and every later push waiting for a
+  `turn.complete` that, in an unattended session, never comes. So the rejection handler clears `submitted` and, when
+  no turn is `running`, submits `pendingSubmits` at once; a second refusal in a row leaves them for the next
+  `turn.complete` and `read_messages`, rather than looping.
 
 So a burst of N costs at most one turn after the current one, and a burst into an idle session at most two (the
 first message's, and the rest's). This is huddle's "one nudge per burst", carried as text rather than a pointer.
@@ -322,11 +381,21 @@ first message's, and the rest's). This is huddle's "one nudge per burst", carrie
   wrapper and fence included; the separator is punctuation. A body cannot end its own fence (`fenced`), so it cannot
   forge the separator into a new message's header.
 - **Cap per merged turn**: `4 × MESSAGE_PUSH_MAX` (32 KiB) of push text; past it the rest goes into the next
-  submit, made at once behind it (the engine queues it). The inbox's own caps (32 messages) bound the total.
+  submit, made at once behind it (the engine queues it). `pendingSubmits` has its own cap, `INBOX_MAX_MESSAGES` (32)
+  and `INBOX_MAX_BYTES`, oldest dropped first (still readable through `read_messages` while its own hold keeps it; the
+  mod adds no wording to say so) (the daemon's inbox caps bound only its hold while no listener is connected; a connected listener gets every line
+  at once).
 - **Lost with the worker**, as `held` and pending submits are today: a hooks-worker respawn or `session.end` drops
   `pendingSubmits`. `read_messages` still holds their texts.
 - **Dialogs.** A permission dialog or AskUserQuestion is inside a turn, so a message arriving under one waits for
   `turn.complete` as before (submit already waited out dialogs).
+
+**D3.1a Two engine facts gate the merge, checked in the spike before PR 3.** (a) Does every main turn end in
+`turn.complete`, including one ended by Escape or an API error, and what does a hooks-worker respawn mid-turn leave
+`running` as? If a turn can end without it, `running` sticks and pushes stall: the fallback is clearing `running` on
+the next main `turn.start` and on `session.start`. (b) Does the model act on the second and third request of a merged
+submit as it does on one request per submit? The spike measured one per submit only. If (b) fails, the merge is
+limited to questions and `wake` notes, and each request keeps its own submit.
 
 **D3.2 No daemon or wire change.** The daemon cannot see turn boundaries for a session without the session-events
 mod, and batching lines on its side would still reach the mod as lines. The coalescing lives where the turn events
@@ -372,9 +441,13 @@ Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other,
    (D1.7). DESIGN.md and CLAUDE.md wording as in §1.
    - Tested by: `shared` unit tests for `displayLine` (bidi overrides, zero-widths, separators, quotes, the cap on a
      code point, empty-after-scrub); daemon tests on the local socket with a real peer (`ClaudeStub.runInPane`):
-     bound by peer pid, refused on a null pid, refused alongside `state`, cleared by `""`, by `ended`, by a second
-     `claude` in the same pane, by a task change, kept across a turn end, rate-limited; `seance session-event` drops a
-     `doing` (the CLI test); the `sessions` op carries it and `get_sessions` does not; the budget drops `doing` first;
+     bound by peer pid, refused `unbound` on a null pid and on a host that names no peer (even with a `pane`),
+     refused `untracked` for a hand-started (not `ours`) pane, refused alongside `state`, cleared by `""`, by `ended`,
+     by a respawned pane and by a task change found at the next listing with no custodian seat running (the pruning
+     path), kept across a turn end, rate-limited; `reason` retained beside `needs-input`; `seance session-event` drops a
+     `doing` (the CLI test); the `sessions` op carries it to an app and not to a scheduler-sealed request; `get_sessions`
+     prints only the allowlisted fields (a test that adds an unknown field to an entry and sees it absent); the new
+     fitter drops every `doing` and sets `doingOmitted` past `REPLY_JSON_BUDGET`;
      a PWA view test for the line and its age; the layering test that nothing in the path logs the text; and the
      existing `STANDING_INSTRUCTION` test still holding (it names `set_doing` and never `--remote-control`).
 2. **Status answers** (§2). Kind `status`, `Presence`/`parsePresence`, `presenceNote`, outcome `answered`, the local
@@ -383,7 +456,11 @@ Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other,
    - Tested by: `shared` unit tests for `parsePresence` (strict, re-scrubs `doing`) and `presenceNote`;
      `daemon/test/messages.test.ts` with real peers for each row of D2.2's table, `status` with text refused, nothing
      delivered to the target's listener, the bucket counted; leader tests for forwarding only to a `messageStatus`
-     target (`unsupported` otherwise), copying `presence` into the receipt for the sealer only, and no log line;
+     target (`unsupported` otherwise), parsing `presence` into the receipt for the sealer only, `unknown` for a
+     malformed or mismatched `presence.task`, and no log line; a daemon test that a cross-machine `status` reply reaches
+     `send_message` inside `SEND_TIMEOUT_MS` (the real client, not a stub timeout), that a receipt arriving before
+     `route` returns is still taken, and that a closed caller's late receipt becomes a note; a wire test that `status`
+     with `text`, `inReplyTo` or `replyTo` is refused on all three frames;
      an e2e test (`e2e/messages.test.ts`) across two daemons: answered in time (in the tool result), answered late (a
      receipt note, the wait raised past the stub's delay), a target without the capability, a superseded target
      answered by its successor; `takeLeakedTasks()` empty, tasks ended through `cancelTask`.
@@ -391,11 +468,14 @@ Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other,
    - Tested by: `claude-mods/inbox/hooks/register.test.ts` under `claude plugin test` (local only): three questions
      during a turn give one submit at its end, joined in order; one while idle submits at once; a `wake` note joins
      the merge, a plain note still appends; past the cap two submits; a person's turn between does not lose a
-     pending push; a subagent's turn events change nothing. One live run per platform to confirm that the merged
+     pending push; a subagent's turn events change nothing; a refused submit clears `submitted` and the next push is
+     submitted rather than stranded; `pendingSubmits` past its cap drops the oldest. Before PR 3, the spike in D3.1a
+     (Escape and an API error ending a turn, a worker respawn mid-turn, three requests in one merged submit). One live run per platform to confirm that the merged
      submit runs as one turn and the model answers each message in it.
-4. **The custodian's `sessions` carries `doing`** (D1.6, O1; needs PR 1). The verb's reply line and the seed's
+4. **The custodian's `sessions` carries `doing`** (D1.6, O1; needs PR 1). The verb's reply fields and the seed's
    sentence; the CLAUDE.md and DESIGN.md wording in §1's threat model.
-   - Tested by: `daemon/test` custodian verb tests: the label and age, the scrub, absent when none; and a round test
+   - Tested by: `daemon/test` custodian verb tests: the scrub and the cap; and a round test
+     that `doing`/`doingMinutes` appear in `CustodianPaneView` JSON and are null when none is held, and
      that `close` on a session whose `doing` says "done" but is `busy` is still refused (`closeVerdict` reads no
      `doing`); the seed's constant carries the sentence; and no line of the round's log or the daemon's audit
      carries the text.
