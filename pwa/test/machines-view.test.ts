@@ -710,10 +710,12 @@ describe("deriveMachines", () => {
     expect(
       account?.bars.map((bar) => [bar.label, bar.pct, bar.level, bar.note === null ? null : plain(bar.note)]),
     ).toEqual([
-      ["5h", 0, "ok", "reset"],
+      ["5h", 0, "ok", "reset now"],
       ["7d", 43, "ok", "resets in 5d"],
-      ["7d Fable", 0, "ok", "reset"],
+      ["7d Fable", 0, "ok", "reset now"],
     ]);
+    // "now" carries the reset's own instant, for the hover, not the reading's.
+    expect(account?.bars[0]?.note).toEqual(["reset ", { text: "now", at: (S - 60) * 1000 }]);
   });
 
   test("credits show only while a window is full, a past reset not counting; spent of cap in whole units", () => {
@@ -721,11 +723,11 @@ describe("deriveMachines", () => {
     const labels = (window: Window): string[] => {
       const quota = [{ x: 0, s: "cache" as const, at: S - 60, d: 40, c: 84, cu: 4177, cl: 5000, ...window }];
       const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW, NO_LEADER).accounts;
-      return account?.bars.map((bar) => [bar.label, `${bar.pct}%`, bar.note].join(" ").trim()) ?? [];
+      return account?.bars.map((bar) => [bar.label, `${bar.pct}%`, bar.note === null ? "" : plain(bar.note)].join(" ").trim()) ?? [];
     };
     expect(labels({ h: 99 })).toEqual(["5h 99%", "7d 40%"]);
     expect(labels({ h: 100 })).toEqual(["5h 100%", "7d 40%", "Credits 84% $42 of $50"]);
-    expect(labels({ h: 100, hr: S - 1 })).toEqual(["5h 0% reset", "7d 40%"]);
+    expect(labels({ h: 100, hr: S - 1 })).toEqual(["5h 0% reset now", "7d 40%"]);
     expect(labels({ w: [{ m: "Fable", p: 100 }] })).toEqual(["7d 40%", "7d Fable 100%", "Credits 84% $42 of $50"]);
     // A daemon that predates the amounts sends `c` alone: the note is empty.
     const bare = labels({ h: 100, cu: undefined });
