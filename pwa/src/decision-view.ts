@@ -274,16 +274,33 @@ function inputSentence(task: Task): string {
 }
 
 /** What became of a queued task, in one line: the verdict's headline. */
-export function taskHeadline(task: Task, machines: readonly Machine[], now: number): Timed {
-  const headline = headlineOf(task, machines, now);
+export function taskHeadline(
+  task: Task,
+  machines: readonly Machine[],
+  aliases: Readonly<Record<string, string>>,
+  now: number,
+): Timed {
+  const headline = headlineOf(task, machines, aliases, now);
   return typeof headline === "string" ? [headline] : headline;
 }
 
-function headlineOf(task: Task, machines: readonly Machine[], now: number): string | Timed {
+/** An exclave by its account's alias, else its own id: never the email, too long for a headline. */
+function exclaveName(machine: Machine | undefined, exclave: string, aliases: Readonly<Record<string, string>>): string {
+  const accountId = machine?.exclaves?.find((e) => e.id === exclave)?.accountId;
+  if (accountId === null || accountId === undefined || !Object.hasOwn(aliases, accountId)) return exclave;
+  return aliases[accountId] ?? exclave;
+}
+
+function headlineOf(
+  task: Task,
+  machines: readonly Machine[],
+  aliases: Readonly<Record<string, string>>,
+  now: number,
+): string | Timed {
   const at = task.assignment ?? task.reservation;
   const listed = at === undefined ? undefined : machines.find((m) => m.deviceId === at.deviceId);
   const machine = at === undefined ? undefined : (listed?.name ?? at.deviceId);
-  const place = at === undefined ? "" : ` on ${machine ?? ""} · ${at.exclave}`;
+  const place = at === undefined ? "" : ` on ${machine ?? ""} · ${exclaveName(listed, at.exclave, aliases)}`;
   const asleep = sleepingMachine(task, machines);
   const slept = asleep === undefined ? timed`` : timed` — its machine went to sleep ${seen(lastHeardAt(asleep), now)}`;
   switch (task.state) {

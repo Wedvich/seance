@@ -235,11 +235,7 @@ describe("deriveQueue", () => {
     const rows = view.sections.find((s) => s.title === "Asleep")?.rows ?? [];
     const settles = "Settles when its machine wakes; cancel or mark done to give up on it";
     expect(rows[4]).toMatchObject({
-      headline: [
-        "Asleep on MacBook · default — its machine went to sleep ",
-        { text: "10m ago", at: NOW - 600_000 },
-        ".",
-      ],
+      headline: ["Asleep on MacBook · default — its machine went to sleep ", { text: "10m ago", at: NOW - 600_000 }],
       body: [settles],
     });
     const needs = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
