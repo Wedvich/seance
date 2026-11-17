@@ -146,8 +146,8 @@ export interface ClaudeStub {
   /**
    * Has the `ok`/`stuck` stub in `pane` run `command` under `sh -c` as its own child, on the pane's tty, so a
    * test process sits where a session's tool would (the daemon binds it by its parent walk to that pane). Not
-   * `respawn-pane -k`: swapping a live pane's pty failed ENXIO now and then on GitHub's macOS runners under a
-   * full run's load (`fork failed: Device not configured`), and only that swap ever did; this allocates none.
+   * `respawn-pane -k`: that opens a new pty, which macOS fails now and then (`PTY_RACE` in `src/tmux.ts`) after the
+   * pane's process is already killed; this opens none.
    */
   readonly runInPane: (pane: string, command: string) => Promise<void>;
 }
