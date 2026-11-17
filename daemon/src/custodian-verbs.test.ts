@@ -509,7 +509,7 @@ describe("capture", () => {
     const result = bottomOfScreen(`${"x".repeat(50)}\n${"\u2500".repeat(2000)}`);
     expect(result.truncated).toBe(true);
     expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(CAPTURE_MAX_BYTES);
-    expect(result.text).toMatch(/^\u2500+$/);
+    expect(result.text).toMatch(/^\u2500+$/u);
     expect(bottomOfScreen("\u2500".repeat(2000)).truncated).toBe(true);
   });
 
