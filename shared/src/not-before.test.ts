@@ -11,6 +11,8 @@ import {
 describe("isNotBefore", () => {
   test("positive safe integers only", () => {
     expect(isNotBefore(1)).toBe(true);
+    expect(isNotBefore(8.64e15)).toBe(true);
+    expect(isNotBefore(8.64e15 + 1)).toBe(false);
     for (const v of [0, -1, 1.5, Number.NaN, Infinity, "1", 2 ** 53, null]) expect(isNotBefore(v)).toBe(false);
   });
 });
@@ -51,6 +53,9 @@ describe("parseDateTime", () => {
     expect(parseDateTime("2026-02-30T10:00", { requireOffset: false })).toBeNull();
     expect(parseDateTime("2026-02-30T10:00Z", { requireOffset: true })).toBeNull();
     expect(parseDateTime("2026-11-18T25:00Z", { requireOffset: true })).toBeNull();
+    expect(parseDateTime("2026-11-18T10:75", { requireOffset: false })).toBeNull();
+    expect(parseDateTime("2026-11-18T10:60", { requireOffset: false })).toBeNull();
+    expect(parseDateTime("2026-11-18T24:00", { requireOffset: false })).toBeNull();
     expect(parseDateTime("nope", { requireOffset: false })).toBeNull();
   });
 });
@@ -60,6 +65,7 @@ describe("resolveNotBefore", () => {
   test("exclusive, and one required", () => {
     expect(resolveNotBefore({ at: "21:30", in: "1h" }, now).ok).toBe(false);
     expect(resolveNotBefore({}, now).ok).toBe(false);
+    expect(resolveNotBefore({ in: "100000000d" }, 1_800_000_000_000).ok).toBe(false);
   });
   test("--in", () => {
     expect(resolveNotBefore({ in: "2h" }, now)).toEqual({ ok: true, at: now + 7_200_000 });
@@ -87,5 +93,7 @@ describe("formatNotBefore", () => {
   });
   test("with offset", () => {
     expect(formatNotBefore(at, "Europe/Oslo", { withOffset: true })).toBe("Wed 18 Nov, 21:30 GMT+1");
+    // The UTC label is ICU-dependent ("GMT", "GMT+0", "UTC"); the point is that one is there.
+    expect(formatNotBefore(at, "UTC", { withOffset: true })).toMatch(/^Wed 18 Nov, 20:30 (GMT|UTC)(\+0)?$/u);
   });
 });

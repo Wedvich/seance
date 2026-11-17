@@ -1747,7 +1747,7 @@ describe("store", () => {
       },
       client: "ø".repeat(TASK_SPEC_LIMITS.client),
       until: "reported",
-      notBefore: Number.MAX_SAFE_INTEGER,
+      notBefore: 8.64e15,
     },
   };
   const target: Target = { ...placement, clone: "c".repeat(TARGET_LIMITS.clone) };

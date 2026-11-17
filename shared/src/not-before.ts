@@ -6,9 +6,12 @@
  * an hour forward, and an autumn overlap takes its first occurrence. Accepted.
  */
 
-/** Epoch ms as a positive safe integer: what `TaskSpec.notBefore` holds. */
+/** The largest instant a `Date` holds; past it `toISOString` and `Intl` formatting throw. */
+const MAX_INSTANT = 8.64e15;
+
+/** Epoch ms, positive and within what a `Date` can format: what `TaskSpec.notBefore` holds. */
 export function isNotBefore(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_INSTANT;
 }
 
 const DURATION_PATTERN = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$/u;
@@ -56,7 +59,7 @@ export function parseDateTime(text: string, opts: { readonly requireOffset: bool
   const minute = Number(mi);
   const second = Number(s ?? 0);
   const ms = Number((frac ?? "").padEnd(3, "0") || 0);
-  if (second > 59) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
   let at: number;
   if (zone === undefined) {
     if (opts.requireOffset) return null;
@@ -92,7 +95,9 @@ export function resolveNotBefore(
   if (input.in !== undefined) {
     const ms = parseDuration(input.in);
     if (ms === null) return { ok: false, error: `--in ${input.in}: expected a duration like 90m, 2h or 1d2h` };
-    return { ok: true, at: now + ms };
+    return isNotBefore(now + ms)
+      ? { ok: true, at: now + ms }
+      : { ok: false, error: `--in ${input.in}: too far ahead` };
   }
   if (input.at === undefined) return { ok: false, error: "no time given" };
   const clock = parseClockTime(input.at);
