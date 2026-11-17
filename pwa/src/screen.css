@@ -3730,6 +3730,15 @@
   border-left: 1px solid var(--line);
 }
 
+/* Only the Queue's header carries the 44px settings pill; without this it is taller than the
+   other two and centres its title lower. Every title block is the pill's height, as .phone-heading is. */
+.desk-col > .header > :first-child {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 44px;
+}
+
 /* Spawn is the one call to action on screen; pausing steps down to an outline. */
 .desk .queue-pause {
   padding: 13.5px;
