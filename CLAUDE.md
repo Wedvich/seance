@@ -110,6 +110,13 @@ green:
   machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
   in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is
   legitimate — a non-event can't be polled — so leave those alone.
+- Waiting on one signal proves nothing about another that nothing orders after it. A _positive_
+  assertion read straight after a wait on an independent chain (one stub's `requests()` after
+  another stub's answer was acted on; two sends of one `send`) is a latent flake too: the chains
+  finish within a fraction of a millisecond in either order, and the read rides on `pollUntil`'s
+  10 ms pace. Wait on the asserted thing's own signal (`waitForRequests`), as
+  `push-sender.test.ts`'s prune test does. A read is safe only when the awaited signal can come
+  solely after it (the same stub's answer, which follows its recording).
 - An e2e test ends every task it queued through `cancelTask` (`e2e/harness.ts`), never a bare
   `client.cancel(...).catch(() => null)`, and never by killing its window alone. A file's tests share
   one account under the leader's per-account cap (4), so a task left running starves later tests, and
