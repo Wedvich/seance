@@ -146,11 +146,18 @@ green:
   while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,
   as `spawn.ts` does) rather than reading its automatic name, which on macOS is whatever tmux caught
   mid-exec (`kernel_task`, `tmux`, `""`).
+- Every tmux call that opens a pty (`new-window`, `new-session`, `split-window`, `respawn-pane`,
+  `respawn-window`) goes through `tmuxOk` (`daemon/src/tmux.ts`), in tests as in product code, or retries until
+  it lands as `machine-tag.test.ts`'s restart does. macOS's pty allocator fails such an open now and then, at
+  any call site (`respawn-pane`, then `new-window`, hit it on GitHub's macOS runners): `fork failed: Device not
+  configured` (ENXIO) when the machine reaches a new high of ptys in use since boot while another process frees
+  one, and `Unknown error: -6` when two opens collide. `tmuxOk` retries exactly those (`PTY_RACE` names the
+  kernel code). Only a freshly booted Mac shows the ENXIO race, since the kernel's pty table never shrinks:
+  reproduce it on a GitHub macOS runner beside a process churning ptys, not locally.
 - A test that needs its own process inside a session's pane (to be bound by peer pid, as a tool would be)
-  runs it through `ClaudeStub.runInPane` (`daemon/test/fixtures.ts`), never `respawn-pane -k`: swapping a
-  live pane's pty failed ENXIO (`fork failed: Device not configured`) in ~2% of full runs on GitHub's macOS
-  runners — not exhaustion (63 ptys of 511), transient, and no other tmux call ever did. `runInPane` starts it
-  as the stub's child on the pane's own tty and untitles the pane, as the respawn did.
+  runs it through `ClaudeStub.runInPane` (`daemon/test/fixtures.ts`), not `respawn-pane -k`: it opens no pty
+  and kills nothing, where a respawn that hits the pty race above has already killed the pane's process.
+  `runInPane` starts it as the stub's child on the pane's own tty and untitles the pane, as the respawn did.
 - A test server binds the address it is dialed at — `hostname: "127.0.0.1"` on every `Bun.serve`.
   Bun's default is the dual-stack `[::]`, and macOS lets another process's `SO_REUSEADDR` bind of
   `127.0.0.1` on the same port (a VS Code helper, a dev server) sit on top of it and take every
