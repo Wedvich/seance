@@ -154,6 +154,13 @@ the outcomes, the wrappers, the standing instruction (the spawn's command line; 
 rejected alternatives) and Claude Code mods, **inbox** (the mod, its delivery table, `read_messages`).
 The spike's three checks are in the Evidence table above.
 
+**A session with no listener (2026-11-17).** A `--here` task in a stale second clone ran its `mod install`, which
+repointed every exclave's `seance` marketplace at a clone with no `inbox`: the mod stayed enabled yet loaded in no new
+session, so messages to those tasks ended `nolistener`. Fixed where it lived (DESIGN.md, Claude Code mods: `mod
+install` refuses while the live daemon runs from another clone, and doctor names an unloadable mod). Holding such a
+pane's messages past the grace, and a `turn.start` fallback in the mod, were rejected (DESIGN.md, "Session messages",
+the listener grace).
+
 ### 2. Addressing: the task id, following its chain
 
 **The task id is the only address for a message that is not a reply** (D3, amended 2026-11-14: a reply to a session

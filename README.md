@@ -404,7 +404,9 @@ place from the checkout, so a `git pull` reaches new sessions with nothing re-ru
 `mcp install`, it reaches every Claude config directory: plugins are per config
 directory, so install, uninstall and doctor run once per exclave (`~/.claude`
 plus each `~/.claude-<name>` listed in `~/.exclaves`), skipping any not set up yet.
-An exclave created later needs `seance mod install` run again.
+An exclave created later needs `seance mod install` run again. Run it from the clone the daemon runs
+from: an install from another clone would repoint every exclave's mods at that clone, so it is refused
+while a daemon runs elsewhere.
 
 The same command installs **session-events**. It tells this machine's daemon what
 each session is doing (busy, idle, waiting on you, ended) and the PR it opened, which

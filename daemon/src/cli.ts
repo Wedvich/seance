@@ -833,12 +833,9 @@ export async function cmdDoctor(): Promise<void> {
   const source = await readSource();
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
   else ok(`checkout ${describeCheckout(source)}`);
-  const runtime = await readRuntime();
-  const serving = servingRoot(runtime, runtime !== null && pidAlive(runtime.pid));
-  // Realpath'd both sides: a symlinked path to this clone is still this clone.
-  const real = (path: string): Promise<string> => realpath(path).catch(() => path);
-  if (serving !== null && (await real(serving)) !== (await real(trimRoot(checkoutRoot())))) {
-    warn(`the running daemon runs from ${tildify(serving)}, not this checkout — update that clone`);
+  const elsewhere = await servedElsewhere();
+  if (elsewhere !== null) {
+    warn(`the running daemon runs from ${tildify(elsewhere)}, not this checkout — update that clone`);
   }
 
   render(await auditLogChecks(await auditLogPath()));
@@ -1206,9 +1203,30 @@ export function parseModArgs(argv: readonly string[]): "install" | "uninstall" {
   return sub;
 }
 
+/**
+ * The clone a live daemon runs from when it is not this CLI's, else null. Realpath'd both sides: a symlinked path to
+ * this clone is still this clone.
+ */
+async function servedElsewhere(): Promise<string | null> {
+  const runtime = await readRuntime();
+  const serving = servingRoot(runtime, runtime !== null && pidAlive(runtime.pid));
+  if (serving === null) return null;
+  const real = (path: string): Promise<string> => realpath(path).catch(() => path);
+  return (await real(serving)) === (await real(trimRoot(checkoutRoot()))) ? null : serving;
+}
+
 /** Like `mcp install`, Claude's own CLI does the writing — see claude-mod.ts. */
 export async function cmdMod(argv: readonly string[]): Promise<void> {
   if (parseModArgs(argv) === "install") {
+    // The marketplace is one per exclave and read in place: an install from another clone repoints every exclave's
+    // mods at it, so each new session loads that clone's mods (one it lacks, silently not at all) beside a daemon
+    // running this one's (DESIGN.md, "Claude Code mods").
+    const elsewhere = await servedElsewhere();
+    if (elsewhere !== null) {
+      throw new Error(
+        `the running daemon runs from ${tildify(elsewhere)}, not this checkout — run \`seance mod install\` from that clone`,
+      );
+    }
     await installMods((line) => console.log(line));
     console.log("read in place from this checkout: new sessions pick it up, running ones on /reload-plugins");
     return;
