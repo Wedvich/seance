@@ -17,7 +17,7 @@ import {
 } from "@seance/shared";
 import { sleepingMachine } from "./asleep.ts";
 import type { PreviewState } from "./state.ts";
-import { timed, type Timed } from "./timed.ts";
+import { timed, type Moment, type Timed } from "./timed.ts";
 import { failedBody, seen } from "./view.ts";
 
 /**
@@ -44,6 +44,43 @@ export interface DecisionSummary {
   readonly others: readonly DecisionLine[];
   /** Candidates the leader cut from this copy (`Decision.trimmed`): `others` is then partial. */
   readonly omitted: { readonly count: number; readonly text: string } | null;
+}
+
+export function sameMoment(a: Moment | undefined, b: Moment | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined && a.text === b.text && a.at === b.at);
+}
+
+function sameTimed(a: Timed | null, b: Timed | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.length === b.length &&
+    a.every((part, i) => {
+      const other = b[i];
+      return typeof part === "string" || typeof other === "string" ? part === other : sameMoment(part, other);
+    })
+  );
+}
+
+function sameLine(a: DecisionLine | null, b: DecisionLine | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.id === b.id && a.where === b.where && a.outcome === b.outcome && a.why === b.why && sameTimed(a.quota, b.quota)
+  );
+}
+
+/**
+ * Whether two summaries render alike, instants included (a `<time>` carries its own). The app re-derives every
+ * summary on each state change, so a card compares what it shows rather than which object it was handed.
+ */
+export function sameSummary(a: DecisionSummary, b: DecisionSummary): boolean {
+  return (
+    a.headline === b.headline &&
+    sameLine(a.chosen, b.chosen) &&
+    a.others.length === b.others.length &&
+    a.others.every((other, i) => sameLine(other, b.others[i] ?? null)) &&
+    a.omitted?.count === b.omitted?.count &&
+    a.omitted?.text === b.omitted?.text
+  );
 }
 
 function omittedOf(decision: Decision): DecisionSummary["omitted"] {

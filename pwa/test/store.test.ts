@@ -5553,7 +5553,8 @@ describe("task history", () => {
         total: 2,
         next: { endedAt: 1, createdAt: 0, id: "a-0" },
       });
-      store.refreshOlder();
+      store.toggleOlder();
+      store.toggleOlder();
       await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
       // An archivist too old to list its machines: the Machine sheet falls back to the rows read.
       const first = store.getState().older.list;
@@ -5791,7 +5792,8 @@ describe("task history", () => {
         next: { endedAt: 1, createdAt: 0, id: "x" },
       });
       client.archiveTaskAsks.length = 0;
-      store.refreshOlder();
+      store.toggleOlder();
+      store.toggleOlder();
       await pollUntil(() => store.getState().older.list?.kind === "ok", "the empty page");
       expect(client.archiveTaskAsks).toHaveLength(1);
     } finally {

@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 const SRC = new URL("../src/", import.meta.url);
 
 /** Icon glyphs centred in fixed tap targets: scaling one would overflow its box. */
-const FIXED_GLYPHS = new Set([".attach-remove", ".verdict-glyph", ".stage-dot", ".preview-refresh", ".queue-refresh"]);
+const FIXED_GLYPHS = new Set([".attach-remove", ".verdict-glyph", ".stage-dot"]);
 
 function stylesheets(): ReadonlyArray<readonly [string, string]> {
   return readdirSync(SRC)

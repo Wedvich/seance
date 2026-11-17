@@ -14,6 +14,7 @@ import {
   pinLine,
   queuedBody,
   requiresLine,
+  sameSummary,
   startNowItem,
   taskHeadline as timedHeadline,
   waitingText,
@@ -196,6 +197,43 @@ describe("describeDecision", () => {
     const preview = describeDecision(record, [], NOW, "would");
     expect(preview.chosen?.why).toEndWith("— would spend credits (7d full)");
     expect(preview.others[0]?.why).toEndWith("— may spill into credits (5h projected at 93%)");
+  });
+});
+
+describe("sameSummary", () => {
+  const decision: Decision = {
+    at: NOW,
+    chosen: { deviceId: "mac", exclave: "default", clone: "app" },
+    candidates: [scored("mac", "Mac", 1.5), scored("wsl", "WSL", 2.75), rejected("lxc", "LXC", [{ code: "offline" }])],
+  };
+  const fleet = [machine("mac", "Mac"), machine("wsl", "WSL")];
+  const summary = describeDecision(decision, fleet, NOW, "would");
+
+  test("a re-derived summary of the same record, even a re-asked one, is the same", () => {
+    expect(sameSummary(summary, describeDecision(decision, fleet, NOW, "would"))).toBe(true);
+    expect(sameSummary(summary, describeDecision({ ...decision, at: NOW + 5_000 }, fleet, NOW, "would"))).toBe(true);
+  });
+
+  test("anything the card shows differing is not: a winner, a score, a quota's age, a rename, a trimmed count", () => {
+    const differs = [
+      describeDecision(
+        { ...decision, chosen: { deviceId: "wsl", exclave: "default", clone: "app" } },
+        fleet,
+        NOW,
+        "would",
+      ),
+      describeDecision(
+        { ...decision, candidates: [scored("mac", "Mac", 1.6), ...decision.candidates.slice(1)] },
+        fleet,
+        NOW,
+        "would",
+      ),
+      describeDecision(decision, fleet, NOW + 2 * 60_000, "would"),
+      describeDecision(decision, [machine("mac", "Mac"), machine("wsl", "WSL", false)], NOW, "would"),
+      describeDecision({ ...decision, trimmed: 2 }, fleet, NOW, "would"),
+      describeDecision({ ...decision, candidates: decision.candidates.slice(0, 2) }, fleet, NOW, "would"),
+    ];
+    for (const other of differs) expect(sameSummary(summary, other)).toBe(false);
   });
 });
 

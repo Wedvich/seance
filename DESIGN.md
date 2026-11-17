@@ -10142,8 +10142,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   breakpoint Prompt, Queue and Machines are peers under one fixed header that `app.tsx` renders outside
   the keyed screen body, so the pill never moves or re-mounts and any screen is two taps from any other;
   Queue and Machines have no back button. Its left holds the screen's title block (`PromptHeading`,
-  `QueueHeading`, `MachinesHeading`, which the desk's column headers render too); its right the pill,
-  with the Queue's ↻ beside it on that screen only. The raised face is a hamburger opening Prompt, Queue,
+  `QueueHeading`, `MachinesHeading`, which the desk's column headers render too); its right the pill
+  alone (the Queue's ↻ and the placement preview's went 2026-11-17: never used, since both re-read on their
+  own). The raised face is a hamburger opening Prompt, Queue,
   Machines and Settings, each with a feather-weight icon (pen, list, server, the cog); the current
   screen's row is tinted in the accent and `aria-current="page"`, and picking it only closes the menu.
   The track and its dot are unchanged; an escalated task puts the queue's attention dot on the closed
@@ -10202,7 +10203,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   so a poll or a keystroke never starts one; Settings outranks a screen change, which
   outranks a verdict change, a verdict replacing a verdict is none, and on a desk only
   Settings and the form column's verdict move. A `switch` moves only what changes: the
-  header's title block cross-fades with a 4px shift, the Queue's ↻ fades, the body
+  header's title block cross-fades with a 4px shift, the body
   cross-fades with a small rise, and the pill is named only to be held still (the rest
   of the header is one panel the same on both sides). A started transition holds the state back
   until its update callback, which runs after the browser captures the old screen; the
