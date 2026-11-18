@@ -1058,8 +1058,9 @@ nothing checked it. The last is the gap they leave.
   `parseWatchSet` (`shared/src/watch.ts`) holds to the PR or run pattern, parsed into owner, repo and number or id. It
   reaches `gh` only as GraphQL variables in an argv array (`-f`, with `-F` only for the regex-held PR number), the
   query text built from alias indices alone, through `askGithub` with `--hostname github.com`, read-only. A
-  `watch-set` is honoured only sealed from a registered machine's own device id (never `from: "app"`, never the
-  archivist, which holds the PSK and is no machine), parsed fresh, past the one `schedulerGuard`; a `watch-event` is
+  `watch-set` is honoured only sealed from a registered machine's own device id advertising `CAPABILITIES.watches`
+  (never `from: "app"`, never the archivist, which holds the PSK and is no machine), parsed fresh, past the one
+  `schedulerGuard`; a `watch-event` is
   acted on only sealed from the scheduler, or in process, parsed by `parseWatchEvent`. Neither frame names a pane, a
   task or a session. A watch never changes a task's record, and a watch-only read never changes the poller's class.
   The fleet caps (100 PRs, 100 runs), the sanity cap (64 a set) and the reserve for tasks' reads (under 500 points)
@@ -5136,7 +5137,9 @@ for the lot with its own `gh`.
     (`b<i>`), sharing the aliases. Watch-only PRs are read in their own merge chunks after every task chunk and every
     task blocked read, with blocked reads of their own. A failure there other than `limited` changes no poller class,
     owes nothing to a task and logs nothing, as a run chunk's failure: a broken watch must not back off the tasks'
-    reads. `limited` is the token's budget, so it ends the poll as anywhere.
+    reads. The same holds for the blocked read of a task chunk that held no task needing it: the task-facing
+    "blocked reasons are unavailable" warning, and its once-a-term latch, are for a run that held a PR a task reads
+    wide. `limited` is the token's budget, so it ends the poll as anywhere.
   - A watch never changes a task's `PrStatus`: a task's write carries the blocked fields only when the task itself is
     read wide (today's rule, `taskWide`). A non-wide task PR that is also watched waits for the blocked read before its
     unchanged base write (a merge never waits). A draft is read wide for a watch (CI runs on one) and never for a task.
@@ -5157,7 +5160,7 @@ for the lot with its own `gh`.
   - `resource(url:)` is reliable, so the REST and ETag fallback is not needed. A run read that fails is no poll
     failure.
 - **What a watch's events are** (2026-11-18). One key per event (`watchKeyOf`, `shared/src/watch.ts`): `checks:<head>:
-  <pass|fail>`, `conflict:<head>`, `completed:<attempt>`, `suspended:<since>`, `merged`, `closed`, `unreadable`. Each
+  <pass|fail>`, `conflict:<head>`, `completed:<attempt>`, `suspended:<reason>`, `merged`, `closed`, `unreadable`. Each
   is level-triggered: due whenever the latest reading says so and its key is in neither the watch's `seen` nor its
   acknowledged keys, so a lost answer is sent again at the next poll and nothing is recorded before the daemon's
   `ok: true`. A reading counts for a watch only if it was read in that same poll.
@@ -5171,8 +5174,9 @@ for the lot with its own `gh`.
     `statusCheckRollup.state`.
   - **The head is `headRefOid`.** The contexts are read from `commits(last:1)`, and a reading whose commit oid differs
     from `headRefOid` fires no `checks` event that poll. A set that names a head follows it only after
-    `HEAD_GRACE_POLLS` polls of a different one (the first rollup after a push is probably still the previous head's);
-    one that names none adopts the first head read. `headMoved` marks an event for a head the watch followed to.
+    `HEAD_GRACE_POLLS` polls of a different one while the set's own head has not been read yet (the head a set names
+    is the session's word, which GitHub may not show yet, so a different one is probably the previous push); once
+    read, a new head is followed at once. One that names none adopts the first head read. `headMoved` marks an event for a head the watch followed to.
   - **`conflict`** fires on `mergeStateStatus === "DIRTY"` or `mergeable === "CONFLICTING"`, so a draft (whose
     `mergeStateStatus` is `DRAFT`) gets it too.
   - **The job link** of a failing context is rebuilt from the two id strings of a `detailsUrl` that names a job of the
@@ -5182,6 +5186,10 @@ for the lot with its own `gh`.
   - **Generation.** Keyed by device id, whole-set replace. `gen` is the daemon's boot id (`instance`) and a counter
     it bumps on every `watch-set`: an equal `gen` is re-answered as last computed without replacing, a lower `n` on the
     same boot is ignored unanswered, a higher `n` or a new boot replaces, and a retired boot stays ignored.
+  - **Who is taken.** A set from a registered machine that does not advertise `CAPABILITIES.watches` is dropped
+    (logged, no answer), as one from an unregistered sealer or the archivist is: it would be polled and counted toward
+    the caps with nobody to hear the answer. Refusals are logged once per change of their counts per device, not on
+    every heartbeat.
   - **Expiry and caps.** A set not refreshed (by any accepted set, a re-answered one included) for 15 minutes is
     dropped. The fleet holds at most 100 PRs and 100 runs, with no eviction: a device's already-admitted watches are
     admitted before its new ones, and refusals are re-evaluated on every replacing set. `fleet_full` means "not polled
@@ -5189,18 +5197,29 @@ for the lot with its own `gh`.
     `invalid` in `set.refused`, as is an entry with a good id and a bad body. A set past 256 entries is dropped whole.
   - **Answers.** Every accepted set is answered by a `watch-event` carrying `set` (its generation and the refusals),
     repeated until an `ok: true` answer. `seen` and the acknowledged keys are held in memory, and a key is added only
-    for a watch id the daemon's answer lists as delivered. One `watch-event` goes per device per poll, bounded by
+    for a watch id the daemon's answer lists as delivered; events carry no id of their own, so a listed id
+    acknowledges every event of that watch in the frame, all or nothing. At most one `watch-event` is in flight per
+    device, sent at the end of each poll, at each clock tick (so up to two a poll interval while something stays
+    unacknowledged), on an accepted set and when a send ends with a set still owed. A frame is bounded by
     `WATCH_EVENT_JSON_MAX` in UTF-8 bytes of JSON (`watchJsonBytes`, as `MESSAGE_ROUTE_MAX`); what does not fit is due
-    again next poll. A device is sent to only while it advertises `CAPABILITIES.watches` (or is the leader's own
+    again at the next send, which starts at the watch the full frame stopped in, so events an early watch leaves
+    unacknowledged cannot keep the later ones out. Every `watch-event` is also written as an `audit request` line on
+    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: step 3's
+    daemon must acknowledge or drop what it cannot place, and its `watch` origin may replace that line. A device is sent to only while it advertises `CAPABILITIES.watches` (or is the leader's own
     machine), and an answer of `null` (an ended term, an unreachable machine) is no answer.
 - **Reserve for tasks** (2026-11-18, docs/gh-watch.md W8). A poll that starts with the term's newest `remaining` under
   500 and its `resetAt` still ahead reads the tasks' PRs only: watched targets are asked for nothing until the budget
-  recovers. Logged once per stay (and once when it ends), naming the reset and no target. The budget is unknown until a
+  recovers. A watch on a PR a task reads anyway still takes that merge reading (`merged`, `closed`, `unreadable`):
+  it costs nothing, and no blocked read is made for the watch. Logged once per stay (and once when it ends), naming the reset and no target. The budget is unknown until a
   poll's first answer, so a term's first poll reads both.
 - **Suspended and unreadable** (2026-11-18). A clock of the poller's own, at its interval, ticks the registry even
   while a `limited` wait parks the poll chain for up to an hour. A watch that has gone unread for two intervals,
-  whatever the cause, is suspended: once per suspension per watch, with the poller's class as the reason when it is
-  not `ok`, `reserve` under the reserve, else `failed`, and `resetAt` only for a limit or the reserve. A watch whose
+  whatever the cause, is suspended, though never while a poll is in flight (the clock passes `polling`): a healthy
+  poll longer than an interval leaves every watch unread for longer than two, and its end reads them. The class
+  is the reason when it is not `ok`, `reserve` under the reserve, else `failed`, and `resetAt` only for a limit or
+  the reserve. The key is `suspended:<reason>` and nothing leader-local, so a daemon's `seen` stops a new leader
+  telling it again: once per reason per watch, however often it recovers and stops again. `since` (when this leader
+  last read the watch) is display only. A watch whose
   PR or run alias answers null on two polls in a row is `unreadable`.
 - **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
   so the write has the per-task serial chain, the term fence and the version floor of every other,

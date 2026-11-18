@@ -237,14 +237,15 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   backoff).
 - **A reserve for tasks.** Built 2026-11-18: DESIGN.md, "PR status", "Reserve for tasks". A watch is a convenience; a
   merge settling is not.
-- **Watchers are told, once per suspension.** The leader's side is built (2026-11-18: DESIGN.md, "PR status",
+- **Watchers are told, once per reason.** The leader's side is built (2026-11-18: DESIGN.md, "PR status",
   "Suspended and unreadable"): a watch whose reads stop for longer than two intervals gets a `suspended` event with a
   reason enum and, for a limit, the reset time. The daemon delivers a fixed note (step 3): for a limit "GitHub's budget for this fleet's account is
   spent until HH:MM UTC; this watch resumes then; do not poll GitHub yourself meanwhile", **without wake** (an
   `append`: the session is waiting either way, and waking it to say "keep waiting" costs a turn); for a login or a
   missing `gh`, "the fleet cannot read GitHub; this watch is suspended" **with wake**, since that may never heal by
   itself and the session should fall back to its own polling at 30 s or ask its user. The watch stays and resumes
-  when reads do; the fallback is the session's call. One note per watch per suspension, and a resumption says nothing.
+  when reads do; the fallback is the session's call. One note per watch per reason (the key is `suspended:<reason>`, so a new leader does not repeat it), and a
+  resumption says nothing.
 - **A target the forge will not describe** (the alias answers `null`: no repo, no access, no such run) for two
   consecutive polls ends the watch with an `unreadable` note, with wake. The leader's event is built (2026-11-18); the
   note is step 3's.
@@ -412,8 +413,16 @@ What the daemon's table must do to fit the leader's registry (DESIGN.md, "PR sta
   sends it again at each poll until the daemon's answer reports it taken.
 - **`fleet_full` means "not polled for now", not "ended".** The entry stays in the table and in the next set; the
   leader re-evaluates its refusals on every replacing set. An `invalid` entry is the daemon's to drop.
-- **Keys in `seen` cover `suspended:<since>`**, so a suspension already told is not sent again by a new leader.
-- **A watch id in `delivered` is the only acknowledgement** the leader keeps; a key is never recorded before it.
+- **Keys in `seen` cover `suspended:<reason>`** (`limited`, `reserve`, `unauthenticated`, `missing`, `failed`), so a
+  suspension already told is not sent again by a new leader: the key carries nothing leader-local, and a watch is told
+  each reason once, however often it recovers and stops again. The event's `since` is display only.
+- **A watch id in `delivered` is the only acknowledgement** the leader keeps; a key is never recorded before it. Events
+  carry no id of their own: a listed id acknowledges every event of that watch in the frame, so a daemon that places
+  only some of a watch's events in a frame must leave the watch out of `delivered`.
+- **A frame the daemon cannot place a watch's events in** (session gone, delivery failed) must be answered without that
+  id and the watch dropped from the next set: the leader resends level-triggered events at every poll's end and clock
+  tick, each also one `audit request` line on the daemon, until acknowledged or the watch leaves the set.
+- **A machine that does not advertise `CAPABILITIES.watches`** has its sets dropped: advertise it before the first set.
 
 ## Build order
 
