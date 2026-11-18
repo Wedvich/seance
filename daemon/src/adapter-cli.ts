@@ -172,7 +172,9 @@ async function add(args: readonly string[]): Promise<void> {
   );
   console.log(`  commit   ${commit ?? "none: not a git checkout, so doctor cannot tell when its code changes"}`);
   if (replaced) {
-    console.log(`  its subscriptions end when the daemon reads this config: sessions that messaged it must message it again`);
+    console.log(
+      `  its subscriptions end when the daemon reads this config: sessions that messaged it must message it again`,
+    );
   }
   const known = new Set(((await readState().catch(() => null))?.repos ?? []).map((repo) => repo.name));
   for (const repo of repos ?? []) {

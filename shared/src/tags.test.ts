@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AGENT_VISIBLE_TAG_KEYS,
   agentVisibleTags,
   chainTags,
   creatorTaskTags,
@@ -211,6 +212,17 @@ describe("agentVisibleTags", () => {
     expect(agentVisibleTags({ "agent.session": { value: UUID, at: 1, scope: "conversation" } })).toBeUndefined();
     expect(agentVisibleTags(undefined)).toBeUndefined();
   });
+
+  test("never an adapter's tag: a tool's ids stay out of every MCP surface", () => {
+    for (const key of AGENT_VISIBLE_TAG_KEYS) expect(key.startsWith("adapter.")).toBe(false);
+    expect(
+      agentVisibleTags({
+        "adapter.tg.ticket": { value: "ENG-1", at: 1, scope: "conversation" },
+        "adapter.label.label": { value: "x", at: 1, scope: "conversation" },
+        "owner.label": { value: "mine", at: 1, scope: "conversation" },
+      }),
+    ).toEqual({ "owner.label": { value: "mine", at: 1, scope: "conversation" } });
+  });
 });
 
 describe("joinTags and displayName", () => {
@@ -236,6 +248,15 @@ describe("joinTags and displayName", () => {
     expect(displayName(self, { title: " \n" }, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName(self, null, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName({}, undefined, "zsh\u0007")).toEqual({ text: "zsh", source: "window" });
+  });
+
+  test("an adapter's tag is never the name, whatever its suffix", () => {
+    const adapted = joinTags(null, {
+      "adapter.tg.label": { value: "from a tool", at: 1 },
+      "adapter.tg.name": { value: "from a tool", at: 1 },
+    });
+    expect(displayName(adapted, null, "zsh")).toEqual({ text: "zsh", source: "window" });
+    expect(displayName(adapted, { title: "the title" }, "zsh")).toEqual({ text: "the title", source: "task" });
   });
 });
 
