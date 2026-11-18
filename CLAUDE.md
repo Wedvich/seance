@@ -68,7 +68,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   against three kinds of tool and the seam's rejected shapes; Claude Code mods; MCP server; Threat model item 6 and its
   adapter invariant). What is left in the file is the problem, the spike evidence, the owner's decisions D1 to D4 and the
   open questions. Read it, and DESIGN.md's "Adapters", before adding a leader event op or an adapter.
-- **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
+- **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of the tags model, DESIGN.md "Tags and session identity"), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
 - **docs/gh-watch.md** — what is left of the spec: built (steps 1 to 4, spikes S1 to S4) and recorded in DESIGN.md,
   "PR status" (the leader's poller, registry and reserve), "Watches" (the daemon's table and notes, W1–W11 with their
   rejected alternatives, the weighing against extending `hand_off_task`, S4) and "MCP server". A session asks the fleet
@@ -97,12 +97,17 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
   item and lists the open questions. Read it before building amend deps, anything that reads a
   tracker, or a new kind of session that is not a task; build nothing from it until it is decided.
-- **docs/tags.md** — spec: tags at task and session scope (namespace = writer), session identity
+- **docs/tags.md** — built and folded: tags at task and session scope (namespace = writer), session identity
   (pane, process, conversation; a verified `agent.session`) and the adapter subscription that amends messaging's D3.
   Steps 1 to 4 are built (the vocabulary in `shared/src/tags.ts`, the frame's `agent`, the conversation table and its
   verification, `SessionEntry.tags`; the `session-tag` op, `conversations.json`, the PWA's session names and rename;
   task tags: `TaskSpec.tags`, the sentinel, `ownerTags`, `SpawnRequest.ref`; the adapter subscription and adapter tags),
-  recorded in DESIGN.md, "Session events", "Session identity", "The owner's label", "Task tags", "Adapters". Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
+  recorded in DESIGN.md: "Tags and session identity" (the model: the owner's T1–T4, the levels, the vocabulary, the
+  surfaces, the rejected alternatives and the threat model), "Session events", "Session identity", "The owner's
+  label", "Task tags", "Adapters". Not built: the PWA's per-namespace view of a session's tags. What is left in the
+  file is the open questions and the spikes' evidence (S1–S3, macOS and Linux) that verification rests on. Read the
+  DESIGN.md section before adding a field that labels a session or a task, or touching session identity or adapter
+  addressing.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -467,7 +472,7 @@ green:
   or move anything; `agent.session` is verified only against the launch ledger or the `claude` process's own
   `sessions/<pid>.json`, opened as `custodian-remote.ts` opens it (`readSessionFile`), re-read at each act (`atAct`), a
   refuted claim dropped, and is used only to address the owner's `session-tag` (built: the bullet beside "Closing a
-  machine" above) and adapter delivery through a subscription (`toSession`, docs/tags.md §8, built), never a reply — and `reason`, kept only as a known
+  machine" above) and adapter delivery through a subscription (`toSession`, DESIGN.md "Adapters", "The subscription"), never a reply — and `reason`, kept only as a known
   `NEEDS_INPUT_REASONS` value (`question` or `permission`) beside `needs-input` (dropped otherwise,
   never the event), whose effects on behaviour are `question` making the leader alert that
   needs-input stay at once instead of after its debounce (`questionAlert`), only for the task's
@@ -524,7 +529,7 @@ green:
   other act, or binding by a field, is a threat-model change.
   **A session with no task is reached only as a reply, by the id of a message it sent, or by an adapter on its own
   machine through a subscription the session made by messaging it, keyed by its verified conversation id**
-  (DESIGN.md, "Session messages", "Replies by handle", and "Adapters"; docs/messaging.md D3, amended; docs/tags.md §8):
+  (DESIGN.md, "Session messages", "Replies by handle", and "Adapters"; docs/messaging.md D3, amended; "Tags and session identity"):
   the subscription kept at rest in `conversations.json`, refused when two live processes claim the id, usable only over
   that adapter's stdin. A `message` frame carries `inReplyTo` and no `to` (or the same id as
   `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each (past the cap the oldest entry of the busiest pane goes, a note's before a question's), hold a handle:
@@ -647,8 +652,10 @@ green:
   frame, a local-socket op, a broker action, an app op or MCP. `add` reads `seance-adapter.json` (exact keys, a protocol
   in `ADAPTER_PROTOCOLS`, an argv whose relative words resolve inside the checkout by realpath and no absolute word),
   writes `adapters.<name>` and nothing else of `config.json`, only after the new file loads, records the checkout's
-  commit and an `added` stamp that joins the subscription fingerprint, and ends that name's subscriptions, as `remove`
-  does; neither deletes the adapter's own directory. `restart` and `status` reach the daemon only through
+  commit and an `added` stamp that joins the subscription fingerprint; neither `add` nor `remove` writes
+  `conversations.json` (the daemon is its one writer, one store per path per process, `subscriptionsFor`) and the
+  daemon ends that name's subscriptions when it reads the config (`reconcileWith`, at each start and reload, with no
+  adapter left too); neither deletes the adapter's own directory. `restart` and `status` reach the daemon only through
   `adapter-status.json` (believed only under the live daemon's pid; the hello's `version` printed only through
   `printable`) and `adapter-restart.json` (names only, 60 s), never the socket. `doctor` warns when the checkout moved
   since `add`, never refuses. The verbs audit under origin `cli` with a name, argv word count, `argv[0]`'s basename,

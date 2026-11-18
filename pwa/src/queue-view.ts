@@ -462,8 +462,8 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
 }
 
 /**
- * The live session's `agent.remote` from its machine's last `sessions` read, else the task's `remoteSession` (docs/tags.md
- * §7 step 4). Both passed `isRemoteSessionId` at parse (`session_` and base62 only), so they can name no other path,
+ * The live session's `agent.remote` from its machine's last `sessions` read, else the task's `remoteSession` (DESIGN.md, "Tags and session identity",
+ * `remoteSession` and `agent.remote`). Both passed `isRemoteSessionId` at parse (`session_` and base62 only), so they can name no other path,
  * query or origin.
  */
 function sessionOf(task: Task, sessions: AppState["sessions"]): string | null {

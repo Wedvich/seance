@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from "claude-code";
  * by this process tree — so nothing here names a pane or a task. Every report
  * also carries `agent` (`agentOf`): this process's conversation id and bridge id
  * as claims, which the daemon verifies from its own sources and binds nothing by
- * (docs/tags.md §4).
+ * (DESIGN.md, "Session identity").
  *
  * Engine events only, never `classic.*`: on Team/Enterprise orgs a built-in
  * plugin sits above every installed one on the classic chain and passes each
@@ -67,7 +67,7 @@ interface Report {
   readonly tool?: string;
 }
 
-/** Who is reporting, as this process sees it at the report: claims the daemon verifies, never trusts (docs/tags.md §4). */
+/** Who is reporting, as this process sees it at the report: claims the daemon verifies, never trusts (DESIGN.md, "Session identity"). */
 interface Agent {
   readonly kind: "claude";
   readonly session?: string;

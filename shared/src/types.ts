@@ -1003,7 +1003,7 @@ export interface SessionEntry {
    */
   readonly taskId?: string;
   /**
-   * The session's tags (docs/tags.md §2, §6.2): its bound `claude` process's and its current conversation's, full keys,
+   * The session's tags (DESIGN.md, "Tags and session identity"): its bound `claude` process's and its current conversation's, full keys,
    * each with its scope. Sent only to an app, never on a scheduler-sealed `sessions`; display-only, read only through
    * `parseTags(…, { scope: "session" })`. Absent when there are none, and from older daemons.
    */
@@ -1207,7 +1207,7 @@ export interface MachineInfo {
  * `watch-set` only to a verified leader advertising it. An older leader drops the unknown event op. A step-2 daemon
  * (which advertised this before the table existed) answers every event `delivered: []`, so nothing is ever marked
  * delivered for it, and closes a `watch` frame as malformed.
- * `sessionTag`: as a daemon, answers `session-tag` (the owner's label on an untasked conversation, docs/tags.md §3.1),
+ * `sessionTag`: as a daemon, answers `session-tag` (the owner's label on an untasked conversation, DESIGN.md, "Session identity", "The owner's label"),
  * keeps it in `conversations.json` and joins it into `SessionEntry.tags` as `owner.label`. Advertised unconditionally: the
  * conversation table it needs starts with the session-events capability, which every daemon runs. The PWA offers a session's
  * Rename only on a machine advertising it: an older daemon ignores the unknown op, which an app sees only as a timeout.
@@ -2079,7 +2079,7 @@ export type CustodianResponse =
   | { readonly ok: false; readonly code: CustodianErrorCode; readonly message: string; readonly after?: number };
 
 /**
- * `session-tag`, app → daemon, sealed `from: "app"` on the relay leg only (docs/tags.md §3.1): the owner's label on an
+ * `session-tag`, app → daemon, sealed `from: "app"` on the relay leg only (DESIGN.md, "Session identity", "The owner's label"): the owner's label on an
  * untasked conversation, addressed by the pane and the conversation id (`agent.session`) the app read in `sessions`.
  * `key` is a bare suffix, `label` alone; `value` has passed `displayLine` and the title's cap whole (a longer one is refused, never shortened), `""` clearing it.
  */
@@ -3147,7 +3147,7 @@ export interface TaskSpec extends TaskRequest {
    */
   readonly requires?: readonly string[];
   /**
-   * Display tags, full keys (`creator.*`, `owner.*`, `scheduler.*`; docs/tags.md §5): at most `TASK_TAGS_MAX`, each
+   * Display tags, full keys (`creator.*`, `owner.*`, `scheduler.*`; DESIGN.md, "Task tags"): at most `TASK_TAGS_MAX`, each
    * namespace within `TASK_TAG_BUDGET`. Display only: never routes, binds, places, settles or alerts. `creator.*` is
    * written at create, `owner.*` only by the leader on an `amend`, and `scheduler.*` by the leader (none in v1). Sealed
    * only through `taskRecordAtRest`, which appends `TAGS_DEP_SENTINEL`; a client writes it only when the verified

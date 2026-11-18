@@ -8,7 +8,7 @@ import {
 } from "./types.ts";
 
 /**
- * Tags: one vocabulary for every writer and reader (docs/tags.md §2.1). A tag is a key in a writer's namespace and a
+ * Tags: one vocabulary for every writer and reader (DESIGN.md, "Tags and session identity"). A tag is a key in a writer's namespace and a
  * short printable value. The namespace is the access rule: the path a write arrives on decides it, so every write
  * carries bare suffixes (`writeTags`), and only what a writer builds itself, and every read-side view, holds full
  * keys. No tag binds, routes, places, settles, alerts, authorizes or moves anything (§2.2); the one exception, a
@@ -297,7 +297,7 @@ export function parseTags(
 }
 
 /**
- * The one place precedence lives (docs/tags.md §6.1): a task's, a conversation's and a process's tags, each a map of
+ * The one place precedence lives (DESIGN.md, "Tags and session identity"): a task's, a conversation's and a process's tags, each a map of
  * full keys, as one view with each key's scope. A key lives at one scope by construction, bar `owner.label`, where the
  * task's wins over the conversation's; any other overlap goes the same way, task over conversation over process.
  */
@@ -497,7 +497,7 @@ const PANE_ID = /^%\d{1,10}$/u;
 const SESSION_TAG_FIELDS: ReadonlySet<string> = new Set(["pane", "session", "key", "value"]);
 
 /**
- * `session-tag`, at the daemon (docs/tags.md §3.1): the pane, a conversation id, the bare suffix `label` (a full key,
+ * `session-tag`, at the daemon (DESIGN.md, "Session identity", "The owner's label"): the pane, a conversation id, the bare suffix `label` (a full key,
  * or any other suffix, refuses the request: never re-homed) and a value through `owner.label`'s parser, `""` clearing
  * it. Null for anything else, an extra field included, and for a value too long to keep whole (never shortened).
  */

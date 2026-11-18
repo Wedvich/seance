@@ -1,5 +1,5 @@
 // The owner's label at rest: kept by the one owner of `conversations.json` beside the adapter subscriptions
-// (`adapter-subscriptions.ts`, docs/tags.md §3.2).
+// (`adapter-subscriptions.ts`, DESIGN.md, "The owner's label", "At rest").
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

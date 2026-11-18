@@ -475,7 +475,7 @@ export interface AccountsState {
 }
 
 /**
- * The next task's ref as typed (`creator.ref` and its URL, docs/tags.md §5). Transient like the autonomy level, so
+ * The next task's ref as typed (`creator.ref` and its URL, DESIGN.md, "Task tags"). Transient like the autonomy level, so
  * never persisted: a ref names one task's work and must not ride along unnoticed on the next.
  */
 export interface RefDraft {

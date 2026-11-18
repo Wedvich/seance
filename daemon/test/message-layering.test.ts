@@ -53,7 +53,7 @@ describe("the message paths that run where stdout is a protocol channel", () => 
 
 /**
  * Tag text (a claimed `agent.session`, `agent.remote`, what a `sessions/<pid>.json` holds) is never logged or audited
- * (docs/tags.md, "Threat model"). The modules that hold it load neither sink, type-only edges included, so a call
+ * (DESIGN.md, "Tags and session identity", threat model). The modules that hold it load neither sink, type-only edges included, so a call
  * that would put it there cannot be written without failing here.
  */
 describe("the modules that hold session tags", () => {
@@ -67,7 +67,7 @@ describe("the modules that hold session tags", () => {
 });
 
 /**
- * A session's name is the owner's and the session's own text (docs/tags.md, "Threat model"): a message's wrapper, a
+ * A session's name is the owner's and the session's own text (DESIGN.md, "Tags and session identity", threat model): a message's wrapper, a
  * receipt and the custodian's `sessions` verb name a sender or a session by task, pane and machine only. So the modules
  * that build them run neither the table that holds the names nor the file that keeps the owner's, and never name the
  * keys or the precedence that reads them. Run, not load: `messages.ts` and `custodian-verbs.ts` take a type from

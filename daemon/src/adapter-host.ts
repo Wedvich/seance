@@ -35,7 +35,7 @@ import type { AdapterDeliveryContext, AdapterOutlet, AdapterOutletAnswer, Messag
  *
  * Text in and out (3b): an adapter's `deliver` goes through messages' local delivery, bounded by its `kinds` and
  * `repos`, and a session's message to `adapter:<name>` comes out as a `message` frame, subscribing the sender's verified
- * conversation (docs/tags.md §8). Its `tag` writes `adapter.<name>.*` and nothing else. The audit lines carry ids, kind,
+ * conversation (DESIGN.md, "Adapters", "The subscription"). Its `tag` writes `adapter.<name>.*` and nothing else. The audit lines carry ids, kind,
  * a byte count and an outcome: never text, a label, a message id or a conversation id.
  */
 

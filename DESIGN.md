@@ -1144,15 +1144,15 @@ nothing checked it. The last is the gap they leave.
   shell's is, so a holder of the PSK gains at most a round per 15 minutes it could not already ask for at a machine's
   shell; thresholds, the model and on/off stay in `config.json` (C46), out of its reach.
 - **A session's name is the owner's display write, sealed, and never reachable without the app role** (2026-11-18,
-  Presence & identity, "Session identity", "The owner's label"; docs/tags.md step 2). The daemon answers
+  Presence & identity, "Session identity", "The owner's label"; "Tags and session identity"). The daemon answers
   `session-tag` only when sealed `from: "app"` on the relay leg, parsed by `parseSessionTagRequest`, audited without a
   payload (`audit session-tag origin=relay key-count=<0|1> outcome=<…>`, never the label or an id); neither
   `LOCAL_OPS`, `BROKER_OPS` nor MCP carries it, so a session cannot name itself as the owner (the residual is
-  `set-limits`' and `availability`'s: a process holding the PSK can seal `from: "app"`). It is the second thing a
-  verified `agent.session` names, beside adapter delivery (not built): re-checked with `atAct` at the act, refused
+  `set-limits`' and `availability`'s: a process holding the PSK can seal `from: "app"`). It is one of the two things a
+  verified `agent.session` names, beside adapter delivery through a subscription ("Adapters"): re-checked with `atAct` at the act, refused
   `moved`, `unverified`, `ambiguous`, `ended` or `tasked` otherwise, and binding, routing and authorizing nothing. The
   label is the one text `conversations.json` holds (0600, the owner's own, under `displayLine` and the title's cap,
-  never logged), and it reaches a reader only while its conversation's one claimant is verified, so a session that
+  never logged; beside it the file holds only conversation ids, adapter names, adapter fingerprints and times), and it reaches a reader only while its conversation's one claimant is verified, so a session that
   claims a labelled id shows its own name, never the owner's. MCP's `get_sessions` prints `owner.label` through
   `AGENT_VISIBLE_TAG_KEYS`; message wrappers, receipts and the custodian's `sessions` never carry it.
 - **The drain's session ask is constant keys, into ledger-bound panes, while draining** (2026-11-13, Daemon, "The
@@ -8745,10 +8745,194 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   docs/scheduler.md's Later). Not changed: no relay store rule, and Raycast, which is spawn-only and
   reads no task states.
 
-### Task tags — built 2026-11-18 (docs/tags.md step 3)
+### Tags and session identity — built 2026-11-17 to 2026-11-18 (docs/tags.md, steps 1 to 4)
+
+The model behind four built parts, each recorded where it lives: the vocabulary, the frame's `agent` claims, the
+conversation table and its verification ("Session events", "Session identity"); the owner's label on an untasked
+session (there, "The owner's label"); task tags ("Task tags", below); and the adapter subscription and adapter tags
+("Adapters", "The subscription" and "Tags"). docs/tags.md keeps the open questions and the spikes' evidence (S1–S3,
+macOS and Linux) that `agent.session`'s verification rests on.
+
+**The problem.** Three parties want to hang facts on a session, and each had grown its own field: the person (a
+hand-started session showed as "zsh" or a slug, and a task's session could be renamed only by amending the task's
+title), the session (what it is doing, docs/presence.md's `self.doing`), and a tool (the adapter seam), which wanted its
+own ids on a session and a way to keep reaching it across restarts and `--resume`. The adapter seam as drafted keyed a
+session by `<pid>:<start time>`, which dies with the process and which the session cannot learn, and a reply handle
+lives an hour. Meanwhile `remoteSession`, `TaskSpec.linear` (a field naming a tool, read by nothing) and
+orchestrator.md's proposed `ref` were each one-offs, and the one stable identity every agent has, its conversation id,
+was refused as an address.
+
+**Decided by the owner (2026-11-17).**
+
+- **T1. Tags are key/value, namespaced by writer, and the namespace is the access rule.** `agent.*` is written only by
+  the agent's own mod and hooks, `seance.*` only by the daemon, `self.*` only by the session through MCP (display-only,
+  never keyed on), `adapter.<name>.*` only by that adapter over its stdin, `owner.*` only by the owner, sealed `from:
+  "app"`. **No tag binds, routes or authorizes anything, with one exception:** a verified `agent.session` may address
+  adapter delivery, and is refused when two live processes claim it. (The owner's `session-tag` is the other act a
+  verified id names; it is the owner's own display write, not a tag deciding anything.)
+- **T2. The owner's label may rename a task's session, display-only, separate from the task's title.** A session's
+  name is chosen by precedence **owner label > task title > `self.name` > window**, the source marked whenever it is
+  not the owner's or the task's. Push notifications never show a tag.
+- **T3. Tags were specified together with session identity and the adapter subscription**, in one spec.
+- **T4. Retention covers hand-started sessions**: the gate is a bound `claude` process, not `ours`. The direction is
+  that Séance picks up every session in its tmux server, not only task-backed ones.
+- **Beyond T1** (decided the same day): two task-scope namespaces, `creator.*` (whoever enqueues, at create only) and
+  `scheduler.*` (the leader; no keys in v1, reserved so a leader-made display fact needs no new field). `creator.*` has
+  no single writer: any app-role client that enqueues writes it, so it is trusted as a task's title is, no more.
+  `linear` and orchestrator.md's `ref` became `creator.ref` and `creator.ref-url`. The key count was sized at six
+  (three, two, one) at step 3 ("Task tags", "The bound").
+
+**Three levels and the task.** "Session" had meant three things with different lifetimes, and a fact belongs at the
+level whose lifetime it shares:
+
+| Level            | Identity                                                     | Ends, or is reused                                                                                         | Facts that live here                                                                       |
+| ---------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **pane**         | tmux pane id (`%12`)                                         | outlives processes; tmux reuses the id; a pane can be re-tagged for another task                           | none: a pane is where a process is, never what it is                                       |
+| **process**      | the `claude` process, `<pid>:<start time>` (`Bound.session`) | the process exits; a restart in the same pane is a new process                                             | turn state, `self.*`, `agent.remote` (one bridge per process), reply handles               |
+| **conversation** | the agent's session id, held as `agent.session`              | never ends: survives `--resume`, spans a continue chain, left by `/clear` or `/resume`; a successor is new | `agent.session`, `agent.kind`, adapter tags and subscriptions, an untasked session's label |
+| **task**         | the task id                                                  | finished, pruned; followed by continuations (same conversation) and successors (new conversation)          | `creator.*`, `owner.*`, `scheduler.*`                                                      |
+
+`self.doing` must die with the process (a restarted `claude` has not said what it is doing), an adapter's ticket id
+must not (its ask is still open after `--resume`), and a tracker ref must exist while the task is still queued, before
+any process: one per-pane bag would lose the second at every restart or keep the first past its truth. `/clear` and
+`/resume` move a process to another conversation, so a process carries a current conversation link that the next
+report moves; process tags stay, conversation tags follow the conversation.
+
+**One vocabulary, two stores** (`shared/src/tags.ts`, the record of the grammar, caps and parsers; nothing restates
+it). Session scope (process and conversation) lives in **daemon memory**, re-sent by its writers, never in a task
+record, `MachineStatus`, the store or the archive. Task scope lives in **the task record**, through the one task
+sealer, kept to few writers because each is a path into the sealer. What no writer re-sends (an untasked
+conversation's owner label and its adapter subscriptions) is at rest in the daemon's `conversations.json`.
+
+| Namespace          | Scope                  | Written by, and only over                                             | Accepts                                         |
+| ------------------ | ---------------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
+| `agent.*`          | process / conversation | the agent's own mod and hooks, through `seance session-event`         | `kind`, `session`, `remote` only                |
+| `seance.*`         | process                | the daemon itself                                                     | known keys only; none in v1 (reserved)          |
+| `self.*`           | process                | the session, through MCP `set_self_tag` (docs/presence.md, not built) | `doing`, `name`; any other suffix `unknown_key` |
+| `adapter.<name>.*` | conversation, or task  | that adapter, over its own stdin                                      | any suffix, opaque value                        |
+| `owner.*`          | conversation, or task  | the owner, through the PWA only, sealed `from: "app"`                 | `label` known; any other suffix opaque          |
+| `creator.*`        | task                   | whoever enqueues the task, at create only                             | `ref`, `ref-url` known; any other suffix opaque |
+| `scheduler.*`      | task                   | the leader, through the one task sealer                               | known keys only; none in v1 (reserved)          |
+
+- **Namespace is writer, and writer is path.** No frame names its own namespace: every write carries bare suffixes
+  (the frame's `agent`, `set_self_tag`, the adapter's `tag`, `session-tag`, `creatorTags`, `ownerTags`), and only what
+  a writer builds itself holds full keys (the task record, every read-side view). A full key on a write is refused
+  `invalid`, never re-homed. The parser splits at the last dot, so `adapter.x.y` is namespace `adapter.x`, suffix `y`.
+- **Values** pass `displayLine` (the one printable-text rule) and `TAG_VALUE_MAX` (256 UTF-8 bytes, cut on a code
+  point); empty clears the key. Known keys have strict parsers; an opaque value is display text and nothing else.
+- **Caps.** At session scope `TAGS_PER_WRITER_MAX` (4) per namespace, and `TAGS_PER_PANE_MAX` (16) over a session's
+  tags outside `adapter.*`; each adapter has its own 4 per target on top, so with `ADAPTERS_MAX` adapters a session's
+  worst case is 32 keys. Past a cap a write is refused `full`, never a silent drop of another key. Task scope:
+  "Task tags".
+- **Parsers are strict in shape and lenient in membership** (`parseTags`): a key a reader does not know, or whose value
+  fails its parser, is dropped, never the record, so a newer writer never breaks an older reader.
+
+**What every tag is not** (an invariant, held in the threat model): no tag binds, routes, places, settles, alerts,
+authorizes or moves anything, but for T1's exception. No tag is logged, audited as text (a line may carry a key count),
+put in argv, `progress`, `MachineStatus`, a push payload or a push's text, or read by `closeVerdict`, routing, the
+drain or any custodian verdict.
+
+**Retention for hand-started sessions (T4), and what it costs.** The gate moved from `ours` to "a peer whose chain
+holds a `claude` process", tasked or not, `ours` or not ("Session identity", "Retention"). The daemon keeps per-process
+memory for panes it did not start, bounded by the caps and pruned at its listings, and holds no new act on them: every
+custodian verb and the drain still require `ours` and a launch-ledger task. A same-uid process typing `claude` in the
+daemon's tmux server can put lines on the Machines screen; it could already put a pane and a window title there.
+Sessions outside the daemon's tmux server (an IDE terminal) stay out: the mod skips them (`TMUX_PANE` unset) and no
+pane binds them.
+
+**What verification proves, and what it does not.** It defeats a confused or lying peer in the wrong place: a Bash
+child of session B claiming A's id from B's pane is not verified, because the file for B's `claude` names B's
+conversation. It does not defeat a same-uid process that writes the file, as nothing on the machine defeats the
+owner's uid. Two live processes claiming one id (`claude --resume <id>` in two panes) refuse it until one ends; the
+claims counted are the verified and the unverifiable, never a refuted one or one bound through the `pane` fallback, so
+a misdelivery stays impossible and a Bash child in another pane cannot deny delivery. The settle window and the
+per-platform `procStart` read come from the spikes (docs/tags.md, "Spikes").
+
+**The join and the name.** `joinTags(task?, conversation?, process?)` is the one place precedence lives; a key exists
+at one scope by construction, bar `owner.label`, where the task's wins. `displayName` is used only on the owner's own
+surfaces (the PWA) and in an adapter's `Session`; anything that puts a name in another agent's context (a message
+wrapper, a receipt, the custodian's `sessions`, MCP) keeps the task's title or the window, since `self.name` is
+session-chosen text. The reader joins, since no single process holds both scopes; the daemon gets only a task's ref
+(`SpawnRequest.ref`, for adapters), never `owner.*`, so there is no stale second copy of the owner's label.
+
+| Surface                                  | Gets                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| PWA (Machines, Queue, task details)      | a session's name and rename; a task's label and ref                   |
+| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included             |
+| `sessions` op sealed from the scheduler  | none                                                                  |
+| MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                 |
+| adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref |
+| custodian `sessions` verb                | no tag                                                                |
+| `MachineStatus`, push, logs, audit, argv | never                                                                 |
+| archive                                  | `creator.ref`, `creator.ref-url` only                                 |
+
+**Not built: the PWA's per-namespace view** (every namespace with its scope, writer and age, `verified` shown on
+`agent.session`). The PWA reads `SessionEntry.tags` today only to name and rename a session.
+
+An adapter never sees another adapter's tags: each is a separate third party.
+
+**Another agent's context: by writer, not by reader, and narrow.** `AGENT_VISIBLE_TAG_KEYS` is `agent.kind`,
+`creator.ref` and `owner.label`. Not `creator.ref-url` or an opaque `creator.*` key (when a session enqueued, those are
+session-chosen text), not `agent.session` (no reader needs another session's conversation id, and handing it out only
+helps one claim another's), and never a tag a session or a tool chose (`self.*`, `adapter.*`), for any caller: such
+text reaches another session only inside Séance's fixed wrappers. **Rejected:** an orchestrator role that sees more.
+MCP cannot tell an orchestrator from any other session (both are `seance mcp` sealing `from: "app"`), so a role would
+be a claim.
+
+**`remoteSession` and `agent.remote`.** The concept is renamed, not the wire fields the skew table depends on: the
+local frame sends `agent.remote` and, until the mod's floor moves, `remoteSession` (read as its fallback, through the
+one `isRemoteSessionId`); `SessionEvent.remoteSession` keeps its name on the sealed op an older leader parses;
+`Task.remoteSession` keeps its name and rule, a task field and not a tag, which the PWA falls back to outside the tag
+map; the custodian round's link is unchanged. Codex will supply its own `agent.remote` through the same key.
+
+**The adapter subscription** (amends docs/messaging.md D3; built: "Adapters", "The subscription"). A tool's asks live
+for days, and a session that joined it by messaging `adapter:<name>` was answerable only by reply, for the `sent`
+table's hour, and only while the same `claude` ran: a restart, a `--resume`, a `continue_task` or an hour's silence cut
+it off. So a session's message to `adapter:<name>` subscribes its verified conversation for the conversation's life.
+
+- **Why D3's one-hour bearer reason does not apply.** A reply handle is a bearer: a message id that crossed the wire,
+  valid from any machine through the leader. A subscription's authority is the session's own act, recorded by the
+  daemon against a conversation it verified; it is usable only over that one adapter's stdin, on that machine, and the
+  id it is keyed by grants nothing to anyone else who learns it. The channel bounds what an hour bounded.
+- **Chains.** A continue chain keeps it (same id, same machine). A successor is a new conversation: the adapter learns
+  of it from the `task` event and reaches it by task id, or the successor subscribes itself.
+
+**Rejected:**
+
+- **One per-pane bag of tags** (no levels): it loses conversation facts at every restart or keeps process facts past
+  their truth.
+- **Tags in `MachineStatus`**: 1.5 KiB of ciphertext for the whole machine.
+- **Session tags in the store** (a leader-held map keyed by conversation): every change a term-fenced write and a push
+  to every app, and a leader holding session text.
+- **A free-for-all namespace** (any writer, any key): a session could set `owner.label` and a tool `agent.session`;
+  access rules would have to be per key and would drift.
+- **Trusting the mod's `agent.session` without verification**: a Bash child of one session could claim another's
+  conversation from its own pane.
+- **The pane id or `<pid>:<start time>` as the adapter's key**: neither survives a restart, and the session cannot
+  learn either.
+- **Persisting every session tag**: process tags are false after a restart, and conversation tags other than the
+  owner's label and subscriptions are re-sent by their writers.
+- **A separate `set-task-tags` op, a changeable `creator.*`, and adapter task tags**: each another path into the
+  sealer.
+- **Extending the reply handle's TTL for adapters** instead of a subscription: a longer-lived bearer, still bound to
+  one process, still useless across `--resume`.
+
+**Threat model.** What this adds, and what bounds it (Threat model item 6 and CLAUDE.md carry the invariants):
+
+- **Session-chosen and tool-chosen strings other readers display** (`self.*`, `adapter.*`): scrubbed by
+  `displayLine`, capped, scoped, kept out of MCP and pushes.
+- **Retention for hand-started panes**: memory per bound `claude` process, bounded and pruned, no new act.
+- **A verified conversation id names two acts**: the owner's `session-tag`, and adapter delivery on one machine to a
+  subscribed conversation; both refused when ambiguous, both re-verified at the act. It is read by the daemon from its
+  ledger or the agent's own per-process file, never taken from a frame to bind anything.
+- **A long-lived subscription**: the session's own act, at rest in one 0600 file of conversation ids, adapter names,
+  adapter fingerprints and times, beside the owner's labels (its one text, the owner's own), with one writer.
+- **Task tags**: display text sealed like a title, held to the sentinel, the gate and the archivist's strip.
+
+### Task tags — built 2026-11-18 (tags step 3)
 
 A task carries display tags in `TaskSpec.tags` (full keys, `creator.*`, `owner.*`, `scheduler.*`), the task-scope half
-of docs/tags.md's model. They label a task for people and for the adapter feed; nothing routes, binds, places, settles
+of the tags model ("Tags and session identity"). They label a task for people and for the adapter feed; nothing routes, binds, places, settles
 or alerts on one.
 
 - **Vocabulary** (`shared/src/tags.ts`). At most `TASK_TAGS_MAX` (6) keys per task, within `TASK_TAG_BUDGET`
@@ -8791,7 +8975,7 @@ or alerts on one.
   `too_large` write once with the held decision cut to its winner (`winnerOnly`; it does not retry a record that has
   nothing to cut): the five keys a leader writes then fit with 1420 spare, and 2920 spare with no decision. A store
   refusal of a label alone answers `tags_full`, never `prompt_too_long`. The key count was kept at six on that basis
-  rather than cut (docs/tags.md open question 7).
+  rather than cut ("Tags and session identity", "Decided by the owner").
 - **Chains.** `continuationSpec` and `successorSpec` copy the predecessor's `creator.*` tags (`chainTags`), never
   `owner.*` and never `scheduler.*`. The leader copies the predecessor's `owner.*` onto the new task at its first move
   out of `queued` (`scheduler/src/chain-tags.ts`: the resumed or passed-from task, by `continues` or `succeeds`), so the
@@ -12394,7 +12578,8 @@ pid, task and session, with `wake` as for any answer to a question or request. A
 `received` with its name, so the session's reply by handle (`inReplyTo`, no `to`) goes back to that adapter as a
 `message` frame carrying `inReplyTo`, never routed; it subscribes nothing. D3 amended again 2026-11-17: **a session
 with no task is reached only as a reply, by the id of a message it sent, or by an adapter on its own machine through
-the subscription it made by messaging that adapter** ("Adapters", "The subscription"; docs/tags.md §8).
+the subscription it made by messaging that adapter** ("Adapters", "The subscription"; "Tags and session identity",
+"The adapter subscription").
 
 **Rejected** (docs/messaging.md D3, amended): **machine id plus pane id as a general address** (a pane id outlives the
 session in it and names no session, so it is a guess the daemon cannot check, and a hand-started session's pane is
@@ -12403,10 +12588,10 @@ session Séance never spawned in the leader's record and the Queue screen, with 
 leader-held reply table** (the leader would keep a map of who talked to whom, a mailbox's worth of metadata, to
 answer a question the asker's own daemon can: it keeps the minting table already); **the Claude session id** for
 replies (a `$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the
-peer-pid binding exists to avoid; amended 2026-11-17, docs/tags.md §4.4: that reason stands for a claim and falls for
-an id the daemon verified from its own sources ("Session events", "Session identity"), but a reply is still by
-message id, and the one use a verified id gets is the adapter subscription, "Adapters", built 2026-11-18, docs/tags.md
-§8); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
+peer-pid binding exists to avoid; amended 2026-11-17: that reason stands for a claim and falls for an id the daemon
+verified from its own sources ("Session events", "Session identity"), but a reply is still by message id, and a
+verified id names only two acts, the owner's `session-tag` and adapter delivery through a subscription ("Adapters",
+built 2026-11-18; "Tags and session identity")); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
 ### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md steps 3 and 4
@@ -12787,7 +12972,7 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   task?, title?}` (`session` only when subscribed), `inReplyTo` only when it names that adapter's delivery to this same
   session (any other is dropped, never passed on), `subscribed`, and `leave`. Text flows out only when a session
   addressed it to that adapter.
-- **The subscription** (docs/tags.md §8; D3 amended). A session's message to `adapter:<name>` subscribes its
+- **The subscription** ("Tags and session identity", "The adapter subscription"; D3 amended). A session's message to `adapter:<name>` subscribes its
   conversation when the daemon holds a verified `agent.session` for the sender's bound `claude` process, which that
   process alone claims (`Conversations.verifiedFor`), never one from the frame; the reply says `subscribed` and names
   the conversation (`session`), so the session can give the tool the id it holds it under. A sender with no verified
@@ -12796,19 +12981,25 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   one chain, beside the owner's labels: "The owner's label"): ids, adapter names, fingerprints and times, never text; one the daemon cannot read loads empty. Ended
   by the session's `leave` (`send_message`'s `leave: true`, no text needed; the frame still goes, with `leave`), by
   the conversation not live for `CONVERSATION_IDLE_MS` (30 days; a verified, unconflicted session the feed reports
-  touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and at each
-  host start for a name no longer configured or configured as another program (`reconcile`: the fingerprint
+  touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and each
+  time the daemon reads its config, for a name no longer configured or configured as another program (`reconcileWith`,
+  at each start and at each reload a `config.json` change makes, with no adapter left configured too: the fingerprint
   (`adapterFingerprint`) is a hash of `argv`, the recorded `commit` and `added`, the last only when the entry has one,
-  so a hand-written entry keeps the fingerprint it had before 3c), so a replaced program inherits none. `seance adapter
-  add` and `remove` also end a name's subscriptions at once (`drop(name)`). Not a bearer, unlike a reply handle: usable
-  only by that adapter, over its own stdin, on this machine, to a conversation that messaged it and that the daemon
-  verified at the act.
-- **Tags** (`tag`, docs/tags.md §8.4): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
+  so a hand-written entry keeps the fingerprint it had before 3c), so a replaced program inherits none. **The file has
+  one writer, the daemon**: `subscriptionsFor` keeps one store per path per process, which the session-events
+  capability opens and every reload's capabilities share, so a write still queued from the outgoing daemon and the
+  incoming one's reconcile run on one chain over one memory; `seance adapter add` and `remove` write `config.json`
+  alone, and the daemon ends the subscriptions when it reads that write (a running daemon at once, through the reload;
+  a stopped one at its next start). Not a bearer, unlike a reply handle: usable only by that adapter, over its own
+  stdin, on this machine, to a conversation that messaged it and that the daemon verified at the act.
+- **Tags** (`tag`, "Tags and session identity"): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
   (one live in a session outside `repos` is `refused`) or on a task this ledger holds within `repos`; else `unknown`.
   Memory only (`Conversations.setAdapterTag`, at most `ADAPTER_TAG_TARGETS_MAX` targets per adapter, the tag caps per
   target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
-  conversation's tags show on the process whose verified, unconflicted claim it is. They reach the PWA's `sessions`
-  and that adapter's own records, never another adapter's (`tagsFor`) or MCP (`AGENT_VISIBLE_TAG_KEYS`).
+  conversation's tags show on the process whose verified, unconflicted claim it is. They reach an app's `sessions`
+  reply (`SessionEntry.tags`) and that adapter's own records, never another adapter's (`tagsFor`) or MCP
+  (`AGENT_VISIBLE_TAG_KEYS`). The PWA reads `SessionEntry.tags` for a session's name and rename only and shows no
+  adapter tag (the per-namespace view is not built).
 - **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
   account id, an absolute path, the PSK or anything derived from it.
 - **Audit**, origin `adapter` (`adapterAudit`), the lifecycle lines and one line per message each way:
@@ -12871,14 +13062,16 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
     "question"]`, `request` only by `--kinds`; a re-add keeps the entry's `kinds` and `repos` unless given. A fifth
     name is refused (`ADAPTERS_MAX`). `commit` is the checkout's `HEAD` through the hardened git (`checkoutCommit`), when
     it is a git work tree. A `--repo` no scanned repo names is a warning, not a refusal (the scan may not have run).
-    Then it ends that name's subscriptions (`drop`), so a replaced program inherits none even under the same name, and
-    prints what it wrote, the trust statement and that `seance restart` starts it: a running daemon reads `config.json`
-    at its start only.
-  - **`remove <name>`** deletes the entry, ends its subscriptions, and leaves `stateDir()/adapters/<name>` as it is:
-    the adapter's own data, which Séance did not write.
-  - **The race the `added` stamp closes.** A running daemon keeps its subscriptions in memory and may rewrite
-    `conversations.json` after the CLI's `drop`, putting the old ones back. `added` is new at every add and joins the
-    fingerprint, so the next start's `reconcile` drops them anyway; `remove` needs no stamp, since the name is gone.
+    It prints what it wrote, the trust statement and that `seance restart` starts it. It does not touch
+    `conversations.json`: the daemon ends that name's subscriptions when it reads the new entry ("The subscription"),
+    so a replaced program inherits none even under the same name.
+  - **`remove <name>`** deletes the entry and leaves `stateDir()/adapters/<name>` as it is: the adapter's own data,
+    which Séance did not write. The daemon ends its subscriptions when it reads the config, as for `add`.
+  - **Why the CLI writes no subscription.** A running daemon keeps its subscriptions in memory and rewrites
+    `conversations.json` whole, so a second writer's edit is lost at the daemon's next write (an earlier build had the
+    CLI drop them and relied on the `added` stamp to drop them again at the next start). With the daemon the one
+    writer, the end comes from its own reconcile: a re-add's new `added` stamp changes the fingerprint, and a removed
+    name is not configured at all; `remove` needs no stamp.
   - **`restart [<name>]` and `status`** reach the running daemon through two files in `stateDir()`, never the socket
     (widening the local op socket is a threat-model change this does not need). The daemon writes
     `adapter-status.json` (0600, durably, on every supervisor change, coalesced: per adapter the supervisor's state,
@@ -12937,19 +13130,25 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
     messages, a sender outside `repos`;
   - a subscription across a `--resume` in another process and a daemon restart, `ambiguous`, `unverified` after a
     `/clear`, ended by `leave` and by the name configured as another program;
-  - a tag refused on an unsubscribed conversation, and never seen by another adapter.
+  - a tag refused on an unsubscribed conversation, and never seen by another adapter;
+  - `toSession` answering `ended` with no live claimant and `refused` for a session outside `repos`;
+  - a tag on a task launched here within `repos`, `refused` outside it, and `full` past the writer's cap;
+  - tags cleared at the adapter's handshake and on the session's `leave`.
 
-  `daemon/src/adapter-subscriptions.test.ts` covers the file (mode, reopen, `reconcile`, `drop`, the idle prune, the
-  cap, an unreadable file, no text at rest).
+  `daemon/src/adapter-subscriptions.test.ts` covers the file (mode, reopen, `reconcile`, `reconcileWith` for a re-add
+  and for no adapter left, the idle prune, the cap, an unreadable file, no argv at rest);
+  `daemon/test/config-reload.test.ts` a label written just before a reload surviving it (one store across the reload).
 
   3c: `daemon/test/adapter-cli.test.ts` runs the real CLI as a subprocess on a throwaway config and state dir, the test
   process playing the daemon where one matters:
   - `add` writing the entry (absolute argv, commit, dir, other keys and the file's mode kept) and its audit line;
-  - `add` under a name already there ending that name's subscriptions and no other's, keeping `kinds` and `repos`,
-    and changing the fingerprint at the same commit;
+  - `add` under a name already there leaving `conversations.json` untouched, the daemon's reconcile (a fresh start,
+    and a live store) then ending that name's subscriptions and no other's, keeping `kinds` and `repos`, and changing
+    the fingerprint at the same commit;
   - a refused manifest (an argv word out of the checkout, an unknown protocol, no checkout) writing and auditing
     nothing; the fifth adapter; usage errors;
-  - `remove`, its subscriptions, and the adapter's own directory left in place;
+  - `remove`, the file untouched and the subscriptions ended by the daemon's reconcile, and the adapter's own
+    directory left in place;
   - `status` with no daemon and with one, the hello version scrubbed;
   - `restart` with no daemon (`not_running`) and through the request file.
 
@@ -13741,7 +13940,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   another claude.ai session the same account owns. Not covered: the spawn verdict (above,
   "Out of scope for v1"), and sessions with no task, whose events go nowhere. The custodian's round is such a session
   and its id reaches the Machines row another way (custodian 5, "the live link").
-- **Session identity: the `agent` claims and the conversation table** (built 2026-11-17, docs/tags.md step 1;
+- **Session identity: the `agent` claims and the conversation table** (built 2026-11-17, tags step 1; the model and
+  its rationale: "Tags and session identity";
   `daemon/src/conversations.ts`, `daemon/src/agent-session-file.ts`, the vocabulary in `shared/src/tags.ts`).
   - **The claims.** Every report carries `agent: {kind, session?, remote?}`. The mod reads `$.session.id` and
     `$CLAUDE_CODE_BRIDGE_SESSION_ID` at each report, never cached, since `/clear` and `/resume` move the conversation
@@ -13750,7 +13950,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     (`parseTagValue`: `agent.kind` one of `AGENT_KINDS`, `agent.session` a lowercase UUID, `agent.remote`
     `isRemoteSessionId`). A bad value drops that key, an unknown key drops the whole `agent`, and neither drops the
     frame. A frame may carry `agent` with no state. `agent.remote` is read first and `remoteSession` is its fallback
-    (docs/tags.md §7). The leader's `SessionEvent.remoteSession` keeps its name, and the PWA's claude.ai link prefers
+    ("Tags and session identity", "`remoteSession` and `agent.remote`"). The leader's `SessionEvent.remoteSession` keeps its name, and the PWA's claude.ai link prefers
     the live session's `agent.remote` from its machine's last `sessions` read over `Task.remoteSession`.
   - **Retention, keyed on the bound `claude` process.** The key is `<pid>:<start time>` of the innermost
     `claude`-named process on the peer's chain (`claudeProcessOf`, `daemon/src/claude-process.ts`, the one
@@ -13776,7 +13976,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     - **Conflicts.** Two live claimants of one id (verified, unverifiable or still settling) are a conflict.
     - **At each act.** `atAct` re-reads the source before any act a verified id names, demotes the claim on a
       mismatch and answers `ambiguous` on a conflict. The owner's `session-tag` (below) is its first act; adapter
-      delivery will be the second (docs/tags.md §8).
+      delivery through a subscription ("Adapters", "The subscription") the second.
   - **The daemon's own read.** At start and at each `sweep`, a live pane with no report since this process began is
     matched to a `sessions/<pid>.json` whose pid is the innermost `claude` on its own chain, exactly one under that
     pane. That conversation is linked verified, with the file's `bridgeSessionId` as `agent.remote`. An idle session
@@ -13784,14 +13984,15 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   - **Where tags go.** `SessionEntry.tags` carries the newest live process's `agent.remote` (process scope) and its
     `agent.kind` and `agent.session` (conversation scope, `verified` when it is), each with `{value, at, scope}`.
     They go on an app's `sessions` only, never a scheduler-sealed one, and are read only through
-    `parseTags(…, { scope: "session" })`. MCP's `get_sessions` prints only `AGENT_VISIBLE_TAG_KEYS` (docs/tags.md
-    §6.3), so another session never sees a conversation id or a bridge id. No tag is logged or audited:
+    `parseTags(…, { scope: "session" })`. MCP's `get_sessions` prints only `AGENT_VISIBLE_TAG_KEYS` ("Tags and
+    session identity", "Another agent's context"), so another session never sees a conversation id or a bridge id. No tag is logged or audited:
     `message-layering.test.ts` holds the three modules that keep them off both sinks, type-only imports included.
   - **Rejected:** the custodian's per-pane tracker (`pane-activity.ts`) as the store. It is `ours`-only and keyed by
     pane for the custodian's own reads, so it would have had to change both to serve this.
-  - **The owner's label** (built 2026-11-18, docs/tags.md step 2; `daemon/src/adapter-subscriptions.ts`,
+  - **The owner's label** (built 2026-11-18, tags step 2; `daemon/src/adapter-subscriptions.ts`,
     `Conversations.label`, `handleSessionTag` in `daemon/src/handlers.ts`). The owner names an **untasked**
-    conversation; a tasked session's name stays its task's title until task tags (docs/tags.md step 3).
+    conversation; a tasked session's `owner.label` lives on its task ("Task tags"), so it survives the queue and its
+    chain, and the op answers `tasked` for one.
     - **The op.** `session-tag` (`SessionTagRequest`: `{ pane, session, key: "label", value }`, `""` clears),
       answered only when sealed `from: "app"` on the relay leg (`refused` otherwise), parsed by
       `parseSessionTagRequest` (`invalid_request`: an unknown field, a key other than `label`, a value
@@ -13805,8 +14006,11 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       origin=relay key-count=<0|1> outcome=<set|cleared|code>`. `CAPABILITIES.sessionTag` advertises it,
       unconditionally: session events always run, so every daemon of this build has the table.
     - **At rest.** `stateDir()/conversations.json`, 0600, the adapter subscriptions' file ("Adapters"), with one
-      owner: `openSubscriptions`, opened once by the session-events capability and handed to the adapter host, so no
-      second writer of another shape erases its entries (each loading the other's as empty). Written whole through
+      owner: one `openSubscriptions` store per path per process (`subscriptionsFor`, `daemon/src/run-capabilities.ts`),
+      taken by the session-events capability and handed to the adapter host, and the same store across a config
+      reload's two daemons, so no second writer of another shape, and no second store over the same file, erases its
+      entries (each loading the other's as empty, or writing back what it read before the other's write). The adapter
+      CLI never writes it ("Adapters", "Installing"). Written whole through
       `writeDurable` (temp, fsync, rename) on one chain: `{ v: 1, adapters, conversations }`, each conversation
       `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }], lastLive }`. At most `CONVERSATIONS_KEPT_MAX`
       (256), the least recently live dropped first; an entry not live for `CONVERSATION_IDLE_MS` (30 days), or holding
@@ -13819,8 +14023,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
       of a labelled id shows its own name. A restart keeps the label and reattaches it at the next verified claim.
     - **The name, in the PWA.** The Machines card lists an awake machine's sessions by `displayName` over
-      `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (decided as
-      docs/tags.md's open question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
+      `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (taken as docs/tags.md's open
+      question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
       then the window, marked "(self-named)" or "(window)" for the last two. Rename is offered only for a connected
       machine advertising `CAPABILITIES.sessionTag`, on an untasked row whose `agent.session` is verified; a refusal
       shows a fixed text by its code. Sessions are read for every connected machine when the screen opens, on wake, when a

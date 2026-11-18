@@ -1,16 +1,16 @@
-// What no writer re-sends, kept at rest per conversation (docs/tags.md §3.2) in the one file
+// What no writer re-sends, kept at rest per conversation (DESIGN.md, "The owner's label", "At rest") in the one file
 // `stateDir()/conversations.json`, owned by this module alone (a second writer of its own format would erase this one's
-// entries, each loading the other's as empty): the adapter subscriptions (docs/tags.md §8, amending docs/messaging.md
-// D3) — a session that messages `adapter:<name>` subscribes its verified conversation to that adapter, which may then
-// deliver to it by `toSession` for the conversation's life — and the owner's label on an untasked conversation (§3.1,
-// the `session-tag` op). The label is the one text the file holds, the owner's own. Nothing in this module logs (an
+// entries, each loading the other's as empty): the adapter subscriptions (DESIGN.md, "Adapters", "The subscription",
+// amending docs/messaging.md D3) — a session that messages `adapter:<name>` subscribes its verified conversation to that
+// adapter, which may then deliver to it by `toSession` for the conversation's life — and the owner's label on an
+// untasked conversation (the `session-tag` op). The label is the one text the file holds, the owner's own. Nothing in this module logs (an
 // adapter module: `daemon/test/adapter-layering.test.ts`; `message-layering.test.ts` holds it off both sinks too).
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAdapterName, isAgentSessionId, isRecord, parseTagValue } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
 
-/** A conversation not live this long is dropped with its subscriptions (docs/tags.md §3.2). */
+/** A conversation not live this long is dropped with its subscriptions (DESIGN.md, "The owner's label", "At rest"). */
 export const CONVERSATION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Conversations kept at rest; past it the least recently live goes first. */

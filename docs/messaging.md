@@ -100,13 +100,13 @@ and Séance gives them none (DESIGN.md, "Cross-machine").
   reply names the message it answers (`inReplyTo`, no `to`); the daemon that minted the id knows which session
   asked, and answers only to the pane, pid, task and **`claude` process** that did, for an hour. A task id stays the
   only address for anything that is not a reply. Built: DESIGN.md, "Session messages", "Replies by handle".
-  **Amended again 2026-11-17 (decided by the owner, docs/tags.md §8):** "… or, by an adapter on its own machine, through the
+  **Amended again 2026-11-17 (decided by the owner; DESIGN.md, "Tags and session identity", "The adapter subscription"):** "… or, by an adapter on its own machine, through the
   subscription the session made by messaging that adapter", keyed by its verified conversation id (`agent.session`)
   for the conversation's life. The hour bounds a reply handle because the handle is a bearer; a subscription is the
   session's own act, usable only over that adapter's stdin, so the hour does not apply to it. Built
   2026-11-18 with 3b: DESIGN.md, "Adapters", "The subscription".
   **Rejected**, each in DESIGN.md, "Replies by handle": machine + pane id as a general address; a synthetic task id or queue entry for a
-  hand-started session; a leader-held reply table; the Claude session id; replies on one machine only.
+  hand-started session; a leader-held reply table; the Claude session id **for replies** (narrowed 2026-11-17: the reason, a claim taken from a frame, stands for a claim and falls for an id the daemon verified itself, which may name two acts, the owner's `session-tag` and adapter delivery through a subscription; a reply is still by message id); replies on one machine only.
 - **D4. Wake by kind.** A question or request wakes an idle session; a note does not. Built: a note is a
   `$.session.append` row, added at once and read within a running turn too, which does not wake an idle session.
   **Extended 2026-11-14 (`wake`):** a note that answers a question or request the receiving session itself sent
@@ -137,7 +137,7 @@ The adapter seam's (DESIGN.md, "Adapters"), all decided by the owner on 2026-11-
    machine's adapter covers its own sessions and launched tasks; unplaced tasks reach a tool through whoever queued
    them. Revisit when a tool needs it.
 7. **Addressing an untasked session beyond a reply** (D3)? **Decided 2026-11-17 by the subscription**
-   (docs/tags.md §8; D3 amended): a session that messages `adapter:<name>` is reachable by that adapter for its
+   (DESIGN.md, "Adapters", "The subscription"; D3 amended): a session that messages `adapter:<name>` is reachable by that adapter for its
    conversation's life. Still no general address: only that adapter, only that machine.
 8. **Session-to-session message metadata out** (who messaged whom, when)? **Decided 2026-11-17: no, not even
    counts.** It is the mailbox-shaped record D3 rejected keeping at the leader, handed to a third party instead.
@@ -147,11 +147,11 @@ The adapter seam's (DESIGN.md, "Adapters"), all decided by the owner on 2026-11-
     2026-11-17: not in PR 3.** The same-uid trust is stated plainly (DESIGN.md, "Adapters", "Trust"); revisit before any adapter the owner did
     not write is installed. Containment would have to be drilled as the custodian's was before it is claimed.
 11. **An external ref on a task in state out**, for a tool to map a task to its own object without keeping a
-    map? **Decided 2026-11-17** (with docs/tags.md question 7): `Session.task.ref`, the dispatched `creator.ref` (docs/tags.md §5.4, §6.1).
+    map? **Decided 2026-11-17**, with `creator.*`: `Session.task.ref`, the dispatched `creator.ref` (DESIGN.md, "Task tags", `SpawnRequest.ref`).
 12. **Adapters on the Machines row** (a `MachineStatus` field)? **Decided 2026-11-17: later**; `seance adapter
     status` and `doctor` first.
 13. **State in beyond messages** (a tool setting a label, a flag or done on a task)? **Partly settled
     2026-11-17**: an adapter may set its own `adapter.<name>.*` tags on a session (the `tag` frame), memory only, on its
     machine. Nothing on the task record: a flag or done touches the leader's record, which the owner's brief keeps out of the seam.
-14. **The spec's `linear` field names a tool**, against the brief's rule. **Decided 2026-11-17** (docs/tags.md question 7): it becomes the
-    task tag `creator.ref` (docs/tags.md §5.4), which is also orchestrator.md's `ref`.
+14. **The spec's `linear` field names a tool**, against the brief's rule. **Decided 2026-11-17**, with `creator.*`: it becomes the
+    task tag `creator.ref` (DESIGN.md, "Task tags"), which is also orchestrator.md's `ref`.

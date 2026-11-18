@@ -132,7 +132,7 @@ export interface AdapterOutletMessage {
   /** The sender's verified conversation, re-read at the act; null when it has none. */
   readonly conversation: string | null;
   readonly leave: boolean;
-  /** A message to `adapter:<name>` subscribes; a reply by handle to the adapter's delivery does not (docs/tags.md §8.2). */
+  /** A message to `adapter:<name>` subscribes; a reply by handle to the adapter's delivery does not (DESIGN.md, "Adapters", "The subscription"). */
   readonly subscribe: boolean;
 }
 

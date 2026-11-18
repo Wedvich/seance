@@ -141,7 +141,7 @@ export interface MachineCard {
   readonly sessions: readonly SessionRow[] | null;
 }
 
-/** One session on a machine card, named as the owner's own surfaces name it (`displayName`, docs/tags.md §6.1). */
+/** One session on a machine card, named as the owner's own surfaces name it (`displayName`, DESIGN.md, "Tags and session identity"). */
 export interface SessionRow {
   /** The tmux pane id: what `session-tag` names, beside the conversation. Null from a daemon too old to send it. */
   readonly pane: string | null;

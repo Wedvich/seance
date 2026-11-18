@@ -4,7 +4,7 @@ import { chainOwnerTags } from "../src/chain-tags.ts";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type StoredTask, type Task } from "../src/index.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
-/** Task tags (docs/tags.md §5): the owner's amend in any state, the reserve that ignores them, and the dispatch's ref. */
+/** Task tags (DESIGN.md, "Task tags"): the owner's amend in any state, the reserve that ignores them, and the dispatch's ref. */
 
 const TAGGING = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.taskTags];
 

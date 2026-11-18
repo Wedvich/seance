@@ -203,7 +203,7 @@ export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
  * may name the worktree) and `decision` (a `skill_absent` reason carries a
  * `/skill` read off the prompt) and `flag.note` (model-written from pane text; the reason and time stay). `failure.code`
  * and the placement stay. Of `spec.tags` only `REF_TAG_KEYS` stay (where the task came from: an id and a URL the
- * creator wrote as such), never an `owner.*` label, which is free text a person typed (docs/tags.md §5.1).
+ * creator wrote as such), never an `owner.*` label, which is free text a person typed (DESIGN.md, "Task tags").
  */
 export function archivedTask(task: Task): Task {
   const {

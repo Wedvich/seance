@@ -1,6 +1,6 @@
 import { displayLine, httpsUrl, joinTags, taskTagEntries, type Task } from "@seance/shared";
 
-/** A task's tags as the Queue card and the verdict show them (docs/tags.md §6.2: the PWA gets the joined view). */
+/** A task's tags as the Queue card and the verdict show them (DESIGN.md, "Tags and session identity": the PWA gets the joined view). */
 export interface TaskTagLines {
   /** `owner.label`: what the owner called it; null when unset. */
   readonly label: string | null;
