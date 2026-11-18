@@ -367,7 +367,7 @@ the exclave the same way, or a send stops at a permission prompt.
 `watch_github` (`mcp__seance__watch_github`) lets a session wait on a GitHub pull request or Actions run without
 polling: the scheduler leader reads it in its batched poll, and a note in the session's inbox wakes it when checks pass
 or fail, a conflict appears, the PR is merged or closed, or the run completes. The session ends its turn after the call;
-a watch lasts until then, its session ends, or 24 h pass, and `unwatch_github` (`mcp__seance__unwatch_github`) stops
+a watch lasts until the PR is merged or closed or the run completes, its session ends, or 24 h pass, and `unwatch_github` (`mcp__seance__unwatch_github`) stops
 one early. It needs the **inbox** mod in the session's Claude account, and this machine's daemon and the scheduler's
 leader on a build that keeps watches; otherwise it refuses and says how to wait with `gh` instead. Allow both tools in
 the exclave the same way.

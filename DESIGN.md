@@ -12375,8 +12375,8 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   U+FFFD, the class `printable` and `isFlagNote` use, inside the fence.
 - **Step 4: `seance mcp`'s `watch_github` and `unwatch_github`** (built 2026-11-18; "MCP server"). The frame was
   advertised under `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it
-  closes a `watch` frame as malformed. The client (`watch-github.ts`) reads a closed connection or an unparseable reply
-  as `unsupported`, in addition to the gate (`watchGate`: this machine's daemon and the verified leader). No second
+  closes a `watch` frame as malformed. The client (`watch-github.ts`) reads an unparseable reply as `unsupported`
+  and a closed connection as an old daemon or a restart (the add is persisted first, so the watch may come back), in addition to the gate (`watchGate`: this machine's daemon and the verified leader). No second
   capability string.
 - **Rejected: ending a watch on a failed pane read.** A `tmux` failure is transient and the session still waits;
   ending the watch would drop it for good.

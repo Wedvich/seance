@@ -281,9 +281,10 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
 
 ### W10. Surfaces, capability and audit
 
-- **MCP** (`seance mcp`; built 2026-11-18, DESIGN.md, "MCP server"): `watch_github { url, head? }` answers `{ ok, id, kind }` or a code (`invalid`,
-  `nosession`, `nolistener`, `too_many`, `fleet_full`, `no_leader`, `unsupported`, `unbound`, plus the transport
-  codes); `unwatch_github { id }` answers `ok` or `unknown`. Its description says to end the turn after a successful
+- **MCP** (`seance mcp`; built 2026-11-18, DESIGN.md, "MCP server"): `watch_github { url, head? }` answers text: the watch id and what to do next, or a
+  refusal worded per code (`invalid`, `nosession`, `nolistener`, `too_many`, `fleet_full`, `no_leader`, `unsupported`,
+  `unbound`, plus the transport faults) that ends with the `gh` command to wait with instead; `unwatch_github { id }`
+  answers `ok` or `unknown`. Its description says to end the turn after a successful
   call, that a note will wake the session, and that the session must not poll the same target meanwhile. Rejected:
   separate `watch_pr` and `watch_run`: the URL already says which, and one tool is one more line in every session's
   context instead of two. No list tool: the ids are in the session's own context, and an `unwatch` of an unknown id
@@ -420,5 +421,5 @@ wants it, it is its own decision against the "manual" one above.
    audit origin, and the threat-model invariants into CLAUDE.md and DESIGN.md (built 2026-11-18: DESIGN.md,
    "Watches", which also holds the `watch-set` contract the leader built: `gen.n` rising on every send, the resend
    until answered, what `delivered` lists, `fleet_full` as "not polled for now").
-4. **MCP's `watch_github` and `unwatch_github`** with the verified-leader gate (W10), S4 live, then the /ship and
-   owner-instruction changes (outside this repo).
+4. **MCP's `watch_github` and `unwatch_github`** with the verified-leader gate (W10) (built 2026-11-18: DESIGN.md,
+   "MCP server"). Left: S4 live, then the /ship and owner-instruction changes (outside this repo).
