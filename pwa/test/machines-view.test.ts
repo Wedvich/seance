@@ -1449,4 +1449,30 @@ describe("a machine's sessions by name", () => {
       ["adapter.slack.thread", "T1", "conversation", false, "5m ago", null],
     ]);
   });
+
+  test("the tag view: no link for a non-https ref-url, an unverified session id stays unverified, empty values are dropped, a missing task still shows session tags", () => {
+    const at = NOW - 60_000;
+    const hostile: Task = {
+      ...running,
+      spec: { ...running.spec, tags: { "creator.ref-url": "javascript:alert(1)", "creator.ref": "x" } },
+    };
+    const derive = (tasks: readonly Task[], tags: NonNullable<SessionEntry["tags"]>) =>
+      deriveMachines([machine({ capabilities: [CAPABILITIES.sessionTag] })], NOW, NO_LEADER, {}, [], undefined, true, {
+        passes: false,
+        tasks,
+        sessions: { "dev-1": { sessions: [entry("%1", { taskId: "t1", tags })] } },
+      }).cards[0]?.sessions?.[0]?.tags ?? [];
+    const tags = {
+      "agent.session": { value: conversation, at, scope: "conversation" as const },
+      "self.doing": { value: "\u0007 ", at, scope: "process" as const },
+    };
+    const lines = (groups: ReturnType<typeof derive>) =>
+      groups.flatMap((g) => g.tags.map((l) => [`${g.namespace}.${l.suffix}`, l.url, l.verified]));
+    expect(lines(derive([hostile], tags))).toEqual([
+      ["agent.session", null, false],
+      ["creator.ref", null, false],
+      ["creator.ref-url", null, false],
+    ]);
+    expect(lines(derive([], tags))).toEqual([["agent.session", null, false]]);
+  });
 });

@@ -481,7 +481,7 @@ function SessionTags({ groups }: { groups: readonly SessionTagGroup[] }) {
     <details className="fleet-session-tags">
       <summary>Tags · {count}</summary>
       {groups.map((group) => (
-        <section key={group.namespace} className="session-tag-group" aria-label={`${group.namespace} tags`}>
+        <div key={group.namespace} className="session-tag-group">
           <p className="session-tag-head">
             <code>{group.namespace}.*</code> · by {group.writer}
           </p>
@@ -505,7 +505,7 @@ function SessionTags({ groups }: { groups: readonly SessionTagGroup[] }) {
               </div>
             ))}
           </dl>
-        </section>
+        </div>
       ))}
     </details>
   );

@@ -192,6 +192,14 @@ const WRITERS: Readonly<Record<(typeof TAG_NAMESPACES)[number], string>> = {
   scheduler: "the leader",
 };
 
+const WRITER_BY_NAMESPACE: ReadonlyMap<string, string> = new Map(Object.entries(WRITERS));
+
+function writerOf(namespace: string): string {
+  const fixed = WRITER_BY_NAMESPACE.get(namespace);
+  if (fixed !== undefined) return fixed;
+  return namespace.startsWith("adapter.") ? `adapter ${namespace.slice("adapter.".length)}` : namespace;
+}
+
 const NAMESPACE_ORDER: readonly string[] = ["agent", "self", "seance", "owner", "creator", "scheduler"];
 
 function tagGroups(joined: Readonly<Record<string, JoinedTag>>, now: number): readonly SessionTagGroup[] {
@@ -204,7 +212,7 @@ function tagGroups(joined: Readonly<Record<string, JoinedTag>>, now: number): re
     const line: SessionTagLine = {
       suffix: split.suffix,
       value,
-      url: key === "creator.ref-url" ? httpsUrl(value) : null,
+      url: key === "creator.ref-url" ? httpsUrl(tag.value) : null,
       scope: tag.scope,
       verified: key === "agent.session" && tag.verified === true,
       age: tag.scope === "task" ? timed`task created ${seen(tag.at, now)}` : timed`${seen(tag.at, now)}`,
@@ -219,9 +227,7 @@ function tagGroups(joined: Readonly<Record<string, JoinedTag>>, now: number): re
     .toSorted(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
     .map(([namespace, tags]) => ({
       namespace,
-      writer:
-        new Map<string, string>(Object.entries(WRITERS)).get(namespace) ??
-        `adapter ${namespace.slice("adapter.".length)}`,
+      writer: writerOf(namespace),
       tags: tags.toSorted((a, b) => a.suffix.localeCompare(b.suffix)),
     }));
 }

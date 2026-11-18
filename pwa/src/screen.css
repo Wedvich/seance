@@ -2605,13 +2605,16 @@
 
 .fleet-session {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
   font-size: 0.8125rem;
 }
 
+/* flex-basis 0: the name ellipsizes instead of pushing Rename onto the wrapped line. */
 .fleet-session-name {
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2630,11 +2633,7 @@
   margin-left: auto;
 }
 
-/* Folded under the row: the row stays one line until the owner opens it. */
-.fleet-session {
-  flex-wrap: wrap;
-}
-
+/* Folded under the row, on its own full-width line. */
 .fleet-session-tags {
   flex-basis: 100%;
   min-width: 0;
@@ -2668,7 +2667,10 @@
 }
 
 .session-tag dt {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow-wrap: anywhere;
   color: var(--fg2);
 }
 
