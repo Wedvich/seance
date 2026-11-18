@@ -75,6 +75,11 @@ export function reapRefusalsPath(): string {
   return join(stateDir(), "reap-refusals.json");
 }
 
+/** The owner's labels on conversations, kept at rest (`conversation-store.ts`). */
+export function conversationsPath(): string {
+  return join(stateDir(), "conversations.json");
+}
+
 export function logPath(): string {
   return logPathIn(stateDir());
 }

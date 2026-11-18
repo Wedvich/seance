@@ -40,6 +40,7 @@ import {
   writeSeatView,
   type PauseRead,
 } from "./custodian-control.ts";
+import { loadConversationStore } from "./conversation-store.ts";
 import { createConversations, type Conversations, type SessionTagsSource } from "./conversations.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
@@ -85,6 +86,7 @@ import { log } from "./log.ts";
 import { createMessages, type Messages } from "./messages.ts";
 import {
   adaptersDir,
+  conversationsPath,
   custodianActivityPath,
   custodianRoundsPath,
   custodianSessionsPath,
@@ -182,8 +184,8 @@ export interface Started {
   readonly custodianPoke?: () => void;
   /** Whether the seat exists: `starting` while its async checks run, `failed` once they declined. The op reads it, never the file view. */
   readonly custodianHost?: () => CustodianHost;
-  /** Session identity and tags, once session events run: an app's `sessions` reads it late (`run.ts`). */
-  readonly conversations?: SessionTagsSource;
+  /** Session identity and tags, once session events run: an app's `sessions` and `session-tag` read it late (`run.ts`). */
+  readonly conversations?: SessionTagsSource & Pick<Conversations, "label">;
   /** Run once the local op socket is up (`run.ts`): what must not start before a session's `seance` can reach it. */
   readonly afterLocal?: () => void;
 }
@@ -317,6 +319,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
     launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
     panes: listPanePids,
+    store: loadConversationStore(conversationsPath()),
   });
   const events = createSessionEvents({
     panes: listPanePids,
@@ -976,7 +979,7 @@ export interface StartedCapabilities {
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
   readonly custodianPoke?: () => void;
   readonly custodianHost?: () => CustodianHost;
-  readonly conversations?: SessionTagsSource;
+  readonly conversations?: Started["conversations"];
   readonly local: LocalSurfaces;
   /** Every capability's `afterLocal`, in start order. */
   readonly afterLocal: () => void;

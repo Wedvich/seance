@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { isRecord, parseTags, SCHEDULER_ID, type Plain, type SessionEntry } from "@seance/shared";
 import { ctimeUtcSeconds } from "../src/agent-session-file.ts";
 import type { SessionBackend } from "../src/backend.ts";
+import { loadConversationStore } from "../src/conversation-store.ts";
 import { createConversations, SETTLE_MS, type Conversations } from "../src/conversations.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import { createHandler, type HandlerContext } from "../src/handlers.ts";
@@ -39,7 +40,7 @@ function shq(value: string): string {
 }
 
 /** A fresh table and its ingest: what a daemon (re)start builds. */
-function boot(opts: { readonly hostNamesPeers?: boolean } = {}): {
+function boot(opts: { readonly hostNamesPeers?: boolean; readonly store?: string } = {}): {
   readonly table: Conversations;
   readonly events: SessionEvents;
 } {
@@ -47,6 +48,7 @@ function boot(opts: { readonly hostNamesPeers?: boolean } = {}): {
     configDirs: () => [dirA, dirB],
     launchSession: (taskId) => launches.get(taskId),
     panes: listPanePids,
+    ...(opts.store === undefined ? {} : { store: loadConversationStore(opts.store) }),
   });
   const ingest = createSessionEvents({
     panes: listPanePids,
@@ -392,5 +394,122 @@ describe("SessionEntry.tags", () => {
       verified: true,
     });
     expect(await ask(SCHEDULER_ID)).toBeUndefined();
+  });
+});
+
+describe("the owner's label (session-tag)", () => {
+  let stores = 0;
+  /** A table and ingest over a conversations file of their own. */
+  const labelled = (): ReturnType<typeof boot> & { readonly path: string } => {
+    const path = join(base, `conversations-${++stores}.json`);
+    return { ...boot({ store: path }), path };
+  };
+  /** A hand-started session whose claim of `session` its own file verifies. */
+  const verified = async (
+    on: ReturnType<typeof boot>,
+    session: string,
+  ): Promise<{ readonly pane: string; readonly pid: number }> => {
+    const started = await claudePane();
+    await writeSessionFile(started.pid, session);
+    await report(started.pid, claim(session), on.events);
+    await pollUntil(() => sessionOf(started.pane, on.table)?.verified === true, "the claim verified");
+    return started;
+  };
+
+  test("an app on the relay leg names a verified, untasked conversation; anyone else is refused", async () => {
+    const on = labelled();
+    const { pane: p } = await verified(on, id(30));
+    const lines: string[] = [];
+    const ctx: HandlerContext = {
+      backend: {
+        spawn: () => Promise.reject(new Error("not in this suite")),
+        sessions: () => Promise.resolve([]),
+        doctor: () => Promise.resolve([]),
+      },
+      getRepos: () => [],
+      rescan: () => Promise.resolve([]),
+      auditSink: (line) => void lines.push(line),
+      conversations: on.table,
+      sessionTag: on.table.label,
+    };
+    const ask = async (value: string, from: string, origin: "relay" | "local" = "relay"): Promise<unknown> => {
+      const payload = { pane: p, session: id(30), key: "label", value };
+      const request: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "session-tag", payload };
+      return (await createHandler(ctx, origin)(request, from))?.payload;
+    };
+    expect(await ask("from the scheduler", SCHEDULER_ID)).toMatchObject({ ok: false, code: "refused" });
+    expect(await ask("from the local socket", "app", "local")).toMatchObject({ ok: false, code: "refused" });
+    expect(on.table.tagsFor(p)?.["owner.label"]).toBeUndefined();
+    expect(await ask("release notes", "app")).toEqual({ ok: true, value: "release notes" });
+    expect(on.table.tagsFor(p)?.["owner.label"]).toEqual({
+      value: "release notes",
+      at: expect.any(Number),
+      scope: "conversation",
+    });
+    expect(await ask("", "app")).toEqual({ ok: true, value: "" });
+    expect(on.table.tagsFor(p)?.["owner.label"]).toBeUndefined();
+    // No pane, id or label in a line: the key count and the outcome alone.
+    expect(lines.filter((line) => line.startsWith("audit session-tag"))).toEqual([
+      "audit session-tag origin=relay key-count=0 outcome=refused",
+      "audit session-tag origin=local key-count=0 outcome=refused",
+      "audit session-tag origin=relay key-count=1 outcome=set",
+      "audit session-tag origin=relay key-count=1 outcome=cleared",
+    ]);
+    for (const line of lines) expect(line).not.toContain("release notes");
+  });
+
+  test("a tasked session, another conversation in the pane, an unverified claim, two claimants and a gone pane are refused", async () => {
+    const on = labelled();
+    launches.set("t-label", id(31));
+    const tasked = await claudePane("t-label");
+    await report(tasked.pid, claim(id(31)), on.events);
+    await pollUntil(() => sessionOf(tasked.pane, on.table)?.verified === true, "the ledger's verification");
+    expect(await on.table.label(tasked.pane, id(31), "x")).toEqual({ ok: false, code: "tasked" });
+
+    const { pane: p } = await verified(on, id(32));
+    expect(await on.table.label(p, id(33), "x")).toEqual({ ok: false, code: "moved" });
+
+    const unverifiable = await claudePane();
+    await report(unverifiable.pid, claim(id(34)), on.events);
+    await pollUntil(() => sessionOf(unverifiable.pane, on.table) !== null, "the claim retained");
+    expect(await on.table.label(unverifiable.pane, id(34), "x")).toEqual({ ok: false, code: "unverified" });
+
+    const twin = await claudePane();
+    await report(twin.pid, claim(id(32)), on.events);
+    await pollUntil(() => sessionOf(p, on.table)?.conflict === true, "the conflict");
+    expect(await on.table.label(p, id(32), "x")).toEqual({ ok: false, code: "ambiguous" });
+
+    expect(await on.table.label("%999999", id(35), "x")).toEqual({ ok: false, code: "ended" });
+    expect(await readFile(on.path, "utf8").catch(() => null)).toBeNull();
+  });
+
+  test("a label shows only while its conversation's one claimant is verified", async () => {
+    const on = labelled();
+    await loadConversationStore(on.path).setLabel(id(36), "kept");
+    // The table reads its file at boot: one booted before the write would not see it.
+    const fresh = boot({ store: on.path });
+    const { pane: p, pid } = await claudePane();
+    await report(pid, claim(id(36)), fresh.events);
+    await pollUntil(() => sessionOf(p, fresh.table) !== null, "the claim retained");
+    // A claimer no file or ledger backs is shown under its own name, never the label.
+    expect(fresh.table.tagsFor(p)?.["owner.label"]).toBeUndefined();
+    await writeSessionFile(pid, id(36));
+    await report(pid, claim(id(36)), fresh.events);
+    await pollUntil(() => fresh.table.tagsFor(p)?.["owner.label"]?.value === "kept", "the label once verified");
+    const twin = await claudePane();
+    await report(twin.pid, claim(id(36)), fresh.events);
+    await pollUntil(() => sessionOf(p, fresh.table)?.conflict === true, "the conflict");
+    expect(fresh.table.tagsFor(p)?.["owner.label"]).toBeUndefined();
+    expect(fresh.table.tagsFor(twin.pane)?.["owner.label"]).toBeUndefined();
+  });
+
+  test("a daemon restart keeps the label", async () => {
+    const on = labelled();
+    const { pane: p } = await verified(on, id(37));
+    expect(await on.table.label(p, id(37), "kept across")).toEqual({ ok: true });
+    const restarted = boot({ store: on.path });
+    // The idle pane's own read verifies it again, with no report.
+    await restarted.table.sweep();
+    expect(restarted.table.tagsFor(p)?.["owner.label"]?.value).toBe("kept across");
   });
 });
