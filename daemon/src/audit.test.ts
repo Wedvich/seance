@@ -15,6 +15,7 @@ import {
   enqueueAudit,
   queueAudit,
   messageAudit,
+  watchAudit,
   spawnAudit,
   traitRefusalAudit,
   type AuditSink,
@@ -478,5 +479,23 @@ describe("adapterAudit", () => {
       "audit adapter origin=adapter op=stop name=tg",
     ]);
     expect(emitted()).not.toContain("secret-value");
+  });
+});
+
+describe("watchAudit", () => {
+  test("each op is one line of closed values, with - for what is absent", async () => {
+    const audit = watchAudit(collect);
+    await audit({ op: "add", kind: "pr", outcome: "ok" });
+    await audit({ op: "add", outcome: "too_many" });
+    await audit({ op: "remove", outcome: "unknown" });
+    await audit({ op: "event", kind: "run", event: "completed", outcome: "delivered" });
+    await audit({ op: "end", kind: "pr", reason: "terminal" });
+    expect(collected).toEqual([
+      "audit watch origin=watch op=add kind=pr event=- reason=- outcome=ok",
+      "audit watch origin=watch op=add kind=- event=- reason=- outcome=too_many",
+      "audit watch origin=watch op=remove kind=- event=- reason=- outcome=unknown",
+      "audit watch origin=watch op=event kind=run event=completed reason=- outcome=delivered",
+      "audit watch origin=watch op=end kind=pr event=- reason=terminal outcome=-",
+    ]);
   });
 });

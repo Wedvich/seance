@@ -17,6 +17,7 @@ import {
   type SpawnRequest,
   type SuccessorTrigger,
   type UpdateOutcome,
+  type WatchNoteBody,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
 import type { BrokerErrorCode, BrokerSchedulerOp } from "./broker-protocol.ts";
@@ -25,6 +26,7 @@ import type { CloseRefusal, CustodianReplyCode, KeptWhy } from "./custodian-fram
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
+import type { WatchReplyCode } from "./watch-frame.ts";
 
 /**
  * The first question when a line looks unfamiliar. `cli` at 2pm is the human at
@@ -967,6 +969,47 @@ export function messageAudit(sink: AuditSink): MessageAudit {
             : "custodian";
     await sink(
       `audit message origin=${origin} dir=${line.dir} from=${from} to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes ?? "-"} outcome=${line.outcome}`,
+    );
+  };
+}
+
+export type WatchOrigin = "watch";
+
+/** Why a watch left the table (`watches.ts`), the closed set `op=end` writes. */
+export type WatchEndReason =
+  | "terminal"
+  | "unreadable"
+  | "session"
+  | "task"
+  | "ended"
+  | "expired"
+  | "invalid"
+  | "replaced"
+  | "nolistener"
+  | "dropped"
+  | "restart";
+
+export interface WatchAuditLine {
+  readonly op: "add" | "remove" | "event" | "end";
+  readonly kind?: "pr" | "run";
+  /** A note's kind: a `watch-event` body's, or `no_leader`, `expired`, `invalid`, `fleet_full`. */
+  readonly event?: WatchNoteBody["kind"];
+  readonly reason?: WatchEndReason;
+  /** `ok` or a refusal's code for an add or remove; `delivered` or `sent` for a note. */
+  readonly outcome?: WatchReplyCode | "ok" | "delivered" | "sent";
+}
+
+export type WatchAudit = (line: WatchAuditLine) => Promise<void>;
+
+/**
+ * A watch's lifecycle (DESIGN.md, "Watches"): every value is from a closed set above, so there is nothing to quote and
+ * nothing user-supplied to leak. Never a URL, owner, repo, number, head, check name or watch id.
+ */
+export function watchAudit(sink: AuditSink): WatchAudit {
+  const origin: WatchOrigin = "watch";
+  return async (line) => {
+    await sink(
+      `audit watch origin=${origin} op=${line.op} kind=${line.kind ?? "-"} event=${line.event ?? "-"} reason=${line.reason ?? "-"} outcome=${line.outcome ?? "-"}`,
     );
   };
 }
