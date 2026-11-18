@@ -10,6 +10,8 @@ import {
   type AdapterWant,
   type AdapterDaemonFrame,
   type DaemonHello,
+  type DeliverFrame,
+  type TagFrame,
 } from "@seance/shared";
 import type { AdapterAudit, AdapterReason } from "./audit.ts";
 import type { AdapterConfig } from "./config.ts";
@@ -58,6 +60,10 @@ export interface SupervisorDeps extends SupervisorTiming {
   readonly audit: AdapterAudit;
   /** Once both hellos are through, and on each `resync`: the snapshot to send now, read synchronously from the feed. */
   readonly snapshot: () => AdapterDaemonFrame;
+  /** Both hellos are through, before the snapshot: a fresh start, so what the last run set (its tags) is cleared. */
+  readonly onReady?: () => void;
+  /** A `deliver` or `tag` past the handshake; answered by the host with a `result` through `send`. */
+  readonly onFrame?: (frame: DeliverFrame | TagFrame) => void;
   /** Whether a start must wait: the daemon is draining for a restart. Asked before each start. */
   readonly held?: () => boolean;
   readonly now?: () => number;
@@ -65,8 +71,13 @@ export interface SupervisorDeps extends SupervisorTiming {
 
 export interface AdapterSupervisor {
   readonly start: () => void;
-  /** Sends `frame` when the adapter is past its handshake and `wants` it; dropped otherwise (a restart snapshots afresh). */
-  readonly send: (frame: AdapterDaemonFrame) => void;
+  /**
+   * Sends `frame` when the adapter is past its handshake and `wants` it; dropped otherwise (a restart snapshots
+   * afresh). False when nothing was written: not running, not past the handshake, not wanted, or ending.
+   */
+  readonly send: (frame: AdapterDaemonFrame) => boolean;
+  /** What the running adapter's hello asked for; null while none is past its handshake. */
+  readonly wants: () => readonly AdapterWant[] | null;
   readonly state: () => SupervisorState;
   /** Stdin closed, SIGTERM to the group, SIGKILL after `killAfterMs`; resolves once the child is gone. */
   readonly stop: () => Promise<void>;
@@ -167,16 +178,17 @@ export function createAdapterSupervisor(deps: SupervisorDeps): AdapterSupervisor
     }
   };
 
-  const write = (current: Run, frame: AdapterDaemonFrame): void => {
-    if (current.ending !== null) return;
+  const write = (current: Run, frame: AdapterDaemonFrame): boolean => {
+    if (current.ending !== null) return false;
     const line = encodeDaemonFrame(frame);
     current.unread += bytesOf(line);
     if (current.unread > unreadMax) {
       end(current, "unread");
-      return;
+      return false;
     }
     current.queue.push(line);
     void pump(current);
+    return true;
   };
 
   const refuse = (current: Run, reason: AdapterReason): void => {
@@ -214,15 +226,24 @@ export function createAdapterSupervisor(deps: SupervisorDeps): AdapterSupervisor
       current.ready = true;
       current.wants = frame.wants;
       state = "running";
+      deps.onReady?.();
       sendSnapshot(current);
       return;
     }
-    // `resync`: only past the handshake, where nothing else flows before both hellos.
+    // Only past the handshake, where nothing else flows before both hellos.
     if (!current.ready) {
       invalid(current);
       return;
     }
-    sendSnapshot(current);
+    if (frame.kind === "resync") {
+      sendSnapshot(current);
+      return;
+    }
+    if (deps.onFrame === undefined) {
+      write(current, { kind: "error", code: "unsupported" });
+      return;
+    }
+    deps.onFrame(frame);
   };
 
   const sendSnapshot = (current: Run): void => {
@@ -406,10 +427,11 @@ export function createAdapterSupervisor(deps: SupervisorDeps): AdapterSupervisor
       if (state === "held") state = "stopped";
       launch();
     },
-    send: (frame): void => {
-      if (run === null || !run.ready || !adapterWants(run.wants, frame)) return;
-      write(run, frame);
+    send: (frame): boolean => {
+      if (run === null || !run.ready || !adapterWants(run.wants, frame)) return false;
+      return write(run, frame);
     },
+    wants: () => (run === null || !run.ready ? null : run.wants),
     state: () => state,
     stop: async (): Promise<void> => {
       if (stopping) return;

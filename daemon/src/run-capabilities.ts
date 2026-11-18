@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { CustodianEvent, CustodianStatus, QuotaReading, RepoEntry } from "@seance/shared";
 import { createAdapterFeed } from "./adapter-feed.ts";
 import { startAdapterHost } from "./adapter-host.ts";
+import { openSubscriptions } from "./adapter-subscriptions.ts";
 import { attachmentsRoot } from "./attachments.ts";
 import {
   adapterAudit,
@@ -87,6 +88,7 @@ import { createMessages, type Messages } from "./messages.ts";
 import { appRelayClient, LazyRelay } from "./app-relay.ts";
 import {
   adaptersDir,
+  conversationsPath,
   custodianActivityPath,
   custodianRoundsPath,
   custodianSessionsPath,
@@ -312,8 +314,14 @@ const sessionEvents: DaemonCapability = (ctx) => {
         });
   // Beside session events because that capability owns pane binding, the peer warnings above and the `ended` frame
   // that clears a pane's held messages: a second capability would need a late-bound hook into it.
+  const conversations = createConversations({
+    configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
+    launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
+    panes: listPanePids,
+  });
   const messages = createMessages({
     panes: listPanePids,
+    conversations,
     windowName: paneWindowName,
     launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
     machine: ctx.config.name,
@@ -342,11 +350,6 @@ const sessionEvents: DaemonCapability = (ctx) => {
     path: watchesPath(),
     audit: watchAudit(daemonSink),
     now: ctx.now,
-  });
-  const conversations = createConversations({
-    configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
-    launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
-    panes: listPanePids,
   });
   const events = createSessionEvents({
     panes: listPanePids,
@@ -473,6 +476,7 @@ export async function adaptersSettled(): Promise<void> {
 const adapters: DaemonCapability = (ctx) => {
   const configured = ctx.config.adapters;
   const conversations = conversationsOf.get(ctx);
+  const messages = messagesOf.get(ctx);
   if (configured === undefined || Object.keys(configured).length === 0 || conversations === undefined) {
     return { stop: (): void => {} };
   }
@@ -484,6 +488,10 @@ const adapters: DaemonCapability = (ctx) => {
   });
   const host = startAdapterHost({
     adapters: configured,
+    conversations,
+    subscriptions: openSubscriptions(conversationsPath()),
+    launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
+    ...(messages === undefined ? {} : { messages }),
     feed,
     taskRepo: (taskId) => ctx.endedTasks.taskRepo(taskId),
     machine: { deviceId: ctx.deviceId, name: ctx.config.name },

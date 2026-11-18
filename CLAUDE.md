@@ -55,15 +55,16 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — spec, PR 1, PR 2, the reply by handle and the adapter seam's 3a (the child and state out) built: local delivery (the `inbox` mod, the `inbox`
+- **docs/messaging.md** — spec, PR 1, PR 2, the reply by handle and the adapter seam's 3a (the child and state out) and 3b (delivery in, messages out, the subscription) built: local delivery (the `inbox` mod, the `inbox`
   and `message` frames, `send_message`), cross-machine routing through the leader (`session-message`,
   `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`) and replies to a session with no task, by the id of
   the message answered, on one machine or across (`replyTo`, `CAPABILITIES.messageReply`, `wake`; D3 amended), recorded
   in DESIGN.md (Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections;
   "Adapters" for 3a: `config.json` `adapters`, the supervisor, the handshake, `snapshot`, `session`, `session-gone`,
-  `task`, `shared/src/adapter-protocol.ts` and its committed JSON Schema, audit origin `adapter`; Claude Code mods; MCP
-  server; Threat model item 6). What is left in the file is the adapter seam's 3b (delivery in, messages out, the
-  subscription) and 3c (installing), the open questions and the spike evidence. Read it before adding a leader event op or an adapter.
+  `task`, `shared/src/adapter-protocol.ts` and its committed JSON Schema, audit origin `adapter`; for 3b: `deliver`,
+  `result`, `delivery`, the `message` frame out, `adapter:<name>` in `send_message`, the subscription in
+  `conversations.json`, the `tag` frame; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
+  the adapter seam's 3c (installing), the open questions and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
 - **docs/gh-watch.md** — spec, build steps 1 to 3 built (`askGithub`'s `limited` class, the poll queries' in-query
   `rateLimit` and the reset-time backoff, the leader's side of the watches: its registry, the run query, the reserve
@@ -98,8 +99,8 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - **docs/tags.md** — spec: tags at task and session scope (namespace = writer), session identity
   (pane, process, conversation; a verified `agent.session`) and the adapter subscription that amends messaging's D3.
   Step 1 is built (the vocabulary in `shared/src/tags.ts`, the frame's `agent`, the conversation table and its
-  verification, `SessionEntry.tags`), recorded in DESIGN.md, "Session events", "Session identity"; owner labels, task
-  tags and the subscription are not. Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
+  verification, `SessionEntry.tags`), recorded in DESIGN.md, "Session events", "Session identity", and so is step 4
+  (the adapter subscription and adapter tags, DESIGN.md "Adapters"); owner labels and task tags are not. Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -235,7 +236,9 @@ green:
   values only: op, kind, event, reason, outcome — never a URL, owner, repo, number, head, check name or watch id),
   `adapter` for the daemon starting, restarting, refusing, holding as `failed` and stopping a configured adapter (its
   name, `argv`'s word count and `argv[0]`'s basename, an exit code and a reason, never another argv word or anything the
-  adapter wrote),
+  adapter wrote), and for each message an adapter delivers or a session sends one (`op=deliver dir=in`, `op=message
+  dir=out`: a task id or the constant `session`/`reply`, kind, byte count, outcome and code, never text, a `from`
+  label, a message or conversation id),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
   `leader` for the scheduler loop dispatching to its own machine in
@@ -449,8 +452,8 @@ green:
   `isRemoteSessionId`) passes it, display-only (`agent.remote` is the PWA's claude.ai link) and never used to bind, route
   or move anything; `agent.session` is verified only against the launch ledger or the `claude` process's own
   `sessions/<pid>.json`, opened as `custodian-remote.ts` opens it (`readSessionFile`), re-read at each act (`atAct`), a
-  refuted claim dropped, and is to be used only to address adapter delivery and the owner's `session-tag` (docs/tags.md
-  §8, §3.1; neither built), never a reply — and `reason`, kept only as a known
+  refuted claim dropped, and is used only to address adapter delivery through a subscription (`toSession`, docs/tags.md
+  §8, built) and, later, the owner's `session-tag` (§3.1, not built), never a reply — and `reason`, kept only as a known
   `NEEDS_INPUT_REASONS` value (`question` or `permission`) beside `needs-input` (dropped otherwise,
   never the event), whose effects on behaviour are `question` making the leader alert that
   needs-input stay at once instead of after its debounce (`questionAlert`), only for the task's
@@ -505,8 +508,11 @@ green:
   Nothing reachable from `seance mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
-  **A session with no task is reached only as a reply, by the id of a message it sent** (DESIGN.md, "Session messages",
-  "Replies by handle"; docs/messaging.md D3, amended). A `message` frame carries `inReplyTo` and no `to` (or the same id as
+  **A session with no task is reached only as a reply, by the id of a message it sent, or by an adapter on its own
+  machine through a subscription the session made by messaging it, keyed by its verified conversation id**
+  (DESIGN.md, "Session messages", "Replies by handle", and "Adapters"; docs/messaging.md D3, amended; docs/tags.md §8):
+  the subscription kept at rest in `conversations.json`, refused when two live processes claim the id, usable only over
+  that adapter's stdin. A `message` frame carries `inReplyTo` and no `to` (or the same id as
   `to`, which is the same reply). Two memory-only tables, 1 h and 256 entries each (past the cap the oldest entry of the busiest pane goes, a note's before a question's), hold a handle:
   `sent` (ids this daemon minted, for the asker) and `received` (ids placed in a pane, for the replier). A message id is
   `crypto.randomUUID`, so the id is a bearer handle and no audit line, log line or warn carries one (the audit names the
@@ -526,7 +532,8 @@ green:
   while that machine advertises `CAPABILITIES.messageReply` (`unsupported` otherwise), with `origin` the sealer's id
   (what a later reply routes back to), and the target daemon's own `sent` table decides. `wake` is on an inbox line only
   when the daemon's own `sent` table says the message answers a question or request that this pane's session sent (never
-  from a frame), and only on that session's listener; the mod then submits even a note. A client sends a reply to
+  from a frame), and only on that session's listener, or when an adapter's `deliver` carried `wake: true` (the
+  adapter's own frame, on stdin, never a session's); the mod then submits even a note. A client sends a reply to
   another machine only after the same verified-leader gate, now for `messageReply` (`messageRouteGate("reply")`).
   **A message to a task not deliverable on its machine goes through the leader, which keeps nothing**
   (DESIGN.md, "Session messages", "Cross-machine"). A `message` frame carries `route` only as `"ask"` or
@@ -606,8 +613,23 @@ green:
   ledger holds. `closed` is read only from the despawn's own note (`closing-panes.ts`), never a log. Nothing an adapter
   writes, and no argv word but `argv[0]`'s basename, reaches a log or an audit line: the adapter modules load neither
   `log.ts` nor `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`). An adapter runs as the owner's uid, so
-  these rules bound what Séance grants, never what the program can do. Giving the seam another act (3b's delivery and
-  messages out, 3c's installing) is a threat-model change, made in DESIGN.md with it.
+  these rules bound what Séance grants, never what the program can do. Its other acts are 3b's, and only these:
+  `deliver` (`Messages.deliverFromAdapter`), checked against `kinds` first, never routed, to a task this machine's
+  launch ledger holds at a live pane carrying it, to a conversation subscribed to it re-verified at the act
+  (`atAct`: `ambiguous`, `unverified`, `ended`), or by `inReplyTo` only to a message a session sent that adapter (its
+  `sent` entry names it), `repos` bounding every address, within its own bucket (`ADAPTER_RATE`) and the target's, in
+  the adapter wrapper (`renderAdapterMessage`, `from` a display label through `displayTitle`) by the mod's local
+  delivery, never a key; a `message` frame out only for a session's `send_message` to `adapter:<name>`, bound by peer
+  pid, refused `unbound` with no `claude` process on the peer's chain and `refused` outside `repos`, sent only to an
+  adapter whose hello wants `messages`, carrying an `inReplyTo` only when it names that adapter's delivery to that same
+  session; a subscription (`adapter-subscriptions.ts`) made only from the sender's bound process's verified
+  conversation that it alone claims (`verifiedFor`), never from a frame, never by a reply by handle, kept 0600 in
+  `conversations.json` with ids, names, fingerprints and times only (an unreadable file loads empty), ended by `leave`,
+  30 days not live, the cap, or the name gone or configured as another program; and a `tag` only under its own
+  `adapter.<name>.*` on a conversation subscribed to it or a task this ledger holds, within `repos`, in memory only,
+  cleared at each handshake, never shown to another adapter or MCP. Every message either way is audited under origin
+  `adapter`, never `message`. Giving the seam another act (3c's installing) is a threat-model change, made in
+  DESIGN.md with it.
 - **The `custodian` frame kind is served only on the round's own socket** (`custodian-socket.ts`,
   `/tmp/seance-cu-s-<mkdtemp>/c.sock`, the directory kept in the seat record's `socketDir` and reused only while `lstat`
   shows it the daemon's own, else made fresh: a 0700 directory checked with `lstat`, a 0600 socket, 64 KiB

@@ -1,7 +1,8 @@
 # Session messaging — spec
 
 **Status: PR 1 (local delivery) built 2026-11-13, PR 2 (cross-machine) and the reply by handle (D3, amended)
-built 2026-11-14; PR 3 (adapter seam): 3a (the child and state out) built 2026-11-18, 3b and 3c not built; §6 revised 2026-11-14, and again 2026-11-17 to build on docs/tags.md
+built 2026-11-14; PR 3 (adapter seam): 3a (the child and state out) and 3b (delivery in and messages out, the
+subscription) built 2026-11-18, 3c not built; §6 revised 2026-11-14, and again 2026-11-17 to build on docs/tags.md
 (draft PR #533: session identity, tags, the adapter subscription).** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
 Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
 macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
@@ -11,8 +12,9 @@ and its text here goes. PR 1's and PR 2's record is in DESIGN.md: Local op socke
 (the frames, the daemon's inbox, the outcomes, the wrappers, the audit) and its "Cross-machine"
 subsection (the gate, the leader's resolve, forward and receipt, the size budget, the skew table) and its
 "Replies by handle" subsection (the two tables, the `claude`-process binding, `wake`, `messageReply`),
-Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. PR 3a's record is DESIGN.md,
-"Adapters". What stays here is the evidence, PR 3's whole design (3b and 3c build on it), and the open questions.
+Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. PR 3a's and 3b's record is
+DESIGN.md, "Adapters" (and "Replies by handle" for the adapter as a party to a handle). What stays here is the
+evidence, PR 3's whole design (3c builds on it), and the open questions.
 
 ## Problem
 
@@ -135,7 +137,8 @@ leader (DESIGN.md, "Cross-machine"). The audit gained `dir=receipt`.
   **Amended again 2026-11-17 (decided by the owner, docs/tags.md §8):** "… or, by an adapter on its own machine, through the
   subscription the session made by messaging that adapter", keyed by its verified conversation id (`agent.session`)
   for the conversation's life. The hour bounds a reply handle because the handle is a bearer; a subscription is the
-  session's own act, usable only over that adapter's stdin, so the hour does not apply to it (§6.2).
+  session's own act, usable only over that adapter's stdin, so the hour does not apply to it (§6.2). Built
+  2026-11-18 with 3b: DESIGN.md, "Adapters", "The subscription".
   **Rejected**, each in §2's list: machine + pane id as a general address; a synthetic task id or queue entry for a
   hand-started session; a leader-held reply table; the Claude session id; replies on one machine only.
 - **D4. Wake by kind.** A question or request wakes an idle session; a note does not (§1). Built: a note is a
@@ -249,10 +252,12 @@ the daemons', with the outcomes of §3 added to the built set.
 
 Revised 2026-11-14 from the owner's brief for PR 3 and the 2026-11-13 memo. Three PRs, §7 item 3. **3a (the child
 and state out) is built 2026-11-18**, recorded in DESIGN.md, "Adapters": §6.1's handshake, versioning, supervision and
-the state-out frames, `config.json` `adapters`, and the lifecycle audit lines. Deliveries in, messages out, the
-subscription, `kinds` and the `deliver`, `tag`, `result`, `delivery` and `message` frames (3b), and installing (3c),
-are not. 3a sends `Session` without `task.title` and `task.ref`, and `task` without `continues` (the daemon's ledger
-notes none of them), and already applies `repos` to state out.
+the state-out frames, `config.json` `adapters`, and the lifecycle audit lines. **3b (deliveries in, messages out, the
+subscription, `kinds` and the `deliver`, `tag`, `result`, `delivery` and `message` frames) is built 2026-11-18**, in
+the same section. Installing (3c) is not. `Session` still goes without `task.title` and `task.ref`, and `task` without
+`continues` (the daemon's ledger notes none of them). Until 3c, a name's subscriptions are dropped at the daemon's
+start when the name is gone from `config.json` or its `argv` or recorded `commit` changed; `seance adapter add` will
+drop them explicitly (`Subscriptions.drop`).
 
 **What the owner decided (the brief, 2026-11-14).**
 
@@ -615,7 +620,7 @@ Small PRs, each landing on its own:
      `snapshot`, `session` (with `session`, `name` and `tags`), `session-gone` with its `reason`, and `task`, `shared/src/adapter-protocol.ts` and its committed JSON
      Schema, the reference adapter, and audit origin `adapter`'s lifecycle lines. Useful alone: an
      output-only tool works after it.
-   - **3b. Delivery in and messages out.** `deliver`, `result` and `delivery`, `kinds` and `repos` (both directions),
+   - **3b. Delivery in and messages out. Built 2026-11-18; the record is DESIGN.md, "Adapters".** `deliver`, `result` and `delivery`, `kinds` and `repos` (both directions),
      the adapter wrapper in `shared/src/messages.ts`, the rate buckets, `adapter:<name>` in `send_message` and
      the `message` frame out, replies both ways through the `sent` table, the subscription (docs/tags.md §8:
      `conversations.json`, `toSession`, `subscribed`, `leave`, `ambiguous`, `unverified`, `send_message` returning

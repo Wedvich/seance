@@ -97,6 +97,11 @@ export function adaptersDir(): string {
   return join(stateDir(), "adapters");
 }
 
+/** The adapter subscriptions kept at rest (docs/tags.md §3.2, §8): 0600, the daemon's own. */
+export function conversationsPath(): string {
+  return join(stateDir(), "conversations.json");
+}
+
 /** The custodian seat's own files (docs/custodian.md): the notes, and the default exclave's round dir. */
 export function custodianDir(): string {
   return join(stateDir(), "custodian");

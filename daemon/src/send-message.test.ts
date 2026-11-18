@@ -113,6 +113,7 @@ describe("sendMessage", () => {
       held: "is starting on this machine and has no session yet; nothing was kept",
       remote: "cannot route through the scheduler",
       no_leader: "could not reach a scheduler leader",
+      refused: "does not serve this session's repository",
     } as const;
     expect(Object.keys(wording).toSorted()).toEqual([...MESSAGE_REPLY_CODES].toSorted());
     for (const [code, text] of Object.entries(wording)) {
@@ -126,6 +127,48 @@ describe("sendMessage", () => {
       } finally {
         fake.stop();
       }
+    }
+  });
+
+  test("to an adapter: one exchange, the subscribed conversation named, `leave` carried, refusals naming the adapter", async () => {
+    const id = "11111111-2222-4333-8444-555555555555";
+    const session = "00000001-aaaa-4bbb-8ccc-dddddddddddd";
+    const subscribed = daemon(
+      "adapter-sub.sock",
+      JSON.stringify({ ok: true, id, outcome: "delivered", subscribed: true, session, adapter: "tg" }),
+    );
+    try {
+      const result = await sendMessage({ to: "adapter:tg", kind: "question", text: "hi" }, { path: subscribed.path });
+      expect(result).toMatchObject({ ok: true, session });
+      expect(result.text).toContain(`This conversation, ${session}, is subscribed`);
+      expect(subscribed.frames).toEqual([
+        { v: 1, kind: "message", to: "adapter:tg", messageKind: "question", text: "hi" },
+      ]);
+    } finally {
+      subscribed.stop();
+    }
+    const left = daemon(
+      "adapter-leave.sock",
+      JSON.stringify({ ok: true, id, outcome: "delivered", subscribed: false }),
+    );
+    try {
+      const result = await sendMessage({ to: "adapter:tg", kind: "note", text: "", leave: true }, { path: left.path });
+      expect(result.ok).toBe(true);
+      expect(result).not.toHaveProperty("session");
+      expect(result.text).toContain("subscription to it has ended");
+      expect(left.frames).toEqual([
+        { v: 1, kind: "message", to: "adapter:tg", messageKind: "note", text: "", leave: true },
+      ]);
+    } finally {
+      left.stop();
+    }
+    const refused = daemon("adapter-refused.sock", JSON.stringify({ ok: false, code: "unknown" }));
+    try {
+      const result = await sendMessage({ to: "adapter:tg", kind: "note", text: "x" }, { path: refused.path });
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("no adapter named tg");
+    } finally {
+      refused.stop();
     }
   });
 

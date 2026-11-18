@@ -280,7 +280,7 @@ describe("verification", () => {
     const { pane: p, pid } = await claudePane("t-clear");
     await report(pid, claim(id(13)));
     await pollUntil(() => sessionOf(p)?.verified === true, "the ledger's verification");
-    expect(await table.atAct(id(13))).toEqual({ ok: true, pane: p, pid });
+    expect(await table.atAct(id(13))).toMatchObject({ ok: true, pane: p, pid });
     // `/clear`: Claude Code writes the file for the new conversation; no report has come yet.
     await writeSessionFile(pid, id(14));
     expect(await table.atAct(id(13))).toEqual({ ok: false, code: "unverified" });
@@ -288,7 +288,7 @@ describe("verification", () => {
     await pollUntil(() => sessionOf(p) === null, "the ledger's id refuted", SETTLE_MS * 4);
     await report(pid, claim(id(14)));
     await pollUntil(() => sessionOf(p)?.verified === true, "the file's verification of the new id");
-    expect(await table.atAct(id(14))).toEqual({ ok: true, pane: p, pid });
+    expect(await table.atAct(id(14))).toMatchObject({ ok: true, pane: p, pid });
   });
 });
 

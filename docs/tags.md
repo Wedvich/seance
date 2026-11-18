@@ -1,8 +1,9 @@
 # Tags, session identity and the adapter subscription — spec
 
 **Status: draft 2026-11-17; build step 1 built 2026-11-17** (the vocabulary, the frame's `agent`, the conversation
-table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record).
-Steps 2–4 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
+table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record);
+step 4 (§8, the adapter subscription and adapter tags) built 2026-11-18 with docs/messaging.md's 3b (DESIGN.md,
+"Adapters", and "Replies by handle" for §4.4's amended rejection). Steps 2 and 3 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
 proposed, with a recommendation where there is a choice. Two drafts build on this file: docs/presence.md (draft PR
 #526: `self.doing`, `set_self_tag`, the `tags` map on `SessionEntry`), which already fixes the first key and must stay
 valid under this model, and docs/messaging.md §6 (draft PR #486: the adapter seam), whose `Session` record, addressing
@@ -808,6 +809,6 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
      two ref tags reach a row; `get_queue` showing `creator.ref` and never `creator.ref-url`, an opaque `creator.*`,
      `agent.session` or `self.*`; an e2e test queueing a task with a ref to a two-daemon fleet and reading it back
      in the queue, ending it through `cancelTask`.
-4. **The adapter subscription** lands with #486's PR 3b (docs/messaging.md §6, as revised): `subscribed`,
+4. **The adapter subscription.** **Built 2026-11-18** with docs/messaging.md's 3b (DESIGN.md, "Adapters"). Lands with #486's PR 3b (docs/messaging.md §6, as revised): `subscribed`,
    `toSession`, `leave`, `ambiguous`, adapter `tag` frames, the at-rest subscriptions, `adapter add` dropping a
    name's subscriptions. Its tests are listed there.
