@@ -98,8 +98,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - **docs/tags.md** — spec: tags at task and session scope (namespace = writer), session identity
   (pane, process, conversation; a verified `agent.session`) and the adapter subscription that amends messaging's D3.
   Step 1 is built (the vocabulary in `shared/src/tags.ts`, the frame's `agent`, the conversation table and its
-  verification, `SessionEntry.tags`), recorded in DESIGN.md, "Session events", "Session identity"; owner labels, task
-  tags and the subscription are not. Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
+  verification, `SessionEntry.tags`), recorded in DESIGN.md, "Session events", "Session identity"; so is step 2 (the
+  `session-tag` op, `conversations.json`, the PWA's session names and rename), in "Session identity", "The owner's
+  label"; task tags and the subscription are not. Read it before adding a field that labels a session or a task, or touching session identity or adapter addressing.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -375,6 +376,15 @@ green:
   draining; `MachineStatus.dr` is sent only beside `cl` and never trimmed by `fitStatus`; and the leader's outside pass
   drains a machine only from `drainStart` (`shared/src/status-reader.ts`: `dr`, else `cl` for a daemon not advertising
   `CAPABILITIES.softClose`, else never).
+- **A session's name is the owner's sealed act too** (DESIGN.md, "Session identity", "The owner's label"): the daemon
+  answers `session-tag` only when sealed `from: "app"` on the relay leg, parsed by `parseSessionTagRequest`, audited
+  without a payload (`key-count` and `outcome`, never the label or an id), and neither `LOCAL_OPS`, `BROKER_OPS` nor MCP
+  carries it, so a session never names itself as the owner. It acts only on an untasked pane's newest live `claude`
+  whose conversation is the one named, verified and unconflicted, re-checked with `atAct` at the act (`tasked`, `moved`,
+  `unverified`, `ambiguous`, `ended` otherwise). The label is the one text in the daemon's 0600 `conversations.json`
+  (written whole through `writeDurable`, at most 256 entries, a 30-day idle prune, a file it cannot read loading
+  empty), never logged, and joined as `owner.label` only while that conversation's one claimant is verified. The PWA
+  offers rename only for a connected machine advertising `CAPABILITIES.sessionTag`.
 - **The custodian's controls are the owner's sealed act too** (DESIGN.md, "The custodian's status and the Machines
   row"): the daemon answers `custodian` (round now, pause, resume) only when sealed `from: "app"` on the relay leg,
   parsed by `parseCustodianRequest`, audited without a payload, and neither `LOCAL_OPS`, `BROKER_OPS` nor MCP carries
@@ -447,8 +457,8 @@ green:
   `isRemoteSessionId`) passes it, display-only (`agent.remote` is the PWA's claude.ai link) and never used to bind, route
   or move anything; `agent.session` is verified only against the launch ledger or the `claude` process's own
   `sessions/<pid>.json`, opened as `custodian-remote.ts` opens it (`readSessionFile`), re-read at each act (`atAct`), a
-  refuted claim dropped, and is to be used only to address adapter delivery and the owner's `session-tag` (docs/tags.md
-  §8, §3.1; neither built), never a reply — and `reason`, kept only as a known
+  refuted claim dropped, and is used only to address the owner's `session-tag` (built: the bullet beside "Closing a
+  machine" above) and adapter delivery (docs/tags.md §8, not built), never a reply — and `reason`, kept only as a known
   `NEEDS_INPUT_REASONS` value (`question` or `permission`) beside `needs-input` (dropped otherwise,
   never the event), whose effects on behaviour are `question` making the leader alert that
   needs-input stay at once instead of after its debounce (`questionAlert`), only for the task's
