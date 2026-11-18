@@ -11,6 +11,12 @@ import {
   displayName,
   joinTags,
   parseTags,
+  splitTagKey,
+  displayLine,
+  httpsUrl,
+  taskTagEntries,
+  TAG_NAMESPACES,
+  type TagScope,
   type DisplayNameSource,
   type JoinedTag,
   type SessionTag,
@@ -153,6 +159,77 @@ export interface SessionRow {
    * verified, on a connected machine advertising `sessionTag` over an open relay. `label` is the owner's now, `""` for none.
    */
   readonly rename: { readonly pane: string; readonly session: string; readonly label: string } | null;
+  /** Its joined tags by namespace (DESIGN.md, "Tags and session identity"), shown folded under the row. */
+  readonly tags: readonly SessionTagGroup[];
+}
+
+/** One namespace of a session's joined tags, named by its writer: the namespace is the writer (T1). */
+export interface SessionTagGroup {
+  readonly namespace: string;
+  readonly writer: string;
+  readonly tags: readonly SessionTagLine[];
+}
+
+export interface SessionTagLine {
+  readonly suffix: string;
+  /** Display text through `displayLine`, never markup. */
+  readonly value: string;
+  /** Only `creator.ref-url`, and only as `httpsUrl` passes it. */
+  readonly url: string | null;
+  readonly scope: TagScope;
+  /** Only a verified `agent.session`. */
+  readonly verified: boolean;
+  /** A task tag's is its task's creation: a record holds no per-key time. */
+  readonly age: Timed;
+}
+
+const WRITERS: Readonly<Record<(typeof TAG_NAMESPACES)[number], string>> = {
+  agent: "the agent's mod and hooks",
+  seance: "the Séance daemon",
+  self: "the session itself",
+  owner: "the owner",
+  creator: "the task's creator",
+  scheduler: "the leader",
+};
+
+const WRITER_BY_NAMESPACE: ReadonlyMap<string, string> = new Map(Object.entries(WRITERS));
+
+function writerOf(namespace: string): string {
+  const fixed = WRITER_BY_NAMESPACE.get(namespace);
+  if (fixed !== undefined) return fixed;
+  return namespace.startsWith("adapter.") ? `adapter ${namespace.slice("adapter.".length)}` : namespace;
+}
+
+const NAMESPACE_ORDER: readonly string[] = ["agent", "self", "seance", "owner", "creator", "scheduler"];
+
+function tagGroups(joined: Readonly<Record<string, JoinedTag>>, now: number): readonly SessionTagGroup[] {
+  const groups = new Map<string, SessionTagLine[]>();
+  for (const [key, tag] of Object.entries(joined)) {
+    const split = splitTagKey(key);
+    if (split === null) continue;
+    const value = displayLine(tag.value);
+    if (value === "") continue;
+    const line: SessionTagLine = {
+      suffix: split.suffix,
+      value,
+      url: key === "creator.ref-url" ? httpsUrl(tag.value) : null,
+      scope: tag.scope,
+      verified: key === "agent.session" && tag.verified === true,
+      age: tag.scope === "task" ? timed`task created ${seen(tag.at, now)}` : timed`${seen(tag.at, now)}`,
+    };
+    groups.set(split.namespace, [...(groups.get(split.namespace) ?? []), line]);
+  }
+  const rank = (namespace: string): number => {
+    const index = NAMESPACE_ORDER.indexOf(namespace);
+    return index === -1 ? NAMESPACE_ORDER.length : index;
+  };
+  return [...groups.entries()]
+    .toSorted(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([namespace, tags]) => ({
+      namespace,
+      writer: writerOf(namespace),
+      tags: tags.toSorted((a, b) => a.suffix.localeCompare(b.suffix)),
+    }));
 }
 
 const NAME_MARKS: Record<DisplayNameSource, string | null> = {
@@ -162,22 +239,24 @@ const NAME_MARKS: Record<DisplayNameSource, string | null> = {
   window: "(window)",
 };
 
-/** `SessionEntry.tags` by scope, then `joinTags`: a session entry carries no task tags (step 3's, from the record). */
-function sessionTagsJoined(entry: SessionEntry): Readonly<Record<string, JoinedTag>> {
+/** `SessionEntry.tags` by scope and its task's record's tags, then `joinTags`: the task's `owner.label` wins. */
+function sessionTagsJoined(entry: SessionEntry, task: Task | undefined): Readonly<Record<string, JoinedTag>> {
   const tags = parseTags(entry.tags, { scope: "session" }) ?? {};
   const at = (scope: "conversation" | "process"): Record<string, SessionTag> =>
     Object.fromEntries(Object.entries(tags).filter(([, tag]) => tag.scope === scope));
-  return joinTags(null, at("conversation"), at("process"));
+  const taskLayer = task === undefined ? null : taskTagEntries(task.spec, task.createdAt);
+  return joinTags(taskLayer, at("conversation"), at("process"));
 }
 
 export function sessionRows(
   entries: readonly SessionEntry[],
   tasks: readonly Task[] | null,
   renameable: boolean,
+  now: number,
 ): readonly SessionRow[] {
   return entries.map((entry) => {
-    const joined = sessionTagsJoined(entry);
     const task = entry.taskId === undefined ? undefined : tasks?.find((t) => t.id === entry.taskId);
+    const joined = sessionTagsJoined(entry, task);
     const name = displayName(joined, task?.spec, entry.window);
     const session = joined["agent.session"];
     const pane = entry.id ?? null;
@@ -189,6 +268,7 @@ export function sessionRows(
         renameable && pane !== null && entry.taskId === undefined && session?.verified === true
           ? { pane, session: session.value, label: joined["owner.label"]?.value ?? "" }
           : null,
+      tags: tagGroups(joined, now),
     };
   });
 }
@@ -647,15 +727,20 @@ function machineCard(
     // Asleep, the seat reports nothing a reader can act on: the row would only ever say `no report yet`.
     custodian: machine.connected ? custodianRow(machine, status, now) : null,
     custodianControls: machine.connected && machine.capabilities?.includes(CAPABILITIES.custodian) === true,
-    sessions: sessionsOfCard(machine, drains, relayOpen),
+    sessions: sessionsOfCard(machine, drains, relayOpen, now),
   };
 }
 
-function sessionsOfCard(machine: Machine, inputs: DrainInputs, relayOpen: boolean): readonly SessionRow[] | null {
+function sessionsOfCard(
+  machine: Machine,
+  inputs: DrainInputs,
+  relayOpen: boolean,
+  now: number,
+): readonly SessionRow[] | null {
   const entries = sessionsOf(inputs, machine.deviceId);
   if (!machine.connected || entries === null) return null;
   const renameable = relayOpen && machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
-  return sessionRows(entries, inputs.tasks, renameable);
+  return sessionRows(entries, inputs.tasks, renameable, now);
 }
 
 interface AccountGroup {

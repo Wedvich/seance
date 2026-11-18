@@ -796,7 +796,9 @@ reading per account, the build its daemon runs, and history charts drawn from ea
 daemon's own store — an asleep machine's history waits until it wakes. Its header
 names who leads the scheduler and under which term, or says no machine does; the
 leader's card carries a **Scheduler** badge, or **Unverified** while its claim to lead
-doesn't check out with your key.
+doesn't check out with your key. Each card lists the machine's sessions by name, and a
+session's **Tags** fold out to show every tag on it by namespace, with who wrote it, its
+scope and its age.
 
 <p align="center">
   <img src="docs/images/machine-sheet.png" width="260"

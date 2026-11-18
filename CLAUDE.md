@@ -104,7 +104,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   task tags: `TaskSpec.tags`, the sentinel, `ownerTags`, `SpawnRequest.ref`; the adapter subscription and adapter tags),
   recorded in DESIGN.md: "Tags and session identity" (the model: the owner's T1–T4, the levels, the vocabulary, the
   surfaces, the rejected alternatives and the threat model), "Session events", "Session identity", "The owner's
-  label", "Task tags", "Adapters". Not built: the PWA's per-namespace view of a session's tags. What is left in the
+  label", "Task tags", "Adapters"; the PWA's per-namespace view of a session's tags is built too. What is left in the
   file is the open questions and the spikes' evidence (S1–S3, macOS and Linux) that verification rests on. Read the
   DESIGN.md section before adding a field that labels a session or a task, or touching session identity or adapter
   addressing.

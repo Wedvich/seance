@@ -2605,13 +2605,16 @@
 
 .fleet-session {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
   font-size: 0.8125rem;
 }
 
+/* flex-basis 0: the name ellipsizes instead of pushing Rename onto the wrapped line. */
 .fleet-session-name {
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2628,6 +2631,70 @@
 .fleet-session-rename {
   flex: none;
   margin-left: auto;
+}
+
+/* Folded under the row, on its own full-width line. */
+.fleet-session-tags {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.fleet-session-tags > summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.session-tag-group {
+  padding: 4px 0 6px 12px;
+}
+
+.session-tag-head {
+  margin: 0 0 2px;
+  color: var(--fg2);
+}
+
+.session-tag-list {
+  margin: 0;
+}
+
+.session-tag {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-tag dt {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow-wrap: anywhere;
+  color: var(--fg2);
+}
+
+.session-tag dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  min-width: 0;
+  margin: 0;
+}
+
+.session-tag-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.session-tag-verified {
+  color: var(--ok);
+}
+
+.session-tag-meta {
+  color: var(--fg2);
+  white-space: nowrap;
 }
 
 /* ---- history chart ---- */

@@ -8857,7 +8857,7 @@ session-chosen text. The reader joins, since no single process holds both scopes
 
 | Surface                                  | Gets                                                                  |
 | ---------------------------------------- | --------------------------------------------------------------------- |
-| PWA (Machines, Queue, task details)      | a session's name and rename; a task's label and ref                   |
+| PWA (Machines, Queue, task details)      | a session's name, rename and joined tags; a task's label and ref      |
 | `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included             |
 | `sessions` op sealed from the scheduler  | none                                                                  |
 | MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                 |
@@ -8866,8 +8866,12 @@ session-chosen text. The reader joins, since no single process holds both scopes
 | `MachineStatus`, push, logs, audit, argv | never                                                                 |
 | archive                                  | `creator.ref`, `creator.ref-url` only                                 |
 
-**Not built: the PWA's per-namespace view** (every namespace with its scope, writer and age, `verified` shown on
-`agent.session`). The PWA reads `SessionEntry.tags` today only to name and rename a session.
+**The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`): each session row on
+the Machines screen folds its joined tags (`SessionEntry.tags` joined with its task's record, `taskTagEntries`) under a
+`Tags` disclosure, grouped by namespace, each group naming its writer from this table and each tag its scope and age,
+`verified` shown on a verified `agent.session`. A task tag's age is its task's creation (a record holds no per-key
+time). Values pass `displayLine`; only `creator.ref-url` is linked, and only as `httpsUrl` passes it. Joining the task
+layer means a task's `owner.label` names its session, over the session's own label and the task's title.
 
 An adapter never sees another adapter's tags: each is a separate third party.
 
@@ -13002,8 +13006,8 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
   conversation's tags show on the process whose verified, unconflicted claim it is. They reach an app's `sessions`
   reply (`SessionEntry.tags`) and that adapter's own records, never another adapter's (`tagsFor`) or MCP
-  (`AGENT_VISIBLE_TAG_KEYS`). The PWA reads `SessionEntry.tags` for a session's name and rename only and shows no
-  adapter tag (the per-namespace view is not built).
+  (`AGENT_VISIBLE_TAG_KEYS`). The PWA reads `SessionEntry.tags` for a session's name and rename and shows adapter
+  tags, display-only, in its per-namespace view ("Tags and session identity").
 - **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
   account id, an absolute path, the PSK or anything derived from it.
 - **Audit**, origin `adapter` (`adapterAudit`), the lifecycle lines and one line per message each way:
