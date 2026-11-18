@@ -674,8 +674,8 @@ describe("when GitHub's budget is spent", () => {
     }
   });
 
-  test("with no reset known, or one past or beyond the window, it backs off on the ladder and says no time", async () => {
-    for (const reset of [null, 1000, 1234 + 2 * 3_600_000]) {
+  test("with no reset known, or one already past, it backs off on the ladder and says no time", async () => {
+    for (const reset of [null, 1000]) {
       const current = gh;
       // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
       await current.setReply(PRIMARY, 1);
@@ -706,8 +706,9 @@ describe("when GitHub's budget is spent", () => {
     const reset = begun + 400;
     await gh.setReply(withBudget(reply({ state: "OPEN" }), reset), 0);
     await gh.setCallReply(2, PRIMARY, 1);
+    // A clock that stands still: the reset stays 400 ms ahead however long a stub exec takes; the wait itself is real.
     const { logs } = start([pr(1)], {
-      now: Date.now,
+      now: () => begun,
       random: () => 0,
       // Later than the in-query reset: were it read, the third poll would not come within the wait below.
       graphqlReset: () => begun + 3_600_000,
@@ -715,7 +716,6 @@ describe("when GitHub's budget is spent", () => {
     await pollUntil(() => logs.warn.length === 1, "the warning");
     expect(logs.warn[0]).toContain(`until ${new Date(reset).toISOString()}`);
     await pollUntil(() => logs.info.length === 1, "the resumption");
-    expect(Date.now()).toBeGreaterThanOrEqual(reset);
     expect(await gh.calls()).toBeGreaterThanOrEqual(3);
     expect(logs.info[0]).toContain("resumed");
     expect(logs.warn).toHaveLength(1);
@@ -737,6 +737,120 @@ describe("when GitHub's budget is spent", () => {
       ["t2", "merged"],
       ["t1", "open"],
     ]);
+  });
+
+  test("a reset beyond the window waits for the window's end rather than the ladder (a clock running behind GitHub's)", async () => {
+    await gh.setReply(PRIMARY, 1);
+    const { logs } = start([pr(1)], { now: () => 1234, graphqlReset: () => 1234 + 2 * 3_600_000, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain(`until ${new Date(1234 + 61 * 60_000).toISOString()}`);
+    await Bun.sleep(100);
+    expect(await gh.calls()).toBe(1);
+  });
+
+  test("a limit seen before a rejected write still ends the poll limited", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }), 0);
+    await gh.setBlockedReply(PRIMARY, 1);
+    const { logs } = start(
+      [pr(1, { state: "awaiting-merge" })],
+      { now: () => now, graphqlReset: () => now + 3_600_000, random: () => 0 },
+      new Set(["t1"]),
+    );
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    await Bun.sleep(150);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(await gh.calls()).toBe(2);
+  });
+
+  test("a limited landed check ends the poll limited: nothing more is asked before the reset", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "MERGED", base: "feature", mergeOid: HEAD, landed: "BEHIND" }), 0);
+    await gh.setCallReply(2, PRIMARY, 1);
+    const { logs } = start([pr(1, { state: "awaiting-merge" })], {
+      now: () => now,
+      graphqlReset: () => now + 3_600_000,
+      random: () => 0,
+    });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    await Bun.sleep(150);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(await gh.calls()).toBe(2);
+  });
+
+  test("a revoked token whose body also mentions the limit stays `unauthenticated`", async () => {
+    await gh.setReply('{"message":"API rate limit exceeded for user ID 1","status":"401"}', 1);
+    const { logs } = start([pr(1)]);
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("gh auth login");
+  });
+
+  test("the limit by wording alone, by `errors[].message`, or typed beside data, is `limited`; an unrelated error is not", async () => {
+    const bodies = [
+      JSON.stringify({ errors: [{ message: "You have exceeded a secondary rate limit." }] }),
+      JSON.stringify({ message: "You have been rate limited. Try later." }),
+      JSON.stringify({ message: "You have triggered an abuse detection mechanism. Please wait." }),
+      JSON.stringify({ data: { p0: null, rateLimit: null }, errors: [{ type: "RATE_LIMITED", message: "slow down" }] }),
+    ];
+    for (const body of bodies) {
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(body, 1);
+      const { logs, stop } = start([pr(1)], { intervalMs: 10_000 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      stop();
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).not.toContain("not readable");
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next body
+      gh = await stub.fresh();
+    }
+    await gh.setReply(JSON.stringify({ errors: [{ message: "Something went wrong while executing your query." }] }), 1);
+    const { logs } = start([pr(1)], { intervalMs: 10_000 });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("(failed)");
+  });
+
+  test("limited, failed, then ok: one warning per class and one resumption", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    await gh.setCallReply(1, PRIMARY, 1);
+    await gh.setCallReply(2, "not json", 0);
+    const { logs, seen } = start([pr(1)], { intervalMs: 10 });
+    await pollUntil(() => seen.length > 0, "the first good reading");
+    expect(logs.warn).toHaveLength(2);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(logs.warn[1]).toContain("(failed)");
+    expect(logs.info).toHaveLength(1);
+  });
+
+  test("a limited stay that gains a known reset warns again, naming it", async () => {
+    await gh.setReply(PRIMARY, 1);
+    let reset: number | null = null;
+    const { logs } = start([pr(1)], { intervalMs: 200, now: () => 1234, graphqlReset: () => reset, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1, "the first warning");
+    expect(logs.warn[0]).not.toContain("until");
+    reset = 1234 + 300;
+    await pollUntil(() => logs.warn.length === 2, "the warning with a time");
+    expect(logs.warn[1]).toContain(`until ${new Date(reset).toISOString()}`);
+  });
+
+  test("a rateLimit that is no budget is not kept: the rate reader's reset sets the wait", async () => {
+    for (const remaining of [1.5, -1, "x"]) {
+      const parsed = JSON.parse(reply({ state: "OPEN" }));
+      parsed.data.rateLimit = { cost: 1, remaining, resetAt: new Date(1234 + 500).toISOString() };
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(JSON.stringify(parsed), 0);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await current.setCallReply(2, PRIMARY, 1);
+      const { logs, stop } = start([pr(1)], { now: () => 1234, graphqlReset: () => 1234 + 1000, random: () => 0 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      stop();
+      expect(logs.warn[0]).toContain(`until ${new Date(1234 + 1000).toISOString()}`);
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next case
+      gh = await stub.fresh();
+    }
   });
 
   test("every query the poller sends selects the rate limit, as constant text", async () => {

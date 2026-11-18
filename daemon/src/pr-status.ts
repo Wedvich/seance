@@ -107,7 +107,7 @@ const REMEDY: Record<Failure, string> = {
  */
 const RATE_LIMIT_SELECTION = "rateLimit{ cost remaining resetAt }";
 
-/** Spread over a fleet's leaders' (and terms') wakes at a reset, so none lands on the reset's first second. */
+/** Added to a wait for a reset, so the poll does not land on the reset's first second (the budget may not be renewed yet). */
 export const LIMIT_JITTER_MS = 60_000;
 
 /** GraphQL's window is an hour: a reset further out than this is no reading of it. */
@@ -137,7 +137,8 @@ export function limitedDelay(resetAt: number | null, now: number, random: number
   if (resetAt === null) return null;
   const ahead = resetAt - now;
   if (!(ahead > 0) || ahead > MAX_RESET_AHEAD_MS) return null;
-  return ahead + Math.floor(Math.min(Math.max(random, 0), 1) * (LIMIT_JITTER_MS - 1));
+  const share = Number.isFinite(random) ? Math.min(Math.max(random, 0), 1) : 0;
+  return ahead + Math.floor(share * (LIMIT_JITTER_MS - 1));
 }
 
 interface Target {
@@ -653,6 +654,8 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   let budget: GraphqlBudget | null = null;
   // Set by any run of the poll in flight that GitHub refused for its rate limit.
   let limited = false;
+  /** The current `limited` stay has warned with a reset time. */
+  let parked = false;
   const pollDeps: PollDeps = {
     ...deps,
     observe: (answer) => {
@@ -670,16 +673,30 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     deps.log.warn("pr-status: the blocked-state read did not answer; blocked reasons are unavailable until it does");
   };
 
-  /** The reset a `limited` poll waits for: this term's in-query `resetAt` while ahead, else the rate reader's. */
-  const resetAt = (now: number): number | null =>
-    budget !== null && budget.resetAt > now ? budget.resetAt : (deps.graphqlReset?.() ?? null);
+  /**
+   * The reset a `limited` poll waits for: this term's in-query `resetAt`, else the rate reader's, the first one
+   * ahead and inside the window; failing that the window's end (a local clock behind GitHub's reads a fresh
+   * window's reset as further off than it is, and the ladder would ask the empty budget again).
+   */
+  const resetAt = (now: number): number | null => {
+    const ahead = [budget?.resetAt ?? null, deps.graphqlReset?.() ?? null].filter(
+      (at): at is number => at !== null && at > now,
+    );
+    const cap = now + MAX_RESET_AHEAD_MS;
+    const inside = ahead.find((at) => at <= cap);
+    if (inside !== undefined) return inside;
+    return ahead.length > 0 ? cap : null;
+  };
 
   /** `wait` is the reset a `limited` class waits for, when one is known; never `gh`'s words. */
   const enter = (next: "ok" | Failure, wait: number | null): void => {
-    if (next === state) return;
+    const timed = next === "limited" && wait !== null;
+    // A limited stay that first learns its reset says so, once: the owner is told the poller is now parked.
+    if (next === state && !(timed && !parked)) return;
     state = next;
+    parked = timed;
     if (next === "ok") deps.log.info("pr-status: gh answers again — PR status resumed");
-    else if (next === "limited" && wait !== null) {
+    else if (timed) {
       deps.log.warn(`pr-status: ${REMEDY[next]}; PR status paused until ${new Date(wait).toISOString()} (${next})`);
     } else deps.log.warn(`pr-status: ${REMEDY[next]}; PR status paused (${next})`);
   };
@@ -795,8 +812,9 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     try {
       outcome = await poll();
     } catch {
-      // A rejected write is the caller's to report (`leader.ts` does), and says nothing of gh.
-      outcome = null;
+      // A rejected write is the caller's to report (`leader.ts` does), and says nothing of gh; a limit seen
+      // before it is still one.
+      outcome = limited ? "limited" : null;
     }
     if (stopped) return;
     if (outcome === null) {
@@ -807,7 +825,8 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     const reset = outcome === "limited" ? resetAt(now) : null;
     const wait = limitedDelay(reset, now, random());
     enter(outcome, wait === null ? null : reset);
-    failures = outcome === "ok" ? 0 : failures + 1;
+    // A wait for a reset is no rung of the ladder: a failure after it starts from the bottom.
+    failures = outcome === "ok" || wait !== null ? 0 : failures + 1;
     if (wait !== null) {
       schedule(wait);
       return;

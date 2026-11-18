@@ -36,7 +36,8 @@ function isBadCredentials(body: Record<string, unknown>): boolean {
   return body["message"] === "Bad credentials" || body["status"] === "401" || body["status"] === 401;
 }
 
-const RATE_LIMIT_MESSAGE = /\brate limit\b/iu;
+/** GitHub's wordings: "API rate limit exceeded", "secondary rate limit", the older "abuse detection mechanism". */
+const RATE_LIMIT_MESSAGE = /\b(?:rate[ -]limit|abuse detection mechanism)/iu;
 
 /**
  * A body with no `data` that is a rate limit (S3, from `gh`'s source and GitHub's docs, not a live spent budget): the
@@ -46,13 +47,18 @@ const RATE_LIMIT_MESSAGE = /\brate limit\b/iu;
  */
 function isRateLimited(body: Record<string, unknown>): boolean {
   if (typeof body["message"] === "string" && RATE_LIMIT_MESSAGE.test(body["message"])) return true;
+  return hasRateLimitedError(body, true);
+}
+
+/** `errors[]` carrying `RATE_LIMITED`; `byMessage` also takes the wording, only where no `data` came with it. */
+function hasRateLimitedError(body: Record<string, unknown>, byMessage: boolean): boolean {
   const { errors } = body;
   if (!Array.isArray(errors)) return false;
   return errors.some(
     (error) =>
       isRecord(error) &&
       (error["type"] === "RATE_LIMITED" ||
-        (typeof error["message"] === "string" && RATE_LIMIT_MESSAGE.test(error["message"]))),
+        (byMessage && typeof error["message"] === "string" && RATE_LIMIT_MESSAGE.test(error["message"]))),
   );
 }
 
@@ -101,6 +107,8 @@ export async function askGithub(opts: GhOpts, query: string, variables: readonly
     if (isBadCredentials(body)) return { kind: "unauthenticated" };
     return { kind: isRateLimited(body) ? "limited" : "failed" };
   }
+  // The typed error beside a `data` object (aliases nulled) is still a spent budget, not N unreadable PRs.
+  if (hasRateLimitedError(body, false)) return { kind: "limited" };
   return { kind: "ok", body, data };
 }
 

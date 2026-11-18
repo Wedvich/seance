@@ -1050,8 +1050,9 @@ nothing checked it. The last is the gap they leave.
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
   Every poll query also selects the constant `rateLimit{ cost remaining resetAt }`; a rate-limited answer
-  (`askGithub`'s `limited`, 2026-11-18) writes nothing, and its warning names the class and a reset time the poller
-  parsed itself, never `gh`'s words.
+  (`askGithub`'s `limited`, 2026-11-18) is never a reading: the run it answered writes nothing (the poll's earlier
+  readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
+  poller parsed itself, never `gh`'s words.
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
@@ -5082,8 +5083,10 @@ for the lot with its own `gh`.
   so once when it recovers. Nothing to poll means `gh` never runs.
 - **A spent budget is waited out** (2026-11-18, docs/gh-watch.md W8, its build step 1). `askGithub`'s `limited`
   class is a body with no `data` object whose `errors[]` carries `type: "RATE_LIMITED"`, or whose `message` (top
-  level or in `errors[]`) says "rate limit" — after the `Bad credentials` check, so a revoked token stays
-  `unauthenticated`. What it matches (spike S3) comes from `gh`'s source (`pkg/cmd/api/api.go`) and GitHub's rate-limit
+  level or in `errors[]`) says "rate limit" or "rate-limit" (also "rate limited") or "abuse detection mechanism"
+  (GitHub's older secondary-limit wording) — after the `Bad credentials` check, so a revoked token stays
+  `unauthenticated` — or an answer whose `errors[]` carries the typed `RATE_LIMITED` beside a `data` object (the
+  wording alone does not count there, so a `NOT_FOUND` alias stays ok). What it matches (spike S3) comes from `gh`'s source (`pkg/cmd/api/api.go`) and GitHub's rate-limit
   docs, **not from a live spent budget**, which every session on the fleet shares: the primary GraphQL limit answers
   HTTP 200 with the `RATE_LIMITED` error and no data; the secondary limit (and REST's primary) a 403 or 429 whose
   message says rate limit; `gh api` prints either body to stdout and exits 1 (its `SilentError`), and prints no
@@ -5095,8 +5098,11 @@ for the lot with its own `gh`.
   open PRs go out with their base reading. The next poll waits until the reset plus up to a minute's jitter
   (`limitedDelay`, `LIMIT_JITTER_MS`), the reset being the term's newest in-query `resetAt` while it is ahead, else
   the machine's own rate reader's GraphQL reset (Daemon, "GitHub rate limits": no second reading of the budget),
-  and the ladder only when neither is ahead or one lies past an hour's window (61 minutes). It warns once on
-  entering, naming the reset (its own value, never `gh`'s words), and says once when a poll answers again. A
+  and the ladder only when neither is ahead. The first one ahead and inside an hour's window (61 minutes) wins; one
+  past it is clamped to the window's end, since a local clock behind GitHub's reads a fresh window's reset as
+  further off than it is. A wait for a reset resets the ladder's count. It warns on entering, naming the reset
+  (its own value, never `gh`'s words) and once more if a stay entered with no reset gains one, and says once when
+  a poll answers again. A limit seen before a rejected write still ends the poll `limited`. A
   secondary limit with budget left also waits for the hourly reset when one is known: conservative, since `gh`
   hides `Retry-After` and GitHub warns that requests made under a secondary limit can get the integration banned.
   Rejected: the ladder for a limit, which would ask an empty budget again at minute 2, 4 and 8.
