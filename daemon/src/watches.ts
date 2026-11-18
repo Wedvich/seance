@@ -21,7 +21,15 @@ import { processStart, peerPidSupported } from "./peer.ts";
 import { sessionAlive, type SessionKey } from "./claude-process.ts";
 import { bindPeer, type Messages } from "./messages.ts";
 import type { BoundPane } from "./session-events.ts";
-import { parseWatchFrame, type WatchFrame, type WatchReply, type WatchReplyCode } from "./watch-frame.ts";
+import {
+  parseWatchFrame,
+  WATCH_MACHINE_MAX,
+  WATCH_SESSION_MAX,
+  WATCH_TTL_MS,
+  type WatchFrame,
+  type WatchReply,
+  type WatchReplyCode,
+} from "./watch-frame.ts";
 import type { WatchLeader } from "./watch-leader.ts";
 import { readSavedWatches, writeSavedWatches, type SavedWatch } from "./watches-store.ts";
 
@@ -33,10 +41,7 @@ import { readSavedWatches, writeSavedWatches, type SavedWatch } from "./watches-
  * expiry or its target; nothing about a watch is ever logged: not its URL, head, check names or id.
  */
 
-export const WATCH_SESSION_MAX = 8;
-/** Equal to the leader's per-device cap (`WATCH_SET_MAX`), so a full table is never refused `invalid` for its size. */
-export const WATCH_MACHINE_MAX = 64;
-export const WATCH_TTL_MS = 24 * 60 * 60_000;
+export { WATCH_MACHINE_MAX, WATCH_SESSION_MAX, WATCH_TTL_MS };
 
 const TICK_MS = 60_000;
 const HEARTBEAT_MS = 5 * 60_000;

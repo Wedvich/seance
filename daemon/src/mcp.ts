@@ -118,6 +118,8 @@ import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import { sendMessage, type RouteGate } from "./send-message.ts";
+import { WATCH_TTL_MS } from "./watch-frame.ts";
+import { unwatchGithub, watchGithub, type WatchGate } from "./watch-github.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -228,6 +230,8 @@ interface ToolResult {
 const HAND_OFF_TOOL = "hand_off_task";
 const PASS_SELF_TOOL = "pass_to_successor";
 const SEND_MESSAGE_TOOL = "send_message";
+const WATCH_TOOL = "watch_github";
+const UNWATCH_TOOL = "unwatch_github";
 
 /**
  * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
@@ -565,6 +569,52 @@ export function messageRouteGate(fleet: Fleet): RouteGate {
     }
   };
 }
+
+/**
+ * `watch_github`'s gate, run before the add is sent: this machine's daemon and the verified leader must both advertise
+ * `watches` (docs/gh-watch.md W10), never the daemon's word alone. Its own lease, as `messageRouteGate`'s. Exported
+ * for its tests.
+ */
+export function watchGate(fleet: Fleet, local: LocalMachine | null): WatchGate {
+  return async () => {
+    if (local === null) return { ok: false, text: "this machine has no daemon state, so no daemon can watch for it" };
+    let lease: FleetLease;
+    try {
+      lease = await fleet.open();
+    } catch (err) {
+      return { ok: false, text: openFailureText(err) };
+    }
+    try {
+      if (lease.scheduler === null) {
+        return { ok: false, text: `can't confirm a scheduler leader keeps watches (${SCHEDULER_NEEDS_NEWER_DAEMON})` };
+      }
+      const own = lease.machines.find((m) => m.deviceId === local.deviceId);
+      if (own === undefined) return { ok: false, text: "this machine's daemon is not in the fleet's registry" };
+      if (own.capabilities?.includes(CAPABILITIES.watches) !== true) {
+        return { ok: false, text: "this machine's daemon keeps no watches yet — it needs `seance update`" };
+      }
+      const availability = lease.scheduler.availability();
+      if (advertises(lease.machines, availability, CAPABILITIES.watches)) return { ok: true };
+      return {
+        ok: false,
+        text:
+          availability.kind === "ready"
+            ? "the scheduler's leader keeps no watches yet — its daemon needs `seance update`"
+            : "no verified scheduler is leading, so nothing would read GitHub for the watch",
+      };
+    } finally {
+      lease.release();
+    }
+  };
+}
+
+/** `watch_github`'s and `unwatch_github`'s frame client; `seance mcp` sends the `watch` frame, tests drive a double. */
+export interface WatchClient {
+  readonly add: typeof watchGithub;
+  readonly remove: typeof unwatchGithub;
+}
+
+const WATCH_CLIENT: WatchClient = { add: watchGithub, remove: unwatchGithub };
 
 /**
  * `machine: "auto"`: no machine pin, the scheduler places the spawn. Matched in
@@ -1048,6 +1098,7 @@ export function buildMcpServer(
   sendMsg: typeof sendMessage = sendMessage,
   /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
   ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
+  watchClient: WatchClient = WATCH_CLIENT,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1919,6 +1970,38 @@ export function buildMcpServer(
         },
         { routeGate: messageRouteGate(fleet) },
       );
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    WATCH_TOOL,
+    {
+      title: "Wait on a GitHub PR or Actions run",
+      description: `Instead of polling GitHub, have the fleet watch a pull request or Actions run (its github.com URL) and wake this session with a note in its inbox when something happens: a PR's checks pass or fail, a conflict, its merge or close; a run's completion. After a successful call, end your turn: the note wakes you. Do not poll the same target meanwhile. \`head\` (a PR only) is the commit you pushed, so a result for an older head is not taken for yours. Calling again with the same URL replaces its watch (a new \`head\` after a fix push). A watch ends with this session, when its PR is merged or closed or its run completes, or after ${WATCH_TTL_MS / 3_600_000} h. A refusal says how to wait yourself instead. Needs the inbox mod in this session's Claude account.`,
+      inputSchema: z.strictObject({
+        url: z.string().describe("https://github.com/<owner>/<repo>/pull/<n> or …/actions/runs/<id>"),
+        head: z.string().optional().describe("PR only: the full sha of the commit you pushed"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ url, head }) => {
+      const result = await watchClient.add({ url, ...(head === undefined ? {} : { head }) }, watchGate(fleet, local));
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    UNWATCH_TOOL,
+    {
+      title: "Stop a GitHub watch",
+      description:
+        "Stop a watch this session made with watch_github, by the id it answered. Only for one you no longer wait on; a watch ends by itself with its target or this session.",
+      inputSchema: z.strictObject({ id: z.string().describe("the watch id watch_github answered") }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ id }) => {
+      const result = await watchClient.remove(id);
       return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );

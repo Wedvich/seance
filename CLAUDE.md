@@ -66,11 +66,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   `conversations.json`, the `tag` frame; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   the adapter seam's 3c (installing), the open questions and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
-- **docs/gh-watch.md** — spec, build steps 1 to 3 built (`askGithub`'s `limited` class, the poll queries' in-query
+- **docs/gh-watch.md** — spec, build steps 1 to 4 built (`askGithub`'s `limited` class, the poll queries' in-query
   `rateLimit` and the reset-time backoff, the leader's side of the watches: its registry, the run query, the reserve
   for tasks, `watch-set` and `watch-event`, recorded in DESIGN.md, "PR status", and the daemon's side: the `watch`
-  frame, the table, `watches.json`, the notes and the custodian hold, recorded in DESIGN.md, "Watches"), step 4 (MCP's
-  `watch_github` and `unwatch_github`) not: a session asks the fleet to watch a GitHub PR or Actions run and is woken
+  frame, the table, `watches.json`, the notes and the custodian hold, recorded in DESIGN.md, "Watches"; and step 4, MCP's
+  `watch_github` and `unwatch_github`, in "MCP server"; only spike S4, live, remains): a session asks the fleet to watch a GitHub PR or Actions run and is woken
   by a fixed note in its inbox, the leader folding watched targets into its batched GraphQL PR poll (`watch-set`,
   `watch-event`, `CAPABILITIES.watches`), with the weighing against extending `hand_off_task`. Read it before touching
   the PR poller, `askGithub`, or adding a way for sessions to wait on GitHub.

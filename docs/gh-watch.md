@@ -3,7 +3,8 @@
 **Status: spec; build steps 1 to 3 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the
 reset-time backoff, then the leader's side: the run query, the watch registry, the reserve for tasks, `watch-set` and
 `watch-event` — DESIGN.md, Scheduler, "PR status"; then the daemon's side: the `watch` frame, the table, `watches.json`,
-the notes and the custodian hold — DESIGN.md, "Watches"); step 4 (MCP's tools) is not.
+the notes and the custodian hold — DESIGN.md, "Watches"); step 4's MCP tools are built (DESIGN.md, "MCP server"), its
+spike S4 is not.
 Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
 session asks the fleet to watch a pull request or an Actions run and is told through its inbox when something
 happens, instead of polling GitHub itself. The leader already reads every task's PR in batches (DESIGN.md, "PR
@@ -280,9 +281,10 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
 
 ### W10. Surfaces, capability and audit
 
-- **MCP** (`seance mcp`): `watch_github { url, head? }` answers `{ ok, id, kind }` or a code (`invalid`,
-  `nosession`, `nolistener`, `too_many`, `fleet_full`, `no_leader`, `unsupported`, `unbound`, plus the transport
-  codes); `unwatch_github { id }` answers `ok` or `unknown`. Its description says to end the turn after a successful
+- **MCP** (`seance mcp`; built 2026-11-18, DESIGN.md, "MCP server"): `watch_github { url, head? }` answers text: the watch id and what to do next, or a
+  refusal worded per code (`invalid`, `nosession`, `nolistener`, `too_many`, `fleet_full`, `no_leader`, `unsupported`,
+  `unbound`, plus the transport faults) that ends with the `gh` command to wait with instead; `unwatch_github { id }`
+  answers `ok` or `unknown`. Its description says to end the turn after a successful
   call, that a note will wake the session, and that the session must not poll the same target meanwhile. Rejected:
   separate `watch_pr` and `watch_run`: the URL already says which, and one tool is one more line in every session's
   context instead of two. No list tool: the ids are in the session's own context, and an `unwatch` of an unknown id
@@ -419,5 +421,5 @@ wants it, it is its own decision against the "manual" one above.
    audit origin, and the threat-model invariants into CLAUDE.md and DESIGN.md (built 2026-11-18: DESIGN.md,
    "Watches", which also holds the `watch-set` contract the leader built: `gen.n` rising on every send, the resend
    until answered, what `delivered` lists, `fleet_full` as "not polled for now").
-4. **MCP's `watch_github` and `unwatch_github`** with the verified-leader gate (W10), S4 live, then the /ship and
-   owner-instruction changes (outside this repo).
+4. **MCP's `watch_github` and `unwatch_github`** with the verified-leader gate (W10) (built 2026-11-18: DESIGN.md,
+   "MCP server"). Left: S4 live, then the /ship and owner-instruction changes (outside this repo).
