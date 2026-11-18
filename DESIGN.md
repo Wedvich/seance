@@ -12124,7 +12124,9 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   `session.id`, since the process is the same. A record that is gone goes out as `session-gone` with its `reason`:
   - **`closed`**: Séance closed the pane. `despawnSession` notes the pane in a short-lived registry
     (`daemon/src/closing-panes.ts`, 60 s, 256 entries) before it acts, which covers a despawn, a hand-off's or a pass's
-    close, a custodian `close` and the drain's.
+    close, a custodian `close` and the drain's. An entry is keyed by pane id and the pane's pid, since a pane id is
+    unique only within one tmux server, which reuses it after a restart. A dead pane is not noted, because its
+    process already ended on its own.
   - **`exited`**: the process ended on its own, or its `ended` report came in.
   - **`replaced`**: the same process now carries another task.
 - **`task` frames** come from `EndedTasks` (`onTask`), and only for task ids this machine's launch ledger holds. The
