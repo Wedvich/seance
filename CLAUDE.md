@@ -383,7 +383,7 @@ green:
   whose conversation is the one named, verified and unconflicted, re-checked with `atAct` at the act (`tasked`, `moved`,
   `unverified`, `ambiguous`, `ended` otherwise). The label is the one text in the daemon's 0600 `conversations.json`
   (written whole through `writeDurable`, at most 256 entries, a 30-day idle prune, a file it cannot read loading
-  empty), never logged, and joined as `owner.label` only while that conversation's one claimant is verified. The PWA
+  empty), never logged, and joined as `owner.label` only to an untasked process while that conversation's one claimant is verified. The PWA
   offers rename only for a connected machine advertising `CAPABILITIES.sessionTag`.
 - **The custodian's controls are the owner's sealed act too** (DESIGN.md, "The custodian's status and the Machines
   row"): the daemon answers `custodian` (round now, pause, resume) only when sealed `from: "app"` on the relay leg,

@@ -1206,8 +1206,8 @@ export interface MachineInfo {
  * `watch-set` only to a verified leader advertising it. An older leader drops the unknown event op. A step-2 daemon
  * answers every event `delivered: []`, so nothing is ever marked delivered for it.
  * `sessionTag`: as a daemon, answers `session-tag` (the owner's label on an untasked conversation, docs/tags.md §3.1),
- * keeps it in `conversations.json` and joins it into `SessionEntry.tags` as `owner.label`. Advertised only where the
- * session-events capability runs, since the conversation table it needs starts with it. The PWA offers a session's
+ * keeps it in `conversations.json` and joins it into `SessionEntry.tags` as `owner.label`. Advertised unconditionally: the
+ * conversation table it needs starts with the session-events capability, which every daemon runs. The PWA offers a session's
  * Rename only on a machine advertising it: an older daemon ignores the unknown op, which an app sees only as a timeout.
  * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
  * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
@@ -2066,7 +2066,7 @@ export type CustodianResponse =
 /**
  * `session-tag`, app → daemon, sealed `from: "app"` on the relay leg only (docs/tags.md §3.1): the owner's label on an
  * untasked conversation, addressed by the pane and the conversation id (`agent.session`) the app read in `sessions`.
- * `key` is a bare suffix, `label` alone; `value` has passed `displayLine` and the title's cap, `""` clearing it.
+ * `key` is a bare suffix, `label` alone; `value` has passed `displayLine` and the title's cap whole (a longer one is refused, never shortened), `""` clearing it.
  */
 export interface SessionTagRequest {
   readonly pane: string;
@@ -2076,9 +2076,9 @@ export interface SessionTagRequest {
 }
 
 /**
- * `tasked`: the pane's session carries a task (its label is the task's, step 3); `moved`: the pane's bound process is not
- * in that conversation now (or another pane holds it); `unverified`: the daemon's own source does not corroborate the
- * claim; `ambiguous`: two live processes claim the id; `ended`: no live process in that pane, or none claims the id;
+ * `tasked`: the pane's session carries a task (its label is the task's, step 3); `moved`: the pane's newest process claims another conversation (or no
+ * conversation), or the id's one claimant is on another pane; `unverified`: the daemon's own source does not corroborate the
+ * claim; `ambiguous`: two live processes claim the id; `ended`: no live process in that pane, or no live process claims the id at the act;
  * `unsupported`: this daemon keeps no conversation table or store.
  */
 export const SESSION_TAG_ERROR_CODES = [

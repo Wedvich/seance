@@ -13122,10 +13122,12 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       `parseTagValue("owner.label", …)` refuses), and `unsupported` from a daemon running no conversation table. The
       act sweeps, then takes the pane's newest live process: none is `ended`, one carrying a task `tasked`, one
       claiming another conversation `moved`; then `atAct` re-reads its source (`unverified`, `ambiguous`), and a
-      claimant on another pane or pid is `moved` too. Only then is the label written. The reply is `{ ok: true }` or
-      `{ ok: false, code }`; a write that throws is `internal_error`, holding nothing new. Audited `audit session-tag
-      origin=relay key-count=<0|1> outcome=<set|cleared|code>`. `CAPABILITIES.sessionTag` advertises it (every
-      daemon this build runs a table, so unconditionally).
+      claimant on another pane or pid is `moved` too. Only then is the label written. The reply is `{ ok: true, value }`
+      (the label now held) or `{ ok: false, code, message }`; a value that would not fit whole (past the title's
+      character cap, or `displayLine`'s 256 bytes, which multibyte text reaches first) is `invalid_request`, never
+      shortened; a write that throws, or a call before the table starts, is `internal_error`, holding nothing new. Audited `audit session-tag
+      origin=relay key-count=<0|1> outcome=<set|cleared|code>`. `CAPABILITIES.sessionTag` advertises it,
+      unconditionally: session events always run, so every daemon of this build has the table.
     - **At rest.** `stateDir()/conversations.json`, 0600, written whole through `writeDurable` (temp, fsync, rename)
       and serialized, keyed by conversation id: `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }],
       lastLive }`. At most `CONVERSATIONS_KEPT_MAX` (256), the least recently live dropped first; an entry not live
@@ -13133,15 +13135,18 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       and reaches the disk at most hourly (`LAST_LIVE_WRITE_MS`), since only the prune reads it. A file the daemon
       cannot read loads empty: labels are lost, never invented. `subscriptions` is docs/tags.md step 4's; nothing
       writes it yet, but a label write carries it over, so a downgrade erases none.
-    - **The join.** `tagsFor` adds `owner.label` (conversation scope) only while the conversation's claim is
-      verified, not through the `pane` fallback, and has exactly one claimant: an unverified or conflicted claimer
+    - **The join.** `tagsFor` adds `owner.label` (conversation scope) only to an untasked process, while its
+      conversation's claim is verified, not through the `pane` fallback, and has exactly one claimant (a tasked
+      process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
       of a labelled id shows its own name. A restart keeps the label and reattaches it at the next verified claim.
     - **The name, in the PWA.** The Machines card lists an awake machine's sessions by `displayName` over
       `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (decided as
       docs/tags.md's open question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
       then the window, marked "(self-named)" or "(window)" for the last two. Rename is offered only for a connected
       machine advertising `CAPABILITIES.sessionTag`, on an untasked row whose `agent.session` is verified; a refusal
-      shows a fixed text by its code. Sessions are read when the screen opens, on wake, and after a rename.
+      shows a fixed text by its code. Sessions are read for every connected machine when the screen opens, on wake, when a
+      `sessionTag` machine's reported session counts move, and after a rename or a refusal that says the row is stale
+      (`ended`, `moved`, `tasked`). The dialog refuses a name past the daemon's byte cap before sending.
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
   `question`, `permission` and (2026-11-17, from the settings `Elicitation` hook) `elicitation`, an MCP
