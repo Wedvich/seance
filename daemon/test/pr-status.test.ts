@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseGithubPr, parseWatchSet, quote, type PrStatus, type WatchEvent } from "@seance/shared";
 import type { Task } from "../src/leader.ts";
 import { LIMIT_JITTER_MS, limitedDelay, readPrHead, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
-import { createWatchRegistry, type WatchRegistry } from "../src/watch-registry.ts";
+import { createWatchRegistry, type PollerWatches } from "../src/watch-registry.ts";
 import { makeGhStub, pollUntil, type GhRun, type GhStub } from "./fixtures.ts";
 
 let base: string;
@@ -176,7 +176,7 @@ interface Seen {
 /** `rejects` names the tasks whose write the caller's `onStatus` refuses. */
 function start(
   tasks: readonly Task[],
-  opts: PrPollerOpts & { readonly now?: () => number; readonly watches?: WatchRegistry } = {},
+  opts: PrPollerOpts & { readonly now?: () => number; readonly watches?: PollerWatches } = {},
   rejects: ReadonlySet<string> = new Set(),
 ) {
   const logs = { info: [] as string[], warn: [] as string[] };
@@ -1503,16 +1503,61 @@ describe("watched targets", () => {
       reply({ state: "OPEN", oid: HEAD, contexts: [run("build", "SUCCESS", true, "COMPLETED", 1)] }),
       0,
     );
-    await gh.setCallReply(3, "{}", 1);
+    // The watch-only read fails in each of the first three polls (calls 3, 6 and 9).
+    for (const call of [3, 6, 9]) await gh.setCallReply(call, "{}", 1);
     const { registry } = watching([{ id: 1, url: prUrl(6) }]);
     const { seen, logs } = start([pr(5, { state: "awaiting-merge" })], { watches: registry });
-    await pollUntil(async () => (await gh.calls()) >= 3, "the watch-only read");
+    // The fourth poll starts only after the third's failure was handled (a class entered would have warned by then).
+    await pollUntil(async () => (await gh.calls()) >= 10, "the fourth poll");
     expect(seen[0]).toMatchObject({ id: "t5", url: prUrl(5), status: { state: "open", required: "passing" } });
     const argvs = await gh.argvs();
     expect(argvs[0]).toContain("n0=5");
     expect(argvs[1]).toContain("n0=5");
     expect(argvs[2]).toContain("n0=6");
     expect(logs.warn).toEqual([]);
+  });
+
+  test("a watch's failed blocked read on a PR of a task that needs none is no task-facing warning", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }), 0);
+    await gh.setBlockedReply("not json", 0);
+    const { registry } = watching([{ id: 1, url: prUrl(5) }]);
+    const reported = pr(5, { state: "awaiting-merge", spec: { repo: "r", mode: "worktree", until: "reported" } });
+    const { logs } = start([reported], { watches: registry });
+    // Each poll is a merge read and the watch's blocked read: the third starts after the first two failed and were handled.
+    await pollUntil(async () => (await gh.calls()) >= 5, "the third poll");
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("under the reserve a watch on a PR a task reads still hears it merge, and asks for nothing more", async () => {
+    const reset = Date.now() + 600_000;
+    const low = (state: string): string => {
+      const body = JSON.parse(reply({ state }));
+      body.data.rateLimit = { cost: 1, remaining: 100, resetAt: new Date(reset).toISOString() };
+      return JSON.stringify(body);
+    };
+    await gh.setReply(low("OPEN"), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }], 3_600_000, Date.now());
+    const { logs } = start([pr(5)], { watches: registry, now: () => Date.now() });
+    await pollUntil(() => logs.warn.length === 1, "the reserve warning");
+    await gh.setReply(low("MERGED"), 0);
+    await pollUntil(() => events().some((e) => e.event.kind === "merged"), "the merge told under the reserve");
+    expect(logs.warn).toHaveLength(1);
+    expect(logs.info.some((line) => line.includes("recovered"))).toBe(false);
+  });
+
+  test("the poller's clock says whether a poll is in flight, so a slow poll suspends nothing", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0, 1);
+    const target = parseGithubPr(prUrl(5));
+    if (target === null) throw new Error("test PR did not parse");
+    const ticks: (boolean | undefined)[] = [];
+    const watches: PollerWatches = {
+      wanted: () => ({ prs: [{ key: "pr:octo-org/widgets#5", pr: target }], runs: [] }),
+      read: () => undefined,
+      tick: (_now, _reason, _resetAt, polling) => void ticks.push(polling),
+    };
+    start([], { watches });
+    await pollUntil(() => ticks.length >= 3, "ticks during the first poll");
+    expect(ticks.every((polling) => polling === true)).toBe(true);
   });
 
   test("a watched run's attempt and conclusion are an event, and a failing one names its jobs", async () => {
@@ -1566,10 +1611,12 @@ describe("watched targets", () => {
 
   test("a run read is no poll failure: a failing run query leaves the tasks' reads, class and logs alone", async () => {
     await gh.setReply(reply({ state: "OPEN" }), 0);
-    await gh.setCallReply(2, "{}", 1);
+    // The run read is the second call of each of the first three polls.
+    for (const call of [2, 4, 6]) await gh.setCallReply(call, "{}", 1);
     const { registry } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
     const { seen, logs } = start([pr(5)], { watches: registry });
-    await pollUntil(async () => (await gh.calls()) >= 2, "the run read");
+    // The fourth poll starts only after the third's failure was handled.
+    await pollUntil(async () => (await gh.calls()) >= 7, "the fourth poll");
     expect(seen[0]).toMatchObject({ id: "t5", status: { state: "open" } });
     expect(logs.warn).toEqual([]);
   });
@@ -1592,9 +1639,10 @@ describe("watched targets", () => {
       (await gh.argvs()).filter((argv) => argv.includes(`n0=${n}`)).length;
     const watchReads = await named(6);
     const taskReads = await named(5);
+    await pollUntil(async () => (await named(5)) > taskReads, "a later task read under the reserve");
+    // A negative: the sleep gives a (wrong) watch read of that poll time to land.
     await Bun.sleep(150);
     expect(await named(6)).toBe(watchReads);
-    expect(await named(5)).toBeGreaterThan(taskReads);
     expect(logs.warn).toHaveLength(1);
     expect(seen.length).toBeGreaterThan(0);
 

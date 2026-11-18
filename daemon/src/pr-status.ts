@@ -154,6 +154,8 @@ interface Target {
   }[];
   /** The registry's key for this PR when a watch holds it: its reading goes there as well as to its tasks. */
   readonly watchKey?: string;
+  /** Under the reserve: the watch takes this PR's merge reading (a task reads it anyway) and asks nothing more. */
+  readonly watchMergeOnly?: true;
 }
 
 type WideFields = Pick<PrStatus, "head" | "required" | "failing" | "merge" | "armed" | "reviewRequested">;
@@ -654,7 +656,7 @@ async function landedOnDefault(deps: PollDeps, landings: readonly Landing[]): Pr
 async function readBlocked(
   deps: PollDeps,
   wide: readonly Wide[],
-  onFailure: () => void,
+  onFailure: (run: readonly Wide[]) => void,
   watched: ReadonlySet<number>,
 ): Promise<{ readonly fields: ReadonlyMap<number, WideFields>; readonly watch: ReadonlyMap<number, WatchPr> }> {
   const fields = new Map<number, WideFields>();
@@ -665,7 +667,7 @@ async function readBlocked(
     const answer = await ask(deps, blockedQueryText(run), blockedVariables(run));
     if (answer.kind === "limited") break;
     if (answer.kind !== "ok") {
-      onFailure();
+      onFailure(run);
       continue;
     }
     for (const { index, pr } of run) {
@@ -780,11 +782,13 @@ const prKeyOf = (pr: GithubPr): string => `${pr.owner}/${pr.repo}#${pr.number}`.
 /**
  * Splits the registry's wanted PRs over the tasks' targets: one a task holds is marked (`watchKey`) and stays in the
  * task chunks, sharing their aliases; the rest, in the registry's order, are watch-only, read after every task read so
- * a watch never delays or fails one. The task list's order and content are otherwise unchanged.
+ * a watch never delays or fails one. The task list's order and content are otherwise unchanged. `mergeOnly` (the
+ * reserve) marks those PRs for their merge reading alone: the task chunk's own read, no blocked read for the watch.
  */
 function withWatches(
   tasks: readonly Target[],
   watched: readonly WatchedPr[],
+  mergeOnly: boolean,
 ): { readonly tasks: readonly Target[]; readonly watchOnly: readonly Target[] } {
   const keys = new Map(watched.map((w) => [prKeyOf(w.pr), w.key]));
   const held = new Set<string>();
@@ -792,7 +796,8 @@ function withWatches(
     const key = prKeyOf(target.pr);
     held.add(key);
     const watchKey = keys.get(key);
-    return watchKey === undefined ? target : { ...target, watchKey };
+    if (watchKey === undefined) return target;
+    return { ...target, watchKey, ...(mergeOnly ? { watchMergeOnly: true as const } : {}) };
   });
   const watchOnly = watched
     .filter((w) => !held.has(prKeyOf(w.pr)))
@@ -890,6 +895,8 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   const random = deps.random ?? Math.random;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  /** A poll is in flight: the clock suspends no watch meanwhile, since its end reads them. */
+  let polling = false;
   let clock: ReturnType<typeof setInterval> | null = null;
   let state: "ok" | Failure = "ok";
   let failures = 0;
@@ -989,7 +996,9 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     const spent = new Set<string>();
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
-      const watched = new Set(chunk.flatMap((target, i) => (target.watchKey === undefined ? [] : [i])));
+      const watched = new Set(
+        chunk.flatMap((target, i) => (target.watchKey === undefined || target.watchMergeOnly === true ? [] : [i])),
+      );
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
       const answer = await readChunk(
         pollDeps,
@@ -1030,8 +1039,17 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     }
     for (const id of spent) readThisTerm.add(id);
     for (let next = owing[0]; next !== undefined; next = owing[0]) {
+      // Only a run that held a PR a task needed wide is the task-facing warning's: a watch's read owes a task nothing.
+      const needed = next.taskWide;
       // oxlint-disable-next-line no-await-in-loop -- as above
-      const { fields, watch } = await readBlocked(pollDeps, next.wide, blockedFailure, next.watched);
+      const { fields, watch } = await readBlocked(
+        pollDeps,
+        next.wide,
+        (failed) => {
+          if (failed.some(({ index }) => needed.has(index))) blockedFailure();
+        },
+        next.watched,
+      );
       if (stopped) return null;
       for (const [index, reading] of watch) {
         const key = next.chunk[index]?.watchKey;
@@ -1103,8 +1121,15 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     const reserve =
       deps.watches !== undefined && budget !== null && budget.remaining < WATCH_RESERVE_POINTS && now < budget.resetAt;
     noteReserve(reserve);
-    const watched = deps.watches === undefined || reserve ? { prs: [], runs: [] } : deps.watches.wanted(now);
-    const { tasks: wanted, watchOnly } = withWatches(targets(deps.tasks(), unreadable, readThisTerm), watched.prs);
+    const wantedWatches = deps.watches?.wanted(now) ?? { prs: [], runs: [] };
+    // Under the reserve a watch on a PR a task reads takes that merge reading, and nothing else is asked for it.
+    const watched = reserve ? { prs: wantedWatches.prs, runs: [] } : wantedWatches;
+    const { tasks: wanted, watchOnly: allWatchOnly } = withWatches(
+      targets(deps.tasks(), unreadable, readThisTerm),
+      watched.prs,
+      reserve,
+    );
+    const watchOnly = reserve ? [] : allWatchOnly;
     if (wanted.length === 0 && watchOnly.length === 0 && watched.runs.length === 0) return null;
     const owing: Owing[] = [];
     const prReadings = new Map<string, PrReading>();
@@ -1151,12 +1176,15 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   async function run(): Promise<void> {
     timer = null;
     let outcome: "ok" | Failure | null;
+    polling = true;
     try {
       outcome = await poll();
     } catch {
       // A rejected write is the caller's to report (`leader.ts` does), and says nothing of gh; a limit seen
       // before it is still one.
       outcome = limited ? "limited" : null;
+    } finally {
+      polling = false;
     }
     if (stopped) return;
     if (outcome === null) {
@@ -1179,7 +1207,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   void run();
   // Its own clock: a `limited` wait parks the poll chain for up to an hour, and a suspension must still go out.
   if (deps.watches !== undefined) {
-    clock = setInterval(() => deps.watches?.tick(deps.now(), suspendReason(), suspendReset()), intervalMs);
+    clock = setInterval(() => deps.watches?.tick(deps.now(), suspendReason(), suspendReset(), polling), intervalMs);
   }
   return {
     stop: () => {
