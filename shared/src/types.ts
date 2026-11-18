@@ -2271,6 +2271,7 @@ export type WatchEventBody =
   | {
       readonly kind: "suspended";
       readonly reason: WatchSuspendReason;
+      /** When this leader last read the watch (display only: a new leader's differs, so the key is the reason alone). */
       readonly since: number;
       readonly resetAt?: number;
     };
@@ -2295,7 +2296,10 @@ export interface WatchEventRequest {
   readonly events: readonly WatchEvent[];
 }
 
-/** `delivered`: the ids of the events the daemon placed; the leader marks only those acknowledged. */
+/**
+ * `delivered`: the ids of the watches whose events in this frame the daemon placed. Events carry no id of their own, so
+ * delivery is all-or-nothing per watch per frame: the leader marks every event it sent for a listed id acknowledged.
+ */
 export type WatchEventResponse =
   | { readonly ok: true; readonly delivered: readonly string[] }
   | { readonly ok: false; readonly code: WatchEventErrorCode; readonly message: string };

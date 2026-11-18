@@ -26,9 +26,10 @@ import {
 
 /**
  * The leader's watch registry (docs/gh-watch.md W9; DESIGN.md, Scheduler, "PR status"): soft state per term, one set per
- * device and generation, the fleet caps, what each poll's readings make due for each watch, and the send of one
- * `watch-event` per device. Pure apart from the injected `send` and `log`, and it takes `send` as `| null` rather than
- * the scheduler's `NoAnswer`, so it imports nothing under `scheduler/` and nothing that logs (the `seance mcp` closure).
+ * device and generation, the fleet caps, what each poll's readings make due for each watch, and the `watch-event`s
+ * sent to each device (at most one in flight; one goes at a poll's end, a clock tick and an accepted set). Pure apart
+ * from the injected `send` and `log`, and it takes `send` as `| null` rather than the scheduler's `NoAnswer`, so it
+ * imports nothing under `scheduler/` and nothing that logs (the `seance mcp` closure).
  *
  * Nothing here names a URL, owner, repo, head, check name or watch id in a log line: a watch's target is a session's
  * word, and a log is read by people who never saw the session.
@@ -38,8 +39,9 @@ import {
 export const WATCH_SET_TTL_MS = 15 * 60_000;
 
 /**
- * Polls a watch given a head by its set ignores a different head before following it: the first rollup after a push
- * is probably still the previous head's.
+ * Polls a watch given a head by its set ignores a different head before following it: the head a set names is the
+ * session's word (what it pushed), which GitHub may not show yet, so a different one read at first is probably the
+ * previous push still being the PR's head. Only until the set's head has been read once.
  */
 export const HEAD_GRACE_POLLS = 5;
 
@@ -89,8 +91,12 @@ export interface PollerWatches {
     readings: { readonly prs: ReadonlyMap<string, PrReading>; readonly runs: ReadonlyMap<string, RunReading> },
     now: number,
   ) => void;
-  /** Every clock tick; `reason` is why a watch unread for two intervals is suspended. */
-  readonly tick: (now: number, reason: WatchSuspendReason, resetAt: number | null) => void;
+  /**
+   * Every clock tick; `reason` is why a watch unread for two intervals is suspended. While a poll is `polling` nothing
+   * is suspended: a healthy poll longer than an interval leaves every watch unread for longer than two, and its end
+   * reads them.
+   */
+  readonly tick: (now: number, reason: WatchSuspendReason, resetAt: number | null, polling?: boolean) => void;
 }
 
 export interface WatchRegistryDeps {
@@ -111,7 +117,6 @@ interface Suspension {
   readonly reason: WatchSuspendReason;
   readonly since: number;
   readonly resetAt?: number;
-  sent: boolean;
 }
 
 interface WatchState {
@@ -146,6 +151,10 @@ interface Device {
   inFlight: boolean;
   failing: boolean;
   setAnswerDue: boolean;
+  /** Where the next frame starts in the watches' order, so a watch whose events were not taken cannot starve the rest. */
+  cursor: number;
+  /** The last refusal counts warned, so a heartbeat repeating the same refusals logs once. */
+  refusalNote: string;
 }
 
 interface Held<T> {
@@ -254,12 +263,12 @@ export function createWatchRegistry(deps: WatchRegistryDeps): WatchRegistry {
     }
     device.watches = next;
     device.refused = refused;
-    if (refused.length > 0) {
-      const full = refused.filter((r) => r.code === "fleet_full").length;
-      deps.log.warn(
-        `scheduler: watch-set from=${quote(deviceId)} refused ${refused.length} (fleet_full ${full}, invalid ${refused.length - full})`,
-      );
-    }
+    const full = refused.filter((r) => r.code === "fleet_full").length;
+    const note =
+      refused.length === 0 ? "" : `refused ${refused.length} (fleet_full ${full}, invalid ${refused.length - full})`;
+    if (note !== "" && note !== device.refusalNote)
+      deps.log.warn(`scheduler: watch-set from=${quote(deviceId)} ${note}`);
+    device.refusalNote = note;
   }
 
   /** Item 6: what a reading makes due for one watch, keys in neither `seen` nor the acknowledged. */
@@ -274,7 +283,7 @@ export function createWatchRegistry(deps: WatchRegistryDeps): WatchRegistry {
       if (held !== undefined && held.at === watch.lastReadAt) runDue(watch, held.reading, bodies);
     }
     const s = watch.suspension;
-    if (s !== null && !s.sent) {
+    if (s !== null) {
       bodies.push({
         kind: "suspended",
         reason: s.reason,
@@ -374,21 +383,30 @@ export function createWatchRegistry(deps: WatchRegistryDeps): WatchRegistry {
         ? { gen: { boot: device.boot, n: device.n }, refused: device.refused }
         : undefined;
       const events: WatchEvent[] = [];
-      let full = false;
-      for (const watch of device.watches.values()) {
+      const list = [...device.watches.values()];
+      const start = list.length === 0 ? 0 : device.cursor % list.length;
+      let stoppedAt: number | null = null;
+      for (let step = 0; step < list.length && stoppedAt === null; step += 1) {
+        const index = (start + step) % list.length;
+        const watch = list[index];
+        if (watch === undefined) continue;
         for (const body of dueFor(watch)) {
           const event: WatchEvent = { id: watch.id, key: watchKeyOf(body), event: body };
           const trial: WatchEventRequest = {
             ...(carriedSet === undefined ? {} : { set: carriedSet }),
             events: [...events, event],
           };
-          // The rest is due next poll: everything is level-triggered.
-          if (watchJsonBytes(trial) > WATCH_EVENT_JSON_MAX) full = true;
-          if (full) break;
+          // The rest is due next send: everything is level-triggered.
+          if (watchJsonBytes(trial) > WATCH_EVENT_JSON_MAX) {
+            stoppedAt = index;
+            break;
+          }
           events.push(event);
         }
-        if (full) break;
       }
+      // A frame that filled resumes at the watch it stopped in, so what an earlier watch left unacknowledged cannot
+      // fill every frame ahead of the later ones.
+      device.cursor = stoppedAt ?? 0;
       if (events.length === 0 && carriedSet === undefined) continue;
       void transmit(deviceId, device, { ...(carriedSet === undefined ? {} : { set: carriedSet }), events });
     }
@@ -423,12 +441,10 @@ export function createWatchRegistry(deps: WatchRegistryDeps): WatchRegistry {
       if (!delivered.has(event.id)) continue;
       const watch = device.watches.get(event.id);
       if (watch === undefined) continue;
-      if (event.event.kind === "suspended") {
-        if (watch.suspension?.since === event.event.since) watch.suspension.sent = true;
-      } else {
-        ack(watch, event.key);
-      }
+      ack(watch, event.key);
     }
+    // A set accepted while this send was in flight waits for its own frame, not for the next read or tick.
+    if (device.setAnswerDue) sendPass();
   }
 
   return {
@@ -455,6 +471,8 @@ export function createWatchRegistry(deps: WatchRegistryDeps): WatchRegistry {
         inFlight: false,
         failing: false,
         setAnswerDue: false,
+        cursor: 0,
+        refusalNote: "",
       };
       if (existing !== undefined && existing.boot !== set.gen.boot) {
         device.retired = [...device.retired, existing.boot].slice(-RETIRED_MAX);
@@ -506,13 +524,13 @@ export function createWatchRegistry(deps: WatchRegistryDeps): WatchRegistry {
       sendPass();
     },
 
-    tick(now, reason, resetAt) {
+    tick(now, reason, resetAt, polling = false) {
       expire(now);
       for (const device of devices.values()) {
         for (const w of device.watches.values()) {
-          if (w.suspension !== null || isDone(w) || now - w.lastReadAt <= 2 * deps.intervalMs) continue;
+          if (polling || w.suspension !== null || isDone(w) || now - w.lastReadAt <= 2 * deps.intervalMs) continue;
           const reset = (reason === "limited" || reason === "reserve") && resetAt !== null ? { resetAt } : {};
-          w.suspension = { reason, since: w.lastReadAt, ...reset, sent: false };
+          w.suspension = { reason, since: w.lastReadAt, ...reset };
         }
       }
       sendPass();

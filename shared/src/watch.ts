@@ -109,7 +109,7 @@ export function watchJsonBytes(value: unknown): number {
 
 const HEAD = "(?:[0-9a-f]{40}|[0-9a-f]{64})";
 const WATCH_KEY = new RegExp(
-  `^(?:checks:${HEAD}:(?:pass|fail)|conflict:${HEAD}|merged|closed|completed:[1-9][0-9]{0,9}|unreadable|suspended:[0-9]{1,16})$`,
+  `^(?:checks:${HEAD}:(?:pass|fail)|conflict:${HEAD}|merged|closed|completed:[1-9][0-9]{0,9}|unreadable|suspended:(?:${WATCH_SUSPEND_REASONS.join("|")}))$`,
   "u",
 );
 
@@ -131,7 +131,7 @@ export function watchKeyOf(body: WatchEventBody): string {
     case "completed":
       return `completed:${body.attempt}`;
     case "suspended":
-      return `suspended:${body.since}`;
+      return `suspended:${body.reason}`;
     case "merged":
     case "closed":
     case "unreadable":

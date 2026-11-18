@@ -221,6 +221,42 @@ describe("every accepted set is answered", () => {
   });
 });
 
+describe("refusal logging", () => {
+  test("a heartbeat repeating the same refusals warns once, a change warns again", async () => {
+    const f = fixture();
+    f.registry.accept(
+      "a",
+      setOf(1, [
+        { id: 1, pr: 1 },
+        { id: 2, bad: true },
+      ]),
+      0,
+    );
+    await settle();
+    f.registry.accept(
+      "a",
+      setOf(2, [
+        { id: 1, pr: 1 },
+        { id: 2, bad: true },
+      ]),
+      1,
+    );
+    await settle();
+    expect(f.logs.warn.filter((l) => l.includes("refused 1"))).toHaveLength(1);
+    f.registry.accept("a", setOf(3, [{ id: 1, pr: 1 }]), 2);
+    f.registry.accept(
+      "a",
+      setOf(4, [
+        { id: 1, pr: 1 },
+        { id: 2, bad: true },
+      ]),
+      3,
+    );
+    await settle();
+    expect(f.logs.warn.filter((l) => l.includes("refused 1"))).toHaveLength(2);
+  });
+});
+
 describe("fleet caps", () => {
   const range = (from: number, to: number, kind: "pr" | "run" = "pr", idBase = 0): Spec[] =>
     Array.from({ length: to - from + 1 }, (_v, i) =>
@@ -476,14 +512,18 @@ describe("suspension", () => {
     f.registry.tick(2 * INTERVAL + 1, "limited", 99_000);
     await settle();
     expect(eventsOf(f)).toEqual([
-      { id: uuid(1), key: "suspended:0", event: { kind: "suspended", reason: "limited", since: 0, resetAt: 99_000 } },
+      {
+        id: uuid(1),
+        key: "suspended:limited",
+        event: { kind: "suspended", reason: "limited", since: 0, resetAt: 99_000 },
+      },
     ]);
     f.registry.tick(5 * INTERVAL, "limited", 99_000);
     await settle();
     expect(eventsOf(f)).toHaveLength(1);
   });
 
-  test("a read clears it, and a later stop is a new suspension", async () => {
+  test("a read clears it, and a later stop for another reason is a new suspension", async () => {
     const f = fixture();
     f.registry.accept("a", setOf(1, [{ id: 1, pr: 1 }]), 0);
     await settle();
@@ -493,7 +533,43 @@ describe("suspension", () => {
     await settle();
     f.registry.tick(7 * INTERVAL, "limited", 8000);
     await settle();
-    expect(eventsOf(f).map((e) => e.key)).toEqual(["suspended:0", `suspended:${4 * INTERVAL}`]);
+    expect(eventsOf(f).map((e) => [e.key, e.event.kind === "suspended" ? e.event.since : null])).toEqual([
+      ["suspended:reserve", 0],
+      ["suspended:limited", 4 * INTERVAL],
+    ]);
+  });
+
+  test("the key is the reason alone: a second stop for the same reason is not told again", async () => {
+    const f = fixture();
+    f.registry.accept("a", setOf(1, [{ id: 1, pr: 1 }]), 0);
+    await settle();
+    f.registry.tick(3 * INTERVAL, "failed", null);
+    await settle();
+    f.registry.read(prs([1, open(HEAD_A)]), 4 * INTERVAL);
+    f.registry.tick(8 * INTERVAL, "failed", null);
+    await settle();
+    expect(eventsOf(f).filter((e) => e.event.kind === "suspended")).toHaveLength(1);
+  });
+
+  test("a suspension a daemon already told (its key in seen) is not sent by a leader that never saw it", async () => {
+    const f = fixture();
+    f.registry.accept("a", setOf(1, [{ id: 1, pr: 1, seen: ["suspended:failed"] }]), 500_000);
+    await settle();
+    f.registry.tick(500_000 + 3 * INTERVAL, "failed", null);
+    await settle();
+    expect(eventsOf(f)).toEqual([]);
+  });
+
+  test("a poll in flight suspends nothing: its end reads what it was reading", async () => {
+    const f = fixture();
+    f.registry.accept("a", setOf(1, [{ id: 1, pr: 1 }]), 0);
+    await settle();
+    f.registry.tick(3 * INTERVAL, "failed", null, true);
+    await settle();
+    expect(eventsOf(f)).toEqual([]);
+    f.registry.tick(3 * INTERVAL + 1, "failed", null, false);
+    await settle();
+    expect(eventsOf(f).map((e) => e.key)).toEqual(["suspended:failed"]);
   });
 
   test("unauthenticated and failed carry no resetAt", async () => {
@@ -520,7 +596,7 @@ describe("suspension", () => {
     await settle();
     f.registry.tick(3 * INTERVAL, "failed", null);
     await settle();
-    expect(eventsOf(f).map((e) => [e.id, e.key])).toEqual([[uuid(1), "suspended:0"]]);
+    expect(eventsOf(f).map((e) => [e.id, e.key])).toEqual([[uuid(1), "suspended:failed"]]);
   });
 
   test("an unacknowledged suspension is sent again", async () => {
@@ -532,7 +608,7 @@ describe("suspension", () => {
     await settle();
     f.registry.tick(4 * INTERVAL, "failed", null);
     await settle();
-    expect(eventsOf(f).filter((e) => e.key === "suspended:0")).toHaveLength(2);
+    expect(eventsOf(f).filter((e) => e.key === "suspended:failed")).toHaveLength(2);
   });
 });
 
@@ -554,6 +630,27 @@ describe("send discipline", () => {
     f.registry.tick(30, "failed", null);
     await settle();
     expect(f.sent.length).toBeGreaterThan(1);
+  });
+
+  test("a set accepted while a send is in flight is answered when that send ends, not at the next poll or tick", async () => {
+    const f = fixture();
+    let release: (r: WatchEventResponse) => void = () => undefined;
+    let first = true;
+    f.answer = () => {
+      if (!first) return Promise.resolve({ ok: true, delivered: [] });
+      first = false;
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    };
+    f.registry.accept("a", setOf(1, [{ id: 1, pr: 1 }]), 0);
+    await settle();
+    f.registry.accept("a", setOf(2, [{ id: 1, pr: 1 }]), 1);
+    expect(f.sent).toHaveLength(1);
+    release({ ok: true, delivered: [] });
+    await settle();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]?.request.set?.gen).toEqual({ boot: BOOT, n: 2 });
   });
 
   test("a failed send warns once per stay, and the next success logs once", async () => {
@@ -597,6 +694,38 @@ describe("send discipline", () => {
     f.registry.read(prs([1, { kind: "closed" }]), 10);
     await settle();
     expect(f.sent).toEqual([]);
+  });
+
+  test("events an early watch leaves unacknowledged cannot fill every frame ahead of the later watches", async () => {
+    const f = fixture();
+    const count = 30;
+    const stuck = new Set(Array.from({ length: 20 }, (_v, i) => uuid(i + 1)));
+    // The daemon takes nothing for the first 20 watches, as a step-3 daemon may for a watch it cannot place.
+    f.answer = (_to, request) =>
+      Promise.resolve({ ok: true, delivered: request.events.map((e) => e.id).filter((id) => !stuck.has(id)) });
+    f.registry.accept(
+      "a",
+      setOf(
+        1,
+        Array.from({ length: count }, (_v, i) => ({ id: i + 1, run: i + 1 })),
+      ),
+      0,
+    );
+    await settle();
+    const failing = Array.from({ length: 10 }, () => ({ name: "ø".repeat(100) }));
+    const readings = new Map<string, RunReading>(
+      Array.from(
+        { length: count },
+        (_v, i) => [runKey(i + 1), { kind: "completed", attempt: 1, conclusion: "failure", failing }] as const,
+      ),
+    );
+    for (let poll = 1; poll <= 12; poll++) {
+      f.registry.read({ prs: new Map(), runs: readings }, poll * 10);
+      // oxlint-disable-next-line no-await-in-loop -- a poll's send ends before the next poll
+      await settle();
+    }
+    const told = new Set(eventsOf(f).map((e) => e.id));
+    for (let i = 21; i <= count; i++) expect(told.has(uuid(i))).toBe(true);
   });
 
   test("an oversized due list is cut in bytes and the rest goes next poll", async () => {

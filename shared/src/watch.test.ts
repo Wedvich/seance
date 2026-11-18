@@ -82,7 +82,8 @@ describe("isWatchKey", () => {
     "completed:1",
     "completed:2147483647",
     "unreadable",
-    "suspended:1700000000000",
+    "suspended:limited",
+    "suspended:unauthenticated",
   ])("accepts %s", (key) => {
     expect(isWatchKey(key)).toBe(true);
   });
@@ -94,7 +95,8 @@ describe("isWatchKey", () => {
     "completed:01",
     "completed:",
     "suspended:",
-    `suspended:${"1".repeat(17)}`,
+    "suspended:1700000000000",
+    "suspended:nope",
     "merged ",
     "MERGED",
     5,
@@ -104,7 +106,7 @@ describe("isWatchKey", () => {
 
   test("terminal keys", () => {
     for (const key of ["merged", "closed", "completed:2", "unreadable"]) expect(isTerminalKey(key)).toBe(true);
-    for (const key of [`checks:${HEAD40}:pass`, `conflict:${HEAD40}`, "suspended:1"]) {
+    for (const key of [`checks:${HEAD40}:pass`, `conflict:${HEAD40}`, "suspended:failed"]) {
       expect(isTerminalKey(key)).toBe(false);
     }
   });
@@ -223,7 +225,7 @@ describe("parseWatchEvent", () => {
       ev(
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         { kind: "suspended", reason: "limited", since: 5, resetAt: 9 },
-        "suspended:5",
+        "suspended:limited",
       ),
     ];
     const parsed = parseWatchEvent({
@@ -281,7 +283,7 @@ describe("parseWatchEvent", () => {
     ],
     [
       "resetAt beside unauthenticated",
-      [ev(A, { kind: "suspended", reason: "unauthenticated", since: 1, resetAt: 2 }, "suspended:1")],
+      [ev(A, { kind: "suspended", reason: "unauthenticated", since: 1, resetAt: 2 }, "suspended:unauthenticated")],
     ],
     ["an unknown body key", [ev(A, { kind: "closed", extra: 1 }, "closed")]],
     ["a non-uuid event id", [ev("x", { kind: "closed" }, "closed")]],
