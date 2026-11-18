@@ -619,7 +619,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   };
   // One expression each for the seat's due check and the `close` verb. A live watch holds a pane as `awaitsWake`, since its
   // note is what wakes the session and has yet to arrive, and is no part of `untouchable`.
-  const { untouchable, awaitsWake } = paneHolds({
+  const { untouchable, awaitsWake, seatHolds } = paneHolds({
     events: () => eventsOf.get(ctx),
     drain: () => drainHoldsOf.get(ctx),
     watches: () => watchesOf.get(ctx),
@@ -804,7 +804,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       now: ctx.now,
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
-      untouchable: (pane) => untouchable(pane) || awaitsWake(pane),
+      untouchable: seatHolds,
       busyReach: verbs.reach,
       appendRound: (entry) => upsertRound(custodianRoundsPath(), entry),
       readRounds: () => readRounds(custodianRoundsPath()),

@@ -572,10 +572,11 @@ green:
   `asUser`, `$.prompt.fill` or tmux keys), rendered by the one `watchNote` formatter from enums, hex, rebuilt URLs and
   bounded check names whose control, format (bidi, zero-width), surrogate and line or paragraph separator characters
   `watchNote` replaces with U+FFFD; a failed read of the pane list is `unreadable`, which delivers and ends nothing.
-  `delivered` lists a watch only when all its events in the frame were placed or held, and a held note's keys stay out
-  of `watches.json` until it lands (`Entry.pending`). A stopped table audits no end and writes no file. A replacing
-  add (the same target, the same session) leaves the old watch in the table's place only for the new one's set, and
-  puts it back when the add is refused; adds of one session run one at a time. The set goes to the leader sealed from this
+  `delivered` lists a watch only when all its events in the frame were placed or held (a held note's keys are saved
+  like a placed one's: the leader keeps them across a daemon restart either way). A stopped table audits no end, writes
+  no file and answers an event it placed after the stop not delivered. A replacing add (the same target, the same
+  session) leaves the old watch in the table's place only for the new one's set, and puts it back when the add is
+  refused; adds and removes of one session run one at a time. The set goes to the leader sealed from this
   daemon's own device id and never `from: "app"`: in process through `leader.onWatchSet` when this daemon leads (the
   parsed set, like a frame), else `RelayClient.sendWatchSet`; who leads is read only through a lazily held app-role
   leg (`LazyRelay`, held while the table is non-empty) that sends nothing, and the add is refused `no_leader` or

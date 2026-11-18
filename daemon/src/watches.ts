@@ -90,11 +90,6 @@ interface Entry {
   readonly head?: string;
   readonly target: WatchTarget;
   seen: readonly string[];
-  /**
-   * Keys of notes held for a listener (`sent`, not yet written): in `seen` so a repeat is skipped, and left out of what
-   * is saved until the note lands, so a restart that loses the held note has the leader send them again.
-   */
-  pending: readonly string[];
   readonly pane: string;
   readonly panePid: number;
   readonly paneStart: string;
@@ -106,10 +101,16 @@ interface Entry {
   fleetFullTold: boolean;
 }
 
+/**
+ * What an add waits for. `ended` is its own watch ending first (its pane, task or session went): the add is refused
+ * rather than answered `ok` with an id the table no longer holds.
+ */
+type AddResult = "ok" | "ended" | WatchRefusal;
+
 interface Waiter {
   /** The `gen.n` of the send that carried this add: an answer of that `n` or later is its answer. */
   readonly n: number;
-  readonly resolve: (result: "ok" | WatchRefusal) => void;
+  readonly resolve: (result: AddResult) => void;
 }
 
 /**
@@ -181,7 +182,7 @@ export function createWatches(deps: WatchesDeps): Watches {
     kind: entry.kind,
     url: entry.url,
     ...(entry.head === undefined ? {} : { head: entry.head }),
-    seen: entry.pending.length === 0 ? entry.seen : entry.seen.filter((key) => !entry.pending.includes(key)),
+    seen: entry.seen,
     pane: entry.pane,
     panePid: entry.panePid,
     paneStart: entry.paneStart,
@@ -259,7 +260,10 @@ export function createWatches(deps: WatchesDeps): Watches {
     }
   };
 
-  const settle = (id: string, result: "ok" | WatchRefusal): void => {
+  /** The watch an add in flight took out of the table for its own, by the new watch's id: audited if the new one ends first. */
+  const replacedBy = new Map<string, Entry>();
+
+  const settle = (id: string, result: AddResult): void => {
     const waiter = waiters.get(id);
     if (waiter === undefined) return;
     waiters.delete(id);
@@ -274,8 +278,12 @@ export function createWatches(deps: WatchesDeps): Watches {
   const drop = async (entry: Entry, reason: WatchEndReason): Promise<boolean> => {
     if (stopped || entries.get(entry.id) !== entry) return false;
     entries.delete(entry.id);
-    settle(entry.id, "ok");
+    // An add in flight over this watch is over with it: the watch it replaced was the same session's and ends with it.
+    const replaced = replacedBy.get(entry.id);
+    replacedBy.delete(entry.id);
+    settle(entry.id, replaced === undefined ? "ok" : "ended");
     await say({ op: "end", kind: entry.kind, reason });
+    if (replaced !== undefined) await say({ op: "end", kind: replaced.kind, reason });
     return true;
   };
 
@@ -293,28 +301,18 @@ export function createWatches(deps: WatchesDeps): Watches {
   });
 
   /** A held note that was never written: its watch is over, since the session will not hear of it. */
-  const onFate = (
-    entry: Entry,
-    fate: "delivered" | "ended" | "nolistener" | "dropped",
-    keys: readonly string[],
-  ): void => {
-    if (fate === "delivered") {
-      // The held note landed: its keys are told, so they may be saved now.
-      if (entry.pending.length === 0) return;
-      entry.pending = entry.pending.filter((key) => !keys.includes(key));
-      if (entries.get(entry.id) === entry) persist();
-      return;
-    }
+  const onFate = (entry: Entry, fate: "delivered" | "ended" | "nolistener" | "dropped"): void => {
+    if (fate === "delivered") return;
     end(entry, fate).catch((err: unknown) => {
       warn(`watches: could not end a watch: ${errorText(err)}`);
     });
   };
 
-  const note = (entry: Entry, bodies: readonly WatchNoteBody[], keys: readonly string[] = []): Promise<NoteOutcome> =>
+  const note = (entry: Entry, bodies: readonly WatchNoteBody[]): Promise<NoteOutcome> =>
     messages.deliverWatchNote(
       sessionOf(entry),
       watchNote({ id: entry.id, target: entry.target, events: bodies }),
-      (fate) => onFate(entry, fate, keys),
+      (fate) => onFate(entry, fate),
     );
 
   /**
@@ -427,7 +425,6 @@ export function createWatches(deps: WatchesDeps): Watches {
       ...(frame.head === undefined ? {} : { head: frame.head }),
       target,
       seen: [],
-      pending: [],
       pane: pane.id,
       panePid: pane.pid,
       paneStart,
@@ -440,10 +437,14 @@ export function createWatches(deps: WatchesDeps): Watches {
     };
     // The old watch leaves the table for the new one's set, and comes back if the add fails: a refused add costs the
     // session nothing. Its end is audited once the add has succeeded.
-    if (replaced !== undefined) entries.delete(replaced.id);
+    if (replaced !== undefined) {
+      entries.delete(replaced.id);
+      replacedBy.set(entry.id, replaced);
+    }
     entries.set(entry.id, entry);
     persist();
     const undo = (): void => {
+      replacedBy.delete(entry.id);
       if (entries.get(entry.id) !== entry) return;
       entries.delete(entry.id);
       if (replaced !== undefined && !stopped) entries.set(replaced.id, replaced);
@@ -452,7 +453,7 @@ export function createWatches(deps: WatchesDeps): Watches {
     };
 
     // Registered before the send: in process, the leader's answer can arrive before `send` returns.
-    const answer = new Promise<"ok" | WatchRefusal>((resolve) => {
+    const answer = new Promise<AddResult>((resolve) => {
       const timeout = setTimeout(() => {
         waiters.delete(entry.id);
         resolve("ok");
@@ -466,13 +467,17 @@ export function createWatches(deps: WatchesDeps): Watches {
       });
     });
     const sent = await sendSet();
-    if (!sent) {
+    // A stopped table's file holds the new watch (and not the old one), and the restart states it: the add stands, as
+    // `stop` settled it, rather than a `no_leader` for a watch the reload brings back.
+    if (!sent && !stopped) {
       // Not handed on and no answer to wait for: the session is told rather than left with a watch nothing reads.
       settle(entry.id, "ok");
       undo();
       return refuse("add", "no_leader");
     }
     const result = await answer;
+    replacedBy.delete(entry.id);
+    if (result === "ended") return refuse("add", "nolistener");
     if (result !== "ok") {
       undo();
       return refuse("add", result);
@@ -493,16 +498,19 @@ export function createWatches(deps: WatchesDeps): Watches {
     if (stopped) return refuse("remove", "stopping");
     const bound = await bind(peer);
     if (typeof bound === "string") return refuse("remove", bound);
-    if (stopped) return refuse("remove", "stopping");
-    const entry = entries.get(id);
-    // The same answer for a wrong id and another session's: an id is no oracle.
-    if (entry === undefined || !sameSession(entry, bound)) return refuse("remove", "unknown");
-    entries.delete(id);
-    settle(id, "ok");
-    persist();
-    scheduleSend();
-    await say({ op: "remove", kind: entry.kind, outcome: "ok" });
-    return { ok: true };
+    // Behind the session's adds, so a remove never meets a watch an add has out of the table while it waits.
+    return serialised(bound.session, async () => {
+      if (stopped) return refuse("remove", "stopping");
+      const entry = entries.get(id);
+      // The same answer for a wrong id and another session's: an id is no oracle.
+      if (entry === undefined || !sameSession(entry, bound)) return refuse("remove", "unknown");
+      entries.delete(id);
+      settle(id, "ok");
+      persist();
+      scheduleSend();
+      await say({ op: "remove", kind: entry.kind, outcome: "ok" });
+      return { ok: true };
+    });
   };
 
   const handle: Watches["handle"] = async (raw, peer) => {
@@ -558,19 +566,18 @@ export function createWatches(deps: WatchesDeps): Watches {
     }
     // The leader re-sent after a lost answer: it is told the events landed, and the session is not told twice.
     if (fresh.length === 0) return true;
-    const keys = fresh.map((each) => each.key);
     const outcome = await note(
       entry,
       fresh.map((each) => each.event),
-      keys,
     );
     if (!placed(outcome)) {
       await failed(entry, outcome);
       return false;
     }
-    // Before any await: a held note's fate can arrive as soon as this turn yields, and clears what is added here.
-    if (outcome === "sent") entry.pending = [...entry.pending, ...keys];
     await Promise.all(fresh.map((each) => say({ op: "event", kind: entry.kind, event: each.event.kind, outcome })));
+    // A stopped table saves and ends nothing, so these keys and a terminal end would be lost with the note told: the
+    // leader is told it did not land and sends it to the next instance, which costs one repeated note, not a zombie watch.
+    if (stopped) return false;
     if (entries.get(entry.id) !== entry) return true;
     entry.seen = [...entry.seen, ...fresh.map((each) => each.key)].slice(-WATCH_SEEN_MAX);
     persist();
@@ -651,7 +658,8 @@ export function createWatches(deps: WatchesDeps): Watches {
   };
 
   const tick = (): Promise<void> => {
-    if (stopped || ticking) return Promise.resolve();
+    // Nothing to sweep or send for an empty table, and the pane read is a `tmux` exec on every machine, watching or not.
+    if (stopped || ticking || entries.size === 0) return Promise.resolve();
     ticking = true;
     return inBatch(async () => {
       await sweep(await deps.panes());
@@ -716,7 +724,6 @@ export function createWatches(deps: WatchesDeps): Watches {
         ...(each.head === undefined ? {} : { head: each.head }),
         target,
         seen: each.seen,
-        pending: [],
         pane: each.pane,
         panePid: each.panePid,
         paneStart: each.paneStart,
@@ -729,8 +736,10 @@ export function createWatches(deps: WatchesDeps): Watches {
       });
     }
     if (dropped > 0) persist();
-    const panes = await deps.panes();
-    await inBatch(() => sweep(panes));
+    if (entries.size > 0) {
+      const panes = await deps.panes();
+      await inBatch(() => sweep(panes));
+    }
     if (entries.size > 0) await sendSet();
     if (stopped) return;
     timer = setInterval(() => {
