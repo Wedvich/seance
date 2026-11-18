@@ -733,6 +733,7 @@ export type OpName =
   | "despawn"
   | "availability"
   | "custodian"
+  | "session-tag"
   | "rescan"
   | "metrics"
   | "push-branch"
@@ -802,6 +803,8 @@ export const OP_TIMEOUT_MS = {
   availability: 10_000,
   // Two small file reads and one write, as `availability`.
   custodian: 10_000,
+  // A pane listing, at most one session-file read and one small write.
+  "session-tag": 10_000,
   metrics: 15_000,
   // Answered from a cached count and two stat calls, never a scan.
   "archive-status": 10_000,
@@ -1202,6 +1205,10 @@ export interface MachineInfo {
  * daemon, parses `watch-event`. A leader sends `watch-event` only to a device advertising it, and a daemon sends
  * `watch-set` only to a verified leader advertising it. An older leader drops the unknown event op. A step-2 daemon
  * answers every event `delivered: []`, so nothing is ever marked delivered for it.
+ * `sessionTag`: as a daemon, answers `session-tag` (the owner's label on an untasked conversation, docs/tags.md §3.1),
+ * keeps it in `conversations.json` and joins it into `SessionEntry.tags` as `owner.label`. Advertised only where the
+ * session-events capability runs, since the conversation table it needs starts with it. The PWA offers a session's
+ * Rename only on a machine advertising it: an older daemon ignores the unknown op, which an app sees only as a timeout.
  * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
  * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
  * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
@@ -1237,6 +1244,7 @@ export const CAPABILITIES = {
   custodian: "custodian",
   limits: "limits",
   watches: "watches",
+  sessionTag: "sessionTag",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -2054,6 +2062,43 @@ export type CustodianErrorCode = (typeof CUSTODIAN_ERROR_CODES)[number];
 export type CustodianResponse =
   | { readonly ok: true; readonly pause: { readonly until: number | null } | null }
   | { readonly ok: false; readonly code: CustodianErrorCode; readonly message: string; readonly after?: number };
+
+/**
+ * `session-tag`, app → daemon, sealed `from: "app"` on the relay leg only (docs/tags.md §3.1): the owner's label on an
+ * untasked conversation, addressed by the pane and the conversation id (`agent.session`) the app read in `sessions`.
+ * `key` is a bare suffix, `label` alone; `value` has passed `displayLine` and the title's cap, `""` clearing it.
+ */
+export interface SessionTagRequest {
+  readonly pane: string;
+  readonly session: string;
+  readonly key: "label";
+  readonly value: string;
+}
+
+/**
+ * `tasked`: the pane's session carries a task (its label is the task's, step 3); `moved`: the pane's bound process is not
+ * in that conversation now (or another pane holds it); `unverified`: the daemon's own source does not corroborate the
+ * claim; `ambiguous`: two live processes claim the id; `ended`: no live process in that pane, or none claims the id;
+ * `unsupported`: this daemon keeps no conversation table or store.
+ */
+export const SESSION_TAG_ERROR_CODES = [
+  "invalid_request",
+  "refused",
+  "unsupported",
+  "tasked",
+  "moved",
+  "unverified",
+  "ambiguous",
+  "ended",
+  ...TRANSPORT_ERROR_CODES,
+] as const;
+
+export type SessionTagErrorCode = (typeof SESSION_TAG_ERROR_CODES)[number];
+
+/** `value`: the label now held, `""` when cleared. */
+export type SessionTagResponse =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly code: SessionTagErrorCode; readonly message: string };
 
 export type DespawnResponse =
   | {

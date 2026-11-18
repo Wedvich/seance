@@ -4,6 +4,8 @@ import {
   displayLine,
   displayName,
   joinTags,
+  parseSessionTagRequest,
+  parseSessionTagResponse,
   parseTags,
   parseTagValue,
   sessionTagsFit,
@@ -14,6 +16,7 @@ import {
   TASK_TAG_BUDGET,
   writeTags,
 } from "./tags.ts";
+import { TASK_REQUEST_LIMITS } from "./types.ts";
 
 const UUID = "0b3f5e0a-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
 
@@ -205,5 +208,53 @@ describe("joinTags and displayName", () => {
     expect(displayName(self, { title: " \n" }, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName(self, null, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName({}, undefined, "zsh\u0007")).toEqual({ text: "zsh", source: "window" });
+  });
+});
+
+describe("session-tag", () => {
+  const ask = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    pane: "%12",
+    session: UUID,
+    key: "label",
+    value: "release notes",
+    ...extra,
+  });
+
+  test("a label is scrubbed and capped; an empty one clears", () => {
+    expect(parseSessionTagRequest(ask())).toEqual({ pane: "%12", session: UUID, key: "label", value: "release notes" });
+    expect(parseSessionTagRequest(ask({ value: " two\nlines\u0007 " }))?.value).toBe("two lines");
+    expect(parseSessionTagRequest(ask({ value: "" }))?.value).toBe("");
+    expect(parseSessionTagRequest(ask({ value: "\u0007" }))?.value).toBe("");
+    expect(parseSessionTagRequest(ask({ value: "x".repeat(TASK_REQUEST_LIMITS.title) }))?.value).toHaveLength(
+      TASK_REQUEST_LIMITS.title,
+    );
+  });
+
+  test("a full key, another suffix, a bad pane or id, a long label or an extra field refuses the request", () => {
+    for (const bad of [
+      ask({ key: "owner.label" }),
+      ask({ key: "name" }),
+      ask({ pane: "12" }),
+      ask({ pane: "%12; rm" }),
+      ask({ session: UUID.toUpperCase() }),
+      ask({ value: 5 }),
+      ask({ value: "x".repeat(TASK_REQUEST_LIMITS.title + 1) }),
+      ask({ task: "t-1" }),
+      null,
+      "label",
+    ]) {
+      expect(parseSessionTagRequest(bad)).toBeNull();
+    }
+  });
+
+  test("a reply keeps its value or a known code", () => {
+    expect(parseSessionTagResponse({ ok: true, value: "x" })).toEqual({ ok: true, value: "x" });
+    expect(parseSessionTagResponse({ ok: false, code: "moved", message: "m" })).toEqual({
+      ok: false,
+      code: "moved",
+      message: "m",
+    });
+    expect(parseSessionTagResponse({ ok: false, code: "whatever", message: "m" })).toBeNull();
+    expect(parseSessionTagResponse({ ok: true })).toBeNull();
   });
 });
