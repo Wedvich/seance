@@ -1054,7 +1054,7 @@ nothing checked it. The last is the gap they leave.
   readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
   poller parsed itself, never `gh`'s words.
 - **A watch's target reaches GitHub only through the leader's poller, and its frames bind nothing** (2026-11-18,
-  Scheduler, "PR status"; docs/gh-watch.md invariants 2, 4, 5). A target reaches the leader only as a URL that
+  Scheduler, "PR status"). A target reaches the leader only as a URL that
   `parseWatchSet` (`shared/src/watch.ts`) holds to the PR or run pattern, parsed into owner, repo and number or id. It
   reaches `gh` only as GraphQL variables in an argv array (`-f`, with `-F` only for the regex-held PR number), the
   query text built from alias indices alone, through `askGithub` with `--hostname github.com`, read-only. A
@@ -1068,7 +1068,7 @@ nothing checked it. The last is the gap they leave.
   machine can spend up to the caps of the fleet's GraphQL budget (about 840 points an hour) and learn the states and
   check names of any repo the operator's token sees, which that session's own `gh` could read anyway (G1).
 - **A daemon's watch table binds a watch to its session's `claude` process and notes it only through messaging's local
-  delivery** (2026-11-18, "Watches", docs/gh-watch.md invariants 1, 3, 5-8). A watch is made only by the local socket's
+  delivery** (2026-11-18, "Watches"). A watch is made only by the local socket's
   `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
   on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
   came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener

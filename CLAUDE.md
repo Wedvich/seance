@@ -567,7 +567,7 @@ green:
   (an untasked sender's only way, to its session alone) or else the pane carrying the sending task, as the one fixed line
   `receiptNote` makes per outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
 - **A watch is the daemon's, bound to a `claude` process, and its notes go only through messaging's local delivery**
-  (DESIGN.md, "Watches"; docs/gh-watch.md invariants 1, 3, 5-8). The local socket's `watch` frame (`add`, `remove`;
+  (DESIGN.md, "Watches", and its threat model, "A daemon's watch table binds a watch to its session's `claude` process"). The local socket's `watch` frame (`add`, `remove`;
   `watch-frame.ts`, `parseWatchFrame`, exactly its fields) is bound only by the kernel-reported peer pid, to the pane,
   its pane process and the innermost `claude` on the peer's chain (`bindPeer`), refused `unbound` where the host names no
   peer (`peerPidSupported`) or the pid came back null, `nosession` with no `claude` on the chain and `nolistener` for a
