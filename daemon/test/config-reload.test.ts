@@ -287,7 +287,7 @@ describe("config hot reload", () => {
     expect(relay.connectionCount()).toBe(connectionsBefore);
   });
 
-  test("a label written just before a reload survives it: one conversations file, one store", async () => {
+  test("a label written just before a reload survives it, and the reloaded daemon's own write lands on the same file", async () => {
     relay = startTestRelay(TOKEN);
     const path = await configFile();
     await writeConfig(path, "Labelled", relay.url);
@@ -297,24 +297,36 @@ describe("config hot reload", () => {
     const file = conversationsPath();
     const store = subscriptionsFor(file);
     const first = "0f3c9a8e-1b2d-4c5e-8f70-123456789abc";
-    const second = "1f3c9a8e-1b2d-4c5e-8f70-123456789abc";
-    // Not awaited: its write is still on the store's chain when the reload stops this daemon and starts the next.
+    // A subscription to an adapter the config names no more: the reloaded daemon's own reconcile must end it, and
+    // that write is the one that loses the label if the daemon's store is not the one these calls queued on.
+    store.reconcile(new Map([["tg", "fingerprint-of-a-removed-adapter"]]));
+    store.add("tg", first);
+    // Not awaited: the writes are still on the store's chain when the reload stops this daemon and starts the next.
     const written = store.setLabel(first, "before the reload");
     await writeConfig(path, "Relabelled", relay.url);
     await reload();
     await written;
-
-    // The reloaded daemon's session events took the same store, so its writes carry the label made before.
-    expect(subscriptionsFor(file)).toBe(store);
-    await store.setLabel(second, "after the reload");
     await store.flushed();
+
     const onDisk: unknown = JSON.parse(await readFile(file, "utf8"));
-    expect(onDisk).toMatchObject({
-      conversations: {
-        [first]: { ownerLabel: { value: "before the reload" } },
-        [second]: { ownerLabel: { value: "after the reload" } },
-      },
-    });
+    expect(onDisk).toMatchObject({ conversations: { [first]: { ownerLabel: { value: "before the reload" } } } });
+    expect(JSON.stringify(onDisk)).not.toContain('"tg"');
+  });
+
+  test("a subscription change made just before stop is on disk once stop resolves", async () => {
+    relay = startTestRelay(TOKEN);
+    const path = await configFile();
+    await writeConfig(path, "Stopped", relay.url);
+    const handle = await startSupervised(path);
+    await registerAs(relay, "Stopped");
+
+    const conversation = "2f3c9a8e-1b2d-4c5e-8f70-123456789abc";
+    // Not awaited, and `flushed()` never called: the daemon's stop is what has to wait for the write.
+    subscriptionsFor(conversationsPath()).add("tg", conversation);
+    await handle.stop();
+    supervisor = null;
+
+    expect(await readFile(conversationsPath(), "utf8")).toContain(conversation);
   });
 
   test("stop() stops watching", async () => {

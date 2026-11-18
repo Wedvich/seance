@@ -479,6 +479,18 @@ export async function watchesSettled(): Promise<void> {
   await Promise.all(watchStops);
 }
 
+/**
+ * Resolves once every `conversations.json` write queued so far reached the disk, looping until no store queued another
+ * meanwhile. `add`, `leave`, `touch` and `reconcile` persist without being awaited, and `main.ts` exits once the
+ * daemon's stop resolves, which would cut a write in flight and bring back a subscription a session had ended.
+ */
+export async function subscriptionsSettled(): Promise<void> {
+  const tails = [...subscriptionStores.values()].map((store) => store.flushed());
+  await Promise.all(tails);
+  const moved = [...subscriptionStores.values()].some((store, i) => store.flushed() !== tails[i]);
+  if (moved) await subscriptionsSettled();
+}
+
 /** How often the daemon looks for `seance adapter restart`'s request file. */
 const ADAPTER_RESTART_POLL_MS = 2_000;
 
