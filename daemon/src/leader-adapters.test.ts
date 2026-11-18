@@ -420,6 +420,15 @@ describe("a watch-event from the leader", () => {
     expect(asked).toEqual([]);
   });
 
+  test("this machine's own reply is parsed too: a delivered id that is no watch id is a malformed reply", async () => {
+    const { watches } = watchFleet({ local: () => Promise.resolve({ ok: true, delivered: ["not-an-id"] }) });
+    expect(await watches.watchEvent("self", request)).toEqual({
+      ok: false,
+      code: "internal_error",
+      message: "malformed watch-event reply",
+    });
+  });
+
   test("another machine's goes over the relay as watch-event, and the reply is parsed before it is believed", async () => {
     const { watches, asked } = watchFleet({ remote: () => Promise.resolve({ ok: true, delivered: [] }) });
     expect(await watches.watchEvent("other", request)).toEqual({ ok: true, delivered: [] });

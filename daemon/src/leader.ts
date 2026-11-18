@@ -536,8 +536,15 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         log.info(`scheduler: watch-set from=${quote(from)} held — no registry yet`);
         return false;
       }
-      if (state.archivist?.deviceId === from || !state.machines.some((machine) => machine.deviceId === from)) {
+      const machine = state.archivist?.deviceId === from ? undefined : state.machines.find((m) => m.deviceId === from);
+      if (machine === undefined) {
         log.warn(`scheduler: watch-set from=${quote(from)} dropped — not a registered machine`);
+        return true;
+      }
+      // A machine that cannot hear an answer would cost the fleet caps and the budget for nothing; its next set,
+      // once it advertises `watches`, is taken.
+      if (machine.capabilities?.includes(CAPABILITIES.watches) !== true) {
+        log.warn(`scheduler: watch-set from=${quote(from)} dropped — the machine does not advertise watches`);
         return true;
       }
     }

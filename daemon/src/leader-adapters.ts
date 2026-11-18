@@ -303,7 +303,7 @@ export function termWatches(o: TermFleetOpts): TermWatches {
   return {
     watchEvent: async (deviceId, request) => {
       if (!o.live()) return null;
-      if (deviceId === o.selfDeviceId) return o.local.watchEvent(request);
+      if (deviceId === o.selfDeviceId) return parseWatchEventResponse(await o.local.watchEvent(request)) ?? malformed;
       try {
         const reply = await o.relay.request<unknown>(deviceId, "watch-event", request);
         return parseWatchEventResponse(reply) ?? malformed;

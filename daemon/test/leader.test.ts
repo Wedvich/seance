@@ -3905,8 +3905,10 @@ describe("watch-set ↔ the leader", () => {
       await sendSet(relay, "stranger", rawSet(1));
       await sendSet(relay, "arch", rawSet(1));
       await sendSet(relay, "a", { ...rawSet(1), watches: "nope" });
-      // Handled in order: a non-event cannot be polled for.
-      await Bun.sleep(300);
+      // A good set behind them: its answer is the signal that the four before it were handled (in order), where a
+      // non-event cannot be polled for.
+      await sendSet(relay, "a", rawSet(1));
+      await answerWatchEvent(relay);
       pending = await pendingWatchEvents(relay);
       replied = replies.size;
     });
@@ -3924,14 +3926,19 @@ describe("watch-set ↔ the leader", () => {
     for (const line of lines) expect(line).not.toContain("acme/app/pull");
   });
 
-  test("a machine that does not advertise watches is taken but never sent one", async () => {
+  test("a machine that does not advertise watches is dropped for good: never polled, never sent one", async () => {
     let pending = -1;
-    await scenario(async ({ relay, leader }) => {
+    const lines = await scenario(async ({ relay, leader }) => {
       expect(leader.onWatchSet(parsedSet(1), "b")).toBe(true);
-      await Bun.sleep(300);
+      // The next set, from a machine that does advertise, is answered: it was handled after the first.
+      await sendSet(relay, "a", rawSet(1));
+      await answerWatchEvent(relay);
       pending = await pendingWatchEvents(relay);
     });
     expect(pending).toBe(0);
+    expect(
+      lines.filter((line) => line.includes('watch-set from="b" dropped — the machine does not advertise watches')),
+    ).toHaveLength(1);
   });
 
   test("with no registry yet the set is held for the sender to resend, as with no term at all", async () => {
