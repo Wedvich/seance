@@ -825,7 +825,7 @@ export const OP_TIMEOUT_MS = {
   "pass-close": 10_000,
   "deliver-message": 10_000,
   "message-receipt": 10_000,
-  // As `deliver-message`: step 2's handler parses and answers; step 3's places a line in a pane's inbox.
+  // As `deliver-message`: the daemon's handler parses and answers, and the watch table places a line in a pane's inbox.
   "watch-event": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
@@ -1199,9 +1199,11 @@ export interface MachineInfo {
  * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
  * rounds were held (`ROUNDS_LIVE`) on every build before custodian 4b, so the one bit gates the Machines card's menu too.
  * `watches`: as a leader, takes `watch-set`, reads watched PRs and runs in its PR poller and sends `watch-event`; as a
- * daemon, parses `watch-event`. A leader sends `watch-event` only to a device advertising it, and a daemon sends
+ * daemon, keeps its sessions' watch table (the local `watch` frame, `watch-set`) and places a note for each
+ * `watch-event`. A leader sends `watch-event` only to a device advertising it, and a daemon sends
  * `watch-set` only to a verified leader advertising it. An older leader drops the unknown event op. A step-2 daemon
- * answers every event `delivered: []`, so nothing is ever marked delivered for it.
+ * (which advertised this before the table existed) answers every event `delivered: []`, so nothing is ever marked
+ * delivered for it, and closes a `watch` frame as malformed.
  * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
  * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
  * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
