@@ -1,8 +1,9 @@
 # Fleet GitHub watches — spec
 
-**Status: spec; build steps 1 and 2 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the
+**Status: spec; build steps 1 to 3 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the
 reset-time backoff, then the leader's side: the run query, the watch registry, the reserve for tasks, `watch-set` and
-`watch-event` — DESIGN.md, Scheduler, "PR status"); steps 3 and 4 (the daemon's table and the surfaces) are not.
+`watch-event` — DESIGN.md, Scheduler, "PR status"; then the daemon's side: the `watch` frame, the table, `watches.json`,
+the notes and the custodian hold — DESIGN.md, "Watches"); step 4 (MCP's tools) is not.
 Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
 session asks the fleet to watch a pull request or an Actions run and is told through its inbox when something
 happens, instead of polling GitHub itself. The leader already reads every task's PR in batches (DESIGN.md, "PR
@@ -111,10 +112,10 @@ A watch is the daemon's, not the leader's, and is bound to the session that made
   Several sessions watching one target count it once at the leader.
 - **Rejected: binding to the task id.** A hand-started session has none, and a task's session can be replaced
   (continue, successor) by one that never asked.
-- **The custodian leaves a watching session alone.** A session idle on a watch looks finished. A live watch on a pane
-  makes the custodian's `close` answer `busy` and the seat count no round due for it, as a held Stop note with a
-  background count does (`awaitsWake`). A hand-off, a pass and a drain are not held by it: those are the session's or
-  the owner's own acts, and the session's end ends the watch.
+- **The custodian leaves a watching session alone.** Built 2026-11-18 (DESIGN.md, "Watches", "The custodian"): a live
+  watch on a pane makes `close` answer `busy` and the seat count no round due for it (`awaitsWake`); a hand-off, a pass
+  and a drain are not held by it.
+- **Built** (DESIGN.md, "Watches"): the binding, the caps, every end above, `unwatch` as the frame's `remove`.
 
 ### W4. Events and what each watch fires on
 
@@ -186,7 +187,8 @@ with `gh api repos/<o>/<r>/actions/jobs/<id>/logs` to a file"), never by echoing
   device per poll carrying every event for that device's watches (watch id, key, fields). It is a request: the daemon
   answers `{ ok, delivered: [ids] }`, and only then does the leader add the key to its `seen`. The leader's own
   machine is answered in process, as `deliver-message` is.
-- **The daemon delivers** only through messaging's local delivery: it looks the watch id up in its own table (never
+- **The daemon delivers** (built 2026-11-18: DESIGN.md, "Watches", "Events and `delivered`", "A held note") only through
+  messaging's local delivery: it looks the watch id up in its own table (never
   the frame's word on the pane or session) and delivers to the pane, pane pid, task and `claude` process that table
   names, as a reply by handle reaches its asker. A watch whose session no longer runs ends there (`ended`). The note is
   an inbox line marked `wake` (the mod submits it, `$.prompt.submit`): every event is something the session asked to
@@ -239,7 +241,7 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   merge settling is not.
 - **Watchers are told, once per reason.** The leader's side is built (2026-11-18: DESIGN.md, "PR status",
   "Suspended and unreadable"): a watch whose reads stop for longer than two intervals gets a `suspended` event with a
-  reason enum and, for a limit, the reset time. The daemon delivers a fixed note (step 3): for a limit "GitHub's budget for this fleet's account is
+  reason enum and, for a limit, the reset time. The daemon delivers a fixed note (built 2026-11-18, "Watches"): for a limit "GitHub's budget for this fleet's account is
   spent until HH:MM UTC; this watch resumes then; do not poll GitHub yourself meanwhile", **without wake** (an
   `append`: the session is waiting either way, and waking it to say "keep waiting" costs a turn); for a login or a
   missing `gh`, "the fleet cannot read GitHub; this watch is suspended" **with wake**, since that may never heal by
@@ -247,22 +249,24 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   when reads do; the fallback is the session's call. One note per watch per reason (the key is `suspended:<reason>`, so a new leader does not repeat it), and a
   resumption says nothing.
 - **A target the forge will not describe** (the alias answers `null`: no repo, no access, no such run) for two
-  consecutive polls ends the watch with an `unreadable` note, with wake. The leader's event is built (2026-11-18); the
-  note is step 3's.
+  consecutive polls ends the watch with an `unreadable` note, with wake. Built 2026-11-18 on both sides.
 - **No leader, or one that does not advertise `watches`**: the add is refused (`no_leader`, `unsupported`) and the
   session polls itself. A leader lost after the add: the daemon, having had no `watch-set` answered for 10 minutes,
-  sends its watches the `suspended` note with reason `no_leader`, with wake, once.
+  sends the watch a `no_leader` note, with wake, once. Built 2026-11-18, with the answer counted and never the send
+  (DESIGN.md, "Watches", "A set nobody answered is resent"). A `fleet_full` that arrives after the add is one wake
+  note per watch and the watch stays, in the daemon's own local flag, never in `seen`.
 - **Expiry** (W3's 24 h) is a note with wake ("watch expired; call `watch_github` again if you still wait on it"):
-  a session may be waiting on it.
+  a session may be waiting on it. Built 2026-11-18.
 
 ### W9. Leader change and daemon restart: the daemon is the owner of record
 
 - **The leader's registry is built** (2026-11-18): DESIGN.md, "PR status", "The registry" (soft state per term, keyed by
   device id, the whole set replacing, the generation, the 15 minute expiry, the caps and the refusals, the answers).
-  Nothing is in the relay's store. The daemon's side is step 3: it sends every live watch it holds (id, kind, target,
-  `head`, `seen`) on every change, every 5 minutes as a heartbeat, and at once when it sees a new leader nominee in a
-  registry push, so a new leader, a relay hiccup or a lost frame each heal within one heartbeat.
-- **The daemon persists its table** in `stateDir()/watches.json` (0600, written by atomic rename): per watch the id,
+  Nothing is in the relay's store. The daemon's side is built (2026-11-18, DESIGN.md, "Watches"): it sends every live
+  watch it holds (id, kind, target, `head`, `seen`) on every change, every 5 minutes as a heartbeat, at each tick while
+  an answer is owed, and at once when it sees a new verified leader nominee, so a new leader, a relay hiccup or a lost
+  frame each heal within one heartbeat.
+- **The daemon persists its table** (built 2026-11-18, "Watches", "Persistence") in `stateDir()/watches.json` (0600, written by atomic rename): per watch the id,
   kind, target, `head`, `seen`, the pane id, the pane process's pid and start time, the `claude` process's pid and
   start time, task id or none, made and expiry times. No note text, check name or reading. A restart (a self-update is
   one) reloads an entry only while its `claude` process still runs with that start time and its pane carries the same
@@ -283,7 +287,7 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   separate `watch_pr` and `watch_run`: the URL already says which, and one tool is one more line in every session's
   context instead of two. No list tool: the ids are in the session's own context, and an `unwatch` of an unknown id
   is harmless.
-- **The local socket's sixth frame kind, `watch`** (`{ v: 1, kind: "watch", op: "add" | "remove", url?, head?, id? }`,
+- **The local socket's `watch` frame kind** (built 2026-11-18) (`{ v: 1, kind: "watch", op: "add" | "remove", url?, head?, id? }`,
   parsed by `parseWatchFrame`, exactly those fields), bound by the kernel-reported peer pid only, refused `unbound`
   where the host names no peer or the pid came back null, never a claimed pane. Not a `Plain`, not on `LOCAL_OPS`,
   not on the broker.
@@ -296,8 +300,8 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   (`messageRouteGate`'s pattern, never the daemon's word alone); the daemon, which sends the `watch-set`, refuses the
   add `unsupported` when the leader it sends to does not advertise it. An older leader would drop the unknown op; the
   gate means none is sent.
-- **Audit**, a new origin `watch`, counts, kinds and outcomes only:
-  `audit watch origin=watch op=<add|remove|event|end> kind=<pr|run> event=<…> reason=<…> outcome=<…>`. Never the
+- **Audit**, a new origin `watch` (built 2026-11-18), counts, kinds and outcomes only:
+  `audit watch origin=watch op=<add|remove|event|end> kind=<pr|run|-> event=<…> reason=<…> outcome=<…>`. Never the
   URL, owner, repo, number, head, check names or the watch id (it joins nothing the line needs). The leader logs no
   line per watch, reading or event, only a refused set, a failed send and the poller's class changes.
 - **Not in the PWA, `get_queue`, `status` or the archivist.** No count of live watches on the Machines row (decided,
@@ -305,7 +309,9 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
 
 ## Threat-model invariants this adds
 
-For CLAUDE.md's conventions list and DESIGN.md's threat model, when built:
+Recorded 2026-11-18 (invariants 1, 3 and 5-8 with step 3, 2 and 4 with step 2): CLAUDE.md's conventions list and
+DESIGN.md's threat model, "A watch's target reaches GitHub only through the leader's poller" and "A daemon's watch
+table binds a watch to its session's `claude` process". The list stays as the spec they were taken from:
 
 1. A watch is made only through the local socket's `watch` frame, bound by the kernel-reported peer pid to a pane and
    a `claude` process (`<pid>:<start time>`), never by a field; refused where the host names no peer.
@@ -402,28 +408,6 @@ wants it, it is its own decision against the "manual" one above.
 3. **A budget gauge**: built as #547 (`MachineStatus.gh`, the leader's `github` alert). **A live-watch count on the
    Machines row**: not built.
 
-## For step 3: the `watch-set` contract the leader built
-
-What the daemon's table must do to fit the leader's registry (DESIGN.md, "PR status", "The registry"):
-
-- **`gen.n` goes up on every send**, a heartbeat included. An equal `gen` is re-answered as last computed without
-  replacing the set; a lower `n` on the same boot is ignored unanswered (`onWatchSet` returns `false`), so a sender
-  that kept a counter across a restart without the boot id would be silent.
-- **`set` is repeated until `ok: true`.** Every accepted set is answered by a `watch-event` carrying `set`; the leader
-  sends it again at each poll until the daemon's answer reports it taken.
-- **`fleet_full` means "not polled for now", not "ended".** The entry stays in the table and in the next set; the
-  leader re-evaluates its refusals on every replacing set. An `invalid` entry is the daemon's to drop.
-- **Keys in `seen` cover `suspended:<reason>`** (`limited`, `reserve`, `unauthenticated`, `missing`, `failed`), so a
-  suspension already told is not sent again by a new leader: the key carries nothing leader-local, and a watch is told
-  each reason once, however often it recovers and stops again. The event's `since` is display only.
-- **A watch id in `delivered` is the only acknowledgement** the leader keeps; a key is never recorded before it. Events
-  carry no id of their own: a listed id acknowledges every event of that watch in the frame, so a daemon that places
-  only some of a watch's events in a frame must leave the watch out of `delivered`.
-- **A frame the daemon cannot place a watch's events in** (session gone, delivery failed) must be answered without that
-  id and the watch dropped from the next set: the leader resends level-triggered events at every poll's end and clock
-  tick, each also one `audit request` line on the daemon, until acknowledged or the watch leaves the set.
-- **A machine that does not advertise `CAPABILITIES.watches`** has its sets dropped: advertise it before the first set.
-
 ## Build order
 
 1. **Leader side, no new surface** (built 2026-11-18): `askGithub`'s `limited` class and the in-query `rateLimit`,
@@ -432,6 +416,8 @@ What the daemon's table must do to fit the leader's registry (DESIGN.md, "PR sta
    `CAPABILITIES.watches`, with `watch-set` and `watch-event` (W6, W9) and their parsers, tests against a `gh` stub
    (built 2026-11-18).
 3. **The daemon's table, `watches.json`, the `watch` frame, delivery and the custodian hold** (W3, W5, W6, W9), the
-   audit origin, and the threat-model invariants into CLAUDE.md and DESIGN.md.
+   audit origin, and the threat-model invariants into CLAUDE.md and DESIGN.md (built 2026-11-18: DESIGN.md,
+   "Watches", which also holds the `watch-set` contract the leader built: `gen.n` rising on every send, the resend
+   until answered, what `delivered` lists, `fleet_full` as "not polled for now").
 4. **MCP's `watch_github` and `unwatch_github`** with the verified-leader gate (W10), S4 live, then the /ship and
    owner-instruction changes (outside this repo).

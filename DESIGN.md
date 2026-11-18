@@ -1067,6 +1067,25 @@ nothing checked it. The last is the gap they leave.
   are the leader's, never a frame's, and no URL, head, check name or watch id is logged. The residual: any registered
   machine can spend up to the caps of the fleet's GraphQL budget (about 840 points an hour) and learn the states and
   check names of any repo the operator's token sees, which that session's own `gh` could read anyway (G1).
+- **A daemon's watch table binds a watch to its session's `claude` process and notes it only through messaging's local
+  delivery** (2026-11-18, "Watches", docs/gh-watch.md invariants 1, 3, 5-8). A watch is made only by the local socket's
+  `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
+  on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
+  came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener
+  serves; the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
+  honoured only from the bound session that made the watch, and a wrong id, another session's id and an unknown id all
+  answer `unknown`. The caps (8 a session, 64 a machine, equal to the leader's per-device cap) are the table's, refused
+  at the add and never an eviction. A `watch-event` is looked up in the table by watch id and delivered only to the
+  pane, pane pid, task and `claude` process that entry names, as a `wake` line or a plain note, rendered by the one
+  `watchNote` formatter from enums, hex, rebuilt URLs and `cleanName`-bounded check names; never `asUser`,
+  `$.prompt.fill` or tmux keys. `watches.json` (0600, atomic rename, one write chain per path per process) holds ids,
+  targets, heads, keys and process identity only, and an entry is reloaded only while its `claude` process still runs
+  with the saved start time and its pane carries the same task. The set goes to the leader only sealed from this
+  daemon's own device id, in process when it leads, never `from: "app"`: the app-role leg that reads who leads is held
+  lazily and sends nothing. A live watch holds its pane from the custodian's `close` (`awaitsWake`) and nothing else:
+  no hand-off, pass, drain or reap waits on it. The audit origin `watch` carries closed enums only (op, kind, event,
+  reason, outcome): never a URL, owner, repo, number, head, check name or watch id, and `watches.ts` imports neither a
+  scheduler module nor `audit.ts`'s other writers.
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
@@ -1161,7 +1180,7 @@ nothing checked it. The last is the gap they leave.
   refuses a symlink. An unreadable record reads as none, and a round pane it no longer names is closed as a
   stray.
 - **The custodian's verbs are a frame on the round's own socket, bound to the round and to nothing a frame says**
-  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The sixth frame kind
+  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The custodian frame kind
   widens the local socket family, so any new verb or act for it is a threat-model change like the broker's, and the
   daemon's **main** socket answers the kind `unsupported`: it is served only on the round's own socket
   (`custodian-socket.ts`), which carries nothing else. Its sender is a
@@ -1593,8 +1612,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `deliver-message` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                                                                                                                | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
 | op `message-receipt` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
 | op `custodian-event` (→`"scheduler"`, built 2026-11-14)                                      | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                                                                                                                   | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
-| op `watch-set` (→`"scheduler"`, built 2026-11-18)                                            | `RelayClient.sendWatchSet`; nothing sends it until gh-watch step 3 (the daemon's table); in process through `leader.onWatchSet` on the leader's own machine                                                                                                                                                                                                                                                                                                                    | `daemon/src/leader.ts` `onEvent` → `onWatchSet` → `daemon/src/watch-registry.ts`                                                                                                                                                                                                                                                                                                                        |
-| op `watch-event` (scheduler→daemon, built 2026-11-18)                                        | the registry through `termWatches` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `LocalOps.watchEvent`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` `handleWatchEvent` (step 2: parsed, answered `delivered: []`)                                                                                                                                                                                                                                                                                                                  |
+| op `watch-set` (→`"scheduler"`, built 2026-11-18)                                            | `daemon/src/watches.ts` through `watch-leader.ts` (`RelayClient.sendWatchSet`, or in process through `leader.onWatchSet` when this daemon leads); built 2026-11-18, "Watches"                                                                                                                                                                                                                                                                                                  | `daemon/src/leader.ts` `onEvent` → `onWatchSet` → `daemon/src/watch-registry.ts`                                                                                                                                                                                                                                                                                                                        |
+| op `watch-event` (scheduler→daemon, built 2026-11-18)                                        | the registry through `termWatches` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `LocalOps.watchEvent`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` `handleWatchEvent` → `Watches.onEvent` in `daemon/src/watches.ts` (delivers the note, answers `delivered`)                                                                                                                                                                                                                                                                     |
 | op `queue-changed` (→`"app"`)                                                                | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                                                                                                                  | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                                           | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                                                                                                                          | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                                                     | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                                                                                                                      | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
@@ -2360,9 +2379,11 @@ an old peer's frames parse as before. Mixed versions:
     by handle"). It needs `messages` (peer binding), and is advertised beside it.
   - `CAPABILITIES.watches` (2026-11-18): an unknown string to an older reader, which keeps the machine. As a daemon it
     answers `watch-event` (advertised unconditionally: any daemon may lead and poll watches); as a leader it honours
-    `watch-set` and sends the answers, only to a machine advertising it. Step 2's daemon side parses and delivers
-    nothing, so nothing sends a `watch-set` until gh-watch step 3's table: a client must not gate a surface on the
-    string alone before then.
+    `watch-set` and sends the answers, only to a machine advertising it. It was advertised from step 2, before the
+    daemon had a `watch` frame (step 3 built it): a daemon of the step 2 build closes a `watch` frame as malformed. A
+    client gates a surface on the string and on the frame's own answer, never on the string alone: `seance mcp`
+    (step 4) must read a closed or unparseable reply to a `watch` frame as `unsupported`. No second capability string
+    was added for the frame.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -5207,9 +5228,11 @@ for the lot with its own `gh`.
     `WATCH_EVENT_JSON_MAX` in UTF-8 bytes of JSON (`watchJsonBytes`, as `MESSAGE_ROUTE_MAX`); what does not fit is due
     again at the next send, which starts at the watch the full frame stopped in, so events an early watch leaves
     unacknowledged cannot keep the later ones out. Every `watch-event` is also written as an `audit request` line on
-    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: step 3's
-    daemon must acknowledge or drop what it cannot place, and its `watch` origin may replace that line. A device is sent to only while it advertises `CAPABILITIES.watches` (or is the leader's own
-    machine), and an answer of `null` (an ended term, an unreachable machine) is no answer.
+    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: the daemon's
+    table acknowledges or drops what it cannot place ("Watches"). A device is sent to only while it advertises
+    `CAPABILITIES.watches` (or is the leader's own machine), and an answer of `null` (an ended term, an unreachable
+    machine) is no answer. The daemon's side of this contract, `gen.n` on every send, the resend until answered, what
+    `delivered` lists and what `fleet_full` leaves, is "Watches".
 - **Reserve for tasks** (2026-11-18, docs/gh-watch.md W8). A poll that starts with the term's newest `remaining` under
   500 and its `resetAt` still ahead reads the tasks' PRs only: watched targets are asked for nothing until the budget
   recovers. A watch on a PR a task reads anyway still takes that merge reading (`merged`, `closed`, `unreadable`):
@@ -9656,7 +9679,8 @@ decision is recorded here.
   or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
   as the machine stays closed), never counts, since no verb may
   touch it and it would otherwise keep a round due for ever. Nor does a pane whose last turn left background work or
-  a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"): `close` answers it `busy`. **So does every pane no built verb could act on**
+  a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"), or one a live watch waits on
+  (`Watches.holds`, "Watches"): `close` answers it `busy`. **So does every pane no built verb could act on**
   (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
   gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (a session
   started, resumed or cleared and never prompted, from the settings `SessionStart` hook; until mod 0.6.0 the
@@ -11598,8 +11622,8 @@ no envelope, no PSK: listing and ending sessions on the machine you are sitting 
 (Until 2026-10-25, M4, `spawn` took this path too; `spawn_session` is now a scheduler
 enqueue, so `spawn` stays on the allowlist only for a `seance mcp` started before that
 update, and for the app's own `spawn` op, which the daemon keeps answering.)
-Beside the `Plain` ops the socket carries four frame kinds of its own: `broker`, `session-event`, `message` and
-`inbox` (each below). A fifth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
+Beside the `Plain` ops the socket carries five frame kinds of its own: `broker`, `session-event`, `message`, `inbox`
+and `watch` (each below; `watch` is "Watches"). A sixth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
 code but **served only on the round's own socket** (`custodian-socket.ts`): this socket answers it `unsupported`.
 The alternative is an internet round trip to Cloudflare and back down the
 daemon's own websocket, to reach a process a few hundred microseconds away.
@@ -12205,6 +12229,100 @@ peer-pid binding exists to avoid; amended 2026-11-17, docs/tags.md §4.4: that r
 an id the daemon verified from its own sources ("Session events", "Session identity"), but a reply is still by
 message id, and the one use a verified id gets is docs/tags.md §8's, not yet built); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
+
+### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md step 3
+
+The daemon's side of fleet GitHub watches (docs/gh-watch.md; the leader's side is "PR status", "The registry"). A
+session asks its own daemon, over the local socket, to watch a PR or an Actions run; the daemon owns the watch, states
+the whole table to the leader, and turns each `watch-event` into one note in that session's inbox.
+
+- **The `watch` frame** (`watch-frame.ts`): `{ v: 1, kind: "watch", op: "add" | "remove", url?, head?, id? }`, exactly
+  those fields, a frame kind of the socket's own, routed on `kind` ahead of the `Plain` check and answered by
+  `startLocalSocket`'s `watches` seam (`unsupported` without one, `internal` on a throw, nothing of the frame logged).
+  Bound by the kernel-reported peer pid only (`bindPeer`, `messages.ts`: pane, pane process, innermost `claude`). The
+  reply is `{ ok: true, id, kind }` or one of `invalid`, `unbound`, `nosession`, `nolistener`, `too_many`, `fleet_full`,
+  `no_leader`, `unsupported`, `unknown`, `stopping`, `internal`. Nothing reachable from `seance mcp` imports `log.ts`:
+  `watch-frame.ts` is in `message-layering.test.ts`'s entry list, and the table itself (which logs a warning) is the
+  daemon's.
+- **Add.** In order: `stopping`, the binding (`unbound`, `nosession`), `canListen` (`nolistener`: a pane no inbox
+  listener serves would never read a note), the caps (`too_many`, a replacement not counted), then the leader's
+  verdict (`WatchLeader.check`: `none` is `no_leader`, one that does not advertise `CAPABILITIES.watches` is
+  `unsupported`). The entry is inserted and saved, the whole set sent, and the add waits at most 3 s for the answer to
+  it: a `fleet_full` or `invalid` refusal in that answer removes the entry and is the reply; no answer in the window is
+  `ok` (the watch stays, the tick resends). A send the leader could not be handed (no term in process, a leg that is
+  down) is `no_leader` and removes the entry. A replacement (the same target from the same session) ends the old watch
+  (`reason=replaced`) once the verdict has passed, so a refused add costs the session nothing.
+- **Who leads, and how the set goes** (`watch-leader.ts`). A daemon that leads (`leader.term() !== null`) hands the
+  set to its own registry in process (`onWatchSet`, parsed fresh like a frame, and answered in process). Otherwise the set
+  goes on the daemon leg (`RelayClient.sendWatchSet`), sealed from this daemon's own device id. Nothing is ever sent
+  `from: "app"`. Which daemon leads is read from an app-role client's `RelayState.scheduler` (a verified nominee, the
+  only place the daemon sees one), and the leader advertises `CAPABILITIES.watches` through the registry the same
+  client reads. The daemon holds no app-role leg of its own, so the table takes a `LazyRelay` (acquire and release
+  counted, released 5 minutes after the last holder): the table holds it while it is non-empty and releases it when
+  the empty set has been sent. The leg sends nothing; it only reads. **Accepted** (the owner's call): a daemon with a
+  key holds an app-role leg while it has a watch, which `seance mcp` and the broker already do for their own reads.
+  A new verified nominee, once the baseline is taken, makes the table restate its set at once (`onNominee`), since a
+  new leader holds none of it (W9).
+- **The set and its generation.** `gen` is `{boot, n}` with `boot` this daemon's `instance` and `n` rising on every
+  send, heartbeat and resend included, so the registry's order holds across a restart. One send per frame or tick (a
+  burst of adds is one set). A set carries each watch's id, kind, URL, `head` and `seen`, at most 64.
+- **A set nobody answered is resent** (plan review finding 1). The table keeps `answeredGen`, the highest `gen.n` any
+  answer named, and at each 60 s tick restates the table while `answeredGen` is behind the latest `n`, the last send
+  failed, or 5 minutes passed (the heartbeat). `gen.n` keeps rising across resends. `no_leader` is a separate clock:
+  a watch that has seen no answer for 10 minutes since the later of its own creation, the last answer and this
+  process's boot is told once (`noLeaderTold`, a flag of the entry, saved), with wake, and never again however many
+  answers follow; an answer only restarts the clock for watches made after it. Answers, not sends, keep it quiet.
+- **Answers** (`onEvent`). A `watch-event`'s `set` is the answer to `gen`: it resolves any add waiting on a `gen.n` at or
+  below it. Its refusals act only when `gen.n` is the latest: `fleet_full` leaves the watch in the table and the next
+  set and tells the session once, with wake (`fleet_full` note, `fleetFullTold`, a local flag that is never in `seen`
+  since the leader never sees it; the owner's decision: a late refusal is a note, not an end), and `invalid` tells the
+  session and ends the watch (`reason=invalid`). An answer older than the latest set, or for a set the table has since
+  replaced, refuses nothing.
+- **Events and `delivered`.** Events are grouped by watch id. An id the table does not know is left out of `delivered`
+  and marks the set stale, so one is sent (the leader's registry then loses it). A key already in the entry's `seen` is
+  skipped but its id is still listed, since the leader asked for an acknowledgement. Otherwise one note carries the
+  watch's events of the frame (`watchNote`, one fixed text per kind, `wake` for all but a `suspended` that heals by
+  itself: reason `limited`, or `reserve`), and on `delivered` or `sent` the keys go into `seen` (the last
+  `WATCH_SEEN_MAX`, saved) and the id is listed. A terminal key (`merged`, `closed`, `completed:*`, `unreadable`) ends the
+  watch (`reason=terminal` or `unreadable`) once the note is placed. `delivered` is all or nothing per watch per frame.
+  The local kinds (`no_leader`, `expired`, `invalid`, `fleet_full`) are never in `seen`: the leader never sees them.
+- **A held note** (the listener is reconnecting): `deliverWatchNote` answers `sent` and calls back with the fate. The
+  watch is listed delivered and its keys go into `seen`; if the note is never written the fate is `ended`,
+  `nolistener` or `dropped` and the watch ends under that reason. The note is lost, which is accepted: the same
+  session was not reachable for the whole grace, and the keys it would have re-received would be lost to the same end.
+  A restart loses a held note for the same reason (memory only).
+- **A failed pane read ends nothing** (plan review finding 2). `deliverWatchNote` answers `unreadable` when the pane
+  list could not be read (an empty list, as `listPanePids` answers a failed `tmux`): the id is left out of `delivered`,
+  the watch stays and its keys stay out of `seen`, so the leader sends the events again at the next poll. `gone` (the
+  pane is not in a list that was read) ends the watch with `reason=session`; `nolistener` with `reason=nolistener`.
+- **The tick** (60 s). First the sweep: a pane missing from the list, a dead `claude` process or a pane pid that changed
+  ends its watches (`reason=session`) and a pane whose task changed ends them (`reason=task`); an empty pane list skips
+  the pane checks (a failed read is not a vanished pane) but a dead `claude` is checked on its own. Then expiry (24 h:
+  an `expired` note with wake, then the end), `no_leader`, and the resend rule above. `onEnded` (session events saw the
+  pane's task end) ends the pane's watches (`reason=ended`).
+- **Persistence** (`watches-store.ts`, `stateDir()/watches.json`). Per watch: id, kind, URL, `head`, `seen`, the pane id,
+  its pane process's pid and start time, the `claude` process's pid and start time, the task id or none, the made and
+  expiry times, `noLeaderTold`, `fleetFullTold`. Written 0600 by atomic rename. A restart (`start`) reloads an entry only
+  while it is unexpired, its `claude` process still runs with that start time, its pane process has the saved start
+  time and the table is under its cap; the others end `reason=restart` and are audited. The first set carries the
+  survivors. **One write chain per path per process** (plan review finding 3): `persist()` snapshots at call time and
+  appends to a module-level chain, `stop()` returns it, `start()` waits on it before reading, and shutdown awaits
+  `watchesSettled()`, so a restart over the same path (and a test that stops without awaiting) reads the last write.
+- **Audit** (`watchAudit`, `audit.ts`): `audit watch origin=watch op=<add|remove|event|end> kind=<pr|run|-> event=<kind|->
+  reason=<reason|-> outcome=<outcome|->`, every value from a closed set, one line per add, remove, event placed and end.
+  The `Watches` table logs nothing else about a watch (a failed save or send is a warning with the error's text and no
+  target).
+- **The custodian.** `awaitsWake` in `run-capabilities.ts` is true for a pane `SessionEvents.awaitsWake` holds or
+  `Watches.holds(pane, taskId)` does, so `close` answers `busy` and the seat counts no round due for it. `untouchable`
+  (hand-off, pass, drain) is not changed: those are the session's or the owner's own acts, and the session's end ends the
+  watch.
+- **For step 4** (`seance mcp`'s `watch_github` and `unwatch_github`). The frame was advertised under
+  `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it closes a `watch`
+  frame as malformed. The client reads a closed connection or an unparseable reply as `unsupported`, in addition to the
+  verified-leader gate. No second capability string.
+- **Rejected: ending a watch on a failed pane read.** A `tmux` failure is transient and the session still waits;
+  ending the watch would drop it for good.
+- **Rejected: a `watch:` store prefix, daemon memory only.** docs/gh-watch.md W9.
 
 ### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`) — 3a built 2026-11-18, docs/messaging.md §6
 
@@ -13292,7 +13410,7 @@ the binding with real panes.
 
 ### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4, 6 and 8), served on the round's own socket since custodian 4b
 
-The sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the custodian round's nine
+The custodian frame kind, beside `Plain`, `broker`, `session-event`, `message`, `inbox` and `watch`: the round's nine
 verbs, `sessions`, `close <pane>`, `capture <pane>`, `pr <pane>`, `flag <pane> <reason> [note]`, `nudge <pane>` (text on
 stdin), `interrupt <pane>`, `notes` and `done` (C22–C34, C37–C40, C42; `capture` and `pr` are 4b's).
 `seance custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the reply as JSON.

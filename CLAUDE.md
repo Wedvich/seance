@@ -65,14 +65,14 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   server; Threat model item 6). What is left in the file is the adapter seam's 3b (delivery in, messages out, the
   subscription) and 3c (installing), the open questions and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
-- **docs/gh-watch.md** — spec, build steps 1 and 2 built (`askGithub`'s `limited` class, the poll queries' in-query
-  `rateLimit` and the reset-time backoff, then the leader's side of the watches: its registry, the run query, the
-  reserve for tasks, `watch-set` and `watch-event`, recorded in DESIGN.md, "PR status"), the daemon's side not: a
-  session asks the fleet to watch a GitHub PR or Actions run (MCP
-  `watch_github`, the local socket's `watch` frame, bound by peer pid) and is woken by a fixed note in its inbox, the
-  leader folding watched targets into its batched GraphQL PR poll (`watch-set`, `watch-event`, `CAPABILITIES.watches`),
-  with the weighing against extending `hand_off_task`. Read it before touching the PR poller,
-  `askGithub`, or adding a way for sessions to wait on GitHub.
+- **docs/gh-watch.md** — spec, build steps 1 to 3 built (`askGithub`'s `limited` class, the poll queries' in-query
+  `rateLimit` and the reset-time backoff, the leader's side of the watches: its registry, the run query, the reserve
+  for tasks, `watch-set` and `watch-event`, recorded in DESIGN.md, "PR status", and the daemon's side: the `watch`
+  frame, the table, `watches.json`, the notes and the custodian hold, recorded in DESIGN.md, "Watches"), step 4 (MCP's
+  `watch_github` and `unwatch_github`) not: a session asks the fleet to watch a GitHub PR or Actions run and is woken
+  by a fixed note in its inbox, the leader folding watched targets into its batched GraphQL PR poll (`watch-set`,
+  `watch-event`, `CAPABILITIES.watches`), with the weighing against extending `hand_off_task`. Read it before touching
+  the PR poller, `askGithub`, or adding a way for sessions to wait on GitHub.
 - **docs/custodian.md** — what is left of the custodian spec: what 4b's drills left unsettled (the round's
   containment — its own socket, the masks, the built environment, no network — is built, rounds are live, and it was
   drilled on macOS and on Linux in both bwrap modes under its vsock filter: strict on WSL2, weaker nested on LXC), the open build-time details, and an
@@ -231,6 +231,8 @@ green:
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
   `custodian` for the daemon's seat starting, closing, refusing to start or ending a custodian round and for a round's `close` and the worktree it decides, its `flag`, `nudge` and `interrupt`,
   `message` for a session's message to another task, on this machine or routed through the leader (one `dir=out` and one `dir=in` line per message, and a `dir=receipt` line for the leader's receipt: task ids, kind, byte count and outcome, never text; a custodian nudge writes only its `dir=in` line, `from=custodian`),
+  `watch` for the daemon's watch table adding, removing, noting and ending a GitHub watch (one line per act, closed-enum
+  values only: op, kind, event, reason, outcome — never a URL, owner, repo, number, head, check name or watch id),
   `adapter` for the daemon starting, restarting, refusing, holding as `failed` and stopping a configured adapter (its
   name, `argv`'s word count and `argv[0]`'s basename, an exit code and a reason, never another argv word or anything the
   adapter wrote),
@@ -462,7 +464,7 @@ green:
   joined to a tasked pane's `idle` and dropped at any other state or when a frame finds the pane gone or under another
   pid, kept by the leader beside its idle clock and in `queue`'s idle entries only (never on a record), display-only like
   `tool` but for one effect: a held note with any count makes the custodian's `close` answer `busy` and the seat count
-  no round due for that pane (`awaitsWake`), never a hand-off's or pass's close. `elicitation` joins `NEEDS_INPUT_REASONS` with `permission`'s effects (none).
+  no round due for that pane (`awaitsWake`, which a live watch on the pane also makes true), never a hand-off's or pass's close. `elicitation` joins `NEEDS_INPUT_REASONS` with `permission`'s effects (none).
   While this machine is draining, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
   A bound `busy` following an `idle` this process retained for that pane (`isNewTurn`; a pane with no state retained is not a new turn) also lifts the pane's own
@@ -554,6 +556,33 @@ green:
   outcome, for `REPLAY_RETAIN_MS`; and hands a receipt only to the pane its own `sent` table says sent that message
   (an untasked sender's only way, to its session alone) or else the pane carrying the sending task, as the one fixed line
   `receiptNote` makes per outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
+- **A watch is the daemon's, bound to a `claude` process, and its notes go only through messaging's local delivery**
+  (DESIGN.md, "Watches"; docs/gh-watch.md invariants 1, 3, 5-8). The local socket's `watch` frame (`add`, `remove`;
+  `watch-frame.ts`, `parseWatchFrame`, exactly its fields) is bound only by the kernel-reported peer pid, to the pane,
+  its pane process and the innermost `claude` on the peer's chain (`bindPeer`), refused `unbound` where the host names no
+  peer (`peerPidSupported`) or the pid came back null, `nosession` with no `claude` on the chain and `nolistener` for a
+  pane no inbox listener serves, never by a field, and it carries a URL, a head and an id and nothing that names a pane,
+  task or session; it is on neither `LOCAL_OPS` nor the broker. A `remove` is honoured only from the session that made
+  the watch (a wrong, foreign or unknown id all answer `unknown`). The caps (8 a session, 64 a machine, `WATCH_MACHINE_MAX`
+  equal to the leader's per-device `WATCH_SET_MAX`) are the table's: refused at the add, never an eviction, and a
+  replacement is not counted. A watch ends with its session (`claude` gone, pane gone or its pid changed), its task
+  changing, `ended`, its 24 h expiry, a terminal or `unreadable` event, an `invalid` refusal, or a note its listener
+  never took. A `watch-event` is looked up by watch id in the daemon's own table and placed only at the pane, pane pid,
+  task and `claude` process that entry names, through `Messages.deliverWatchNote` (a `wake` line or a plain note, never
+  `asUser`, `$.prompt.fill` or tmux keys), rendered by the one `watchNote` formatter from enums, hex, rebuilt URLs and
+  bounded check names; a failed read of the pane list is `unreadable`, which delivers and ends nothing. `delivered` lists
+  a watch only when all its events in the frame were placed or held. The set goes to the leader sealed from this
+  daemon's own device id and never `from: "app"`: in process through `leader.onWatchSet` when this daemon leads (the
+  parsed set, like a frame), else `RelayClient.sendWatchSet`; who leads is read only through a lazily held app-role
+  leg (`LazyRelay`, held while the table is non-empty) that sends nothing, and the add is refused `no_leader` or
+  `unsupported` unless a verified leader advertising `CAPABILITIES.watches` is visible. `gen` is `{boot: instance, n}`,
+  `n` rising on every send, and a set no answer named is resent at the next tick. `watches.json` is 0600, written by
+  atomic rename through one write chain per path per process (the table's `stop()` returns it and shutdown awaits it),
+  holds ids, targets, heads, keys and process identity only, and an entry is reloaded only while its `claude` process
+  still runs with the saved start time and its pane carries the same task. A live watch holds its pane from the
+  custodian's `close` (`awaitsWake`) and nothing else: no hand-off, pass, drain or reap waits on it. Nothing reachable
+  from `seance mcp` imports `log.ts` (`watch-frame.ts`, in `message-layering.test.ts`), and nothing of a watch is logged
+  but the closed-enum `watch` audit line.
 - **An adapter is declared only in its machine's own `config.json` and speaks only on its stdin and stdout**
   (DESIGN.md, "Adapters"; docs/messaging.md §6). `adapters` is parsed strictly (`parseAdapters`, at most
   `ADAPTERS_MAX`, a name by `ADAPTER_NAME_PATTERN`, any mistake failing the load), never from a frame, the PWA, MCP or

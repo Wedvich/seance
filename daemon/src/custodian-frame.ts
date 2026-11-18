@@ -7,7 +7,7 @@ import { PANE_ID } from "./pane-id.ts";
 
 export const CUSTODIAN_FRAME_VERSION = 1;
 
-/** The sixth frame kind, served only on the round's own socket (`custodian-socket.ts`): the round's verbs, bound to its pane. */
+/** A frame kind of its own, served only on the round's own socket (`custodian-socket.ts`): the round's verbs, bound to its pane. */
 export const CUSTODIAN_FRAME_KIND = "custodian";
 
 export const CUSTODIAN_VERBS = [
