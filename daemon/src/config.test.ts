@@ -508,3 +508,60 @@ describe("state", () => {
     expect(await readRuntime(join(dir, "runtime.json"))).toBeNull();
   });
 });
+
+describe("adapters", () => {
+  const load = async (adapters: unknown): Promise<Config> => {
+    const path = join(await tempDir(), "config.json");
+    await writeFile(path, JSON.stringify({ ...VALID, adapters }));
+    return loadConfig(path);
+  };
+
+  test("absent is no adapters; an entry gets its default kinds", async () => {
+    const path = join(await tempDir(), "config.json");
+    await writeFile(path, JSON.stringify(VALID));
+    expect((await loadConfig(path)).adapters).toBeUndefined();
+    expect((await load({ slack: { argv: ["seance-slack", "--quiet"] } })).adapters).toEqual({
+      slack: { argv: ["seance-slack", "--quiet"], kinds: ["note", "question"] },
+    });
+  });
+
+  test("keeps kinds, repos and a full commit sha", async () => {
+    const commit = "a".repeat(40);
+    const config = await load({
+      tg: { argv: ["/opt/tg/bin/tg"], kinds: ["request"], repos: ["seance", "web"], commit },
+    });
+    expect(config.adapters).toEqual({
+      tg: { argv: ["/opt/tg/bin/tg"], kinds: ["request"], repos: ["seance", "web"], commit },
+    });
+    expect((await load({ tg: { argv: ["tg"], commit: "b".repeat(64) } })).adapters?.["tg"]?.commit).toBe(
+      "b".repeat(64),
+    );
+  });
+
+  test("any mistake fails the load, naming where", async () => {
+    const argv = ["tg"];
+    const cases: readonly (readonly [unknown, string])[] = [
+      [["tg"], '"adapters" must be an object'],
+      [{ a: { argv }, b: { argv }, c: { argv }, d: { argv }, e: { argv } }, "at most 4"],
+      [{ Slack: { argv } }, '"adapters.Slack" is not an adapter name'],
+      [{ tg: "tg" }, '"adapters.tg" must be an object'],
+      [{ tg: { argv, env: {} } }, '"adapters.tg.env" is not a key'],
+      [{ tg: {} }, '"adapters.tg.argv"'],
+      [{ tg: { argv: [] } }, '"adapters.tg.argv"'],
+      [{ tg: { argv: ["tg", ""] } }, '"adapters.tg.argv"'],
+      [{ tg: { argv: ["tg", "a\0b"] } }, '"adapters.tg.argv"'],
+      [{ tg: { argv: "tg --x" } }, '"adapters.tg.argv"'],
+      [{ tg: { argv: ["bin/tg"] } }, '"adapters.tg.argv[0]" must be an absolute path'],
+      [{ tg: { argv, kinds: ["shout"] } }, '"adapters.tg.kinds"'],
+      [{ tg: { argv, kinds: ["note", "note"] } }, '"adapters.tg.kinds"'],
+      [{ tg: { argv, repos: "seance" } }, '"adapters.tg.repos"'],
+      [{ tg: { argv, repos: ["seance", "seance"] } }, '"adapters.tg.repos"'],
+      [{ tg: { argv, commit: "main" } }, '"adapters.tg.commit"'],
+      [{ tg: { argv, commit: "A".repeat(40) } }, '"adapters.tg.commit"'],
+    ];
+    for (const [adapters, message] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one load per case, each its own file
+      expect(load(adapters)).rejects.toThrow(message);
+    }
+  });
+});

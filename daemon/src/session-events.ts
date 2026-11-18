@@ -23,6 +23,7 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AdapterTaskEvent } from "@seance/shared";
 import { claudeProcessOf } from "./claude-process.ts";
 import type { AgentClaim, Conversations } from "./conversations.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
@@ -370,6 +371,10 @@ export class EndedTasks {
   readonly #holds = new Set<Promise<void>>();
   /** Told on each close and reopen of the gate: a daemon's status carries it (`MachineStatus.drn`). */
   readonly #gateListeners = new Set<(closed: boolean) => void>();
+  /** Told each task event a launch of this ledger's goes through (`onTask`): an adapter's `task` frame. */
+  readonly #taskListeners = new Set<(taskId: string, event: AdapterTaskEvent) => void>();
+  /** Tasks whose `ended` was told, so an `ended` frame and the harvest of its pane tell it once; bounded like `#ended`. */
+  readonly #endedTold = new Set<string>();
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
@@ -476,6 +481,10 @@ export class EndedTasks {
       } finally {
         await finish();
       }
+      if (sample) {
+        this.#endedTold.delete(taskId);
+        this.#tellTask(taskId, "launched");
+      }
       // A baseline from the start, not the next pass: a session dying before that would have none. After
       // `finish`, and not awaited: its reads can stall, and neither the launch nor `sessions` waits on them.
       if (sample && this.#panes !== undefined && this.#oom !== undefined) {
@@ -573,8 +582,51 @@ export class EndedTasks {
    * missed the event reads it on takeover. `refused`: the ledger holds no such
    * launch; `same`: already reported, so already forwarded.
    */
-  noteReported(taskId: string): Promise<NoteOutcome> {
-    return this.#ledger.apply(taskId, { reported: true });
+  async noteReported(taskId: string): Promise<NoteOutcome> {
+    const outcome = await this.#ledger.apply(taskId, { reported: true });
+    if (outcome === "written" || outcome === "unwritten") this.#tellTask(taskId, "done");
+    return outcome;
+  }
+
+  /**
+   * `listener` hears each event of a task this ledger holds a launch of: `launched` once a launch lands, `done` at a
+   * session's first report, `handoff` and `pass` as their closes are set up, `ended` once per launch. Display only
+   * (an adapter's `task` frame); nothing settles by it. Returns its unsubscribe.
+   */
+  onTask(listener: (taskId: string, event: AdapterTaskEvent) => void): () => void {
+    this.#taskListeners.add(listener);
+    return () => {
+      this.#taskListeners.delete(listener);
+    };
+  }
+
+  #tellTask(taskId: string, event: AdapterTaskEvent): void {
+    if (!this.#ledger.ids().includes(taskId)) return;
+    if (event === "ended") {
+      if (this.#endedTold.has(taskId)) return;
+      this.#endedTold.add(taskId);
+      for (const old of this.#endedTold) {
+        if (this.#endedTold.size <= ENDED_MAX) break;
+        this.#endedTold.delete(old);
+      }
+    }
+    for (const listener of this.#taskListeners) {
+      try {
+        listener(taskId, event);
+      } catch (err) {
+        log.warn(`task event listener failed: ${String(err)}`);
+      }
+    }
+  }
+
+  /** A session's pass of this task was handed to the scheduler: told to `onTask`'s listeners. */
+  passed(taskId: string): void {
+    this.#tellTask(taskId, "pass");
+  }
+
+  /** The repo this task's worktree launch was noted under (the scan-set name); undefined for a here-mode launch or none. */
+  taskRepo(taskId: string): string | undefined {
+    return this.#ledger.notes().find((n) => n.taskId === taskId)?.repo;
   }
 
   /**
@@ -680,6 +732,7 @@ export class EndedTasks {
     } catch (err) {
       log.warn(`launch ledger: could not note that task ${taskId} is being handed off (${String(err)})`);
     }
+    this.#tellTask(taskId, "handoff");
   }
 
   /** Launches harvest may judge, minus any whose spawn is still in flight or registering. */
@@ -701,6 +754,7 @@ export class EndedTasks {
       note: async (taskId, exit, oomKill) => {
         const noted = await this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) });
         await this.#ledger.clearInterrupted([taskId]);
+        this.#tellTask(taskId, "ended");
         return noted;
       },
       closing: (taskId) => this.closing(taskId),
@@ -725,6 +779,7 @@ export class EndedTasks {
     this.#ended.delete(taskId); // re-insert, so insertion order stays age order
     this.#ended.set(taskId, this.#now());
     this.#prune();
+    this.#tellTask(taskId, "ended");
   }
 
   /**
@@ -1167,6 +1222,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       passes.delete(pane.id);
       return { ok: false, code: "unsent" };
     }
+    deps.ended.passed(taskId);
     const pass: PassAck = { taskId, remoteBranch: pushed.remoteBranch, tip: pushed.tip, pushed: pushed.pushed };
     return { ok: true, pass };
   };

@@ -1,14 +1,19 @@
 import { watch } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import {
+  ADAPTER_NAME_PATTERN,
+  ADAPTERS_MAX,
   EFFORTS,
+  isAdapterName,
   isEffort,
   isRecord,
   isTraitName,
   TASK_REQUEST_LIMITS,
   TRAIT_LIMITS,
+  MESSAGE_KINDS,
   TRAIT_NAME_PATTERN,
   type Effort,
+  type MessageKind,
 } from "@seance/shared";
 import { EXCLAVE_NAME } from "./exclaves.ts";
 import { log } from "./log.ts";
@@ -47,6 +52,11 @@ export interface Config {
    * ever declared, so no frame, client or other machine can make this one claim anything.
    */
   readonly traits?: TraitsConfig;
+  /**
+   * Adapters this machine runs (docs/messaging.md §6): the only place one is ever declared, so no frame, client or
+   * other machine can make this one run a program.
+   */
+  readonly adapters?: AdaptersConfig;
 }
 
 /** Trait name → where it applies. `exclaves` absent means every exclave of this machine. */
@@ -182,6 +192,86 @@ function parseTraitProbe(raw: unknown, path: string, name: string): TraitProbeCo
     );
   }
   return { argv: [...argv], everyMinutes: every, timeoutSeconds: timeout };
+}
+
+/** Adapter name → how it runs (docs/messaging.md §6.5). */
+export type AdaptersConfig = Readonly<Record<string, AdapterConfig>>;
+
+export interface AdapterConfig {
+  /** Run as given, never through a shell; `argv[0]` an absolute path or a bare name resolved through PATH at each start. */
+  readonly argv: readonly string[];
+  /** The kinds it may deliver (3b); `request` is the owner's opt-in. */
+  readonly kinds: readonly MessageKind[];
+  /** The repos (scan-set names) whose sessions it sees and reaches; absent, every session on the machine. */
+  readonly repos?: readonly string[];
+  /** The adapter checkout's commit at `seance adapter add` (3c): display only. */
+  readonly commit?: string;
+}
+
+export const ADAPTER_DEFAULT_KINDS: readonly MessageKind[] = ["note", "question"];
+
+const ADAPTER_KEYS = ["argv", "kinds", "repos", "commit"];
+const ADAPTER_ARGV_LIMITS = { words: 32, wordLength: 4096 } as const;
+
+/**
+ * Strict, as `parseTraits` is: an adapter is declared only here, so any mistake fails the load, naming where, rather
+ * than running a program the owner did not quite name.
+ */
+function parseAdapters(raw: unknown, path: string): AdaptersConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new TypeError(`config at ${path}: "adapters" must be an object`);
+  const names = Object.keys(raw);
+  if (names.length > ADAPTERS_MAX) {
+    throw new TypeError(`config at ${path}: "adapters" names ${names.length} adapters; at most ${ADAPTERS_MAX}`);
+  }
+  const adapters: Record<string, AdapterConfig> = {};
+  for (const name of names) {
+    const at = `config at ${path}: "adapters.${name}`;
+    if (!isAdapterName(name)) throw new TypeError(`${at}" is not an adapter name (${ADAPTER_NAME_PATTERN})`);
+    const entry = raw[name];
+    if (!isRecord(entry)) throw new TypeError(`${at}" must be an object`);
+    for (const key of Object.keys(entry)) {
+      if (!ADAPTER_KEYS.includes(key)) {
+        throw new TypeError(`${at}.${key}" is not a key (the keys are ${ADAPTER_KEYS.join(", ")})`);
+      }
+    }
+    const argv = entry["argv"];
+    const word = (w: unknown): w is string =>
+      typeof w === "string" && w.length > 0 && w.length <= ADAPTER_ARGV_LIMITS.wordLength && !w.includes("\0");
+    if (!Array.isArray(argv) || argv.length === 0 || argv.length > ADAPTER_ARGV_LIMITS.words || !argv.every(word)) {
+      throw new TypeError(
+        `${at}.argv" must be a non-empty array of at most ${ADAPTER_ARGV_LIMITS.words} strings, each 1–${ADAPTER_ARGV_LIMITS.wordLength} characters and free of NUL`,
+      );
+    }
+    const [program = ""] = argv;
+    if (!isAbsolute(program) && program.includes("/")) {
+      throw new TypeError(`${at}.argv[0]" must be an absolute path or a bare program name found on PATH`);
+    }
+    const kinds = "kinds" in entry ? entry["kinds"] : ADAPTER_DEFAULT_KINDS;
+    const isKind = (k: unknown): k is MessageKind => (MESSAGE_KINDS as readonly unknown[]).includes(k);
+    if (!Array.isArray(kinds) || !kinds.every(isKind) || new Set(kinds).size !== kinds.length) {
+      throw new TypeError(`${at}.kinds" must be an array of distinct kinds from ${MESSAGE_KINDS.join(", ")}`);
+    }
+    const repos = entry["repos"];
+    const repoName = (r: unknown): r is string => typeof r === "string" && r !== "" && r.length <= 256;
+    if (
+      repos !== undefined &&
+      (!Array.isArray(repos) || !repos.every(repoName) || new Set(repos).size !== repos.length)
+    ) {
+      throw new TypeError(`${at}.repos" must be an array of distinct repo names`);
+    }
+    const commit = entry["commit"];
+    if (commit !== undefined && (typeof commit !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(commit))) {
+      throw new TypeError(`${at}.commit" must be a full git commit sha`);
+    }
+    adapters[name] = {
+      argv: [...argv],
+      kinds: [...kinds],
+      ...(repos === undefined ? {} : { repos: repos.filter(repoName) }),
+      ...(commit === undefined ? {} : { commit }),
+    };
+  }
+  return adapters;
 }
 
 export interface AuthHealthConfig {
@@ -394,7 +484,9 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   const quota = parseQuota(obj["quota"], path);
   const authHealth = parseAuthHealth(obj["authHealth"], path);
   const traits = parseTraits(obj["traits"], path);
+  const adapters = parseAdapters(obj["adapters"], path);
   return {
+    ...(adapters === undefined ? {} : { adapters }),
     ...(reap === undefined ? {} : { reap }),
     ...(custodian === undefined ? {} : { custodian }),
     ...(quota === undefined ? {} : { quota }),

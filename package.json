@@ -16,6 +16,7 @@
   ],
   "type": "module",
   "scripts": {
+    "adapter-schema": "bun scripts/adapter-schema.ts",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint",

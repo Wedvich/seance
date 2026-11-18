@@ -1,7 +1,17 @@
 import { join } from "node:path";
 import type { CustodianEvent, CustodianStatus, QuotaReading, RepoEntry } from "@seance/shared";
+import { createAdapterFeed } from "./adapter-feed.ts";
+import { startAdapterHost } from "./adapter-host.ts";
 import { attachmentsRoot } from "./attachments.ts";
-import { custodianAudit, daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
+import {
+  adapterAudit,
+  custodianAudit,
+  daemonSink,
+  drainAskAudit,
+  messageAudit,
+  pushAudit,
+  reapAudit,
+} from "./audit.ts";
 import { DespawnFailure, type SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
@@ -30,7 +40,7 @@ import {
   writeSeatView,
   type PauseRead,
 } from "./custodian-control.ts";
-import { createConversations, type SessionTagsSource } from "./conversations.ts";
+import { createConversations, type Conversations, type SessionTagsSource } from "./conversations.ts";
 import { roundRemoteId } from "./custodian-remote.ts";
 import { createCustodianVerbs, type CustodianVerbs } from "./custodian-verbs.ts";
 import { createWorktreeRule } from "./custodian-worktree.ts";
@@ -74,6 +84,7 @@ import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { createMessages, type Messages } from "./messages.ts";
 import {
+  adaptersDir,
   custodianActivityPath,
   custodianRoundsPath,
   custodianSessionsPath,
@@ -173,6 +184,8 @@ export interface Started {
   readonly custodianHost?: () => CustodianHost;
   /** Session identity and tags, once session events run: an app's `sessions` reads it late (`run.ts`). */
   readonly conversations?: SessionTagsSource;
+  /** Run once the local op socket is up (`run.ts`): what must not start before a session's `seance` can reach it. */
+  readonly afterLocal?: () => void;
 }
 
 export type CustodianHost = "starting" | "failed" | "ready";
@@ -249,6 +262,8 @@ const flagStoreFor = (path: string, now: () => number): CustodianFlags => {
 const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
 /** The session-events capability's messaging, which the custodian's `nudge` delivers through (C26), read at each nudge. */
 const messagesOf = new WeakMap<WiringCtx, Messages>();
+/** The session-events capability's conversation table, which the adapters' state feed reads. */
+const conversationsOf = new WeakMap<WiringCtx, Conversations>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -374,6 +389,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   late.events = events;
   eventsOf.set(ctx, events);
   messagesOf.set(ctx, messages);
+  conversationsOf.set(ctx, conversations);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
   // The daemon's own read for sessions that were running before it started and have not reported since.
@@ -390,6 +406,65 @@ const sessionEvents: DaemonCapability = (ctx) => {
     messages,
     conversations,
     ...(drainAsk === undefined ? {} : { drainAsk }),
+  };
+};
+
+/** Adapters' stops in flight: `run.ts`'s stop waits for them, so no child outlives the daemon unsignalled. */
+const adapterStops = new Set<Promise<void>>();
+
+/** Resolves once every adapter a stopped daemon instance ran is gone (SIGKILL after its grace). */
+export async function adaptersSettled(): Promise<void> {
+  await Promise.all(adapterStops);
+}
+
+/**
+ * The adapters `config.json` names (docs/messaging.md §6; DESIGN.md, "Adapters"): the state feed over the session-events
+ * capability's conversation table and this machine's launch ledger, and one supervised child per adapter, started once
+ * the local socket is up and the feed's first read is done, never while the daemon drains for a restart (and once the
+ * hold lifts, when an update is called off). Absent with no `adapters` key, or without session events.
+ */
+const adapters: DaemonCapability = (ctx) => {
+  const configured = ctx.config.adapters;
+  const conversations = conversationsOf.get(ctx);
+  if (configured === undefined || Object.keys(configured).length === 0 || conversations === undefined) {
+    return { stop: (): void => {} };
+  }
+  const feed = createAdapterFeed({
+    conversations,
+    tasks: ctx.endedTasks,
+    exclaves: () => ctx.exclaveScan().exclaves,
+    repos: ctx.repos,
+  });
+  const host = startAdapterHost({
+    adapters: configured,
+    feed,
+    taskRepo: (taskId) => ctx.endedTasks.taskRepo(taskId),
+    machine: { deviceId: ctx.deviceId, name: ctx.config.name },
+    version: ctx.version ?? "unknown",
+    audit: adapterAudit(daemonSink),
+    root: adaptersDir(),
+    held: () => ctx.endedTasks.draining || ctx.stopped(),
+  });
+  let stopped = false;
+  const offGate = ctx.endedTasks.onGate((closed) => {
+    if (!closed && !stopped) host.start();
+  });
+  return {
+    afterLocal: (): void => {
+      void feed
+        .start()
+        .then(() => {
+          if (!stopped) host.start();
+        })
+        .catch((err: unknown) => log.warn(`adapters: the state feed did not start (${String(err)})`));
+    },
+    stop: (): void => {
+      stopped = true;
+      offGate();
+      feed.stop();
+      const stop = host.stop().finally(() => adapterStops.delete(stop));
+      adapterStops.add(stop);
+    },
   };
 };
 
@@ -883,6 +958,7 @@ const reapSchedule: DaemonCapability = (ctx) => {
 export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
   fleetBroker,
   sessionEvents,
+  adapters,
   authHealth,
   traitProbes,
   usageRefresh,
@@ -902,6 +978,8 @@ export interface StartedCapabilities {
   readonly custodianHost?: () => CustodianHost;
   readonly conversations?: SessionTagsSource;
   readonly local: LocalSurfaces;
+  /** Every capability's `afterLocal`, in start order. */
+  readonly afterLocal: () => void;
   readonly stop: () => void;
 }
 
@@ -936,8 +1014,12 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       custodianHost ??= entry.custodianHost;
       conversations ??= entry.conversations;
     }
+    const afterLocal = (): void => {
+      for (const entry of started) entry.afterLocal?.();
+    };
     return {
       local,
+      afterLocal,
       stop,
       ...(armPassClose === undefined ? {} : { armPassClose }),
       ...(messages === undefined ? {} : { messages }),

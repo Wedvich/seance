@@ -54,13 +54,15 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — spec, PR 1, PR 2 and the reply by handle built: local delivery (the `inbox` mod, the `inbox`
+- **docs/messaging.md** — spec, PR 1, PR 2, the reply by handle and the adapter seam's 3a (the child and state out) built: local delivery (the `inbox` mod, the `inbox`
   and `message` frames, `send_message`), cross-machine routing through the leader (`session-message`,
   `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`) and replies to a session with no task, by the id of
   the message answered, on one machine or across (`replyTo`, `CAPABILITIES.messageReply`, `wake`; D3 amended), recorded
-  in DESIGN.md (Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections; Claude
-  Code mods; MCP server; Threat model item 6). What is left in the file is the adapter seam (PR 3), the open questions
-  and the spike evidence. Read it before adding a leader event op or an adapter.
+  in DESIGN.md (Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections;
+  "Adapters" for 3a: `config.json` `adapters`, the supervisor, the handshake, `snapshot`, `session`, `session-gone`,
+  `task`, `shared/src/adapter-protocol.ts` and its committed JSON Schema, audit origin `adapter`; Claude Code mods; MCP
+  server; Threat model item 6). What is left in the file is the adapter seam's 3b (delivery in, messages out, the
+  subscription) and 3c (installing), the open questions and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
 - **docs/gh-watch.md** — spec, nothing built: a session asks the fleet to watch a GitHub PR or Actions run (MCP
   `watch_github`, the local socket's `watch` frame, bound by peer pid) and is woken by a fixed note in its inbox, the
@@ -225,6 +227,9 @@ green:
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
   `custodian` for the daemon's seat starting, closing, refusing to start or ending a custodian round and for a round's `close` and the worktree it decides, its `flag`, `nudge` and `interrupt`,
   `message` for a session's message to another task, on this machine or routed through the leader (one `dir=out` and one `dir=in` line per message, and a `dir=receipt` line for the leader's receipt: task ids, kind, byte count and outcome, never text; a custodian nudge writes only its `dir=in` line, `from=custodian`),
+  `adapter` for the daemon starting, restarting, refusing, holding as `failed` and stopping a configured adapter (its
+  name, `argv`'s word count and `argv[0]`'s basename, an exit code and a reason, never another argv word or anything the
+  adapter wrote),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
   `leader` for the scheduler loop dispatching to its own machine in
@@ -545,6 +550,26 @@ green:
   outcome, for `REPLAY_RETAIN_MS`; and hands a receipt only to the pane its own `sent` table says sent that message
   (an untasked sender's only way, to its session alone) or else the pane carrying the sending task, as the one fixed line
   `receiptNote` makes per outcome, never message text. A third audit line, `dir=receipt`, carries ids, kind and outcome with `bytes=-`.
+- **An adapter is declared only in its machine's own `config.json` and speaks only on its stdin and stdout**
+  (DESIGN.md, "Adapters"; docs/messaging.md §6). `adapters` is parsed strictly (`parseAdapters`, at most
+  `ADAPTERS_MAX`, a name by `ADAPTER_NAME_PATTERN`, any mistake failing the load), never from a frame, the PWA, MCP or
+  another machine, and nothing about adapters crosses the relay. Its `argv` is an argv array, never a shell string,
+  `argv[0]` absolute or a bare name resolved through `PATH` at each start, never `process.execPath`. The supervisor
+  (`adapter-supervisor.ts`) starts it with the env a session gets less `CREDENTIALS_DIRECTORY` and every `TMUX*`, plus
+  `SEANCE_ADAPTER_NAME` and `SEANCE_ADAPTER_DIR` (0700 `stateDir()/adapters/<name>`, its cwd), in its own process group,
+  stderr discarded, never while the daemon drains for a restart, and stops it with the daemon (stdin closed, SIGTERM to
+  the group, SIGKILL after 5 s). Every line it writes goes through `parseAdapterLine` (`shared/src/adapter-protocol.ts`,
+  the schema of record; the committed JSON Schema is generated from it), exact fields only, at most `ADAPTER_LINE_MAX`;
+  a protocol major outside `ADAPTER_PROTOCOLS` or a `name` other than its key stops it for good, and the daemon sends
+  only what its `wants` names. State out is `snapshot`, `session`, `session-gone` and `task` from the feed
+  (`adapter-feed.ts`) and only those: never a prompt, an attachment, a session-to-session message, a transcript, the
+  screen, an account id, an absolute path or anything of the PSK; `repos`, when set, bounds both sessions and tasks;
+  another adapter's `adapter.*` tags are stripped (`tagsFor`); a `task` frame only for a task this machine's launch
+  ledger holds. `closed` is read only from the despawn's own note (`closing-panes.ts`), never a log. Nothing an adapter
+  writes, and no argv word but `argv[0]`'s basename, reaches a log or an audit line: the adapter modules load neither
+  `log.ts` nor `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`). An adapter runs as the owner's uid, so
+  these rules bound what Séance grants, never what the program can do. Giving the seam another act (3b's delivery and
+  messages out, 3c's installing) is a threat-model change, made in DESIGN.md with it.
 - **The `custodian` frame kind is served only on the round's own socket** (`custodian-socket.ts`,
   `/tmp/seance-cu-s-<mkdtemp>/c.sock`, the directory kept in the seat record's `socketDir` and reused only while `lstat`
   shows it the daemon's own, else made fresh: a 0700 directory checked with `lstat`, a 0600 socket, 64 KiB

@@ -1,0 +1,324 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "seance-adapter-protocol-1",
+  "title": "Séance adapter protocol, major 1",
+  "description": "One JSON object per line over the adapter's stdin (daemon frames) and stdout (adapter frames), at most 262144 bytes a line. Generated from shared/src/adapter-protocol.ts; do not edit.",
+  "$defs": {
+    "tag": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer"
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["conversation", "process"]
+        },
+        "verified": {
+          "const": true
+        }
+      },
+      "required": ["value", "at", "scope"]
+    },
+    "session": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[0-9]+:.+$"
+        },
+        "session": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "verified": {
+              "type": "boolean"
+            },
+            "conflict": {
+              "const": true
+            }
+          },
+          "required": ["id", "verified"]
+        },
+        "task": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": ["ref"]
+            }
+          },
+          "required": ["id"]
+        },
+        "exclave": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["busy", "idle", "needs-input", "unknown"]
+        },
+        "turnEnded": {
+          "const": true
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["question", "permission", "elicitation"]
+        },
+        "prUrl": {
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "since": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "enum": ["owner", "task", "self", "window"]
+            }
+          },
+          "required": ["text", "source"]
+        },
+        "tags": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/tag"
+          }
+        }
+      },
+      "required": ["key", "exclave", "state", "since", "name", "tags"]
+    },
+    "daemonFrame": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/daemon-hello"
+        },
+        {
+          "$ref": "#/$defs/daemon-snapshot"
+        },
+        {
+          "$ref": "#/$defs/daemon-session"
+        },
+        {
+          "$ref": "#/$defs/daemon-session-gone"
+        },
+        {
+          "$ref": "#/$defs/daemon-task"
+        },
+        {
+          "$ref": "#/$defs/daemon-error"
+        }
+      ]
+    },
+    "adapterFrame": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/adapter-hello"
+        },
+        {
+          "$ref": "#/$defs/adapter-resync"
+        }
+      ]
+    },
+    "daemon-hello": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "hello"
+        },
+        "protocol": {
+          "type": "array",
+          "items": {
+            "enum": [1]
+          }
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "machine": {
+          "type": "object",
+          "properties": {
+            "deviceId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": ["deviceId", "name"]
+        },
+        "daemon": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": ["version"]
+        }
+      },
+      "required": ["kind", "protocol", "features", "machine", "daemon"]
+    },
+    "daemon-snapshot": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "snapshot"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/session"
+          }
+        }
+      },
+      "required": ["kind", "sessions"]
+    },
+    "daemon-session": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "session"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        }
+      },
+      "required": ["kind", "session"]
+    },
+    "daemon-session-gone": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "session-gone"
+        },
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["exited", "closed", "replaced"]
+        }
+      },
+      "required": ["kind", "key", "reason"]
+    },
+    "daemon-task": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "task"
+        },
+        "task": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": ["launched", "done", "handoff", "pass", "ended"]
+        },
+        "continues": {
+          "type": "string"
+        },
+        "prUrl": {
+          "type": "string",
+          "pattern": "^https://"
+        }
+      },
+      "required": ["kind", "task", "event"]
+    },
+    "daemon-error": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "error"
+        },
+        "code": {
+          "type": "string",
+          "enum": ["invalid", "unsupported"]
+        }
+      },
+      "required": ["kind", "code"]
+    },
+    "adapter-hello": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "hello"
+        },
+        "protocol": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "wants": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["sessions", "tasks", "messages"]
+          },
+          "uniqueItems": true
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$"
+          },
+          "maxItems": 32
+        }
+      },
+      "required": ["kind", "protocol", "name", "version", "wants", "features"],
+      "additionalProperties": false
+    },
+    "adapter-resync": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "resync"
+        }
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  adapterAudit,
   admitAudit,
   auditLogChecks,
   availabilityAudit,
@@ -452,5 +453,30 @@ describe("auditLogChecks — what doctor renders", () => {
   test("a writable 0600 log reports only its size", async () => {
     await ensureAuditLog();
     expect(await auditLogChecks()).toEqual([{ level: "ok", message: `log 0KB (${logPath()})` }]);
+  });
+});
+
+describe("adapterAudit", () => {
+  test("lifecycle lines carry the name, an argv count and argv[0]'s basename, never another word", async () => {
+    const audit = adapterAudit(collect);
+    await audit.start("tg", ["/opt/tg/bin/tg", "--token", "secret-value"], 4242);
+    await audit.exit("tg", 3, "exited");
+    await audit.exit("tg", "SIGKILL", "stopped");
+    await audit.exit("tg", null, "spawn");
+    await audit.restart("tg", 2000);
+    await audit.refused("tg", "protocol");
+    await audit.failed("tg", 5);
+    await audit.stop("tg");
+    expect(collected).toEqual([
+      'audit adapter origin=adapter op=start name=tg argv=3 argv0="tg" pid=4242',
+      "audit adapter origin=adapter op=exit name=tg code=3 reason=exited",
+      "audit adapter origin=adapter op=exit name=tg code=SIGKILL reason=stopped",
+      "audit adapter origin=adapter op=exit name=tg code=- reason=spawn",
+      "audit adapter origin=adapter op=restart name=tg delay=2000ms",
+      "audit adapter origin=adapter op=refused name=tg reason=protocol",
+      "audit adapter origin=adapter op=failed name=tg exits=5",
+      "audit adapter origin=adapter op=stop name=tg",
+    ]);
+    expect(emitted()).not.toContain("secret-value");
   });
 });
