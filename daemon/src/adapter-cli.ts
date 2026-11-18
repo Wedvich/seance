@@ -184,7 +184,7 @@ async function add(args: readonly string[]): Promise<void> {
   console.log(
     (await daemonRunning()) === null
       ? "it starts with the daemon."
-      : "`seance restart` starts it (the daemon reads config.json at its start).",
+      : "the running daemon reloads config.json and starts it within moments.",
   );
 }
 
@@ -202,7 +202,7 @@ async function remove(name: string): Promise<void> {
   console.log(`removed adapter ${name} from ${config.path}; its subscriptions end when the daemon reads this config`);
   console.log(`its own directory, ${join(adaptersDir(), name)}, is left as it is`);
   if ((await daemonRunning()) !== null)
-    console.log("`seance restart` stops it (the daemon reads config.json at its start)");
+    console.log("the running daemon reloads config.json and stops it within moments");
 }
 
 async function restart(args: readonly string[]): Promise<void> {
@@ -227,7 +227,7 @@ async function restart(args: readonly string[]): Promise<void> {
     console.error(
       (await daemonRunning()) === null
         ? "the daemon is not running: it starts its adapters when it starts"
-        : "the daemon runs no adapters (config.json named none at its start): `seance restart`",
+        : "the daemon runs no adapters yet: it reloads config.json when it changes, so try again in a moment",
     );
     process.exitCode = 1;
     return;
@@ -236,7 +236,9 @@ async function restart(args: readonly string[]): Promise<void> {
   const unloaded = names.filter((each) => !loaded.includes(each));
   await Promise.all(unloaded.map(async (name) => audit.restart(name, "not_running")));
   for (const name of unloaded) {
-    console.log(`${name}: not running in the daemon (added since it started) — \`seance restart\` starts it`);
+    console.log(
+      `${name}: not loaded by the daemon yet (it reloads config.json when it changes): try again in a moment`,
+    );
   }
   if (loaded.length === 0) {
     process.exitCode = 1;
@@ -286,7 +288,7 @@ async function status(): Promise<void> {
     console.log(name);
     if (pid !== null) {
       if (live === undefined) {
-        console.log("  state      not running in the daemon (added since it started: `seance restart`)");
+        console.log("  state      not loaded by the daemon yet (it reloads config.json when it changes)");
       } else {
         console.log(`  state      ${stateLine(live)}`);
         if (live.protocol !== undefined) {
@@ -302,7 +304,9 @@ async function status(): Promise<void> {
           console.log(`  last exit  ${time(at)}: ${reason}${code === null ? "" : `, code ${code}`}`);
         }
         if (live.fingerprint !== adapterFingerprint(config)) {
-          console.log("  note       config.json changed since the daemon started it: `seance restart`");
+          console.log(
+            "  note       config.json changed since the daemon started it (a reload is under way, or failed: see the log)",
+          );
         }
       }
     }

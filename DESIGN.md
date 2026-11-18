@@ -12990,7 +12990,11 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   capability opens and every reload's capabilities share, so a write still queued from the outgoing daemon and the
   incoming one's reconcile run on one chain over one memory; `seance adapter add` and `remove` write `config.json`
   alone, and the daemon ends the subscriptions when it reads that write (a running daemon at once, through the reload;
-  a stopped one at its next start). Not a bearer, unlike a reply handle: usable only by that adapter, over its own
+  a stopped one at its next start). The daemon's stop awaits that chain (`subscriptionsSettled`, beside the watch
+  table's), since `add`, `leave`, `touch` and `reconcile` write without being awaited and the process exits once stop
+  resolves. A reload that fails after its capabilities started and is rolled back keeps the subscriptions the failed
+  start's reconcile ended (the store is memory shared by both): the rollback restores the adapters' fingerprints, not
+  those subscriptions, and a session messages the adapter again. Not a bearer, unlike a reply handle: usable only by that adapter, over its own
   stdin, on this machine, to a conversation that messaged it and that the daemon verified at the act.
 - **Tags** (`tag`, "Tags and session identity"): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
   (one live in a session outside `repos` is `refused`) or on a task this ledger holds within `repos`; else `unknown`.
@@ -13062,7 +13066,7 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
     "question"]`, `request` only by `--kinds`; a re-add keeps the entry's `kinds` and `repos` unless given. A fifth
     name is refused (`ADAPTERS_MAX`). `commit` is the checkout's `HEAD` through the hardened git (`checkoutCommit`), when
     it is a git work tree. A `--repo` no scanned repo names is a warning, not a refusal (the scan may not have run).
-    It prints what it wrote, the trust statement and that `seance restart` starts it. It does not touch
+    It prints what it wrote, the trust statement and that the running daemon reloads `config.json` (the supervisor watches it) and starts it. It does not touch
     `conversations.json`: the daemon ends that name's subscriptions when it reads the new entry ("The subscription"),
     so a replaced program inherits none even under the same name.
   - **`remove <name>`** deletes the entry and leaves `stateDir()/adapters/<name>` as it is: the adapter's own data,
@@ -13082,7 +13086,7 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
     (`takeRestartRequest`) and acts on through `supervisor.restart()`: the run is ended (`reason=restarted`, not counted
     toward the `failed` window), the window and the backoff reset, and the adapter started again; one held `failed` or
     `refused` starts afresh. The CLI waits up to 10 s for the restart count to rise. A name not in the daemon's view
-    (added since it started) is told `seance restart`. `status` reads `config.json` alone when no daemon runs; the
+    (added since it started, so the reload has not landed) is told to try again. `status` reads `config.json` alone when no daemon runs; the
     adapter's hello `version` reaches the terminal only through `printable`, as the custodian's summary does, and a
     fingerprint that differs from the entry's says the daemon runs an older config.
   - **`doctor`** (`adapterChecks`, its "adapters" section): an absolute `argv[0]` that is missing or not executable
