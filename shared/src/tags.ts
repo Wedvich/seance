@@ -114,6 +114,9 @@ const KNOWN: Readonly<Record<string, (value: string) => string | null>> = {
   "creator.ref-url": (value) => httpsUrl(value),
 };
 
+/** Keys whose value is refused, not cut, past `TAG_VALUE_MAX`: a cut of the value is a different value. */
+const REFUSED_PAST_CAP: ReadonlySet<string> = new Set(["creator.ref-url"]);
+
 /** Namespaces that accept their known keys alone (`seance.*` and `scheduler.*` have none in v1: reserved). */
 const KNOWN_ONLY: ReadonlySet<TagNamespace> = new Set(["agent", "seance", "self", "scheduler"]);
 
@@ -150,9 +153,13 @@ export function parseTagValue(key: string, raw: unknown, scope: TagScope): strin
   if (!scopesOf(split.namespace, split.suffix).includes(scope)) return null;
   const known = Object.hasOwn(KNOWN, key) ? KNOWN[key] : undefined;
   if (known === undefined && KNOWN_ONLY.has(split.namespace)) return null;
-  const value = displayLine(raw);
+  // A key whose parser rewrites the value (a URL's normalised `href`) is refused past the cap, never cut: a cut
+  // URL opens another page, and the cut of a rewritten form is no fixed point of this parse.
+  const value = displayLine(raw, REFUSED_PAST_CAP.has(key) ? Number.POSITIVE_INFINITY : TAG_VALUE_MAX);
   if (value === "") return "";
-  return known === undefined ? value : known(value);
+  if (known === undefined) return value;
+  const parsed = known(value);
+  return parsed !== null && utf8.encode(parsed).length > TAG_VALUE_MAX ? null : parsed;
 }
 
 export type TagWriteRefusal = "invalid" | "unknown_key" | "full";

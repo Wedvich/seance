@@ -100,6 +100,24 @@ describe("known keys", () => {
     expect(parseTagValue(key, raw, scope)).toBe(want);
   });
 
+  test("a ref URL is refused past the cap, never cut, and what it normalises to is a fixed point of the parse", () => {
+    const at = (path: string): string => `https://linear.app/${path}`;
+    // 256 bytes exactly passes; one more is refused where any other value would be cut.
+    const fits = at("u".repeat(TAG_VALUE_MAX - at("").length));
+    expect(parseTagValue("creator.ref-url", fits, "task")).toBe(fits);
+    expect(parseTagValue("creator.ref-url", `${fits}u`, "task")).toBeNull();
+    expect(parseTagValue("creator.ref", `linear:${"x".repeat(64)}`, "task")).not.toBeNull();
+    // Normalising percent-encodes non-ASCII and quotes: grown past the cap it is refused, not cut mid-escape.
+    expect(parseTagValue("creator.ref-url", at("æ".repeat(100)), "task")).toBeNull();
+    expect(parseTagValue("creator.ref-url", at('"'.repeat(100)), "task")).toBeNull();
+    for (const raw of [at("Møtenotater-æøå"), at('a"b c'), at("x?q=ø#å")]) {
+      const stored = parseTagValue("creator.ref-url", raw, "task");
+      expect(stored).not.toBeNull();
+      expect(stored).not.toBe(raw);
+      expect(parseTagValue("creator.ref-url", stored, "task")).toBe(stored);
+    }
+  });
+
   test("the printable rule: controls, bidi and separators gone, cut to bytes on a code point", () => {
     expect(displayLine("a\u0000b‮c d")).toBe("a b c d");
     const long = "é".repeat(TAG_VALUE_MAX);
