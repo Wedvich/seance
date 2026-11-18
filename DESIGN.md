@@ -2381,8 +2381,8 @@ an old peer's frames parse as before. Mixed versions:
     answers `watch-event` (advertised unconditionally: any daemon may lead and poll watches); as a leader it honours
     `watch-set` and sends the answers, only to a machine advertising it. It was advertised from step 2, before the
     daemon had a `watch` frame (step 3 built it): a daemon of the step 2 build closes a `watch` frame as malformed. A
-    client gates a surface on the string and on the frame's own answer, never on the string alone: `seance mcp`
-    (step 4) must read a closed or unparseable reply to a `watch` frame as `unsupported`. No second capability string
+    client gates a surface on the string and on the frame's own answer, never on the string alone: `seance mcp`'s
+    `watch_github` (step 4) reads a closed or unparseable reply to a `watch` frame as `unsupported`. No second capability string
     was added for the frame.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
@@ -11272,6 +11272,24 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
   binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
   does, or the call stops at a permission prompt.
+- **`watch_github { url, head? }` and `unwatch_github { id }`** (built 2026-11-18; "Watches", docs/gh-watch.md W10).
+  One tool for both targets, since the URL says which. `watch_github` checks the URL against the PR and run patterns
+  (`parseGithubPr`, `parseGithubRun`) and `head` (`isWatchHead`, a PR only) before anything is asked, then the gate
+  (`watchGate`, `mcp.ts`): refused unless this box has daemon state, the lease has a scheduler leg, this machine's own
+  registry entry advertises `CAPABILITIES.watches`, and the **verified** leader does (`advertises`), worded apart for no
+  verified leader and a leader that needs `seance update`; never the daemon's word alone, and a refused gate sends
+  nothing. Then one `watch` add frame (`watch-github.ts`, beside `send-message.ts` and like it importing nothing that
+  logs; in `message-layering.test.ts`), 10 s for an answer, since the daemon waits up to 3 s for the leader's. A closed
+  connection or an answer that is no watch reply is `unsupported` (a step 2 daemon); no daemon and no answer keep their
+  own words, and no answer says the watch may exist and that calling again replaces it. No restart grace: a dropped
+  connection must read as a daemon without the frame. Every refusal is worded per code and, where waiting is still the
+  answer, ends with the `gh pr checks <n> -R <owner>/<repo> --watch -i 30` or `gh run watch <id> -R <owner>/<repo> -i 30
+  --exit-status` to run instead, rebuilt from the parsed parts. Success answers the watch id and tells the session to
+  end its turn. `unwatch_github` checks the id (`isMessageId`) and is not gated: removing is the daemon's own table's
+  act and must work with no leader. The description says to end the turn, not to poll the target meanwhile, that the
+  same URL replaces the watch (a new `head` after a fix push), what `head` is for, the 24 h expiry (`WATCH_TTL_MS`, in
+  `watch-frame.ts` with the caps so the words name the table's numbers) and that the inbox mod is needed. Both need
+  `mcp__seance__watch_github` and `mcp__seance__unwatch_github` allowed in the exclave.
 - **`continue_task { taskId, prompt?, not_before? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
   a continuation of a `session_failed` or cancelled (after placement) task, the newest in a chain: the session's conversation is resumed in its worktree, on
   the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
@@ -12355,10 +12373,11 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   characters other than C0, DEL and C1 (a ZWJ emoji is legitimate and refusing it would drop the whole event), and
   `watchNote` replaces every control, format (bidi, zero-width), surrogate, line and paragraph separator character with
   U+FFFD, the class `printable` and `isFlagNote` use, inside the fence.
-- **For step 4** (`seance mcp`'s `watch_github` and `unwatch_github`). The frame was advertised under
-  `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it closes a `watch`
-  frame as malformed. The client reads a closed connection or an unparseable reply as `unsupported`, in addition to the
-  verified-leader gate. No second capability string.
+- **Step 4: `seance mcp`'s `watch_github` and `unwatch_github`** (built 2026-11-18; "MCP server"). The frame was
+  advertised under `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it
+  closes a `watch` frame as malformed. The client (`watch-github.ts`) reads a closed connection or an unparseable reply
+  as `unsupported`, in addition to the gate (`watchGate`: this machine's daemon and the verified leader). No second
+  capability string.
 - **Rejected: ending a watch on a failed pane read.** A `tmux` failure is transient and the session still waits;
   ending the watch would drop it for good.
 - **Rejected: a `watch:` store prefix, daemon memory only.** docs/gh-watch.md W9.

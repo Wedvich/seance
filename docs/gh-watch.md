@@ -3,7 +3,8 @@
 **Status: spec; build steps 1 to 3 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the
 reset-time backoff, then the leader's side: the run query, the watch registry, the reserve for tasks, `watch-set` and
 `watch-event` — DESIGN.md, Scheduler, "PR status"; then the daemon's side: the `watch` frame, the table, `watches.json`,
-the notes and the custodian hold — DESIGN.md, "Watches"); step 4 (MCP's tools) is not.
+the notes and the custodian hold — DESIGN.md, "Watches"); step 4's MCP tools are built (DESIGN.md, "MCP server"), its
+spike S4 is not.
 Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
 session asks the fleet to watch a pull request or an Actions run and is told through its inbox when something
 happens, instead of polling GitHub itself. The leader already reads every task's PR in batches (DESIGN.md, "PR
@@ -280,7 +281,7 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
 
 ### W10. Surfaces, capability and audit
 
-- **MCP** (`seance mcp`): `watch_github { url, head? }` answers `{ ok, id, kind }` or a code (`invalid`,
+- **MCP** (`seance mcp`; built 2026-11-18, DESIGN.md, "MCP server"): `watch_github { url, head? }` answers `{ ok, id, kind }` or a code (`invalid`,
   `nosession`, `nolistener`, `too_many`, `fleet_full`, `no_leader`, `unsupported`, `unbound`, plus the transport
   codes); `unwatch_github { id }` answers `ok` or `unknown`. Its description says to end the turn after a successful
   call, that a note will wake the session, and that the session must not poll the same target meanwhile. Rejected:
