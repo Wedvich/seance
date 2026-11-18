@@ -3441,6 +3441,7 @@ describe("watch_github and unwatch_github", () => {
       const { tools } = await c.listTools();
       const watch = tools.find((t) => t.name === "watch_github");
       expect(watch?.annotations?.readOnlyHint).toBe(false);
+      expect(watch?.annotations?.idempotentHint).toBe(false);
       expect(watch?.description).toContain("end your turn");
       expect(watch?.description).toContain("Do not poll the same target");
       expect(watch?.description).toContain("replaces its watch");
@@ -3536,6 +3537,20 @@ describe("watch_github and unwatch_github", () => {
 
     test("passes only when this machine's daemon and the verified leader both advertise watches", async () => {
       expect(await gate(fleetOf(true, true), true)).toEqual({ ok: true });
+    });
+
+    test("an unverified nominee is refused though its registry entry advertises watches", async () => {
+      const fake = fakeRelay(fleetOf(true, true), () => new Error("unexpected op"));
+      fake.setState({ scheduler: { kind: "unverified", deviceId: "device-1", term: 3 } });
+      const lazy = new LazyRelay({ create: () => fake });
+      try {
+        await refusedWith(
+          watchGate(relayFleet(lazy), fakeLocal(undefined, { deviceId: "device-2" }))(),
+          "no verified scheduler is leading",
+        );
+      } finally {
+        lazy.stop();
+      }
     });
 
     test("a leader without the capability is told to update", async () => {

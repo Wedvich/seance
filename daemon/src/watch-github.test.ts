@@ -102,7 +102,7 @@ describe("watchGithub", () => {
       const pr = await watchGithub({ url: PR }, gate, { path: fake.path });
       expect(pr).toEqual({
         ok: false,
-        text: "not watched: no verified scheduler is leading; wait on it yourself instead, in the background: `gh pr checks 42 -R acme/widgets --watch -i 30` (never more often than every 30 s)",
+        text: "not watched: no verified scheduler is leading; wait on it yourself instead, in the background: `gh pr checks 42 -R acme/widgets --watch -i 30 --fail-fast` (never more often than every 30 s)",
       });
       const run = await watchGithub({ url: `${RUN}/attempts/2` }, gate, { path: fake.path });
       expect(run.text).toContain("`gh run watch 123456789 -R acme/widgets -i 30 --exit-status`");
@@ -123,7 +123,7 @@ describe("watchGithub", () => {
       );
       expect(result.ok).toBe(false);
       expect(result.text).toStartWith("not watched: ");
-      expect(result.text).toContain("gh pr checks 42 -R acme/widgets --watch -i 30");
+      expect(result.text).toContain("gh pr checks 42 -R acme/widgets --watch -i 30 --fail-fast");
       texts.set(code, result.text);
     }
     expect(new Set(texts.values()).size).toBe(WATCH_REPLY_CODES.length);
@@ -134,12 +134,15 @@ describe("watchGithub", () => {
     expect(texts.get("stopping")).toContain("call again");
   });
 
-  test("a step 2 daemon's dropped connection, or an answer that is no watch reply, reads as unsupported", async () => {
+  test("a dropped connection is worded for an old daemon and a restart; an answer that is no watch reply reads as unsupported", async () => {
     const unsupported = await withDaemon("code-unsupported-ref.sock", refusal("unsupported"), (fake) =>
       watchGithub({ url: PR }, open, { path: fake.path }),
     );
     const closed = await withDaemon("closed.sock", null, (fake) => watchGithub({ url: PR }, open, { path: fake.path }));
-    expect(closed).toEqual(unsupported);
+    expect(closed.ok).toBe(false);
+    expect(closed.text).toContain("predates watches");
+    expect(closed.text).toContain("restarted and may bring the watch back");
+    expect(closed.text).toContain("may or may not have been made");
     for (const answer of ["not json", JSON.stringify({ ok: true }), JSON.stringify({ ok: false, code: "nope" })]) {
       // oxlint-disable-next-line no-await-in-loop -- one double per answer, in turn
       const odd = await withDaemon("odd.sock", answer, (fake) => watchGithub({ url: PR }, open, { path: fake.path }));
@@ -150,7 +153,8 @@ describe("watchGithub", () => {
   test("no daemon and no answer keep their own words", async () => {
     const none = await watchGithub({ url: PR }, open, { path: join(dir, "absent.sock") });
     expect(none.ok).toBe(false);
-    expect(none.text).toStartWith("the local daemon is not running");
+    expect(none.text).toStartWith("not watched: the local daemon is not running");
+    expect(none.text).not.toContain("may or may not");
     const silent = await withDaemon("silent.sock", "silent", (fake) =>
       watchGithub({ url: PR }, open, { path: fake.path, timeoutMs: 100 }),
     );
@@ -179,8 +183,8 @@ describe("unwatchGithub", () => {
     expect(unknown.ok).toBe(false);
     expect(unknown.text).toContain("no such watch");
     const closed = await withDaemon("remove-closed.sock", null, (fake) => unwatchGithub(ID, { path: fake.path }));
-    expect(closed.text).toContain("keeps no watches");
+    expect(closed.text).toContain("predates watches");
     const none = await unwatchGithub(ID, { path: join(dir, "absent.sock") });
-    expect(none.text).toStartWith("the local daemon is not running");
+    expect(none.text).toBe("the local daemon is not running; nothing was sent");
   });
 });

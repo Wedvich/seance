@@ -1977,7 +1977,7 @@ export function buildMcpServer(
         url: z.string().describe("https://github.com/<owner>/<repo>/pull/<n> or …/actions/runs/<id>"),
         head: z.string().optional().describe("PR only: the full sha of the commit you pushed"),
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     async ({ url, head }) => {
       const result = await watchClient.add({ url, ...(head === undefined ? {} : { head }) }, watchGate(fleet, local));

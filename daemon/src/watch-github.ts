@@ -18,8 +18,12 @@ import {
  * frame, its codes and the caps live in `watch-frame.ts`, not the daemon's table.
  */
 
-/** The daemon waits up to 3 s for the leader's answer to an add, behind any add of the same session still waiting. */
-const WATCH_TIMEOUT_MS = 10_000;
+/**
+ * The daemon's add can wait on the app-role leg's connect (10 s), the registry settle (3 s) and the leader's answer
+ * (3 s), behind any earlier add of the same session. Past this the daemon may still make the watch, so it is the outer
+ * bound, not a guess at the usual case.
+ */
+const WATCH_TIMEOUT_MS = 30_000;
 
 export interface WatchGithubResult {
   readonly ok: boolean;
@@ -46,7 +50,7 @@ function pollYourself(target: Target): string {
   const repo = `${target.owner}/${target.repo}`;
   const command =
     target.kind === "pr"
-      ? `gh pr checks ${target.number} -R ${repo} --watch -i 30`
+      ? `gh pr checks ${target.number} -R ${repo} --watch -i 30 --fail-fast`
       : `gh run watch ${target.id} -R ${repo} -i 30 --exit-status`;
   return `wait on it yourself instead, in the background: \`${command}\` (never more often than every 30 s)`;
 }
@@ -55,17 +59,20 @@ const UNBOUND =
   "this session is not in a tmux pane this machine's daemon can see, or this machine cannot name a socket's peer process";
 const NO_SESSION = "this machine's daemon found no `claude` process above this tool, so there is no session to wake";
 const NO_DAEMON = "the local daemon is not running";
+/** A closed connection is an old daemon or a restart (the add is persisted first): the client cannot tell them apart. */
+const CONNECTION_LOST =
+  "the connection to this machine's daemon closed: it predates watches (`seance update`), or it restarted and may bring the watch back";
 const STOPPING = "this machine's daemon is stopping";
 const INTERNAL = "this machine's daemon hit an error handling the watch (see its log)";
 const PREDATES = "this machine's daemon keeps no watches (it predates them: `seance update`)";
 
 const ADD_REFUSED = {
   invalid:
-    "this machine's daemon or the scheduler could not read the watch; the daemon may predate watches (`seance update`)",
+    "this machine's daemon or the scheduler refused the watch as unreadable or not pollable; a different build of either may be the cause (`seance update`)",
   unbound: UNBOUND,
   nosession: NO_SESSION,
   nolistener:
-    "this session has no inbox listener, so no note could reach it: its Claude account lacks the inbox mod (`seance mod install`) or the session started before it was installed",
+    "no inbox listener serves this session, so no note could reach it: its Claude account lacks the inbox mod (`seance mod install`), the session started before it was installed, or its task or listener changed while the watch was being made",
   too_many: `this session has ${WATCH_SESSION_MAX} watches, or this machine ${WATCH_MACHINE_MAX}; unwatch_github one you no longer wait on`,
   fleet_full: "the scheduler watches as many PRs or runs as it takes right now",
   no_leader: "no scheduler leader answers, so nothing would read GitHub for the watch",
@@ -107,13 +114,17 @@ function parseReply(raw: unknown): Reply | null {
 }
 
 /**
- * A step 2 daemon advertises `watches` and closes a `watch` frame as malformed, so a connection it dropped, or an
- * answer that is no watch reply, is `unsupported`, never a transport fault (DESIGN.md, "Watches", "For step 4").
+ * A step 2 daemon advertises `watches` and closes a `watch` frame as malformed, but a restart closes it too, so a
+ * dropped connection is worded for both; an answer that is no watch reply is `unsupported` (DESIGN.md, "Watches",
+ * "Step 4"). `sent` is false only when the frame never left this process.
  */
-async function send(frame: object, opts: WatchGithubOpts): Promise<Reply | { readonly failed: string }> {
+async function send(
+  frame: object,
+  opts: WatchGithubOpts,
+): Promise<Reply | { readonly failed: string; readonly sent: boolean }> {
   let raw: unknown;
   try {
-    // No restart grace: a dropped connection must read as a daemon without the frame, never be retried as a restart.
+    // No restart grace: a dropped connection is reported, never retried, since a retried add could mint a second watch.
     raw = await exchange(frame, {
       path: opts.path ?? socketPath(),
       timeoutMs: opts.timeoutMs ?? WATCH_TIMEOUT_MS,
@@ -121,11 +132,11 @@ async function send(frame: object, opts: WatchGithubOpts): Promise<Reply | { rea
     });
   } catch (err) {
     // Each before the class it extends.
-    if (err instanceof LocalTimedOut) return { failed: err.message };
-    if (err instanceof LocalConnectionLost || err instanceof LocalRequestFailed)
-      return { ok: false, code: "unsupported" };
-    if (err instanceof LocalUnavailable) return { failed: NO_DAEMON };
-    return { failed: err instanceof Error ? err.message : String(err) };
+    if (err instanceof LocalTimedOut) return { failed: err.message, sent: true };
+    if (err instanceof LocalRequestFailed) return { ok: false, code: "unsupported" };
+    if (err instanceof LocalConnectionLost) return { failed: CONNECTION_LOST, sent: true };
+    if (err instanceof LocalUnavailable) return { failed: NO_DAEMON, sent: false };
+    return { failed: err instanceof Error ? err.message : String(err), sent: true };
   }
   return parseReply(raw) ?? { ok: false, code: "unsupported" };
 }
@@ -174,7 +185,9 @@ export async function watchGithub(
   if ("failed" in reply) {
     return {
       ok: false,
-      text: `${reply.failed}, so the watch may or may not have been made; call watch_github again (the same URL replaces it), or ${fallback}`,
+      text: reply.sent
+        ? `${reply.failed}; the watch may or may not have been made: call watch_github again (the same URL replaces it), or ${fallback}`
+        : `not watched: ${reply.failed}; ${fallback}`,
     };
   }
   if (!reply.ok) {
@@ -196,7 +209,12 @@ export async function watchGithub(
 export async function unwatchGithub(id: string, opts: WatchGithubOpts = {}): Promise<WatchGithubResult> {
   if (!isMessageId(id)) return { ok: false, text: "`id` is not a watch id: it is the id watch_github answered" };
   const reply = await send({ v: WATCH_FRAME_VERSION, kind: WATCH_FRAME_KIND, op: "remove", id }, opts);
-  if ("failed" in reply) return { ok: false, text: `${reply.failed}; the watch may or may not have been removed` };
+  if ("failed" in reply) {
+    return {
+      ok: false,
+      text: `${reply.failed}; ${reply.sent ? "the watch may or may not have been removed" : "nothing was sent"}`,
+    };
+  }
   if (!reply.ok) return { ok: false, text: REMOVE_REFUSED[reply.code] };
   return { ok: true, text: `watch ${id} removed` };
 }
