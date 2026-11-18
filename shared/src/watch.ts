@@ -410,6 +410,14 @@ function targetRepo(target: WatchTarget): { readonly owner: string; readonly rep
   return target.kind === "pr" ? target.pr : target.run;
 }
 
+/**
+ * Control, format (bidi, zero-width), surrogate, line and paragraph separator characters: the set the owner CLI's
+ * `printable` and `isFlagNote` refuse. `parseFailing` keeps a name holding some of them (a ZWJ emoji is legitimate, and
+ * refusing it would drop the whole event and silence the watch), so the note replaces them with U+FFFD where the model
+ * reads them.
+ */
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+
 /** `<name>`, ` (required)`, and the job's link rebuilt from the target's repo, never from the event. */
 function failingBlock(failing: readonly WatchFailing[], target: WatchTarget): string {
   const { owner, repo } = targetRepo(target);
@@ -418,7 +426,7 @@ function failingBlock(failing: readonly WatchFailing[], target: WatchTarget): st
       f.job === undefined
         ? ""
         : `  job: https://github.com/${owner}/${repo}/actions/runs/${f.job.run}/job/${f.job.job}`;
-    return `${f.name}${f.required === true ? " (required)" : ""}${job}`;
+    return `${f.name.replaceAll(UNPRINTABLE, "�")}${f.required === true ? " (required)" : ""}${job}`;
   });
   const parts = [fenced(lines.join("\n"))];
   if (failing.some((f) => f.job !== undefined)) {

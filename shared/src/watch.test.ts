@@ -457,6 +457,15 @@ describe("watchNote", () => {
     expect(text).toContain("`````\na ```` b\n`````");
   });
 
+  test("a name's bidi, zero-width and line-separator characters are replaced, not passed to the session", () => {
+    const bad = [0x202e, 0x200b, 0x2028, 0x2029, 0xd800].map((code) => String.fromCharCode(code));
+    const letters = ["a", "b", "c", "d", "e", "f"];
+    const name = letters.map((letter, i) => letter + (bad[i] ?? "")).join("");
+    const text = note([{ kind: "checks", outcome: "fail", head: HEAD40, failing: [{ name }] }]).text;
+    expect(text).toContain(letters.join(String.fromCodePoint(0xfffd)));
+    expect(text).not.toMatch(/[\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u);
+  });
+
   test("the largest failing list stays under the push bound", () => {
     const failing = Array.from({ length: 10 }, (_, i) => ({
       name: `${i}`.repeat(100),
