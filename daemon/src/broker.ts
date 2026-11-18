@@ -188,6 +188,13 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
   if (!isTaskId(taskId)) return { code: "invalid_request", message: "taskId is not a task id" };
   const spec = parseTaskSpec(raw["spec"]);
   if (spec === null) return { code: "invalid_request", message: "malformed task spec" };
+  // The spec parse drops a tag whose key or value fails its parser, so a peer's bad ref would queue the task untagged
+  // and be told it queued: refuse a count that changed (`specError` does the same for the keyed MCP path).
+  const rawSpec = raw["spec"];
+  const rawTags = isRecord(rawSpec) ? rawSpec["tags"] : undefined;
+  if (isRecord(rawTags) && Object.keys(rawTags).length !== Object.keys(spec.tags ?? {}).length) {
+    return { code: "invalid_request", message: "tags: a key is unknown or its value is invalid" };
+  }
   if (spec.lineage !== undefined || spec.base !== undefined) {
     return { code: "invalid_request", message: "lineage and base are not brokered" };
   }

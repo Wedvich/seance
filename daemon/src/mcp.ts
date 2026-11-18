@@ -769,7 +769,7 @@ const AFTER_WHEN = z
   );
 
 const REF_DESCRIPTION =
-  'What this task is for, as source:id — e.g. "linear:ENG-123" or "github:owner/repo#12" (a lowercase source of letters, digits and hyphens, then a colon, then an id of at most 64 letters, digits and ._#/-). Informational: the scheduler stores and shows it (get_queue lists it as tags["creator.ref"]), and reads nothing from the tracker';
+  'What this task is for, as source:id — e.g. "linear:ENG-123" or "github:owner/repo#12" (a lowercase source of letters, digits and hyphens, then a colon, then an id of at most 64 letters, digits and ._#/-). Informational: the scheduler stores and shows it (get_queue lists it as tags["creator.ref"]), and reads nothing from the tracker. It replaces the retired `linear: { issue, url }` field: pass "linear:ENG-123" here and the URL as the ref URL';
 const REF_URL_DESCRIPTION = "The ref's https: URL, shown beside it in the app; only with the ref";
 
 const AUTONOMY_FIELD = z

@@ -513,6 +513,20 @@ describe("the broker's scheduler actions", () => {
       }
     });
 
+    test("is refused when a tag's value or key would be dropped, not queued untagged", async () => {
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.taskTags] });
+      for (const tags of [
+        { "creator.ref": "ENG-1" },
+        { "creator.ref": "linear:ENG-1", "creator.ref-url": "http://linear.app/x" },
+        { "creator.ref": "linear:ENG-1", "unknown.key": "x" },
+      ]) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
+        expect(failed(await broker.handle(enqueue({ tags })))).toMatchObject({ code: "invalid_request" });
+      }
+      expect(fakes[0]?.creates ?? []).toEqual([]);
+      broker.stop();
+    });
+
     test("is refused beside a key that is not the creator's, even to a leader that takes tags", async () => {
       const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.taskTags] });
       const reply = failed(
