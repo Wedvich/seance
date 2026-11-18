@@ -233,8 +233,21 @@ describe("the state feed", () => {
     const before = d.frames.length;
     await tmuxOk(["set-option", "-p", "-t", pane, "@seance-task", id(2)]);
     await pollUntil(() => sessionOf(d, key)?.task?.id === id(2), "the re-tagged record");
-    const after = d.frames.slice(before).filter((frame) => frame.kind !== "task");
-    expect(after.map((frame) => frame.kind)).toEqual(["session-gone", "session"]);
+    // A late refresh may still restate the old record before the re-tag lands (as on CI runners); what must hold is
+    // that the old task's record is gone, as `replaced`, before any record names the new task.
+    const after = d.frames
+      .slice(before)
+      .flatMap((frame) =>
+        frame.kind === "session" && frame.session.key === key
+          ? [`session:${frame.session.task?.id ?? "-"}`]
+          : frame.kind === "session-gone" && frame.key === key
+            ? [`gone:${frame.reason}`]
+            : [],
+      );
+    const gone = after.indexOf("gone:replaced");
+    expect(gone).toBeGreaterThanOrEqual(0);
+    expect(after.slice(0, gone).every((entry) => entry === `session:${id(1)}`)).toBe(true);
+    expect(after[gone + 1]).toBe(`session:${id(2)}`);
     expect(goneFor(d, key)).toEqual(["replaced"]);
     // The table's facts were the old task's: state reads unknown until this session reports under the new one.
     expect(sessionOf(d, key)?.state).toBe("unknown");
