@@ -37,6 +37,7 @@ import {
   type SchedulerError,
   type SessionEvent,
   type SessionMessage,
+  type WatchSet,
   type SessionPass,
   type StoreReplyFrame,
   type StoreRequestFrame,
@@ -306,9 +307,18 @@ export class RelayClient {
     return this.#toScheduler("session-message", message);
   }
 
+  /**
+   * Fire-and-forget like `sendToScheduler`, for the `watch-set` op; false when it was not sent. Step 3's daemon table
+   * sends it; nothing does yet. The URLs ride inside the sealed envelope only: the `wire send` line below names no
+   * payload.
+   */
+  sendWatchSet(set: WatchSet): Promise<boolean> {
+    return this.#toScheduler("watch-set", set);
+  }
+
   async #toScheduler(
-    op: "session-event" | "branch-state" | "session-pass" | "custodian-event" | "session-message",
-    payload: SessionEvent | BranchState | SessionPass | CustodianEvent | SessionMessage,
+    op: "session-event" | "branch-state" | "session-pass" | "custodian-event" | "session-message" | "watch-set",
+    payload: SessionEvent | BranchState | SessionPass | CustodianEvent | SessionMessage | WatchSet,
   ): Promise<boolean> {
     if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };

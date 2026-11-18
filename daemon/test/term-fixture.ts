@@ -40,6 +40,7 @@ export const noLocalOps: LocalOps = {
   passClose: () => Promise.reject(new Error("unexpected local pass-close")),
   deliverMessage: () => Promise.reject(new Error("unexpected local deliver-message")),
   messageReceipt: () => Promise.reject(new Error("unexpected local message-receipt")),
+  watchEvent: () => Promise.reject(new Error("unexpected local watch-event")),
 };
 
 export function task(id: string, fields: Partial<Task> = {}): Task {

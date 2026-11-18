@@ -393,6 +393,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.softClose,
         // Unconditional: any daemon may lead, and receiving a forward binds no peer (the leader checks `messages` too).
         CAPABILITIES.messageRoute,
+        // Unconditional: any daemon may lead and poll watches, and the daemon side of `watch-event` binds nothing until
+        // step 3's table.
+        CAPABILITIES.watches,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
         // so it could not receive.
         // `messageReply` beside it: the handle tables and the untasked ack bind by the same peer pid, and one gate
