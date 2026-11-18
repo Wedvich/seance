@@ -621,7 +621,10 @@ describe("realpathOfFile", () => {
   test("names the file by the links followed, never by another hard link of it", async () => {
     const root = await mkdtemp(join(tmpdir(), "seance-realfile-"));
     await Promise.all(["keg", "stub", "bin"].map((d) => mkdir(join(root, d))));
-    await writeFile(join(root, "keg", "bun"), "");
+    // Bun's own inode, as `makeClaudeStub` links it: a GitHub macOS runner showed no race in 500 ms on a fresh empty
+    // file, where bun's raced in most calls (only looked up here, never exec'd, so no first-exec scan). A link across
+    // filesystems falls back to a plain file, which still proves the name.
+    await link(process.execPath, join(root, "keg", "bun")).catch(() => writeFile(join(root, "keg", "bun"), ""));
     const other = join(root, "stub", "9.9.9");
     await link(join(root, "keg", "bun"), other);
     await symlink("../keg/bun", join(root, "bin", "bun"));
@@ -641,7 +644,9 @@ describe("realpathOfFile", () => {
       reader.releaseLock();
       const wrong: string[] = [];
       let raced = 0;
-      for (const end = Date.now() + 500; Date.now() < end && raced < 5;) {
+      // Up to 2 s where the race exists (it ends at the fifth sighting, within milliseconds locally); elsewhere a glance.
+      const windowMs = process.platform === "darwin" ? 2000 : 200;
+      for (const end = Date.now() + windowMs; Date.now() < end && raced < 5;) {
         // oxlint-disable-next-line no-await-in-loop -- the race is between this process's lookups and the other's
         const [ours, plain] = await Promise.all([
           realpathOfFile(join(root, "bin", "bun")),
