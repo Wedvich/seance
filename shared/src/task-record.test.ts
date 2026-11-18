@@ -9,6 +9,7 @@ import {
   ATTACHMENTS_DEP_SENTINEL,
   PIN_SENTINEL,
   REQUIRES_DEP_SENTINEL,
+  SUCCESSOR_DEP_SENTINEL,
   SCHEDULER_ID,
   TAGS_DEP_SENTINEL,
   TASK_SPEC_LIMITS,
@@ -234,6 +235,36 @@ describe("task records at rest", () => {
         ...real,
         TAGS_DEP_SENTINEL,
       ]);
+    });
+
+    test("beside a manifest and `requires`, or beside `requires` and `succeeds`, every sentinel is sealed in order and dropped on read", async () => {
+      const attachments = [
+        {
+          id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+          name: "t.txt",
+          type: "text/plain",
+          size: 1,
+          hash: "A".repeat(43),
+        },
+      ];
+      const at = { deviceId: "a", exclave: "main", clone: "app" };
+      const real = [{ task: "t-1", after: "done" as const }];
+      const tags = { "creator.ref": "linear:ENG-1", "owner.label": "mine" };
+      const files = tagged(tags, { attachments, requires: ["atlas"], deps: real });
+      expect(await sealedDeps(files)).toEqual([
+        ...real,
+        ATTACHMENTS_DEP_SENTINEL,
+        REQUIRES_DEP_SENTINEL,
+        TAGS_DEP_SENTINEL,
+      ]);
+      expect(await open(files, 2)).toEqual({ version: 2, task: files });
+      // A successor carries no manifest (`parseTaskSpec` refuses the pair), so its three never meet the fourth.
+      const successor = tagged(tags, {
+        requires: ["atlas"],
+        succeeds: { task: "t-0", account: "org:a", trigger: "manual", at },
+      });
+      expect(await sealedDeps(successor)).toEqual([REQUIRES_DEP_SENTINEL, SUCCESSOR_DEP_SENTINEL, TAGS_DEP_SENTINEL]);
+      expect(await open(successor, 2)).toEqual({ version: 2, task: successor });
     });
 
     test("a payload carrying the sentinel without tags is malformed, and tags without the sentinel read", async () => {
