@@ -59,9 +59,6 @@ const UNBOUND =
   "this session is not in a tmux pane this machine's daemon can see, or this machine cannot name a socket's peer process";
 const NO_SESSION = "this machine's daemon found no `claude` process above this tool, so there is no session to wake";
 const NO_DAEMON = "the local daemon is not running";
-/** A closed connection is an old daemon or a restart (the add is persisted first): the client cannot tell them apart. */
-const CONNECTION_LOST =
-  "the connection to this machine's daemon closed: it predates watches (`seance update`), or it restarted and may bring the watch back";
 const STOPPING = "this machine's daemon is stopping";
 const INTERNAL = "this machine's daemon hit an error handling the watch (see its log)";
 const PREDATES = "this machine's daemon keeps no watches (it predates them: `seance update`)";
@@ -114,9 +111,10 @@ function parseReply(raw: unknown): Reply | null {
 }
 
 /**
- * A step 2 daemon advertises `watches` and closes a `watch` frame as malformed, but a restart closes it too, so a
- * dropped connection is worded for both; an answer that is no watch reply is `unsupported` (DESIGN.md, "Watches",
- * "Step 4"). `sent` is false only when the frame never left this process.
+ * A step 2 daemon advertises `watches` and closes a `watch` frame as malformed, so a dropped connection, like an answer
+ * that is no watch reply, is `unsupported` and the session waits on its own (DESIGN.md, "Watches", "Step 4"). A restart
+ * also drops it, rarely: an add it had persisted may then still note the session, which only ends a wait early.
+ * `sent` is false only when the frame never left this process.
  */
 async function send(
   frame: object,
@@ -134,7 +132,7 @@ async function send(
     // Each before the class it extends.
     if (err instanceof LocalTimedOut) return { failed: err.message, sent: true };
     if (err instanceof LocalRequestFailed) return { ok: false, code: "unsupported" };
-    if (err instanceof LocalConnectionLost) return { failed: CONNECTION_LOST, sent: true };
+    if (err instanceof LocalConnectionLost) return { ok: false, code: "unsupported" };
     if (err instanceof LocalUnavailable) return { failed: NO_DAEMON, sent: false };
     return { failed: err instanceof Error ? err.message : String(err), sent: true };
   }

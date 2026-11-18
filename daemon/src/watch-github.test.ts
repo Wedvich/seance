@@ -134,15 +134,13 @@ describe("watchGithub", () => {
     expect(texts.get("stopping")).toContain("call again");
   });
 
-  test("a dropped connection is worded for an old daemon and a restart; an answer that is no watch reply reads as unsupported", async () => {
+  test("a dropped connection or an answer that is no watch reply reads as unsupported", async () => {
     const unsupported = await withDaemon("code-unsupported-ref.sock", refusal("unsupported"), (fake) =>
       watchGithub({ url: PR }, open, { path: fake.path }),
     );
     const closed = await withDaemon("closed.sock", null, (fake) => watchGithub({ url: PR }, open, { path: fake.path }));
-    expect(closed.ok).toBe(false);
-    expect(closed.text).toContain("predates watches");
-    expect(closed.text).toContain("restarted and may bring the watch back");
-    expect(closed.text).toContain("may or may not have been made");
+    expect(closed).toEqual(unsupported);
+    expect(closed.text).toContain("gh pr checks");
     for (const answer of ["not json", JSON.stringify({ ok: true }), JSON.stringify({ ok: false, code: "nope" })]) {
       // oxlint-disable-next-line no-await-in-loop -- one double per answer, in turn
       const odd = await withDaemon("odd.sock", answer, (fake) => watchGithub({ url: PR }, open, { path: fake.path }));
@@ -183,7 +181,7 @@ describe("unwatchGithub", () => {
     expect(unknown.ok).toBe(false);
     expect(unknown.text).toContain("no such watch");
     const closed = await withDaemon("remove-closed.sock", null, (fake) => unwatchGithub(ID, { path: fake.path }));
-    expect(closed.text).toContain("predates watches");
+    expect(closed.text).toContain("keeps no watches");
     const none = await unwatchGithub(ID, { path: join(dir, "absent.sock") });
     expect(none.text).toBe("the local daemon is not running; nothing was sent");
   });
