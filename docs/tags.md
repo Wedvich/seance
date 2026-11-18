@@ -1,8 +1,8 @@
 # Tags, session identity and the adapter subscription — spec
 
-**Status: draft 2026-11-17; build step 1 built 2026-11-17** (the vocabulary, the frame's `agent`, the conversation
-table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record).
-Steps 2–4 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
+**Status: draft 2026-11-17; build steps 1 and 3 built** (step 1, 2026-11-17: the vocabulary, the frame's `agent`, the
+conversation table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its
+record. Step 3, 2026-11-18: task tags, DESIGN.md, "Task tags"). Steps 2 and 4 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
 proposed, with a recommendation where there is a choice. Two drafts build on this file: docs/presence.md (draft PR
 #526: `self.doing`, `set_self_tag`, the `tags` map on `SessionEntry`), which already fixes the first key and must stay
 valid under this model, and docs/messaging.md §6 (draft PR #486: the adapter seam), whose `Session` record, addressing
@@ -332,74 +332,34 @@ the one use a verified id gets.
 
 ## 5. Task tags: in the task record, through the one sealer
 
+**Built 2026-11-18 (step 3); DESIGN.md, "Task tags" is the record** and this section's text went into it. The
+subsections stay as pointers, since code cites them by number.
+
 ### 5.1 Shape and skew
 
-`TaskSpec.tags?: Readonly<Record<string, string>>`, at most `TASK_TAGS_MAX` keys, each key in `creator.*`, `owner.*`
-or `scheduler.*`, each value through §2.1's rules; a parse failure of one key drops that key (§2.1), a malformed map
-(not a record, over the cap) nulls the spec as every other malformed spec field does.
-
-- **Sealed only through the one task sealer** (`taskRecordAtRest`/`sealTaskRecord`), which appends
-  `TAGS_DEP_SENTINEL` to deps whenever `tags` is present, so an older leader, whose parser would drop `tags` on its
-  next write, refuses the record instead: the pattern of `ATTACHMENTS_DEP_SENTINEL` and `REQUIRES_DEP_SENTINEL`, with
-  its own `after` so each sentinel stays tied to its field. The parser drops the sentinel only beside `tags` and nulls
-  the spec over the sentinel without it.
-- **Gated by `CAPABILITIES.taskTags`.** A client writes `creatorTags` or `ownerTags` only to a verified leader
-  advertising it, and refuses locally otherwise, before anything is sent.
-- **The cost the sentinel carries.** A tags-only amend (§5.2) puts the sentinel on a running or finished record, so an
-  older leader that later takes the term holds that record unreadable, as it would an attachments task. Accepted: the
-  gate means a current leader wrote it, and leadership moving to an older daemon is a skew the fleet already avoids. A
-  write to a finished record does not move its finish time, so its prune age is unchanged; the archivist takes the new
-  store version as it takes any (a row only over a lower version).
-- **The archivist** keeps `creator.ref` and `creator.ref-url` (structured, and how history is searched by tracker
-  item) and drops every other tag in `taskRow`, as it drops `flag.note`: free text a person or a session chose.
+`TaskSpec.tags`, its caps, `TAGS_DEP_SENTINEL`, the `CAPABILITIES.taskTags` gate, the cost the sentinel carries (and
+why it is an exception to the skew list's rule) and the archivist's strip: DESIGN.md, "Task tags", and its skew-list
+entry.
 
 ### 5.2 Writers, kept few
 
-- **`creator.*` at create only.** Every enqueue path (the PWA, `spawn_session`, `queue_batch`, `seance spawn`, the
-  broker's `enqueue`) may carry `creatorTags` in the spec it seals. Never changed after the create. **A client seals only `creator.*`**:
-  the leader drops `owner.*` and `scheduler.*` from any record at store version 1 (a client's create), so no enqueue
-  path, `continue_task` and the broker included, writes the owner's namespace.
-- **`scheduler.*` by the leader**, through the sealer, on its own writes. None in v1.
-- **`owner.*` only through `amend`**, and only from the PWA: the `amend` op gains `tags: { set?, clear? }` restricted
-  to `owner.*`, on no MCP tool (`amend_task` refuses `ownerTags`), broker action (the broker's `amend` refuses it too) or local op
-  (the `set-limits` rule).
-  **A tags-only amend is accepted in any task state, finished included**, unlike a prompt, title, model or effort
-  amend (queued, blocked or ready with no spawn out): the owner renames a session while it runs, and a tag changes no
-  spawn. It is the leader's own write through `Scheduler.amend` and the sealer, at the record's version, held to the
-  version floor like any write. **Rejected:** a separate `set-task-tags` op (a second write path into the sealer for
-  the same record and the same caller); letting the owner change `creator.*` (the creator's word stays the creator's;
-  the owner adds a label beside it).
-- **Adapters write no task tags** (#486 §6.6, kept): a tool's view of a task is a conversation tag on that task's
-  session (§8.4), on the machine that runs it, never a record write.
+`creator.*` at create, `owner.*` only through `amend` from the PWA in any state, `scheduler.*` none in v1, adapters
+none: DESIGN.md, "Task tags" and "Amending a waiting task" (tags-only). A separate `set-task-tags` op and a changeable
+`creator.*` stay rejected.
 
 ### 5.3 Chains
 
-| Tag                         | Continuation (`continue_task`)                                                                                   | Successor (pass)                               |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `creator.*`                 | copied by the client into the continuation's spec                                                                | copied by the leader into the successor's spec |
-| `owner.*`                   | copied by the leader on its first write of the continuation, from the `continues` target's record while readable | copied (the work has the same name)            |
-| `scheduler.*`               | never (it described the old task)                                                                                | never                                          |
-| conversation tags (session) | **carry automatically**: same conversation id, same machine                                                      | never: a successor is a new conversation       |
-| process tags (session)      | never: a new process                                                                                             | never                                          |
-
-The successor's copy is the leader's own write of its create through the app-role leg (DESIGN.md, "Passing to a
-successor"), sealed through the sealer like the rest of it; the sentinel follows.
+`creator.*` copied by the client (continuation) or the creating leg (successor); `owner.*` copied by the leader at the
+first move out of `queued`; `scheduler.*` never; conversation tags carry on a continuation, process tags never:
+DESIGN.md, "Task tags", "Continuing a session" and "Passing to a successor".
 
 ### 5.4 `linear` becomes the first task tag
 
-`TaskSpec.linear` (`{ issue, url? }`) names a tool, against #486's rule, and is read by nothing (orchestrator.md).
-It becomes `creator.ref = "linear:<issue>"` and `creator.ref-url = <url>`:
-
-- **Mapped at the join, never in the record.** `parseTaskSpec` round-trips a stored `linear` untouched, so the
-  leader's next write re-seals it as it was and an older leader still reads it (mapping it into `tags` there would add
-  the sentinel to a record that never had one). `joinTags` shows it as `creator.ref` (`linear:` and the stored issue
-  through `displayLine`, unparsed: today's `linearIssue` is any bounded string, which the ref's `id` pattern may not
-  admit, and a display needs no parse) and `creator.ref-url`. **Writers** stop writing `linear` once the leader
-  advertises `taskTags`; the PWA's and MCP's `linear` inputs become a general ref input (`source:id`, optional URL).
-- **`doneBy: "linear"`** stays the refused value it is (DESIGN.md: an older leader holds such a record unreadable),
-  and `SettingsRecord.linearKey` the unused slot it is; orchestrator.md §2 recommends withdrawing both, unchanged here.
-- **orchestrator.md's `ref: { source, id, url? }`** is `creator.ref` plus `creator.ref-url`; that doc's "A way to find
-  its own tasks" can filter `get_queue` by `creator.ref` (open question 5). This resolves #486's open question 14.
+Mapped at the join only (`taskTagEntries`), never in the record; writers send `ref` (`source:id`, optional URL) once
+the leader advertises `taskTags` (none writes `linear` any more); `doneBy: "linear"` and
+`SettingsRecord.linearKey` are unchanged: DESIGN.md, "Task tags". orchestrator.md's `ref: { source, id, url? }` is
+`creator.ref` plus `creator.ref-url`; its "find its own tasks" can filter `get_queue` by `creator.ref` (open question
+5). This resolves #486's open question 14.
 
 ## 6. The joined view and the name
 
@@ -422,12 +382,9 @@ session-chosen text.
 **Who joins.** The reader, since no single process holds both scopes: the daemon holds session tags and, for its own
 launches, the task's ref (below); the PWA and `seance mcp` hold the queue.
 
-- **The spawn carries the task's ref, for adapters only.** `SpawnRequest.ref`: `creator.ref` and `creator.ref-url`
-  and nothing else (structured, the archivist's own set), sent by the leader only to a daemon advertising
-  `CAPABILITIES.taskTags`, accepted only on a spawn sealed `from` the scheduler with `client: "scheduler"` (or in
-  process), parsed by `parseTags`, noted in the launch ledger beside the task id, and read only into an adapter's
-  `Session` (#486's open question 11). Not in a `sessions` reply (the PWA joins the record itself), and no `owner.*`
-  or opaque tag goes to the daemon, so there is no stale second copy of the owner's label. Open question 4.
+- **The spawn carries the task's ref, for adapters only.** Built (`SpawnRequest.ref`, `TaskNote.ref`, the adapter's
+  `task.ref`): DESIGN.md, "Task tags". Not in a `sessions` reply, and no `owner.*` or opaque tag goes to the daemon, so
+  there is no stale second copy of the owner's label. Open question 4.
 
 ### 6.2 Surfaces
 
@@ -450,12 +407,13 @@ another's business.
 #526 keeps tags out of other agents' context: `get_sessions` prints a field allowlist, and a scheduler-sealed
 `sessions` gets none. The question is whether an orchestrator session (docs/orchestrator.md) may see others' tags.
 
-**Recommend: by writer, not by reader, and narrow.** MCP's allowlist gains `creator.ref` (a parsed `source:id`, which
-an orchestrator needs to find its tasks), `owner.label` (the owner's), `agent.kind` and `scheduler.*`/`seance.*` keys
-as they are defined. Not `creator.ref-url` or opaque `creator.*` suffixes (when a session enqueued, those are
-session-chosen text), and not `agent.session`: no reader needs another session's conversation id, and handing it out
-only helps one claim another's (§4.2 makes that harmless, not useful). Tags a session or a tool chose (`self.*`, `adapter.*`) stay out of every MCP surface for every caller,
-orchestrator included: they reach another session only inside Séance's fixed wrappers (#526 §2's `presenceNote`).
+**Decided and built (step 3): by writer, not by reader, and narrow.** `AGENT_VISIBLE_TAG_KEYS` is `agent.kind`,
+`creator.ref` and `owner.label`: MCP's `get_sessions` and `get_queue` print only those (DESIGN.md, "Task tags",
+"Session identity"). Not `creator.ref-url` or opaque `creator.*` suffixes (when a session enqueued, those are
+session-chosen text), not `agent.session` (no reader needs another session's conversation id, and handing it out only
+helps one claim another's), and tags a session or a tool chose (`self.*`, `adapter.*`) stay out of every MCP surface for
+every caller, orchestrator included: they reach another session only inside Séance's fixed wrappers (#526 §2's
+`presenceNote`).
 **Rejected:** an orchestrator role that sees more. MCP cannot tell an orchestrator from any other session (both are
 `seance mcp` sealing `from: "app"`), so a role would be a claim; and orchestrator.md decides nothing yet.
 
@@ -585,22 +543,23 @@ Wording this changes, each in the PR that builds it:
 - CLAUDE.md, same bullet, "Keeping each `ours` pane's last state and `turnEnded`, tasked or not …": "each pane whose
   peer resolves to a `claude` process", and the conversation table beside it (done, step 1, as a sentence of its own:
   the custodian's tracker stays `ours`-only, and the table is a separate module, `conversations.ts`).
-- CLAUDE.md, the task-sealer list: "every task record carrying `tags` is sealed through that same sealer, which
+- Done, step 3: CLAUDE.md, the task-sealer list: "every task record carrying `tags` is sealed through that same sealer, which
   appends `TAGS_DEP_SENTINEL` …; a client writes `tags` only to a verified leader advertising `CAPABILITIES.taskTags`;
   `owner.*` only through `amend` from the PWA, in any state; adapters write none".
-- CLAUDE.md, the amend sentence ("a task's prompt, title, model and effort change after its create only by the
+- Done, step 3: CLAUDE.md, the amend sentence ("a task's prompt, title, model and effort change after its create only by the
   leader's own write on an `amend` … only while …"): add that a tags-only amend, `owner.*` only, is the leader's own
   write in any state.
-- CLAUDE.md, the archivist's `archive.sqlite` sentence: `tags` dropped but `creator.ref` and `creator.ref-url`.
-- CLAUDE.md, the push sentence: "its payload carries ids and state only" gains "and never a tag".
+- Done, step 3: CLAUDE.md, the archivist's `archive.sqlite` sentence: `tags` dropped but `creator.ref` and `creator.ref-url`.
+- Done, step 3: CLAUDE.md, the push sentence: "its payload carries ids and state only" gains "and never a tag".
 - CLAUDE.md, a new bullet beside "Closing a machine is the owner's sealed act": `session-tag` is the owner's sealed
   act (relay leg, `from: "app"`, its parser, audited without payload, on no local op, broker action or MCP tool).
 - CLAUDE.md, messaging bullet: §8.5.
-- CLAUDE.md, the task-sealer list's phrase for `amend`, and the broker bullet's `amend` action: neither carries
+- Done, step 3: CLAUDE.md, the task-sealer list's phrase for `amend`, and the broker bullet's `amend` action: neither carries
   `ownerTags`; the leader drops `owner.*` and `scheduler.*` from a version-1 record.
-- DESIGN.md: "Session events" (the `agent` field, retention), "Session messages" and "Replies by handle" (§8.5),
-  "Task records" (`tags`, the sentinel), "Continuing a session" and "Passing to a successor" (§5.3), MCP server (the
-  allowlist, `amend_task` refusing `ownerTags`), the archivist (its strip), and Threat model items 2 and 6.
+- DESIGN.md: "Session events" (the `agent` field, retention; done, step 1), "Session messages" and "Replies by
+  handle" (§8.5), and, done in step 3 as the "Task tags" section with pointers in "Continuing a session", "Passing to a
+  successor", "Amending a waiting task", the MCP server, the PWA, the archivist, the skew list and Threat model items 2
+  and 6.
 
 ## What changes in #526 (docs/presence.md)
 
@@ -633,6 +592,13 @@ second:
    Part of docs/agents.md's spike.
 7. **`creator.*` and `scheduler.*`** (beyond T1's five namespaces). **Decided 2026-11-17: both.** `creator.*` is where `linear`
    and orchestrator.md's `ref` go, and `scheduler.*` reserves a slot so a leader-made display fact needs no new field.
+
+8. **An older keyless broker daemon drops `tags`** from a brokered enqueue (its `parseTaskSpec`), so a task a session
+   queues through `seance mcp` or the CLI behind it lands untagged. Display data only, so no stale-broker check guards
+   it (a `staleDaemonOf` test was weighed and left out). _Recommend leaving it_ unless refs become load-bearing.
+9. **A task's tags carry the task's `createdAt` as their `at`**: a task has no per-key time, so an amended label shows
+   the task's age. _Recommend keeping it_ until a surface wants "labelled 2 h ago"; then `owner.*` gets a stamp, which is
+   a record-format change.
 
 ## Spikes before building
 
@@ -795,7 +761,7 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
      unverified claimer of a labelled id; the file's mode, atomic write, cap, idle prune and unreadable-loads-empty;
      a restart keeping the label; a PWA view test for each name source; and a test that message wrappers, receipts
      and the custodian's `sessions` never carry `self.name` or the owner's label.
-3. **Task tags.** `TaskSpec.tags`, `creatorTags`, `ownerTags`, `TAGS_DEP_SENTINEL`, `CAPABILITIES.taskTags`,
+3. **Task tags.** **Built 2026-11-18** (DESIGN.md, "Task tags"). `TaskSpec.tags`, `creatorTags`, `ownerTags`, `TAGS_DEP_SENTINEL`, `CAPABILITIES.taskTags`,
    `creator.*` on every enqueue path, `owner.*` through `amend` in any state, the chain copies (§5.3),
    `SpawnRequest.ref` into the ledger, `linear` shown as `creator.ref` at the join, the archivist's strip, MCP's
    allowlist (§6.3).
