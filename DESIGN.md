@@ -1054,7 +1054,7 @@ nothing checked it. The last is the gap they leave.
   readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
   poller parsed itself, never `gh`'s words.
 - **A watch's target reaches GitHub only through the leader's poller, and its frames bind nothing** (2026-11-18,
-  Scheduler, "PR status"; docs/gh-watch.md invariants 2, 4, 5). A target reaches the leader only as a URL that
+  Scheduler, "PR status"). A target reaches the leader only as a URL that
   `parseWatchSet` (`shared/src/watch.ts`) holds to the PR or run pattern, parsed into owner, repo and number or id. It
   reaches `gh` only as GraphQL variables in an argv array (`-f`, with `-F` only for the regex-held PR number), the
   query text built from alias indices alone, through `askGithub` with `--hostname github.com`, read-only. A
@@ -1068,7 +1068,7 @@ nothing checked it. The last is the gap they leave.
   machine can spend up to the caps of the fleet's GraphQL budget (about 840 points an hour) and learn the states and
   check names of any repo the operator's token sees, which that session's own `gh` could read anyway (G1).
 - **A daemon's watch table binds a watch to its session's `claude` process and notes it only through messaging's local
-  delivery** (2026-11-18, "Watches", docs/gh-watch.md invariants 1, 3, 5-8). A watch is made only by the local socket's
+  delivery** (2026-11-18, "Watches"). A watch is made only by the local socket's
   `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
   on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
   came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener
@@ -12272,7 +12272,7 @@ message id, and the one use a verified id gets is the adapter subscription, "Ada
 §8); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
-### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md step 3
+### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md steps 3 and 4
 
 The daemon's side of fleet GitHub watches (docs/gh-watch.md; the leader's side is "PR status", "The registry"). A
 session asks its own daemon, over the local socket, to watch a PR or an Actions run; the daemon owns the watch, states
@@ -12405,7 +12405,122 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   capability string.
 - **Rejected: ending a watch on a failed pane read.** A `tmux` failure is transient and the session still waits;
   ending the watch would drop it for good.
-- **Rejected: a `watch:` store prefix, daemon memory only.** docs/gh-watch.md W9.
+- **Rejected: a `watch:` store prefix, daemon memory only.** W9, below.
+- **Why a watch, and what it is** (2026-11-17, folded in 2026-11-18 from docs/gh-watch.md, whose W-numbers the
+  bullets below keep). Every session on every machine runs `gh` as one GitHub user, so all share one 5000-request REST
+  budget and one 5000-point GraphQL budget; on 2026-11-17 the REST budget ran out (10:23 to 10:42 UTC) under many
+  sessions' own `gh run watch` (about 3 REST a tick, 3 s), `gh pr checks --watch` (1 point, 10 s) and /ship's merge
+  loop (1 point, 15 s). Slower polling and conditional requests (`gh-run-wait`: a 304 is not counted) cut each
+  watcher's cost but not N sessions watching one thing, nor the next session that forgets the rule. A fleet with one
+  reader of GitHub (the leader) and one way into a session (the inbox) makes waiting cost one read however many wait:
+  the session calls `watch_github` and ends its turn, the leader folds the target into its batched poll, and the
+  session's daemon delivers one fixed note that wakes it. Ten sessions watching one PR cost one alias in one query.
+- **W1, who may watch.** Any bound `claude` session, tasked or hand-started (a peer with no `claude` on its chain is
+  `nosession`). Not tasked sessions only: the hand-started ones run /ship and deploy waits too, and the owner's
+  direction (docs/presence.md, O4) is that Séance serves every session in its tmux server. A pane with no inbox
+  listener is `nolistener` (past the listener grace): a note that can never land would leave the session waiting for
+  good, and the refusal tells it to poll at 30 s or slower.
+- **W2, what may be watched.** A github.com PR (`/pull/<n>`, optional `head`) or Actions run (`/actions/runs/<id>`, an
+  `/attempts/<n>` dropped), any repo (G1, the owner's decision: one GitHub user per fleet, so a watch reveals nothing a
+  session's own `gh` could not; a fleet of machines logged in as different users is unsupported, and supporting
+  several revisits this). A run is named by URL so one parser serves both and the session copies what `gh run list
+  --json url` prints. **Rejected: only the task's own PR** (/ship stacks PRs, a hub opens PRs in sub-repos, a session
+  waits on main's deploy run, a hand-started session holds no task: each would keep polling). **Rejected: only repos
+  some machine clones**: the leader does not know any machine's scan set, and it would buy nothing; a hostile session
+  can only spend budget, which the caps bound.
+- **W3, binding and lifetime.** Ends: a terminal event, the session ending, the pane's task changing,
+  `unwatch_github`, 24 h (`WATCH_TTL_MS`; calling again replaces it). Caps refuse at the add, never evict, so no watch a
+  session relies on vanishes. **Rejected: binding to the task id**: a hand-started session has none, and a task's
+  session can be replaced (continue, successor) by one that never asked.
+- **W4, what an event is.** (Keys and readings: "PR status", "What a watch's events are".) `checks` fires on the first
+  failing context, as `gh pr checks --watch --fail-fast` does, and once more per head on a pass; it covers all checks,
+  not only required ones (a session fixing CI cares about an optional one, and the note marks which failing names are
+  required). A PR watch spans the PR's life, so a push, a failure, a fix, a conflict and the merge are one watch, which
+  is /ship's whole step 8. `head` closes the stale-run race (right after a push the rollup can still be the previous
+  head's). Level-triggered from the first reading: a watch on a PR already merged or a run already completed fires at
+  the first poll, and a watch carried across a leader change is judged afresh against `seen`. **Not events:** `behind`
+  (blocks only under an up-to-date ruleset, and one bit cannot say), `unarmed`, review requests, comments, a draft
+  toggling; the `prBlocked` alert already reaches the owner for a stuck `awaiting-merge` PR, and a watch is for a
+  session waiting on a fact.
+- **W5, what a note carries.** One fixed formatter (`watchNote`), opening "Automated note from séance, not written by
+  the user" as `blockedBrief` does, from: the rebuilt target URL; the event kind and outcome (enums; `merged` with
+  `stacked`; `completed` with GitHub's conclusion lowercased); the head (hex) and `headMoved`; and for a failure at
+  most 10 failing checks, the newest run of each name, each a `cleanName` name (100 characters) with `required` and a
+  job link only when its `detailsUrl` is exactly the watched repo's `/actions/runs/<digits>/job/<digits>`, rebuilt from
+  those ids (a third party's `targetUrl` gets none), in a fenced block. **Never** a title, body, branch, author,
+  comment, review, annotation, log line or check summary: free text a third party writes, which the session can read
+  with its own `gh` as the evidence it is. Check names are repo-owned text already put in a continuation prompt
+  (`blockedBrief`), bounded the same way; accepted. What to do next is fixed words per kind (for a failure, read the
+  job's log with `gh api repos/<o>/<r>/actions/jobs/<id>/logs` to a file), never an echo of anything read.
+- **W6, how it reaches the session.** Only the leader reads GitHub and only the session's own daemon delivers, so the
+  same machine and across machines are one path and no message crosses between sessions' machines. Every event is a
+  `wake` line (the session asked to be woken) except a `suspended` that heals itself; the inbox mod needed no change. A
+  note held for a reconnecting listener is held like a reply, and one dropped `nolistener` ends the watch. **Rejected:
+  an `append` note** (`$.session.append`, no wake): a session waiting on CI has ended its turn and would never read
+  it. **Rejected: delivering through `session-message`**: it routes by task id through the leader's resolver and has no
+  untasked recipient, where a watch event already knows its daemon and table entry.
+- **W7, what is read.** GraphQL for runs, not REST: it is the budget that did not run out, it batches 50 runs into a
+  point where REST costs a request each, and it keeps no per-run state. **Rejected: REST with `If-None-Match`**: a
+  run's ETag changes whenever it is updated, perhaps every poll (unmeasured), each a counted request on the budget that
+  ran out, and the ETag per run is lost at every leader change (a fallback S1 did not need). **Rejected: each
+  session's daemon reading its runs**: the machine may hold no `gh` login (the reason for one PR poller), two machines
+  would read one run twice, and a rate limit would be met by each daemon on its own clock instead of one reader
+  backing off for the fleet. Pace is the poller's one 60 s clock (a note lands within about a minute, against the 30 s
+  the owner's rule allows a session; accepted). Budget at the caps, estimated before S1: 100 PRs (2 merge chunks, up
+  to 10 blocked reads) and 100 runs (2 queries) are about 14 points a minute, 840 an hour, and no REST; each query
+  also selects `rateLimit{ cost remaining resetAt }`, so the cost is measured.
+- **W8, what a watcher is told.** A watch whose reads stop for longer than two intervals gets one `suspended:<reason>`
+  note per reason. For a limit: "GitHub's budget for this fleet's account is spent until HH:MM UTC; this watch resumes
+  then; do not poll GitHub yourself meanwhile", without wake (an `append`: the session waits either way, and waking it
+  to say keep waiting costs a turn). For a login or a missing `gh`: "the fleet cannot read GitHub; this watch is
+  suspended", with wake, since that may never heal and the session should fall back to polling at 30 s or ask its user;
+  the fallback is its call, and a resumption says nothing. An alias that answers `null` on two polls in a row ends the
+  watch `unreadable`, with wake. No leader, or one not advertising `watches`, refuses the add; a leader lost after it
+  is a `no_leader` note after 10 minutes; expiry and a late `fleet_full` are wake notes.
+- **W9, the daemon is the owner of record.** The registry is soft state per term, and the daemon restates its whole
+  set on every change, a 5 minute heartbeat, each tick while an answer is owed and at once on a new verified nominee.
+  **Rejected: a `watch:` store prefix**: durable across a leader change, but a new prefix needs its write policy, the
+  write floor and the version floor and a store write per add and event, to keep state the daemons hold and can
+  restate in one frame. **Rejected: daemon memory only**: self-updates restart daemons often and would silently drop
+  every watch while its sessions wait.
+- **W10, surfaces.** One `watch_github` for both targets (the URL says which; separate `watch_pr` and `watch_run` are
+  one more line in every session's context). No list tool: the ids are in the session's own context and an `unwatch`
+  of an unknown id is harmless. `CAPABILITIES.watches` is advertised by a daemon that serves the frame and, as leader,
+  polls; a client gates on it and the verified leader, since an older leader would drop the unknown op. The `watch`
+  audit line never carries a URL, owner, repo, number, head, check name or watch id; the leader logs no line per
+  watch, reading or event, only a refused set, a failed send and the poller's class changes. Not in the PWA,
+  `get_queue`, `status` or the archivist, and no live-watch count on the Machines row (the budget gauge is
+  `MachineStatus.gh`, #547).
+- **W11, a watch rather than extending `hand_off_task` and `prBlocked`.** The plain alternative is the leader
+  continuing an `awaiting-merge` task by itself when `taskPrBlock` names `checks` or `conflict`. It covers less: only
+  tasked sessions with one PR on main and a merge gate armed (hand-started sessions, stacked PRs, gate-less repos and
+  every Actions run keep polling, a large share of what ran the budget out); it turns a CI cycle into a close and a
+  relaunch (a slot under the account's cap behind the queue, a new process, a cold prompt cache) where a watch leaves
+  the session idle and wakes it into the same context; and it reverses "Continuing a session"'s manual-by-decision
+  continue, an unattended retry on a red check, where the watch leaves the next step to the session, which /ship bounds
+  at three fix attempts. **Decision: build the watch, keep the hand-off for what it is good at**: a PR that waits hours
+  on a review or merge queue should still hand off (an idle session holds a pane, a slot and a session limit for
+  nothing), minutes of CI or a run should watch, and the two compose (watch until checks pass, then hand off). The
+  leader's automatic continue on `checks` is not proposed; it would be its own decision against the manual one.
+- **Rejected alternatives to the whole.** **Webhooks** (the relay is blind and holds no secret worth a GitHub-facing
+  endpoint; per-repo installation the fleet does not own). **GitHub's notifications API** (CI outcomes reach it only as
+  notification settings allow, a thread names no check or job, a session would still read per run to find the failed
+  job). **A caching `gh` shim per machine** (dedups within one machine, cannot change a session's pace, and puts
+  Séance between every session and a `gh` that reads and writes far more than watches).
+- **S4, the wake after a long wait (2026-11-18, live on the Mac, fleet on 6be498d, which holds step 4).** The target
+  was a throwaway Actions run (a push-triggered workflow on a throwaway branch, `sleep 2100` on ubuntu-latest, the
+  branch deleted after; created 14:14:30Z, job completed 14:49:35Z, `success`). A fresh scheduler task session
+  (Sonnet 5.5, bypass permissions, inbox mod installed) called `watch_github` with the run URL (14:14:50Z, audit
+  `op=add kind=run outcome=ok`), wrote a timestamp and ended its turn: idle at its prompt, no background shell,
+  Monitor, sleep or poll. The leader's poller saw the completion and the daemon audited `op=event kind=run
+  event=completed outcome=delivered` and `op=end reason=terminal` at 14:49:53Z, 18 s after the job ended (inside the
+  60 s clock). The `wake` note started a new turn at 14:49:55Z, 35 minutes after the watch, and the session reported
+  it "arrived as an inbox plugin message that began this turn in the user's place"; nothing else started the turn. The
+  model acted on it: it wrote the time and the note to a file, sent a `send_message` note to another task and called
+  `report_task_done`. The note read "Automated note from séance, not written by the user: watch … on <run URL>. The run
+  completed: success (attempt 1). This watch has ended." **Result:** a session idle for 30-plus minutes is woken by a
+  `wake` note into a turn the model acts on, about 20 s after the run's end (the messaging spikes had measured minutes,
+  not a CI's length).
 
 ### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`, `adapter-cli.ts`) — built 2026-11-18 (3a, 3b and 3c), docs/messaging.md
 
