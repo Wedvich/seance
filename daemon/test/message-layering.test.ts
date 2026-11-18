@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { BROKER_OPS } from "../src/broker-protocol.ts";
 
 /**
  * `send_message` runs inside `seance mcp`, whose stdout is the JSON-RPC channel, `seance inbox` writes the
@@ -61,6 +62,65 @@ describe("the modules that hold session tags", () => {
       expect([...reached].filter((file) => file === "log.ts" || file === "audit.ts")).toEqual([]);
     });
   }
+});
+
+/**
+ * A session's name is the owner's and the session's own text (docs/tags.md, "Threat model"): a message's wrapper, a
+ * receipt and the custodian's `sessions` verb name a sender or a session by task, pane and machine only. So the modules
+ * that build them run neither the table that holds the names nor the file that keeps the owner's, and never name the
+ * keys or the precedence that reads them. Run, not load: `messages.ts` and `custodian-verbs.ts` take a type from
+ * `session-events.ts`, which erases, so this walk follows only imports that are not `import type`.
+ */
+const VALUE_IMPORT = /^\s*(?:import|export)\s(type\s)?(?:[^;]*?\sfrom\s*)?["'](\.\/[^"']+)["']/gmu;
+
+async function valueClosure(entry: string): Promise<ReadonlySet<string>> {
+  const seen = new Set<string>();
+  const queue = [entry];
+  for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    // oxlint-disable-next-line no-await-in-loop -- a walk
+    const source = await readFile(join(SRC, file), "utf8");
+    for (const match of source.matchAll(VALUE_IMPORT)) {
+      const target = match[2]?.replace(/^\.\//u, "");
+      if (match[1] === undefined && target !== undefined) queue.push(target);
+    }
+  }
+  return seen;
+}
+
+describe("the paths that tell one session about another", () => {
+  for (const entry of ["messages.ts", "message-frame.ts", "send-message.ts", "custodian-verbs.ts"]) {
+    test(`${entry} reaches no session name`, async () => {
+      const reached = await valueClosure(entry);
+      expect(reached.has(entry)).toBe(true);
+      expect([...reached].filter((file) => file === "conversations.ts" || file === "conversation-store.ts")).toEqual(
+        [],
+      );
+      const sources = await Promise.all([...reached].map((file) => readFile(join(SRC, file), "utf8")));
+      for (const source of sources) {
+        expect(source).not.toMatch(/owner\.label|self\.name|displayName/u);
+      }
+    });
+  }
+});
+
+/**
+ * `session-tag` is the owner's act from the PWA alone: the relay leg's handler is the one daemon module that answers
+ * it, so no local op, broker action or MCP tool can send it (`local-socket.test.ts` and `mcp.test.ts` hold the
+ * surfaces themselves).
+ */
+describe("who may send session-tag", () => {
+  test("only handlers.ts names the op, and the broker does not carry it", async () => {
+    const naming: string[] = [];
+    for await (const file of new Bun.Glob("**/*.ts").scan(SRC)) {
+      if (file.endsWith(".test.ts")) continue;
+      // oxlint-disable-next-line no-await-in-loop -- a walk
+      if ((await readFile(join(SRC, file), "utf8")).includes('"session-tag"')) naming.push(file);
+    }
+    expect(naming).toEqual(["handlers.ts"]);
+    expect(BROKER_OPS).not.toContain("session-tag");
+  });
 });
 
 /**

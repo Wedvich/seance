@@ -3154,6 +3154,14 @@ describe("get_queue", () => {
     expect(tools.find((tool) => tool.name === "get_queue")?.annotations?.readOnlyHint).toBe(true);
     lazy.stop();
   });
+
+  test("no tool names or labels a session: session-tag is the owner's act from the PWA", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name).filter((name) => /tag|label|name/u.test(name))).toEqual([]);
+    lazy.stop();
+  });
 });
 
 describe("tool input schemas", () => {
