@@ -142,7 +142,7 @@ export interface AdapterFeedDeps {
   readonly panes?: () => Promise<readonly FeedPane[]>;
   readonly claudeUnder?: (panePids: readonly number[]) => Promise<ReadonlyMap<number, ClaudeProcess>>;
   readonly branchOf?: (path: string) => Promise<string | null>;
-  readonly closedBySeance?: (pane: string) => boolean;
+  readonly closedBySeance?: (pane: string, pid: number) => boolean;
   readonly now?: () => number;
   readonly intervalMs?: number;
   readonly debounceMs?: number;
@@ -163,6 +163,7 @@ interface Held {
   readonly session: AdapterSession;
   readonly json: string;
   readonly pane: string;
+  readonly panePid: number;
 }
 
 const toState = (state: string | null): AdapterSessionState =>
@@ -173,7 +174,7 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
   const panes = deps.panes ?? listFeedPanes;
   const under = deps.claudeUnder ?? claudeUnder;
   const branchOf = deps.branchOf ?? branchAt;
-  const closed = deps.closedBySeance ?? ((pane: string): boolean => closedBySeance(pane));
+  const closed = deps.closedBySeance ?? closedBySeance;
   const listeners = new Set<(frame: FeedFrame) => void>();
   const held = new Map<SessionKey, Held>();
   /** When the feed first saw a process the table holds nothing for: its `since`. */
@@ -259,7 +260,7 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
         tags,
       };
       if (view === null && !firstSeen.has(key)) firstSeen.set(key, session.since);
-      next.set(key, { session, json: JSON.stringify(session), pane: pane.id });
+      next.set(key, { session, json: JSON.stringify(session), pane: pane.id, panePid: pane.pid });
     }
     for (const key of firstSeen.keys()) if (!next.has(key)) firstSeen.delete(key);
     return next;
@@ -269,7 +270,7 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
     for (const [key, before] of held) {
       if (next.has(key)) continue;
       held.delete(key);
-      tell({ kind: "session-gone", key, reason: closed(before.pane) ? "closed" : "exited" });
+      tell({ kind: "session-gone", key, reason: closed(before.pane, before.panePid) ? "closed" : "exited" });
     }
     for (const [key, after] of next) {
       const before = held.get(key);

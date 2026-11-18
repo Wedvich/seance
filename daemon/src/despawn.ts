@@ -46,7 +46,8 @@ export async function despawnSession(id: string, opts: DespawnOptions): Promise<
     throw new DespawnFailure("session_not_found", `no session in pane ${id} — it may have exited already`);
   }
   if (pane.taskId !== null) await opts.closing?.(pane.taskId);
-  noteClosing(pane.paneId);
+  // A dead pane's process already ended on its own: its session left as `exited`, so there is nothing to note.
+  if (pane.pid !== null) noteClosing(pane.paneId, pane.pid);
   const leaveDead = opts.leaveDeadTask === true && pane.taskId !== null;
   return close(pane, opts.force, opts.graceMs, opts.reapWaitMs, leaveDead);
 }

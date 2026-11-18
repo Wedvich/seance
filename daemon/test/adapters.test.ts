@@ -14,6 +14,7 @@ import { LaunchLedger } from "../src/launch-ledger.ts";
 import { processStart } from "../src/peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
+import { paneInfo } from "../src/sessions.ts";
 import { tmuxOk } from "../src/tmux.ts";
 import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
@@ -207,8 +208,11 @@ describe("the state feed", () => {
   test("one Séance closes is `closed`", async () => {
     const { key, pid, pane } = await claudePane();
     await d.feed.refresh();
-    // What `despawnSession` notes before every close of its own (a despawn, a hand-off, a pass, a custodian close).
-    noteClosing(pane);
+    // What `despawnSession` notes before every close of its own (a despawn, a hand-off, a pass, a custodian close),
+    // read as it reads the pane.
+    const panePid = (await paneInfo(pane))?.pid;
+    if (panePid === null || panePid === undefined) throw new Error(`no pid for ${pane}`);
+    noteClosing(pane, panePid);
     process.kill(pid, "SIGKILL");
     await pollUntil(() => goneFor(d, key).length > 0, "the session-gone");
     expect(goneFor(d, key)).toEqual(["closed"]);
