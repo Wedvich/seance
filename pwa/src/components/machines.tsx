@@ -11,6 +11,7 @@ import type {
   MachineCard,
   MachinesView,
   SessionRow,
+  SessionTagGroup,
 } from "../machines-view.ts";
 import { custodianMenu } from "../machines-view.ts";
 import {
@@ -455,6 +456,7 @@ function MachineCardView(props: {
                     Rename
                   </button>
                 )}
+                {row.tags.length > 0 && <SessionTags groups={row.tags} />}
               </li>
             );
           })}
@@ -472,6 +474,43 @@ function MachineCardView(props: {
  * The owner's name for an untasked session, kept against its conversation on that machine. Stays open on a refusal,
  * the reason where the hint was, so the draft is there to send again; closes once the name landed.
  */
+/** A session's joined tags, folded: each namespace with its writer, each tag with its scope and age. */
+function SessionTags({ groups }: { groups: readonly SessionTagGroup[] }) {
+  const count = groups.reduce((sum, group) => sum + group.tags.length, 0);
+  return (
+    <details className="fleet-session-tags">
+      <summary>Tags · {count}</summary>
+      {groups.map((group) => (
+        <section key={group.namespace} className="session-tag-group" aria-label={`${group.namespace} tags`}>
+          <p className="session-tag-head">
+            <code>{group.namespace}.*</code> · by {group.writer}
+          </p>
+          <dl className="session-tag-list">
+            {group.tags.map((tag) => (
+              <div key={tag.suffix} className="session-tag">
+                <dt>{tag.suffix}</dt>
+                <dd>
+                  {tag.url === null ? (
+                    <span className="session-tag-value">{tag.value}</span>
+                  ) : (
+                    <a className="session-tag-value" href={tag.url} target="_blank" rel="noopener noreferrer">
+                      {tag.value}
+                    </a>
+                  )}
+                  {tag.verified && <span className="session-tag-verified">verified</span>}
+                  <span className="session-tag-meta">
+                    {tag.scope} · <TimedText line={tag.age} />
+                  </span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ))}
+    </details>
+  );
+}
+
 function SessionRenameDialog(props: {
   row: SessionRow;
   /** The owner's label now, `""` for none. */

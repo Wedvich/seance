@@ -1351,4 +1351,102 @@ describe("a machine's sessions by name", () => {
     // Asleep: no rows, since its last read is not what runs there now.
     expect(rowsOf(sessions, [CAPABILITIES.sessionTag], true, false)).toBeNull();
   });
+
+  test("a task's owner.label names its session over the title; Rename still only untasked", () => {
+    const labelled: Task = { ...running, spec: { ...running.spec, tags: { "owner.label": "release" } } };
+    const rows = deriveMachines(
+      [machine({ capabilities: [CAPABILITIES.sessionTag] })],
+      NOW,
+      NO_LEADER,
+      {},
+      [],
+      undefined,
+      true,
+      {
+        passes: false,
+        tasks: [labelled],
+        sessions: { "dev-1": { sessions: [entry("%2", { taskId: "t1", tags: verified })] } },
+      },
+    ).cards[0]?.sessions;
+    expect(rows?.map((row) => [row.name, row.mark, row.rename])).toEqual([["release", null, null]]);
+  });
+
+  test("the tag view: by namespace, each with its writer, each tag with scope, age and verified", () => {
+    const at = NOW - 5 * 60_000;
+    const withTask: Task = {
+      ...running,
+      createdAt: NOW - 3 * 3_600_000,
+      spec: {
+        ...running.spec,
+        tags: { "creator.ref": "linear:PEN-1", "creator.ref-url": "https://linear.app/x/PEN-1", "owner.label": "rel" },
+      },
+    };
+    const rows = deriveMachines(
+      [machine({ capabilities: [CAPABILITIES.sessionTag] })],
+      NOW,
+      NO_LEADER,
+      {},
+      [],
+      undefined,
+      true,
+      {
+        passes: false,
+        tasks: [withTask],
+        sessions: {
+          "dev-1": {
+            sessions: [
+              entry("%1", {
+                taskId: "t1",
+                tags: {
+                  "agent.session": { value: conversation, at, scope: "conversation", verified: true },
+                  "agent.kind": { value: "claude", at, scope: "conversation", verified: true },
+                  "self.doing": { value: "a\u0007b  c", at, scope: "process" },
+                  "adapter.slack.thread": { value: "T1", at, scope: "conversation" },
+                  "adapter.jira.issue": { value: "J-2", at, scope: "conversation" },
+                  "bogus.key": { value: "x", at, scope: "conversation" },
+                  "self.mood": { value: "x", at, scope: "process" },
+                },
+              }),
+            ],
+          },
+        },
+      },
+    ).cards[0]?.sessions;
+    const groups = rows?.[0]?.tags ?? [];
+    expect(groups.map((group) => [group.namespace, group.writer])).toEqual([
+      ["agent", "the agent's mod and hooks"],
+      ["self", "the session itself"],
+      ["owner", "the owner"],
+      ["creator", "the task's creator"],
+      ["adapter.jira", "adapter jira"],
+      ["adapter.slack", "adapter slack"],
+    ]);
+    const lines = groups.flatMap((group) =>
+      group.tags.map((line) => [
+        `${group.namespace}.${line.suffix}`,
+        line.value,
+        line.scope,
+        line.verified,
+        plain(line.age),
+        line.url,
+      ]),
+    );
+    expect(lines).toEqual([
+      ["agent.kind", "claude", "conversation", false, "5m ago", null],
+      ["agent.session", conversation, "conversation", true, "5m ago", null],
+      ["self.doing", "a b c", "process", false, "5m ago", null],
+      ["owner.label", "rel", "task", false, "task created 3h ago", null],
+      ["creator.ref", "linear:PEN-1", "task", false, "task created 3h ago", null],
+      [
+        "creator.ref-url",
+        "https://linear.app/x/PEN-1",
+        "task",
+        false,
+        "task created 3h ago",
+        "https://linear.app/x/PEN-1",
+      ],
+      ["adapter.jira.issue", "J-2", "conversation", false, "5m ago", null],
+      ["adapter.slack.thread", "T1", "conversation", false, "5m ago", null],
+    ]);
+  });
 });

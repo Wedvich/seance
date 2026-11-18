@@ -11,8 +11,8 @@ DESIGN.md is the record of each part:
 | Step 3: task tags (`TaskSpec.tags`, the sentinel, `ownerTags`, `SpawnRequest.ref`)                                | "Task tags", with pointers in "Amending a waiting task" and the chain sections |
 | Step 4: the adapter subscription and adapter tags                                                                 | "Adapters", "The subscription" and "Tags"; "Replies by handle" (D3 amended)    |
 
-Not built: the PWA's per-namespace view of a session's tags ("Tags and session identity", the surfaces table), and
-`self.*`, which waits on docs/presence.md's `set_self_tag`.
+The PWA's per-namespace view of a session's tags is built ("Tags and session identity"). Not built: `self.*`, which
+waits on docs/presence.md's `set_self_tag`.
 
 What is left here: the open questions and the spikes' evidence that `agent.session`'s verification (the per-platform
 `procStart` read and the 500 ms settle window) rests on.
