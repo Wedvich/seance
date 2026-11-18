@@ -1,11 +1,17 @@
 # Fleet GitHub watches — spec
 
-**Status: spec, nothing built. Drafted 2026-11-17; every decision below is proposed for the owner's review.** A
+**Status: spec, nothing built. Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
 session asks the fleet to watch a pull request or an Actions run and is told through its inbox when something
 happens, instead of polling GitHub itself. The leader already reads every task's PR in batches (DESIGN.md, "PR
 status") and the daemon already delivers text into a session (DESIGN.md, "Session messages"); a watch joins the two.
 Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as it is
 built, and its text here goes.
+
+**Decided by the owner (2026-11-18):**
+
+- **G1. A watch may name any github.com repo** (W2), not only the task's own PR or a repo some machine clones. Séance
+  supports one GitHub user per fleet; a fleet whose machines are logged in as different users is unsupported, so a
+  watch reveals nothing a session's own `gh` could not.
 
 ## Problem
 
@@ -74,9 +80,9 @@ Any repo, not only the session's own task's PR.
   never on the wire), and the restriction would buy nothing: the session runs `gh` as the same user, so a watch tells
   it nothing its own `gh` could not. What a hostile session can do with a watch is spend budget, and the caps (W7)
   bound that.
-- **Accepted, and an owner call** (open question 1): on a fleet where machines' `gh` logins differ, a session learns
-  states, check names and job ids of a repo only the leader's token reads. The premise of this file is one GitHub user
-  fleet-wide.
+- **One GitHub user per fleet** (G1). Machines logged in as different users are unsupported: on such a fleet a
+  session would learn states, check names and job ids of a repo only the leader's token reads. Supporting several
+  users later revisits this rule.
 - A run is named by URL rather than `<owner>/<repo>` and id so one parser serves both kinds and the session copies
   what `gh run list --json url` or a check's link already prints.
 
@@ -126,7 +132,7 @@ lacks the event's key:
 - **All checks, not only required ones.** A session fixing CI cares about an optional check too. The note marks which
   failing names are required (W5), so a session can tell a merge blocker from noise.
 - **A PR watch spans the PR's life** until it is merged or closed: a push, a failure, a fix, a conflict, a rebase and
-  the merge are one watch, which is /ship's whole step 8. No per-event subscription; open question 2 weighs a
+  the merge are one watch, which is /ship's whole step 8. No per-event subscription; open question 1 weighs a
   `quiet: passing` option.
 - **`head` closes the stale-run race.** Right after a push the rollup can still be the previous head's (why /ship
   sleeps 20 s before `gh pr checks --watch`). A watch made with `head` fires `checks` and `conflict` only for readings
@@ -218,7 +224,7 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   would be met by each daemon on its own clock instead of one reader backing off for the fleet.
 - **Pace**: the poller's 60 s. A watch's note lands within about one interval of the change (plus the blocked-state
   read's few seconds), against the 30 s the owner's rule allows a session. Accepted: a minute's latency on a CI wait of
-  ten, for one read where there were N. No faster pace for watched targets (open question 3).
+  ten, for one read where there were N. No faster pace for watched targets (open question 2).
 - **Budget at the caps**, before S1's measurement: 100 watched PRs are 2 merge chunks and up to 10 blocked-state runs
   a poll, 100 runs 2 queries: about 14 points a minute, 840 an hour, of the 5000 GraphQL points, and **no REST at
   all**. Today a single `gh run watch` at its default costs more REST than that in GraphQL. Each query also selects
@@ -399,13 +405,11 @@ wants it, it is its own decision against the "manual" one above.
 
 ## Open questions
 
-1. **Machines with different `gh` logins** (W2). **Recommend** accepting it with a line in the README: a watch reads
-   as the leader's user.
-2. **`quiet: ["passing"]`** for a session that only cares about failures (an armed PR). **Recommend no** until notes
+1. **`quiet: ["passing"]`** for a session that only cares about failures (an armed PR). **Recommend no** until notes
    prove noisy: one note per head is cheap, and a pass is often when /ship merges.
-3. **A faster pace for watched targets** (30 s while any watch is live). **Recommend no**: it doubles the poll's cost
+2. **A faster pace for watched targets** (30 s while any watch is live). **Recommend no**: it doubles the poll's cost
    for every task's PR too, unless watched targets get their own cadence, which is a second clock in the poller.
-4. **A live-watch count on the Machines row** (`MachineStatus`), and a fleet REST/GraphQL budget gauge from the
+3. **A live-watch count on the Machines row** (`MachineStatus`), and a fleet REST/GraphQL budget gauge from the
    leader's free `rate_limit` read. **Recommend** the gauge as its own small change: it would have shown 2026-11-17's
    burn as it happened, watches or not.
 
