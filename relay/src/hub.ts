@@ -698,7 +698,15 @@ export class Hub extends DurableObject<Env> {
     }
     // The one hint an operator gets for "auto is unavailable": a capable daemon the list leaves out.
     const unlisted = frame.roles?.includes(DAEMON_ROLES.scheduler) === true && !this.#leaders.has(deviceId);
-    const note = claimsSeat ? " (archivist)" : unlisted ? " (scheduler-capable, not in SCHEDULER_LEADERS)" : "";
+    const fallback =
+      frame.roles?.includes(DAEMON_ROLES.scheduler) === true && frame.roles.includes(DAEMON_ROLES.fallback);
+    const note = claimsSeat
+      ? " (archivist)"
+      : unlisted
+        ? " (scheduler-capable, not in SCHEDULER_LEADERS)"
+        : fallback
+          ? " (scheduler fallback)"
+          : "";
     console.log(`registered ${deviceId}${note}`);
     await this.#pushRegistry();
   }

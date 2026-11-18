@@ -49,6 +49,7 @@ import { graphqlResetOf, startGithubRate, type GithubRateOpts } from "./github-r
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
+import { createLeadFallback } from "./lead-fallback.ts";
 import { adaptersSettled, paneActivitySettled, startCapabilities, type CustodianHost } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -528,6 +529,19 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const drainAsk = createLateDrainAsk();
   // §12's time to empty, fed by the status loop's own sessions read below.
   const drainEmpty = createDrainEmptyWatch({ now });
+  // §6's "Later": closed and empty, it leads only while no other nominee can. `client` is declared below; a change
+  // can only come from a sessions read, which the status loop starts once the client has registered.
+  const leadFallback = createLeadFallback({
+    launching: () => endedTasks.launching,
+    changed: (active, cl): void => {
+      log.info(
+        active
+          ? `scheduler: closed and empty (cl=${cl}), registering as a fallback leader`
+          : `scheduler: no longer closed at cl=${cl}, claiming the scheduler role plainly`,
+      );
+      void client.reRegister();
+    },
+  });
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
   // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
   let setting: Promise<unknown> = Promise.resolve();
@@ -554,7 +568,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         const result = await setOpen(open, mode);
         const d = drainingOf(state);
         if (!open && mode !== "soft" && d !== null) drainAsk.drain(d.cl, mode === "now");
-        else if (open && result.outcome === "reopened") drainAsk.reopened();
+        else if (open && result.outcome === "reopened") {
+          drainAsk.reopened();
+          // At once, not at the next sessions read (a refresh waits out the status floor).
+          leadFallback.observe(null, 0);
+        }
         return result;
       });
       setting = run.catch(() => {});
@@ -661,7 +679,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sessions: watchedSessions(
         () => handlerCtx.backend.sessions(state.repos),
         () => closedOf(state),
-        drainEmpty,
+        {
+          observe: (cl, panes) => {
+            drainEmpty.observe(cl, panes);
+            leadFallback.observe(cl, panes);
+          },
+        },
       ),
       now,
       httpFetch,
@@ -740,6 +763,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     identity,
     key,
     buildInfo,
+    fallback: leadFallback.active,
     handle: createHandler(handlerCtx),
     onLead: (term) => leader.lead(term),
     onFollow: () => leader.follow("the relay moved the role elsewhere"),

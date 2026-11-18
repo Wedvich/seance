@@ -3,9 +3,9 @@
 **Status: build order items 1 (Close), 2 (the leader's outside pass and the report) and 3 (the session ask)
 are built** and recorded in DESIGN.md, "Closing a machine", "The drain's outside pass" and "The drain's session
 ask", as are §6's close warning, §12's time-to-empty line and the soft close by default (N5: the wire, daemon and
-leader, and the PWA's, `seance close`'s and MCP's surfaces). This file keeps the index of names, the decisions the
-owner made, §11, §12's list of measures (every one now read from a line that exists), and what is not built: §6's
-"Later". Drafted 2026-11-13. Like docs/leaving.md, it is the working record until the code lands; each part folded
+leader, and the PWA's, `seance close`'s and MCP's surfaces), and so is §6's "Later" (a closed, empty machine leads
+only as a fallback). Every part is built. This file keeps the index of names, the decisions the owner made, §11 and
+§12's list of measures (every one now read from a line that exists). Drafted 2026-11-13. Like docs/leaving.md, it is the working record until the code lands; each part folded
 into DESIGN.md as it was built, and its text here went.
 
 Scope: something the owner sets ahead of time. Not the SIGTERM path; docs/leaving.md is what happens when the box
@@ -28,6 +28,7 @@ actually goes, and the two are complementary (§11).
 | App → daemon request op          | `availability` (payload `{ open: boolean; now?: true; soft?: true }`)                                                                                                                                                 |
 | Successor trigger                | `succeeds.trigger: "drain"` (the leader's outside pass, and a session's own pass marked `drain` from a closed machine)                                                                                                |
 | Capabilities                     | `close` (daemon), `drain` (leader routes), `drainPass` (leader passes), `drainAsk` (daemon asks and honours `now`), `softClose` (daemon honours `soft` and reports `dr`; leader drains from `drainStart`) — all built |
+| A closed, empty machine's lead   | signed role **`fallback`** beside `scheduler`: the relay nominates it only while no other nominee is connected                                                                                                        |
 | Audit origin (typed prompt)      | `drain`                                                                                                                                                                                                               |
 | CLI                              | `seance close [<machine>] [--drain] [--now] [--wait]` (soft unless `--drain`; `--now` implies it), `seance open [<machine>]`                                                                                          |
 | MCP                              | `set_machine_open { machine, open, drain?, now? }` (`drain` and `now` `true` only; `now` implies `drain`)                                                                                                             |
@@ -70,8 +71,9 @@ One line each; the text is in DESIGN.md.
 - **§4 The drain: ask, then pass, then report.** Step A (the session ask, with its two spikes): "The drain's
   session ask". Steps B and C (the outside pass, the report): "The drain's outside pass".
 - **§5 Progress, and "empty":** `drainView` in `shared/src/drain.ts`, "The drain's outside pass".
-- **§6 Leadership** (a closed leader keeps leading; the close sheet's, `seance close`'s and
-  `set_machine_open`'s warning, a soft close's included): "Closing a machine". Its "Later" stays below.
+- **§6 Leadership** (a closed leader keeps leading until empty; the close sheet's, `seance close`'s and
+  `set_machine_open`'s warning, a soft close's included) and its "Later" (once empty, it registers with the signed
+  role `fallback` and the relay prefers any other connected nominee): "Closing a machine".
 - **§8 Surfaces:** PWA switch, close sheet, drain row, `seance close`/`open`, MCP `set_machine_open` and
   `list_machines`' `drain`: "Closing a machine", "The drain's outside pass" and "The drain's session ask" (`now`,
   "Drain now", the ask's wording). Raycast: none (spawn-only).
@@ -83,14 +85,8 @@ One line each; the text is in DESIGN.md.
   keyed off the drain's start); the client offer and its gate, the PWA's sheet, row and menu, `seance close
   --drain` and MCP `drain` in "Closing a machine" (Capabilities, Surfaces); `drainView`'s soft state and its idle
   source in "The drain's outside pass"; Drain now's bound in "The drain's session ask".
-- **Build order:** items 1 to 3 are built, in that order, each in its own PR; the soft close after them, in two.
-
-## Left
-
-### 6. Leadership — _Later_
-
-Register without the `lead` role once the machine is empty, if another nominee is connected, so the queue keeps
-running through the outage.
+- **Build order:** items 1 to 3 are built, in that order, each in its own PR; the soft close after them, in two;
+  §6's "Later" last.
 
 ## Kept here
 

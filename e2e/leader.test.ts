@@ -99,6 +99,66 @@ describe("scheduler leadership ↔ real daemons", () => {
   });
 });
 
+describe("a closed, empty leader ↔ the relay's fallback nomination ↔ another nominee", () => {
+  // docs/drain.md §6's "Later": the real close, the daemon's own sessions read finding nothing, its signed
+  // re-register with `fallback`, and the real relay moving the term — then reopen, which takes nothing back.
+  test("a closed leader hands the term to a connected nominee once empty, and leads again only when none is", async () => {
+    const watch = watchLeader(stack.relay);
+    const app = startApp(stack);
+    const second = await stack.startSecondDaemon({ name: "LeaderBox" });
+    const info = spyOn(console, "log");
+    const said = (needle: string): number => info.mock.calls.filter((args) => args.join(" ").includes(needle)).length;
+    let closed = false;
+    let secondUp = true;
+    try {
+      await stack.waitForLead("the suite's daemon to lead");
+      await pollUntil(() => watch.current()?.deviceId === stack.deviceId, "the push to name the suite's daemon");
+      await pollUntil(() => watch.connected(second.deviceId), "the second daemon to connect");
+      const term = watch.current()?.term ?? 0;
+
+      const reply = await app.client.request<{ ok?: boolean; closed?: number | null }>(stack.deviceId, "availability", {
+        open: false,
+        soft: true,
+      });
+      expect(reply.ok).toBe(true);
+      closed = true;
+      await pollUntil(
+        () => watch.current()?.deviceId === second.deviceId && (watch.current()?.term ?? 0) > term,
+        "the term to move to the open nominee",
+        20_000,
+      );
+
+      // Reopened, it claims plain `scheduler` again; the current leader keeps the role (stickiness).
+      expect((await app.client.request<{ ok?: boolean }>(stack.deviceId, "availability", { open: true })).ok).toBe(
+        true,
+      );
+      closed = false;
+      expect(said("claiming the scheduler role plainly")).toBe(1);
+      const moved = watch.current()?.term ?? 0;
+      await Bun.sleep(1_000);
+      expect(watch.current()).toMatchObject({ deviceId: second.deviceId, term: moved });
+
+      // Closed again with the other nominee gone: nobody else can lead, so it does.
+      await second.stop();
+      secondUp = false;
+      await pollUntil(() => watch.current()?.deviceId === stack.deviceId, "the suite's daemon to lead again", 10_000);
+      await app.client.request(stack.deviceId, "availability", { open: false, soft: true });
+      closed = true;
+      const alone = watch.current()?.term ?? 0;
+      await pollUntil(() => said("registering as a fallback leader") === 2, "the second close's fallback", 20_000);
+      // A non-event: a fallback with no other nominee keeps the term.
+      await Bun.sleep(1_000);
+      expect(watch.current()).toMatchObject({ deviceId: stack.deviceId, term: alone });
+    } finally {
+      if (closed) await app.client.request(stack.deviceId, "availability", { open: true });
+      if (secondUp) await second.stop();
+      info.mockRestore();
+      app.stop();
+      watch.close();
+    }
+  }, 60_000);
+});
+
 describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () => {
   // The double spawn item 5 closes, end to end: a task reserved on machine B
   // whose spawn reply never came, and whose session reports itself ended.

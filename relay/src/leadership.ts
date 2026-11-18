@@ -19,7 +19,8 @@ export interface Candidate {
 /**
  * The verified roles this relay acts on. What a register signed is kept raw only
  * until it verifies; a socket attachment (16 KiB, shared with `status`) then
- * holds just these. Nomination reads only `scheduler` (`capable`).
+ * holds just these. Nomination reads only `scheduler` (`capable`) and
+ * `fallback`.
  */
 export function knownRoles(roles: readonly string[]): readonly DaemonRole[] {
   return Object.values(DAEMON_ROLES).filter((role) => roles.includes(role));
@@ -27,6 +28,11 @@ export function knownRoles(roles: readonly string[]): readonly DaemonRole[] {
 
 function capable(candidate: Candidate): boolean {
   return candidate.roles.includes(DAEMON_ROLES.scheduler);
+}
+
+/** Signed `fallback` beside `scheduler`: a closed machine that emptied, to lead only when nobody else can. */
+function fallback(candidate: Candidate): boolean {
+  return candidate.roles.includes(DAEMON_ROLES.fallback);
 }
 
 export interface Leaders {
@@ -65,6 +71,14 @@ export function parseLeaders(raw: string | undefined): Leaders {
  * off the list loses it here. Otherwise the earliest-connected eligible
  * candidate takes it, ties broken by the lowest `deviceId` so two relays fed
  * the same sockets agree. Null when nobody is eligible.
+ *
+ * A candidate that also signed `fallback` (a closed machine that emptied)
+ * counts only while no eligible candidate without it is connected: one that
+ * leads loses the role as soon as such a one registers, and takes it back when
+ * the last of them leaves. Within either pool the rules above hold, so two
+ * fallbacks keep stickiness between them. The move is the relay's, made on the
+ * same register, close or sweep as any other, so the daemon never needs to
+ * know who else is listed.
  */
 export function nominate(
   candidates: readonly Candidate[],
@@ -72,9 +86,11 @@ export function nominate(
   leaders: ReadonlySet<string>,
 ): string | null {
   const eligible = candidates.filter((candidate) => capable(candidate) && leaders.has(candidate.deviceId));
-  if (current !== null && eligible.some((candidate) => candidate.deviceId === current)) return current;
+  const preferred = eligible.filter((candidate) => !fallback(candidate));
+  const pool = preferred.length > 0 ? preferred : eligible;
+  if (current !== null && pool.some((candidate) => candidate.deviceId === current)) return current;
   let best: Candidate | null = null;
-  for (const candidate of eligible) {
+  for (const candidate of pool) {
     if (
       best === null ||
       candidate.connectedAt < best.connectedAt ||

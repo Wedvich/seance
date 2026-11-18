@@ -44,12 +44,13 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   (close, reopen, `MachineStatus.cl`, the `closed` filter and `machine_closed` gate, the PWA switch,
   `seance close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
   machine"; the leader's outside pass (item 2: `trigger: "drain"`, `Task.drained`, `drainView`, `seance close --wait`) is built too, in DESIGN.md, "The drain's outside pass", and so is the session ask (item 3: `CAPABILITIES.drainAsk`, `now`, the
-  `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". §6's close warning (a closed leader keeps leading) is in
-  "Closing a machine" and §12's time-to-empty line in "The drain's outside pass", and so is the soft close by default
+  `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". §6's close warning (a closed leader keeps leading until empty)
+  and its "Later" (once empty, the signed role `fallback` beside `scheduler`, which `nominate` ranks below any other
+  connected nominee: `daemon/src/lead-fallback.ts`) are in "Closing a machine" and §12's time-to-empty line in "The drain's outside pass", and so is the soft close by default
   (N5: `soft`, `closed.drainAt`, `MachineStatus.dr`, `drainStart`, `CAPABILITIES.softClose`, and the clients' surfaces —
   the PWA's soft Close, Drain and Drain now, `seance close --drain`, MCP `drain` — in the three DESIGN.md sections
-  above); what is left in the file is §6's "Later" (re-register without the lead role once empty) and §12's list of
-  measures. Read it before scheduler routing or shutdown work.
+  above); every part is built, and what is left in the file is the names, the owner's decisions, §11 and §12's
+  list of measures. Read it before scheduler routing or shutdown work.
 - **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
