@@ -239,8 +239,8 @@ describe("the state feed", () => {
     const before = d.frames.length;
     await tmuxOk(["set-option", "-p", "-t", pane, "@seance-task", id(2)]);
     await pollUntil(() => sessionOf(d, key)?.task?.id === id(2), "the re-tagged record");
-    // A late refresh may still restate the old record before the re-tag lands (as on CI runners); what must hold is
-    // that the old task's record is gone, as `replaced`, before any record names the new task.
+    // A read that listed the pane before the re-tag and read the table or the process after it is torn and read again
+    // (`adapter-feed.ts`), so no record pairs the old task with the new facts: the old record goes, then the new one.
     const after = d.frames
       .slice(before)
       .flatMap((frame) =>
@@ -250,14 +250,11 @@ describe("the state feed", () => {
             ? [`gone:${frame.reason}`]
             : [],
       );
-    const gone = after.indexOf("gone:replaced");
-    expect(gone).toBeGreaterThanOrEqual(0);
-    expect(after.slice(0, gone).every((entry) => entry === `session:${id(1)}`)).toBe(true);
-    expect(after[gone + 1]).toBe(`session:${id(2)}`);
-    // Counted in the window: once on CI a second `replaced` stood outside it (docs/scheduler.md, "Open: a second
-    // `replaced`"); the history rides on the failure so the next one says where.
-    expect({ gone: after.filter((entry) => entry.startsWith("gone:")), history: goneFor(d, key) }).toMatchObject({
-      gone: ["gone:replaced"],
+    // The whole history beside the window: the extra `replaced` CI saw stood before it (docs/scheduler.md, "A second
+    // `replaced`"), a torn read when the pane was first tagged.
+    expect({ after, history: goneFor(d, key) }).toEqual({
+      after: ["gone:replaced", `session:${id(2)}`],
+      history: ["replaced"],
     });
     // The table's facts were the old task's: state reads unknown until this session reports under the new one.
     expect(sessionOf(d, key)?.state).toBe("unknown");
