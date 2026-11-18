@@ -23,7 +23,8 @@ const HEAD64 = "b".repeat(64);
 const PR_URL = "https://github.com/Octo-Org/widgets/pull/42";
 const RUN_URL = "https://github.com/octo-org/widgets/actions/runs/123";
 
-const set = (watches: unknown[], gen: unknown = { boot: BOOT, n: 1 }): unknown => ({ gen, watches });
+const GEN: unknown = { boot: BOOT, n: 1 };
+const set = (watches: unknown[], gen: unknown = GEN): unknown => ({ gen, watches });
 const prEntry = (id: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
   id,
   kind: "pr",
