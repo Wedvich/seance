@@ -75,11 +75,6 @@ export function reapRefusalsPath(): string {
   return join(stateDir(), "reap-refusals.json");
 }
 
-/** The owner's labels on conversations, kept at rest (`conversation-store.ts`). */
-export function conversationsPath(): string {
-  return join(stateDir(), "conversations.json");
-}
-
 export function logPath(): string {
   return logPathIn(stateDir());
 }
@@ -97,9 +92,24 @@ export function runDir(): string {
   return join(stateDir(), "run");
 }
 
-/** Each adapter's own 0700 directory sits under this (`SEANCE_ADAPTER_DIR`, docs/messaging.md §6.1). */
+/** Each adapter's own 0700 directory sits under this (`SEANCE_ADAPTER_DIR`, DESIGN.md, "Adapters"). */
 export function adaptersDir(): string {
   return join(stateDir(), "adapters");
+}
+
+/** What the daemon's adapters are doing, for `seance adapter status` (0600, the daemon's own; never in `adapters/`). */
+export function adapterStatusPath(): string {
+  return join(stateDir(), "adapter-status.json");
+}
+
+/** `seance adapter restart`'s request, read and removed by the running daemon. */
+export function adapterRestartPath(): string {
+  return join(stateDir(), "adapter-restart.json");
+}
+
+/** The adapter subscriptions and the owner's labels kept at rest (docs/tags.md §3.2; `adapter-subscriptions.ts`): 0600. */
+export function conversationsPath(): string {
+  return join(stateDir(), "conversations.json");
 }
 
 /** The custodian seat's own files (docs/custodian.md): the notes, and the default exclave's round dir. */
@@ -134,6 +144,14 @@ export function custodianSessionsPath(): string {
 /** The custodian's per-pane activity (`pane-activity-store.ts`), written by the daemon so a restart can take it back. */
 export function custodianActivityPath(): string {
   return join(custodianDir(), "activity.json");
+}
+
+/**
+ * The daemon's watch table (`watches-store.ts`; DESIGN.md, "Watches"): under `stateDir()`, not `custodian/`, since it is
+ * the session-facing watches' and not the custodian's; the round masks `stateDir()` anyway.
+ */
+export function watchesPath(): string {
+  return join(stateDir(), "watches.json");
 }
 
 /** `seance custodian round` writes it, the seat reads and drops it. */

@@ -1,7 +1,15 @@
 // Apart from `messages.ts` so `seance mcp` (`send-message.ts`) and `seance inbox` (`inbox-cli.ts`) load only these
 // and not the daemon's side (tmux, the launch ledger, the FFI parent walk), and neither reaches `log.ts`: one is
 // the MCP server's JSON-RPC channel, the other the inbox mod's data channel.
-import { isMessageId, isRecord, isTaskId, LISTENER_GRACE_MS, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
+import {
+  adapterOfAddress,
+  isMessageId,
+  isRecord,
+  isTaskId,
+  LISTENER_GRACE_MS,
+  MESSAGE_KINDS,
+  type MessageKind,
+} from "@seance/shared";
 
 export const MESSAGE_FRAME_VERSION = 1;
 
@@ -36,6 +44,8 @@ export const MESSAGE_REPLY_CODES = [
   "remote",
   /** The message could not be handed to a scheduler leader (none, or its leg is down). Nothing was kept. */
   "no_leader",
+  /** To an adapter: the adapter's `repos` do not include the sender's repo. Not delivered, not subscribed. */
+  "refused",
 ] as const;
 
 export type MessageReplyCode = (typeof MESSAGE_REPLY_CODES)[number];
@@ -51,6 +61,14 @@ export type MessageReply =
       readonly id: string;
       readonly outcome: "delivered" | "sent" | "routed";
       readonly receipt?: false;
+      /**
+       * To an adapter only: whether the sender's conversation is subscribed to it now, and `session`, the verified
+       * conversation id it is held under, present exactly when `subscribed`.
+       */
+      readonly subscribed?: boolean;
+      readonly session?: string;
+      /** The adapter a reply by handle reached: the message answered was that adapter's delivery. */
+      readonly adapter?: string;
     }
   | { readonly ok: false; readonly code: MessageReplyCode; readonly reason?: "nolistener" | "route" };
 
@@ -106,28 +124,47 @@ export const MESSAGE_ROUTES = ["ask", "send"] as const;
 export type MessageFrameRoute = (typeof MESSAGE_ROUTES)[number];
 
 export interface MessageFrame {
-  /** Absent for a reply by handle: `inReplyTo` names the message answered and the daemon's own table says where it goes. */
+  /**
+   * A task id, or `adapter:<name>` for an adapter on this machine. Absent for a reply by handle: `inReplyTo` names the
+   * message answered and the daemon's own table says where it goes.
+   */
   readonly to?: string;
   readonly messageKind: MessageKind;
   readonly text: string;
   readonly inReplyTo?: string;
   readonly route?: MessageFrameRoute;
+  /** To an adapter only: end this conversation's subscription to it, the text (which may then be empty) sent last. */
+  readonly leave?: true;
 }
 
-const MESSAGE_FIELDS: ReadonlySet<string> = new Set(["v", "kind", "to", "messageKind", "text", "inReplyTo", "route"]);
+const MESSAGE_FIELDS: ReadonlySet<string> = new Set([
+  "v",
+  "kind",
+  "to",
+  "messageKind",
+  "text",
+  "inReplyTo",
+  "route",
+  "leave",
+]);
 
 /** No `pane` field, on purpose: the sender is bound by the kernel's peer pid and nothing it claims. */
 export function parseMessageFrame(raw: unknown): MessageFrame | null {
   if (!isRecord(raw)) return null;
   if (Object.keys(raw).some((key) => !MESSAGE_FIELDS.has(key))) return null;
   if (raw["v"] !== MESSAGE_FRAME_VERSION || raw["kind"] !== MESSAGE_FRAME_KIND) return null;
-  const { to, messageKind, text, inReplyTo, route: rawRoute } = raw;
+  const { to, messageKind, text, inReplyTo, route: rawRoute, leave } = raw;
   // A handle is an address in its own right, so `to` may be left out only where `inReplyTo` stands in for it.
-  const address = to === undefined ? undefined : isTaskId(to) ? to : null;
+  const adapter = adapterOfAddress(to);
+  const address =
+    to === undefined ? undefined : isTaskId(to) || (adapter !== null && typeof to === "string") ? to : null;
   if (address === null || (address === undefined && inReplyTo === undefined)) return null;
+  if (leave !== undefined && (leave !== true || adapter === null)) return null;
+  // An adapter is local only: there is nothing to route.
+  if (adapter !== null && rawRoute !== undefined) return null;
   const kind = MESSAGE_KINDS.find((k) => k === messageKind);
   if (kind === undefined) return null;
-  if (typeof text !== "string" || text === "") return null;
+  if (typeof text !== "string" || (text === "" && leave !== true)) return null;
   if (inReplyTo !== undefined && !isMessageId(inReplyTo)) return null;
   const route = MESSAGE_ROUTES.find((r) => r === rawRoute);
   if (rawRoute !== undefined && route === undefined) return null;
@@ -137,6 +174,7 @@ export function parseMessageFrame(raw: unknown): MessageFrame | null {
     text,
     ...(inReplyTo === undefined ? {} : { inReplyTo }),
     ...(route === undefined ? {} : { route }),
+    ...(leave === true ? { leave } : {}),
   };
 }
 

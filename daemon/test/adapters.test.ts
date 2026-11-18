@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { link, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AdapterSession, RepoEntry } from "@seance/shared";
 import { createAdapterFeed, type AdapterFeed, type FeedFrame } from "../src/adapter-feed.ts";
 import { startAdapterHost, tagsFor, type AdapterHost } from "../src/adapter-host.ts";
@@ -16,15 +16,20 @@ import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { paneInfo } from "../src/sessions.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import {
+  bunNamed,
+  linkReferenceAdapter,
+  pollUntil,
+  underClaude,
+  usePrivateTmux,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 /**
- * State out to adapters (docs/messaging.md §6.1) with real processes: `claude`-named processes in panes of a private
+ * State out to adapters (DESIGN.md, "Adapters") with real processes: `claude`-named processes in panes of a private
  * tmux server, reporting through the session-event ingest as the peer the socket would name, the feed reading them,
  * and the host handing the frames to the reference adapter (`test/bin/reference-adapter.ts`).
  */
-
-const REFERENCE = resolve(import.meta.dir, "bin/reference-adapter.ts");
 
 let base: string;
 let project: string;
@@ -85,11 +90,8 @@ beforeAll(async () => {
   await exec(["git", "init", "-q", "-b", "feature-x", project]);
   exclaves = [{ id: "default", root: base, configDir: join(base, ".claude"), configFile: join(base, ".claude.json") }];
   repos = [{ name: "proj", path: project, defaultBranch: "main" }];
-  claude = await linkClaudeNamed(join(base, "bin"));
-  adapter = join(base, "bin", "reference-adapter.ts");
-  await link(REFERENCE, adapter);
-  const warmed = await exec([adapter, "--warm"]);
-  if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);
+  claude = await bunNamed("claude");
+  adapter = await linkReferenceAdapter(join(base, "bin"));
   privateTmux = usePrivateTmux(base, "adapters");
   await tmuxOk(["new-session", "-d", "-s", "adapters", "-c", base, "sleep", "600"]);
   ended = new EndedTasks(LaunchLedger.memory());
@@ -237,8 +239,8 @@ describe("the state feed", () => {
     const before = d.frames.length;
     await tmuxOk(["set-option", "-p", "-t", pane, "@seance-task", id(2)]);
     await pollUntil(() => sessionOf(d, key)?.task?.id === id(2), "the re-tagged record");
-    // A late refresh may still restate the old record before the re-tag lands (as on CI runners); what must hold is
-    // that the old task's record is gone, as `replaced`, before any record names the new task.
+    // A read that listed the pane before the re-tag and read the table or the process after it is torn and read again
+    // (`adapter-feed.ts`), so no record pairs the old task with the new facts: the old record goes, then the new one.
     const after = d.frames
       .slice(before)
       .flatMap((frame) =>
@@ -248,11 +250,12 @@ describe("the state feed", () => {
             ? [`gone:${frame.reason}`]
             : [],
       );
-    const gone = after.indexOf("gone:replaced");
-    expect(gone).toBeGreaterThanOrEqual(0);
-    expect(after.slice(0, gone).every((entry) => entry === `session:${id(1)}`)).toBe(true);
-    expect(after[gone + 1]).toBe(`session:${id(2)}`);
-    expect(goneFor(d, key)).toEqual(["replaced"]);
+    // The whole history beside the window: the extra `replaced` CI saw stood before it (docs/scheduler.md, "A second
+    // `replaced`"), a torn read when the pane was first tagged.
+    expect({ after, history: goneFor(d, key) }).toEqual({
+      after: ["gone:replaced", `session:${id(2)}`],
+      history: ["replaced"],
+    });
     // The table's facts were the old task's: state reads unknown until this session reports under the new one.
     expect(sessionOf(d, key)?.state).toBe("unknown");
   });
@@ -341,7 +344,7 @@ describe("the host and the reference adapter", () => {
     expect(hello).toEqual({
       kind: "hello",
       protocol: [1],
-      features: [],
+      features: ["deliver", "tag"],
       machine: { deviceId: "dev-1", name: "box" },
       daemon: { version: "test" },
     });

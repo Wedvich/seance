@@ -1,5 +1,6 @@
 import { watch } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec, execFailure } from "../src/exec.ts";
@@ -165,10 +166,12 @@ const STUB_BIN = join(import.meta.dir, "bin", "stub");
  * scan behind each one (CLAUDE.md, Testing): nine in one `beforeAll` queued
  * 15s past its timeout under the full suite. Each stub is instead a hard link
  * to the committed `bin/stub`, whose scan verdict persists across runs, and the
- * body a plain file bash reads. As in `makeClaudeStub`, nothing writes or
- * chmods through the link, and a copy stands in where a link can't reach.
- * The warm-up pays the one scan a fresh checkout owes, so the first call
- * belongs in `beforeAll`.
+ * body a plain file bash reads. Nothing writes or chmods through the link, and
+ * a copy stands in where a link can't reach. Linking is safe here as it is not
+ * for bun (`bunNamed`): a script's links measured immune to syspolicyd's kill
+ * at exec (0 of 2000 execs, under link churn that killed bun's). The warm-up
+ * pays the one scan a fresh checkout owes, so the first call belongs in
+ * `beforeAll`.
  */
 export async function scriptStub(dir: string, name: string, body: string): Promise<string> {
   const path = join(dir, name);
@@ -184,23 +187,63 @@ export async function scriptStub(dir: string, name: string, body: string): Promi
 }
 
 /**
- * A hard link of the running bun named `claude` (or `name`, such as a version): what `processNames` (and tmux) read as a
- * Claude Code process on both Linux (argv[0]) and macOS (the executable's basename). A link, not a copy, for
- * `makeClaudeStub`'s first-exec reason, and run once here so a copy (another filesystem, or a bun the link is refused
- * for) pays its scan in setup, never inside a test's timed window: call it from `beforeAll`.
+ * The running bun as a file of its own named `name`: what `processNames` (and tmux) read as that process's name on both
+ * Linux (argv[0]) and macOS (the executable's basename, which a symlink would resolve away). Exec it, never write or
+ * chmod through it.
+ *
+ * Never a hard link of the installed bun. At each exec macOS's syspolicyd reads the new process's file by the path the
+ * kernel reports for its vnode, which for a hard-linked inode is whichever link any process looked up last; when that
+ * link was just deleted the read fails and syspolicyd SIGKILLs the exec ("Terminating process due to Malware
+ * rejection": exit 137, empty stderr). Suites that linked bun's inode and removed the link in teardown so killed bun
+ * execs anywhere on the machine, under any name, the installed path included.
+ *
+ * So each name is a copy with one link, kept per machine and bun build under the temp dir and never deleted by a test.
+ * It is published by renaming its directory, so the file has that one name from its first exec on, and a writer racing
+ * another keeps the winner's rather than replacing a file someone may be exec'ing. A copy is a new inode, which macOS
+ * scans on its first exec (CLAUDE.md, Testing): the warm-up pays that here, once per machine and build, never in a
+ * test's timed window, so call it from `beforeAll`.
  */
-export async function linkClaudeNamed(dir: string, name = "claude"): Promise<string> {
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, name);
-  await rm(path, { force: true });
-  await link(process.execPath, path).catch(async () => {
-    await Bun.write(path, Bun.file(process.execPath));
-    await chmod(path, 0o755);
-  });
+export async function bunNamed(name: string): Promise<string> {
+  const builds = join(tmpdir(), "seance-test-bun", Bun.revision);
+  const home = join(builds, name);
+  const path = join(home, name);
+  if (!(await Bun.file(path).exists())) {
+    await mkdir(builds, { recursive: true });
+    const staging = await mkdtemp(join(builds, ".staging-"));
+    try {
+      await Bun.write(join(staging, name), Bun.file(process.execPath));
+      await chmod(join(staging, name), 0o755);
+      await rename(staging, home).catch((err: unknown) => {
+        if (!(err instanceof Error && "code" in err && (err.code === "ENOTEMPTY" || err.code === "EEXIST"))) throw err;
+      });
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+    // Never removed here: a writer that lost the rename can't tell a stale directory from one a winner just published.
+    if (!(await Bun.file(path).exists())) throw new Error(`${home} exists without ${name} in it: remove it`);
+  }
   const warmed = await exec([path, "-e", ""]);
-  if (warmed.exitCode !== 0) throw new Error(`${name} failed to start: ${warmed.stderr}`);
+  if (warmed.exitCode !== 0) throw new Error(`${name} failed to start: ${execFailure(warmed)}`);
   return path;
 }
+
+/**
+ * The reference adapter (`bin/reference-adapter.ts`) linked into `dir` and exec'd once, for the first-exec reason above:
+ * call it from `beforeAll`. A copy stands in where a link can't reach (a tmpdir on another filesystem).
+ */
+export async function linkReferenceAdapter(dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "reference-adapter.ts");
+  await link(REFERENCE_ADAPTER, path).catch(async () => {
+    await Bun.write(path, Bun.file(REFERENCE_ADAPTER));
+    await chmod(path, 0o755);
+  });
+  const warmed = await exec([path, "--warm"]);
+  if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);
+  return path;
+}
+
+const REFERENCE_ADAPTER = join(import.meta.dir, "bin", "reference-adapter.ts");
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
@@ -232,20 +275,8 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   const dir = join(base, "stub");
   await mkdir(dir, { recursive: true });
 
-  const versioned = join(dir, "9.9.9");
-  // A hard link, not a copy: macOS scans every never-executed file on its first
-  // exec (XprotectService), one file at a time machine-wide, ~0.8s for bun — so
-  // five suites' copies queued each first spawn seconds past its registration
-  // budget. A link is the running bun's own inode, already scanned; the kernel
-  // still reports the link's name. That inode *is* the install, so nothing may
-  // write or chmod through it: the rm makes both paths start from no file, and
-  // the copy (for where a link can't reach — another filesystem, Linux's
-  // protected_hardlinks) is then always a new inode.
-  await rm(versioned, { force: true });
-  await link(process.execPath, versioned).catch(async () => {
-    await Bun.write(versioned, Bun.file(process.execPath));
-    await chmod(versioned, 0o755);
-  });
+  // The running bun under its version's name, never a hard link of the installed one (`bunNamed` says why).
+  const versioned = await bunNamed("9.9.9");
 
   const sleeper = join(dir, "sleeper.ts");
   // `runInPane`'s drop box: one file per pane, named by the `TMUX_PANE` tmux gives every pane's process.
@@ -277,8 +308,8 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     ].join("\n"),
   );
 
-  // Each wrapper is new, so each pays the first-exec scan above (~0.2s idle,
-  // seconds behind a busy queue). The warm-up below pays it here, in setup,
+  // Each wrapper is new, so each pays macOS's first-exec scan (CLAUDE.md,
+  // Testing; ~0.2s idle, seconds behind a busy queue). The warm-up below pays it here, in setup,
   // rather than inside the first spawn's registration budget; the flag exits
   // before the tag or argv record is touched.
   const head = `#!/bin/bash\n[ "$1" = ${WARM_FLAG} ] && exit 0\n`;
@@ -742,6 +773,10 @@ export async function captureLog(body: () => Promise<void>): Promise<string[]> {
   console.error = capture;
   try {
     await body();
+  } catch (err) {
+    // A wait that timed out inside the body is the failure the lines explain: keep them in its message.
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`${message}\n--- captured log ---\n${lines.join("\n")}`, { cause: err });
   } finally {
     console.log = realLog;
     console.error = realError;

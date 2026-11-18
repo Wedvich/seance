@@ -314,8 +314,8 @@ export class RelayClient {
   }
 
   /**
-   * Fire-and-forget like `sendToScheduler`, for the `watch-set` op; false when it was not sent. Step 3's daemon table
-   * sends it; nothing does yet. The URLs ride inside the sealed envelope only: the `wire send` line below names no
+   * Fire-and-forget like `sendToScheduler`, for the `watch-set` op; false when it was not sent. The daemon's watch table
+   * sends it (`watch-leader.ts`), only when this daemon does not lead: a leader takes its own set in process. The URLs ride inside the sealed envelope only: the `wire send` line below names no
    * payload.
    */
   sendWatchSet(set: WatchSet): Promise<boolean> {

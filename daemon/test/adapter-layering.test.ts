@@ -3,14 +3,20 @@ import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 /**
- * Nothing an adapter sends or is sent reaches a log or an audit line (docs/messaging.md §6.6): the audit carries the
+ * Nothing an adapter sends or is sent reaches a log or an audit line (DESIGN.md, "Adapters"): the audit carries the
  * name, an exit code and a reason, from the supervisor's own constants. So the adapter modules load no module that
  * logs, by any runtime import, and reach `audit.ts` only for its types (`AdapterAudit`, whose methods take no text the
  * adapter wrote): the walk follows every relative import that is not `import type`.
  */
 const SRC = resolve(import.meta.dir, "../src");
 
-const ENTRIES = ["adapter-supervisor.ts", "adapter-feed.ts", "adapter-host.ts", "closing-panes.ts"] as const;
+const ENTRIES = [
+  "adapter-supervisor.ts",
+  "adapter-feed.ts",
+  "adapter-host.ts",
+  "adapter-subscriptions.ts",
+  "closing-panes.ts",
+] as const;
 
 /** A static or dynamic import, with whether the whole statement is type-only. */
 const IMPORT = /(?:^|\n)\s*(import|export)(\s+type)?\b[^;]*?["'](\.\/[^"']+)["']|import\(\s*["'](\.\/[^"']+)["']/gu;

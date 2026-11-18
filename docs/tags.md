@@ -3,10 +3,12 @@
 **Status: draft 2026-11-17; build step 1 built 2026-11-17** (the vocabulary, the frame's `agent`, the conversation
 table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record),
 **step 2 built 2026-11-18** (the `session-tag` op, `conversations.json`, the `owner.label` join, the PWA's names and
-rename: DESIGN.md, "Session identity", "The owner's label"). Steps 3–4 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
+rename: DESIGN.md, "Session identity", "The owner's label"), and step 4 (§8, the adapter subscription and adapter tags)
+built 2026-11-18 with docs/messaging.md's 3b (DESIGN.md, "Adapters", and "Replies by handle" for §4.4's amended
+rejection). Step 3 is not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
 proposed, with a recommendation where there is a choice. Two drafts build on this file: docs/presence.md (draft PR
 #526: `self.doing`, `set_self_tag`, the `tags` map on `SessionEntry`), which already fixes the first key and must stay
-valid under this model, and docs/messaging.md §6 (draft PR #486: the adapter seam), whose `Session` record, addressing
+valid under this model, and DESIGN.md, "Adapters" (draft PR #486: the adapter seam), whose `Session` record, addressing
 and reply window this file reshapes. Like docs/messaging.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -190,7 +192,7 @@ precedence, never the owner's label, and receives nothing addressed to the id.
   the session, and adapter tags by the adapter after each `snapshot` (it keeps its own state; #486's restart already
   starts from a fresh snapshot). The owner's label on an untasked conversation and the adapter subscriptions are not
   re-sent by anyone, so they are kept at rest in `stateDir()/conversations.json` (built, step 2, with the label; its
-  shape, caps and prune are in DESIGN.md, "The owner's label"). Step 4 starts writing its `subscriptions`.
+  shape, caps and prune are in DESIGN.md, "The owner's label"; step 4 writes its `subscriptions`, through the same one owner, `openSubscriptions`).
 - **Clearing.** Process tags clear as #526's D1.4 says (`ended`, the pane gone, a different task on the pane, a
   restart, or the writer's own `""`), with "a new pane pid" read as "the bound `claude` process gone". Conversation tags clear when the conversation has no live process
   and the daemon restarts (memory), or at the `CONVERSATION_IDLE_MS` prune (what is at rest), or for one adapter's
@@ -494,7 +496,7 @@ conversation's life**, and the adapter may then deliver to it by `agent.session`
   `agent.session` it is, under every rule of #486's delivery (the adapter wrapper, `kinds`, the rate buckets, the
   mod's local delivery, never a key); `ambiguous` when two live panes claim the id (§4.2), `ended` when none is live
   (nothing held: D2), `unknown` when the conversation is not subscribed to this adapter. #486's `kinds` and `repos` bound it as they
-  bound any delivery (`refused`), and a session outside `repos` cannot subscribe (docs/messaging.md §6.2, as revised).
+  bound any delivery (`refused`), and a session outside `repos` cannot subscribe (DESIGN.md, "Adapters", as revised).
 - **Across a continue chain** the subscription carries automatically (same id, same machine). Not to a successor (a
   new conversation): the adapter learns of the successor from #486's `task` event and reaches it by task id, or the
   successor subscribes itself.
@@ -801,6 +803,6 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
      two ref tags reach a row; `get_queue` showing `creator.ref` and never `creator.ref-url`, an opaque `creator.*`,
      `agent.session` or `self.*`; an e2e test queueing a task with a ref to a two-daemon fleet and reading it back
      in the queue, ending it through `cancelTask`.
-4. **The adapter subscription** lands with #486's PR 3b (docs/messaging.md §6, as revised): `subscribed`,
+4. **The adapter subscription.** **Built 2026-11-18** with docs/messaging.md's 3b (DESIGN.md, "Adapters"). Lands with #486's PR 3b (DESIGN.md, "Adapters", as revised): `subscribed`,
    `toSession`, `leave`, `ambiguous`, adapter `tag` frames, the at-rest subscriptions, `adapter add` dropping a
    name's subscriptions. Its tests are listed there.

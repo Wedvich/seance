@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { adapterProtocolSchema, adapterWants, encodeDaemonFrame, parseAdapterLine } from "./adapter-protocol.ts";
+import {
+  adapterOfAddress,
+  adapterProtocolSchema,
+  adapterWants,
+  encodeDaemonFrame,
+  parseAdapterLine,
+} from "./adapter-protocol.ts";
 
 const hello = {
   kind: "hello",
@@ -22,9 +28,55 @@ describe("parseAdapterLine", () => {
     expect(parseAdapterLine(JSON.stringify({ ...hello, protocol: 2 }))).toMatchObject({ ok: true });
   });
 
-  test("a kind protocol 1 defines for later is unsupported; anything else malformed is invalid", () => {
-    expect(parseAdapterLine('{"kind":"deliver"}')).toEqual({ ok: false, code: "unsupported" });
-    expect(parseAdapterLine('{"kind":"tag"}')).toEqual({ ok: false, code: "unsupported" });
+  test("a deliver names exactly one address; a tag a bare suffix on a session or a task", () => {
+    const task = "11111111-2222-4333-8444-555555555555";
+    const deliver = {
+      kind: "deliver",
+      ref: "r-1",
+      to: task,
+      messageKind: "question",
+      text: "hi",
+      wake: true,
+      from: "Ada",
+    } as const;
+    expect(parseAdapterLine(JSON.stringify(deliver))).toEqual({ ok: true, frame: deliver });
+    const bySession = { kind: "deliver", ref: "r-2", toSession: task, messageKind: "note", text: "hi" } as const;
+    expect(parseAdapterLine(JSON.stringify(bySession))).toEqual({ ok: true, frame: bySession });
+    const reply = { kind: "deliver", ref: "r-3", inReplyTo: task, messageKind: "note", text: "hi" } as const;
+    expect(parseAdapterLine(JSON.stringify(reply))).toEqual({ ok: true, frame: reply });
+    const tag = { kind: "tag", ref: "t", session: task, key: "ticket", value: "ENG-1" } as const;
+    expect(parseAdapterLine(JSON.stringify(tag))).toEqual({ ok: true, frame: tag });
+    const malformed = [
+      { kind: "deliver" },
+      { ...deliver, toSession: task },
+      { kind: "deliver", ref: "r", messageKind: "note", text: "hi" },
+      { ...deliver, to: "not:a-task" },
+      { ...deliver, ref: "has space" },
+      { ...deliver, ref: "x".repeat(65) },
+      { ...deliver, text: "" },
+      { ...deliver, messageKind: "shout" },
+      { ...deliver, wake: "yes" },
+      { ...deliver, from: "x".repeat(257) },
+      { ...deliver, extra: 1 },
+      { kind: "tag" },
+      { ...tag, task },
+      { ...tag, key: "adapter.other.ticket" },
+      { ...tag, key: "Ticket" },
+      { ...tag, value: 7 },
+    ];
+    for (const frame of malformed)
+      expect(parseAdapterLine(JSON.stringify(frame))).toEqual({ ok: false, code: "invalid" });
+  });
+
+  test("an adapter address is adapter:<name>, a valid name, nothing else", () => {
+    expect(adapterOfAddress("adapter:tg")).toBe("tg");
+    expect(adapterOfAddress("adapter:")).toBeNull();
+    expect(adapterOfAddress("adapter:Bad Name")).toBeNull();
+    expect(adapterOfAddress("11111111-2222-4333-8444-555555555555")).toBeNull();
+    expect(adapterOfAddress(7)).toBeNull();
+  });
+
+  test("anything malformed is invalid, an unknown kind included", () => {
     const invalid = [
       "not json",
       "[]",
@@ -53,6 +105,19 @@ describe("frames out", () => {
     expect(adapterWants(["sessions"], task)).toBe(false);
     expect(adapterWants(["tasks"], task)).toBe(true);
     expect(adapterWants([], { kind: "error", code: "invalid" })).toBe(true);
+    const message = {
+      kind: "message",
+      id: "m",
+      messageKind: "note",
+      text: "hi",
+      from: { key: "1:2" },
+      subscribed: false,
+    } as const;
+    expect(adapterWants(["sessions"], message)).toBe(false);
+    expect(adapterWants(["messages"], message)).toBe(true);
+    // An answer to the adapter's own frame always goes.
+    expect(adapterWants([], { kind: "result", ref: "r", outcome: "ok" })).toBe(true);
+    expect(adapterWants([], { kind: "delivery", id: "m", outcome: "delivered" })).toBe(true);
   });
 });
 

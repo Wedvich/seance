@@ -1054,7 +1054,7 @@ nothing checked it. The last is the gap they leave.
   readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
   poller parsed itself, never `gh`'s words.
 - **A watch's target reaches GitHub only through the leader's poller, and its frames bind nothing** (2026-11-18,
-  Scheduler, "PR status"; docs/gh-watch.md invariants 2, 4, 5). A target reaches the leader only as a URL that
+  Scheduler, "PR status"). A target reaches the leader only as a URL that
   `parseWatchSet` (`shared/src/watch.ts`) holds to the PR or run pattern, parsed into owner, repo and number or id. It
   reaches `gh` only as GraphQL variables in an argv array (`-f`, with `-F` only for the regex-held PR number), the
   query text built from alias indices alone, through `askGithub` with `--hostname github.com`, read-only. A
@@ -1067,6 +1067,25 @@ nothing checked it. The last is the gap they leave.
   are the leader's, never a frame's, and no URL, head, check name or watch id is logged. The residual: any registered
   machine can spend up to the caps of the fleet's GraphQL budget (about 840 points an hour) and learn the states and
   check names of any repo the operator's token sees, which that session's own `gh` could read anyway (G1).
+- **A daemon's watch table binds a watch to its session's `claude` process and notes it only through messaging's local
+  delivery** (2026-11-18, "Watches"). A watch is made only by the local socket's
+  `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
+  on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
+  came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener
+  serves; the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
+  honoured only from the bound session that made the watch, and a wrong id, another session's id and an unknown id all
+  answer `unknown`. The caps (8 a session, 64 a machine, equal to the leader's per-device cap) are the table's, refused
+  at the add and never an eviction. A `watch-event` is looked up in the table by watch id and delivered only to the
+  pane, pane pid, task and `claude` process that entry names, as a `wake` line or a plain note, rendered by the one
+  `watchNote` formatter from enums, hex, rebuilt URLs and `cleanName`-bounded check names; never `asUser`,
+  `$.prompt.fill` or tmux keys. `watches.json` (0600, atomic rename, one write chain per path per process) holds ids,
+  targets, heads, keys and process identity only, and an entry is reloaded only while its `claude` process still runs
+  with the saved start time and its pane carries the same task. The set goes to the leader only sealed from this
+  daemon's own device id, in process when it leads, never `from: "app"`: the app-role leg that reads who leads is held
+  lazily and sends nothing. A live watch holds its pane from the custodian's `close` (`awaitsWake`) and nothing else:
+  no hand-off, pass, drain or reap waits on it. The audit origin `watch` carries closed enums only (op, kind, event,
+  reason, outcome): never a URL, owner, repo, number, head, check name or watch id, and `watches.ts` imports neither a
+  scheduler module nor `audit.ts`'s other writers.
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
@@ -1173,7 +1192,7 @@ nothing checked it. The last is the gap they leave.
   refuses a symlink. An unreadable record reads as none, and a round pane it no longer names is closed as a
   stray.
 - **The custodian's verbs are a frame on the round's own socket, bound to the round and to nothing a frame says**
-  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The sixth frame kind
+  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The custodian frame kind
   widens the local socket family, so any new verb or act for it is a threat-model change like the broker's, and the
   daemon's **main** socket answers the kind `unsupported`: it is served only on the round's own socket
   (`custodian-socket.ts`), which carries nothing else. Its sender is a
@@ -1238,6 +1257,20 @@ nothing checked it. The last is the gap they leave.
   `basis` it was read at and is refused `prompt_changed` against any other, so a replayed append
   never lands twice. The amended record goes back through the one task sealer, sentinels and all; no
   log or audit line carries prompt text, the amendment's included.
+- **An adapter is the owner's code at the owner's uid, not contained** (built 2026-11-18, Daemon, "Adapters").
+  It can read whatever the owner can, so these bound what Séance grants it, not what it can
+  do, and are no sandbox:
+  - It is declared only in the machine's own `config.json`, written by hand or by the owner's
+    `seance adapter add` from the checkout's manifest, and run only as that argv. Nothing about adapters crosses the
+    relay, and no frame, app op, MCP tool or local-socket op adds, removes or restarts one.
+  - It is reached only over its own stdin and stdout, never a socket a process could dial.
+  - It gets no prompt, attachment, session-to-session message, account id, absolute path or key, and no
+    `CREDENTIALS_DIRECTORY`; message text only when a session addressed it.
+  - It delivers only by the `inbox` mod's local delivery, under its own wrapper, `kinds` and rate buckets, to a task
+    this machine's launch ledger holds, by reply, or to a conversation subscribed to it and verified at the act.
+  - It writes nothing to the queue, the store, the leader or the relay, and nothing it sends or prints is logged.
+  - A re-added or removed adapter inherits no subscription, and `doctor` warns when its checkout moved since it was
+    added: the owner is told new code runs, never stopped.
 - **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
   Attachments and as requirements in `CLAUDE.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
@@ -1605,8 +1638,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `deliver-message` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                                                                                                                | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
 | op `message-receipt` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
 | op `custodian-event` (→`"scheduler"`, built 2026-11-14)                                      | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                                                                                                                   | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
-| op `watch-set` (→`"scheduler"`, built 2026-11-18)                                            | `RelayClient.sendWatchSet`; nothing sends it until gh-watch step 3 (the daemon's table); in process through `leader.onWatchSet` on the leader's own machine                                                                                                                                                                                                                                                                                                                    | `daemon/src/leader.ts` `onEvent` → `onWatchSet` → `daemon/src/watch-registry.ts`                                                                                                                                                                                                                                                                                                                        |
-| op `watch-event` (scheduler→daemon, built 2026-11-18)                                        | the registry through `termWatches` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `LocalOps.watchEvent`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` `handleWatchEvent` (step 2: parsed, answered `delivered: []`)                                                                                                                                                                                                                                                                                                                  |
+| op `watch-set` (→`"scheduler"`, built 2026-11-18)                                            | `daemon/src/watches.ts` through `watch-leader.ts` (`RelayClient.sendWatchSet`, or in process through `leader.onWatchSet` when this daemon leads); built 2026-11-18, "Watches"                                                                                                                                                                                                                                                                                                  | `daemon/src/leader.ts` `onEvent` → `onWatchSet` → `daemon/src/watch-registry.ts`                                                                                                                                                                                                                                                                                                                        |
+| op `watch-event` (scheduler→daemon, built 2026-11-18)                                        | the registry through `termWatches` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `LocalOps.watchEvent`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` `handleWatchEvent` → `Watches.onEvent` in `daemon/src/watches.ts` (delivers the note, answers `delivered`)                                                                                                                                                                                                                                                                     |
 | op `queue-changed` (→`"app"`)                                                                | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                                                                                                                  | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                                           | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                                                                                                                          | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                                                     | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                                                                                                                      | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
@@ -2372,9 +2405,11 @@ an old peer's frames parse as before. Mixed versions:
     by handle"). It needs `messages` (peer binding), and is advertised beside it.
   - `CAPABILITIES.watches` (2026-11-18): an unknown string to an older reader, which keeps the machine. As a daemon it
     answers `watch-event` (advertised unconditionally: any daemon may lead and poll watches); as a leader it honours
-    `watch-set` and sends the answers, only to a machine advertising it. Step 2's daemon side parses and delivers
-    nothing, so nothing sends a `watch-set` until gh-watch step 3's table: a client must not gate a surface on the
-    string alone before then.
+    `watch-set` and sends the answers, only to a machine advertising it. It was advertised from step 2, before the
+    daemon had a `watch` frame (step 3 built it): a daemon of the step 2 build closes a `watch` frame as malformed. A
+    client gates a surface on the string and on the frame's own answer, never on the string alone: `seance mcp`'s
+    `watch_github` (step 4) reads a closed or unparseable reply to a `watch` frame as `unsupported`. No second capability string
+    was added for the frame.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -5219,9 +5254,11 @@ for the lot with its own `gh`.
     `WATCH_EVENT_JSON_MAX` in UTF-8 bytes of JSON (`watchJsonBytes`, as `MESSAGE_ROUTE_MAX`); what does not fit is due
     again at the next send, which starts at the watch the full frame stopped in, so events an early watch leaves
     unacknowledged cannot keep the later ones out. Every `watch-event` is also written as an `audit request` line on
-    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: step 3's
-    daemon must acknowledge or drop what it cannot place, and its `watch` origin may replace that line. A device is sent to only while it advertises `CAPABILITIES.watches` (or is the leader's own
-    machine), and an answer of `null` (an ended term, an unreachable machine) is no answer.
+    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: the daemon's
+    table acknowledges or drops what it cannot place ("Watches"). A device is sent to only while it advertises
+    `CAPABILITIES.watches` (or is the leader's own machine), and an answer of `null` (an ended term, an unreachable
+    machine) is no answer. The daemon's side of this contract, `gen.n` on every send, the resend until answered, what
+    `delivered` lists and what `fleet_full` leaves, is "Watches".
 - **Reserve for tasks** (2026-11-18, docs/gh-watch.md W8). A poll that starts with the term's newest `remaining` under
   500 and its `resetAt` still ahead reads the tasks' PRs only: watched targets are asked for nothing until the budget
   recovers. A watch on a PR a task reads anyway still takes that merge reading (`merged`, `closed`, `unreadable`):
@@ -9567,8 +9604,8 @@ decision is recorded here.
   (`toolchainProblem`) is refused `op=refused reason=toolchain`: a `main.ts` outside `<checkout>/daemon/`; a bun that is a
   version manager's shim (its real file is a script, or is not named `bun*`), whose target sits under the masked home and
   outside every allow entry (the real file found by following its links, `realpathOfFile`: macOS's realpath names a
-  hard-linked file by whichever of its links any process looked up last, so the test suite's `9.9.9` claude stub, a hard
-  link of bun, made the seat refuse now and then); and an allow entry that is, or contains, any path the fence masks (`sandboxMasks`, the one
+  hard-linked file by whichever of its links any process looked up last, so the test suite's `9.9.9` claude stub, then a
+  hard link of bun, made the seat refuse now and then); and an allow entry that is, or contains, any path the fence masks (`sandboxMasks`, the one
   list the fence is made from: home, the state and config dirs, the tmux socket dir, repo and exclave roots, the
   checkout, and the system roots, before any is dropped as nested; srt lets an allow beat a deny, so `~/bun` would
   re-open the whole home and `<checkout>/bun` the relay's `.dev.vars`). The seat checks at its start (with the tmux
@@ -9668,7 +9705,8 @@ decision is recorded here.
   or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
   as the machine stays closed), never counts, since no verb may
   touch it and it would otherwise keep a round due for ever. Nor does a pane whose last turn left background work or
-  a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"): `close` answers it `busy`. **So does every pane no built verb could act on**
+  a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"), or one a live watch waits on
+  (`Watches.holds`, "Watches"): `close` answers it `busy`. **So does every pane no built verb could act on**
   (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
   gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (a session
   started, resumed or cleared and never prompted, from the settings `SessionStart` hook; until mod 0.6.0 the
@@ -11260,6 +11298,24 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
   binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
   does, or the call stops at a permission prompt.
+- **`watch_github { url, head? }` and `unwatch_github { id }`** (built 2026-11-18; "Watches", docs/gh-watch.md W10).
+  One tool for both targets, since the URL says which. `watch_github` checks the URL against the PR and run patterns
+  (`parseGithubPr`, `parseGithubRun`) and `head` (`isWatchHead`, a PR only) before anything is asked, then the gate
+  (`watchGate`, `mcp.ts`): refused unless this box has daemon state, the lease has a scheduler leg, this machine's own
+  registry entry advertises `CAPABILITIES.watches`, and the **verified** leader does (`advertises`), worded apart for no
+  verified leader and a leader that needs `seance update`; never the daemon's word alone, and a refused gate sends
+  nothing. Then one `watch` add frame (`watch-github.ts`, beside `send-message.ts` and like it importing nothing that
+  logs; in `message-layering.test.ts`), 10 s for an answer, since the daemon waits up to 3 s for the leader's. A closed
+  connection or an answer that is no watch reply is `unsupported` (a step 2 daemon); no daemon and no answer keep their
+  own words, and no answer says the watch may exist and that calling again replaces it. No restart grace: a dropped
+  connection must read as a daemon without the frame. Every refusal is worded per code and, where waiting is still the
+  answer, ends with the `gh pr checks <n> -R <owner>/<repo> --watch -i 30` or `gh run watch <id> -R <owner>/<repo> -i 30
+  --exit-status` to run instead, rebuilt from the parsed parts. Success answers the watch id and tells the session to
+  end its turn. `unwatch_github` checks the id (`isMessageId`) and is not gated: removing is the daemon's own table's
+  act and must work with no leader. The description says to end the turn, not to poll the target meanwhile, that the
+  same URL replaces the watch (a new `head` after a fix push), what `head` is for, the 24 h expiry (`WATCH_TTL_MS`, in
+  `watch-frame.ts` with the caps so the words name the table's numbers) and that the inbox mod is needed. Both need
+  `mcp__seance__watch_github` and `mcp__seance__unwatch_github` allowed in the exclave.
 - **`continue_task { taskId, prompt?, not_before? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
   a continuation of a `session_failed` or cancelled (after placement) task, the newest in a chain: the session's conversation is resumed in its worktree, on
   the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
@@ -11610,8 +11666,8 @@ no envelope, no PSK: listing and ending sessions on the machine you are sitting 
 (Until 2026-10-25, M4, `spawn` took this path too; `spawn_session` is now a scheduler
 enqueue, so `spawn` stays on the allowlist only for a `seance mcp` started before that
 update, and for the app's own `spawn` op, which the daemon keeps answering.)
-Beside the `Plain` ops the socket carries four frame kinds of its own: `broker`, `session-event`, `message` and
-`inbox` (each below). A fifth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
+Beside the `Plain` ops the socket carries five frame kinds of its own: `broker`, `session-event`, `message`, `inbox`
+and `watch` (each below; `watch` is "Watches"). A sixth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
 code but **served only on the round's own socket** (`custodian-socket.ts`): this socket answers it `unsupported`.
 The alternative is an internet round trip to Cloudflare and back down the
 daemon's own websocket, to reach a process a few hundred microseconds away.
@@ -12112,7 +12168,8 @@ it waited), **in leader memory** (lost on failover or restart, invisible to the 
 become a mailbox) and **at the sender's daemon with retries** (a second queue per machine with its own expiry
 and duplicate rules). A target that is offline is dropped and answered `offline`; a message that landed whose
 reply was lost reads `offline` too, so a retry can duplicate it, and the wrapper names the message id so the
-receiver can tell.
+receiver can tell. Also rejected: **freezing a message at its first target**, with no chain. A pass moves the work
+exactly when one session runs out of usage, which is when a peer most needs to reach whoever carries it on.
 
 #### Replies by handle (built 2026-11-14, docs/messaging.md D3, amended)
 
@@ -12206,6 +12263,14 @@ whose origin is this machine (the leader returned a message to its sender's own 
 through the `sent` table. An old daemon answering a new receipt with no `to` drops it as unparseable, which is the courtesy lost, not the
 message.
 
+**An adapter is the other party a handle can name** (3b, "Adapters"). A session's message to `adapter:<name>` is minted
+into `sent` with that adapter's name, so only that adapter's `deliver { inReplyTo }` answers it, at the asker's pane,
+pid, task and session, with `wake` as for any answer to a question or request. An adapter's delivery is placed into
+`received` with its name, so the session's reply by handle (`inReplyTo`, no `to`) goes back to that adapter as a
+`message` frame carrying `inReplyTo`, never routed; it subscribes nothing. D3 amended again 2026-11-17: **a session
+with no task is reached only as a reply, by the id of a message it sent, or by an adapter on its own machine through
+the subscription it made by messaging that adapter** ("Adapters", "The subscription"; docs/tags.md §8).
+
 **Rejected** (docs/messaging.md D3, amended): **machine id plus pane id as a general address** (a pane id outlives the
 session in it and names no session, so it is a guess the daemon cannot check, and a hand-started session's pane is
 re-used by the next `claude`); **a synthetic task id, or a queue entry, for a hand-started session** (it would put a
@@ -12215,41 +12280,297 @@ answer a question the asker's own daemon can: it keeps the minting table already
 replies (a `$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the
 peer-pid binding exists to avoid; amended 2026-11-17, docs/tags.md §4.4: that reason stands for a claim and falls for
 an id the daemon verified from its own sources ("Session events", "Session identity"), but a reply is still by
-message id, and the one use a verified id gets is docs/tags.md §8's, not yet built); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
+message id, and the one use a verified id gets is the adapter subscription, "Adapters", built 2026-11-18, docs/tags.md
+§8); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
-### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`) — 3a built 2026-11-18, docs/messaging.md §6
+### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md steps 3 and 4
+
+The daemon's side of fleet GitHub watches (docs/gh-watch.md; the leader's side is "PR status", "The registry"). A
+session asks its own daemon, over the local socket, to watch a PR or an Actions run; the daemon owns the watch, states
+the whole table to the leader, and turns each `watch-event` into one note in that session's inbox.
+
+- **The `watch` frame** (`watch-frame.ts`): `{ v: 1, kind: "watch", op: "add" | "remove", url?, head?, id? }`, exactly
+  those fields, a frame kind of the socket's own, routed on `kind` ahead of the `Plain` check and answered by
+  `startLocalSocket`'s `watches` seam (`unsupported` without one, `internal` on a throw, nothing of the frame logged).
+  Bound by the kernel-reported peer pid only (`bindPeer`, `messages.ts`: pane, pane process, innermost `claude`). The
+  reply is `{ ok: true, id, kind }` or one of `invalid`, `unbound`, `nosession`, `nolistener`, `too_many`, `fleet_full`,
+  `no_leader`, `unsupported`, `unknown`, `stopping`, `internal`. Nothing reachable from `seance mcp` imports `log.ts`:
+  `watch-frame.ts` is in `message-layering.test.ts`'s entry list, and the table itself (which logs a warning) is the
+  daemon's.
+- **Add.** In order: `stopping`, the binding (`unbound`, `nosession`), `canListen` (`nolistener`: a pane no inbox
+  listener serves would never read a note), the caps (`too_many`, a replacement not counted), then the leader's
+  verdict (`WatchLeader.check`: `none` is `no_leader`, one that does not advertise `CAPABILITIES.watches` is
+  `unsupported`). The entry is inserted and saved, the whole set sent, and the add waits at most 3 s for the answer to
+  it: a `fleet_full` or `invalid` refusal in that answer removes the entry and is the reply; no answer in the window is
+  `ok` (the watch stays, the tick resends). A send the leader could not be handed (no term in process, a leg that is
+  down) is `no_leader` and removes the entry. A replacement (the same target from the same session) takes the old
+  watch out of the table for the new one's set and puts it back on any refusal or `no_leader`, so a refused add costs
+  the session nothing; the old watch's end (`reason=replaced`) is audited once the add has succeeded. **Adds and
+  removes of one session run one at a time** (a chain per session), so a replacement is made over a finished add and
+  never over one still waiting for its answer, and a `remove` of the old id waits for the add and finds the old watch
+  back (refused add) or gone (`unknown`, replaced), never a table in between. If the new watch itself ends while the add
+  waits (its pane, task or session went: `onEnded`, the sweep), the add is refused `nolistener` and both watches are
+  audited as ended, under that reason, so none leaves without a line. A `stop` while the add waits on its send settles
+  it `ok`: the file already holds the new watch and not the old, and the restart states it, so the add is not
+  answered `no_leader` for a watch the reload brings back. **Accepted:** a refused replacement restores the old watch
+  here, but the leader rebuilt the old watch's state from the set that lacked it, so it is restated as a fresh one (its
+  followed `head`, head grace and acknowledgements start over); `seen` travels with the set, so nothing already told is
+  told again. **Accepted:** during
+  the restart grace `canListen` passes any bound session, one with no inbox mod included (its listener may simply not
+  have reconnected yet); if none comes, the first note is held, its grace runs out, and the watch ends
+  `reason=nolistener` with nothing told to the session.
+- **Who leads, and how the set goes** (`watch-leader.ts`). A daemon that leads (`leader.term() !== null`) hands the
+  set to its own registry in process (`onWatchSet`, parsed fresh like a frame, and answered in process). Otherwise the set
+  goes on the daemon leg (`RelayClient.sendWatchSet`), sealed from this daemon's own device id. Nothing is ever sent
+  `from: "app"`. Which daemon leads is read from an app-role client's `RelayState.scheduler` (a verified nominee, the
+  only place the daemon sees one), and the leader advertises `CAPABILITIES.watches` through the registry the same
+  client reads. The daemon holds no app-role leg of its own, so the table takes a `LazyRelay` (acquire and release
+  counted, released 5 minutes after the last holder): the table holds it while it is non-empty and releases it when
+  the empty set has been sent. The leg sends nothing; it only reads. **Accepted** (the owner's call): a daemon with a
+  key holds an app-role leg while it has a watch, which `seance mcp` and the broker already do for their own reads.
+  A new verified nominee, once the baseline is taken, makes the table restate its set at once (`onNominee`), since a
+  new leader holds none of it (W9).
+- **The set and its generation.** `gen` is `{boot, n}` with `boot` this daemon's `instance` and `n` rising on every
+  send, heartbeat and resend included, so the registry's order holds across a restart. A frame or a tick sends at most
+  one set (the leader's events, the sweep and `onEnded` coalesce); each add sends its own, since it waits on that
+  set's answer, so a burst of adds is a burst of sets, each the whole table, and the higher `n` replaces. A set carries each watch's id, kind, URL, `head` and `seen`, at most 64.
+- **A set nobody answered is resent** (plan review finding 1). The table keeps `answeredGen`, the highest `gen.n` any
+  answer named, and at each 60 s tick restates the table while `answeredGen` is behind the latest `n`, the last send
+  failed, or 5 minutes passed (the heartbeat). `gen.n` keeps rising across resends. `no_leader` is a separate clock:
+  a watch that has seen no answer for 10 minutes since the later of its own creation, the last answer and this
+  process's boot is told once (`noLeaderTold`, a flag of the entry, saved), with wake, and never again however many
+  answers follow. Any answer restarts the clock for every watch not yet told, older ones included; what is once is the
+  note, not the clock. Answers, not sends, keep it quiet.
+- **Answers** (`onEvent`). A `watch-event`'s `set` is the answer to `gen`: it resolves any add waiting on a `gen.n` at or
+  below it. Its refusals act only when `gen.n` is the latest: `fleet_full` leaves the watch in the table and the next
+  set and tells the session once, with wake (`fleet_full` note, `fleetFullTold`, a local flag that is never in `seen`
+  since the leader never sees it; the owner's decision: a late refusal is a note, not an end), and `invalid` tells the
+  session and ends the watch (`reason=invalid`). An answer older than the latest set, or for a set the table has since
+  replaced, refuses nothing.
+- **Events and `delivered`.** Events are grouped by watch id. An id the table does not know is left out of `delivered`
+  and marks the set stale, so one is sent (the leader's registry then loses it). A key already in the entry's `seen` is
+  skipped but its id is still listed, since the leader asked for an acknowledgement. Otherwise one note carries the
+  watch's events of the frame (`watchNote`, one fixed text per kind, `wake` for all but a `suspended` that heals by
+  itself: reason `limited`, or `reserve`), and on `delivered` or `sent` the keys go into `seen` (the last
+  `WATCH_SEEN_MAX`, saved) and the id is listed. A terminal key (`merged`, `closed`, `completed:*`, `unreadable`) ends the
+  watch (`reason=terminal` or `unreadable`) once the note is placed. `delivered` is all or nothing per watch per frame.
+  The local kinds (`no_leader`, `expired`, `invalid`, `fleet_full`) are never in `seen`: the leader never sees them.
+- **A held note** (the listener is reconnecting): `deliverWatchNote` answers `sent` and calls back with the fate. The
+  watch is listed delivered and its keys go into `seen` like a delivered note's (saved, and in the set). If the note is
+  never written the fate is `ended`, `nolistener` or `dropped` and the watch ends under that reason; the note is lost,
+  which is accepted, since the session was not reachable for the whole grace. A restart (memory only) loses a held
+  note too, and that is accepted the same way. _Decided: accept it, because the leader keeps a device's per-watch
+  `seen` and acknowledgements across that daemon's restart (`accept` reuses the device under a new `boot`, `replace`
+  keeps the state of a watch whose id, target and `head` match and only adds to its `seen`), and it had both the key
+  (in every set sent while the note was held) and the acknowledgement (the id was listed delivered), so leaving the key
+  out of `watches.json` changed nothing there and the event was never sent again. Making a restart re-ask means the
+  leader dropping a device's `seen` and acknowledgements on a new `boot` and rebuilding them from the set, a protocol
+  change that also resets the state of every watch (followed `head`, head grace) for a window that is a restart inside
+  the grace of a note held for a reconnecting listener._
+- **A stopped table ends nothing and writes nothing.** `stop()` is a final state: `persist` and the end of a watch
+  (`drop`) are no-ops afterwards, so work that was past its `stopped` check when `stop` ran, a held note's grace timer
+  included, neither audits an end nor appends a snapshot of the old table behind the chain `stop()` returned, which
+  the next instance (a reload in the same process) has read the file after. An event whose note was placed after that
+  point is answered not delivered (its keys and a terminal end could not be saved or acted on): the leader sends it to
+  the next instance, one repeated note instead of a reloaded watch that outlives its target and holds the pane.
+- **A failed pane read ends nothing** (plan review finding 2). `deliverWatchNote` answers `unreadable` when the pane
+  list could not be read (an empty list, as `listPanePids` answers a failed `tmux`): the id is left out of `delivered`,
+  the watch stays and its keys stay out of `seen`, so the leader sends the events again at the next poll. `gone` (the
+  pane is not in a list that was read) ends the watch with `reason=session`, or `reason=task` when the pane is there
+  with the same process but carries another task (read again for the audit line only); `nolistener` with
+  `reason=nolistener`.
+- **The tick** (60 s). First the sweep: a pane missing from the list, a dead `claude` process or a pane pid that changed
+  ends its watches (`reason=session`) and a pane whose task changed ends them (`reason=task`); an empty pane list skips
+  the pane checks (a failed read is not a vanished pane) but a dead `claude` is checked on its own. Then expiry (24 h:
+  an `expired` note with wake, then the end), `no_leader`, and the resend rule above. An empty table skips the tick
+  and the start's sweep, so a machine with no watch reads no panes for it. `onEnded` (session events saw the pane's task
+  end) ends the pane's watches (`reason=ended`).
+- **Persistence** (`watches-store.ts`, `stateDir()/watches.json`). Per watch: id, kind, URL, `head`, `seen`, the pane id,
+  its pane process's pid and start time, the `claude` process's pid and start time, the task id or none, the made and
+  expiry times, `noLeaderTold`, `fleetFullTold`. Written 0600 by atomic rename. A restart (`start`) reloads an entry only
+  while it is unexpired, its `claude` process still runs with that start time, its pane process has the saved start
+  time and the table is under its cap; the others end `reason=restart` and are audited. The first set carries the
+  survivors. **One write chain per path per process** (plan review finding 3): `persist()` snapshots at call time and
+  appends to a module-level chain, `stop()` returns it, `start()` waits on it before reading, and shutdown awaits
+  `watchesSettled()`, so a restart over the same path (and a test that stops without awaiting) reads the last write.
+- **Audit** (`watchAudit`, `audit.ts`): `audit watch origin=watch op=<add|remove|event|end> kind=<pr|run|-> event=<kind|->
+  reason=<reason|-> outcome=<outcome|->`, every value from a closed set, one line per add, remove, event placed and end.
+  The `Watches` table logs nothing else about a watch (a failed save or send is a warning with the error's text and no
+  target).
+- **The custodian.** `awaitsWake` in `run-capabilities.ts` is true for a pane `SessionEvents.awaitsWake` holds or
+  `Watches.holds(pane, taskId)` does, so `close` answers `busy` and the seat counts no round due for it (`paneHolds`,
+  `pane-holds.ts`, one composition for both and the seat's one `seatHolds` expression, tested apart and against a real
+  table in `watches.test.ts`). `untouchable` (hand-off, pass, drain) is not changed: those
+  are the session's or the owner's own acts, and the session's end ends the watch. `holds` matches the pane id and task,
+  not the pane process: a respawned pane keeps `busy` until the next tick's sweep ends its watch (at most a minute),
+  which only ever errs toward not closing.
+- **A check name in a note** is a repo's text on its way to a model: `parseFailing` keeps one that holds only
+  characters other than C0, DEL and C1 (a ZWJ emoji is legitimate and refusing it would drop the whole event), and
+  `watchNote` replaces every control, format (bidi, zero-width), surrogate, line and paragraph separator character with
+  U+FFFD, the class `printable` and `isFlagNote` use, inside the fence.
+- **Step 4: `seance mcp`'s `watch_github` and `unwatch_github`** (built 2026-11-18; "MCP server"). The frame was
+  advertised under `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it
+  closes a `watch` frame as malformed. The client (`watch-github.ts`) reads a closed connection or an unparseable reply as
+  `unsupported`, and the session waits on its own (a restart closes it too, rarely; an add it had persisted may still
+  note the session, which only ends that wait early), in addition to the gate (`watchGate`: this machine's daemon and the verified leader). No second
+  capability string.
+- **Rejected: ending a watch on a failed pane read.** A `tmux` failure is transient and the session still waits;
+  ending the watch would drop it for good.
+- **Rejected: a `watch:` store prefix, daemon memory only.** W9, below.
+- **Why a watch, and what it is** (2026-11-17, folded in 2026-11-18 from docs/gh-watch.md, whose W-numbers the
+  bullets below keep). Every session on every machine runs `gh` as one GitHub user, so all share one 5000-request REST
+  budget and one 5000-point GraphQL budget; on 2026-11-17 the REST budget ran out (10:23 to 10:42 UTC) under many
+  sessions' own `gh run watch` (about 3 REST a tick, 3 s), `gh pr checks --watch` (1 point, 10 s) and /ship's merge
+  loop (1 point, 15 s). Slower polling and conditional requests (`gh-run-wait`: a 304 is not counted) cut each
+  watcher's cost but not N sessions watching one thing, nor the next session that forgets the rule. A fleet with one
+  reader of GitHub (the leader) and one way into a session (the inbox) makes waiting cost one read however many wait:
+  the session calls `watch_github` and ends its turn, the leader folds the target into its batched poll, and the
+  session's daemon delivers one fixed note that wakes it. Ten sessions watching one PR cost one alias in one query.
+- **W1, who may watch.** Any bound `claude` session, tasked or hand-started (a peer with no `claude` on its chain is
+  `nosession`). Not tasked sessions only: the hand-started ones run /ship and deploy waits too, and the owner's
+  direction (docs/presence.md, O4) is that Séance serves every session in its tmux server. A pane with no inbox
+  listener is `nolistener` (past the listener grace): a note that can never land would leave the session waiting for
+  good, and the refusal tells it to poll at 30 s or slower.
+- **W2, what may be watched.** A github.com PR (`/pull/<n>`, optional `head`) or Actions run (`/actions/runs/<id>`, an
+  `/attempts/<n>` dropped), any repo (G1, the owner's decision: one GitHub user per fleet, so a watch reveals nothing a
+  session's own `gh` could not; a fleet of machines logged in as different users is unsupported, and supporting
+  several revisits this). A run is named by URL so one parser serves both and the session copies what `gh run list
+  --json url` prints. **Rejected: only the task's own PR** (/ship stacks PRs, a hub opens PRs in sub-repos, a session
+  waits on main's deploy run, a hand-started session holds no task: each would keep polling). **Rejected: only repos
+  some machine clones**: the leader does not know any machine's scan set, and it would buy nothing; a hostile session
+  can only spend budget, which the caps bound.
+- **W3, binding and lifetime.** Ends: a terminal event, the session ending, the pane's task changing,
+  `unwatch_github`, 24 h (`WATCH_TTL_MS`; calling again replaces it). Caps refuse at the add, never evict, so no watch a
+  session relies on vanishes. **Rejected: binding to the task id**: a hand-started session has none, and a task's
+  session can be replaced (continue, successor) by one that never asked.
+- **W4, what an event is.** (Keys and readings: "PR status", "What a watch's events are".) `checks` fires on the first
+  failing context, as `gh pr checks --watch --fail-fast` does, and once more per head on a pass; it covers all checks,
+  not only required ones (a session fixing CI cares about an optional one, and the note marks which failing names are
+  required). A PR watch spans the PR's life, so a push, a failure, a fix, a conflict and the merge are one watch, which
+  is /ship's whole step 8. `head` closes the stale-run race (right after a push the rollup can still be the previous
+  head's). Level-triggered from the first reading: a watch on a PR already merged or a run already completed fires at
+  the first poll, and a watch carried across a leader change is judged afresh against `seen`. **Not events:** `behind`
+  (blocks only under an up-to-date ruleset, and one bit cannot say), `unarmed`, review requests, comments, a draft
+  toggling; the `prBlocked` alert already reaches the owner for a stuck `awaiting-merge` PR, and a watch is for a
+  session waiting on a fact.
+- **W5, what a note carries.** One fixed formatter (`watchNote`), opening "Automated note from séance, not written by
+  the user" as `blockedBrief` does, from: the rebuilt target URL; the event kind and outcome (enums; `merged` with
+  `stacked`; `completed` with GitHub's conclusion lowercased); the head (hex) and `headMoved`; and for a failure at
+  most 10 failing checks, the newest run of each name, each a `cleanName` name (100 characters) with `required` and a
+  job link only when its `detailsUrl` is exactly the watched repo's `/actions/runs/<digits>/job/<digits>`, rebuilt from
+  those ids (a third party's `targetUrl` gets none), in a fenced block. **Never** a title, body, branch, author,
+  comment, review, annotation, log line or check summary: free text a third party writes, which the session can read
+  with its own `gh` as the evidence it is. Check names are repo-owned text already put in a continuation prompt
+  (`blockedBrief`), bounded the same way; accepted. What to do next is fixed words per kind (for a failure, read the
+  job's log with `gh api repos/<o>/<r>/actions/jobs/<id>/logs` to a file), never an echo of anything read.
+- **W6, how it reaches the session.** Only the leader reads GitHub and only the session's own daemon delivers, so the
+  same machine and across machines are one path and no message crosses between sessions' machines. Every event is a
+  `wake` line (the session asked to be woken) except a `suspended` that heals itself; the inbox mod needed no change. A
+  note held for a reconnecting listener is held like a reply, and one dropped `nolistener` ends the watch. **Rejected:
+  an `append` note** (`$.session.append`, no wake): a session waiting on CI has ended its turn and would never read
+  it. **Rejected: delivering through `session-message`**: it routes by task id through the leader's resolver and has no
+  untasked recipient, where a watch event already knows its daemon and table entry.
+- **W7, what is read.** GraphQL for runs, not REST: it is the budget that did not run out, it batches 50 runs into a
+  point where REST costs a request each, and it keeps no per-run state. **Rejected: REST with `If-None-Match`**: a
+  run's ETag changes whenever it is updated, perhaps every poll (unmeasured), each a counted request on the budget that
+  ran out, and the ETag per run is lost at every leader change (a fallback S1 did not need). **Rejected: each
+  session's daemon reading its runs**: the machine may hold no `gh` login (the reason for one PR poller), two machines
+  would read one run twice, and a rate limit would be met by each daemon on its own clock instead of one reader
+  backing off for the fleet. Pace is the poller's one 60 s clock (a note lands within about a minute, against the 30 s
+  the owner's rule allows a session; accepted). Budget at the caps, estimated before S1: 100 PRs (2 merge chunks, up
+  to 10 blocked reads) and 100 runs (2 queries) are about 14 points a minute, 840 an hour, and no REST; each query
+  also selects `rateLimit{ cost remaining resetAt }`, so the cost is measured.
+- **W8, what a watcher is told.** A watch whose reads stop for longer than two intervals gets one `suspended:<reason>`
+  note per reason. For a limit: "GitHub's budget for this fleet's account is spent until HH:MM UTC; this watch resumes
+  then; do not poll GitHub yourself meanwhile", without wake (an `append`: the session waits either way, and waking it
+  to say keep waiting costs a turn). For a login or a missing `gh`: "the fleet cannot read GitHub; this watch is
+  suspended", with wake, since that may never heal and the session should fall back to polling at 30 s or ask its user;
+  the fallback is its call, and a resumption says nothing. An alias that answers `null` on two polls in a row ends the
+  watch `unreadable`, with wake. No leader, or one not advertising `watches`, refuses the add; a leader lost after it
+  is a `no_leader` note after 10 minutes; expiry and a late `fleet_full` are wake notes.
+- **W9, the daemon is the owner of record.** The registry is soft state per term, and the daemon restates its whole
+  set on every change, a 5 minute heartbeat, each tick while an answer is owed and at once on a new verified nominee.
+  **Rejected: a `watch:` store prefix**: durable across a leader change, but a new prefix needs its write policy, the
+  write floor and the version floor and a store write per add and event, to keep state the daemons hold and can
+  restate in one frame. **Rejected: daemon memory only**: self-updates restart daemons often and would silently drop
+  every watch while its sessions wait.
+- **W10, surfaces.** One `watch_github` for both targets (the URL says which; separate `watch_pr` and `watch_run` are
+  one more line in every session's context). No list tool: the ids are in the session's own context and an `unwatch`
+  of an unknown id is harmless. `CAPABILITIES.watches` is advertised by a daemon that serves the frame and, as leader,
+  polls; a client gates on it and the verified leader, since an older leader would drop the unknown op. The `watch`
+  audit line never carries a URL, owner, repo, number, head, check name or watch id; the leader logs no line per
+  watch, reading or event, only a refused set, a failed send and the poller's class changes. Not in the PWA,
+  `get_queue`, `status` or the archivist, and no live-watch count on the Machines row (the budget gauge is
+  `MachineStatus.gh`, #547).
+- **W11, a watch rather than extending `hand_off_task` and `prBlocked`.** The plain alternative is the leader
+  continuing an `awaiting-merge` task by itself when `taskPrBlock` names `checks` or `conflict`. It covers less: only
+  tasked sessions with one PR on main and a merge gate armed (hand-started sessions, stacked PRs, gate-less repos and
+  every Actions run keep polling, a large share of what ran the budget out); it turns a CI cycle into a close and a
+  relaunch (a slot under the account's cap behind the queue, a new process, a cold prompt cache) where a watch leaves
+  the session idle and wakes it into the same context; and it reverses "Continuing a session"'s manual-by-decision
+  continue, an unattended retry on a red check, where the watch leaves the next step to the session, which /ship bounds
+  at three fix attempts. **Decision: build the watch, keep the hand-off for what it is good at**: a PR that waits hours
+  on a review or merge queue should still hand off (an idle session holds a pane, a slot and a session limit for
+  nothing), minutes of CI or a run should watch, and the two compose (watch until checks pass, then hand off). The
+  leader's automatic continue on `checks` is not proposed; it would be its own decision against the manual one.
+- **Rejected alternatives to the whole.** **Webhooks** (the relay is blind and holds no secret worth a GitHub-facing
+  endpoint; per-repo installation the fleet does not own). **GitHub's notifications API** (CI outcomes reach it only as
+  notification settings allow, a thread names no check or job, a session would still read per run to find the failed
+  job). **A caching `gh` shim per machine** (dedups within one machine, cannot change a session's pace, and puts
+  Séance between every session and a `gh` that reads and writes far more than watches).
+- **S4, the wake after a long wait (2026-11-18, live on the Mac, fleet on 6be498d, which holds step 4).** The target
+  was a throwaway Actions run (a push-triggered workflow on a throwaway branch, `sleep 2100` on ubuntu-latest, the
+  branch deleted after; created 14:14:30Z, job completed 14:49:35Z, `success`). A fresh scheduler task session
+  (Sonnet 5.5, bypass permissions, inbox mod installed) called `watch_github` with the run URL (14:14:50Z, audit
+  `op=add kind=run outcome=ok`), wrote a timestamp and ended its turn: idle at its prompt, no background shell,
+  Monitor, sleep or poll. The leader's poller saw the completion and the daemon audited `op=event kind=run
+  event=completed outcome=delivered` and `op=end reason=terminal` at 14:49:53Z, 18 s after the job ended (inside the
+  60 s clock). The `wake` note started a new turn at 14:49:55Z, 35 minutes after the watch, and the session reported
+  it "arrived as an inbox plugin message that began this turn in the user's place"; nothing else started the turn. The
+  model acted on it: it wrote the time and the note to a file, sent a `send_message` note to another task and called
+  `report_task_done`. The note read "Automated note from séance, not written by the user: watch … on <run URL>. The run
+  completed: success (attempt 1). This watch has ended." **Result:** a session idle for 30-plus minutes is woken by a
+  `wake` note into a turn the model acts on, about 20 s after the run's end (the messaging spikes had measured minutes,
+  not a CI's length).
+
+### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`, `adapter-cli.ts`) — built 2026-11-18 (3a, 3b and 3c), docs/messaging.md
 
 An adapter is a program the machine's owner names in that machine's `config.json`, run by the daemon as a supervised
 child that speaks newline-delimited JSON on its stdin and stdout. It is the seam through which a tool (a chat, a hosted
-workspace, a notifier) sees this machine's sessions and, from 3b, talks to them. Séance never names a tool: an adapter
+workspace, a notifier) sees this machine's sessions and talks to them. Séance never names a tool: an adapter
 for one lives in its own repository and vendors the protocol's JSON Schema. 3a is the child and state out: the
-supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Delivery in and messages out (3b) and
-`seance adapter add|remove|restart|status` (3c) are docs/messaging.md's still.
+supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. 3b is text both ways: `deliver` with its
+`result` and `delivery`, the `message` frame out, replies through the `sent` and `received` tables, the subscription
+and the `tag` frame. 3c is installing: `seance-adapter.json`, `seance adapter add | remove | restart | status` and
+`doctor`'s checks ("Installing", below). The owner's brief, the seam's rejected shapes and its fit against three kinds
+of tool close the section; docs/messaging.md keeps the spike evidence and the open questions.
 
 - **Declared only in `config.json`** (`adapters`, `parseAdapters` in `daemon/src/config.ts`), at most `ADAPTERS_MAX`
-  (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?}` and nothing else, parsed
+  (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?, dir?, added?}` and nothing else, parsed
   strictly, as `traits` are: any mistake fails the load, naming `adapters.<name>.<key>`. `argv` is an array of at most
   32 non-empty, NUL-free words, never a shell string; `argv[0]` is an absolute path or a bare name resolved through
   `PATH` at each start (`Bun.which`), never a relative path with a slash and never a recorded `process.execPath`.
-  `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds 3b's deliveries in and is parsed now so a
-  config written for 3b loads. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that 3c's `doctor`
-  will read. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the relay, and no
-  capability advertises them.
+  `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds deliveries in; `request` is the owner's
+  opt-in. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that `doctor` reads, `dir` the
+  absolute checkout `seance adapter add` read the manifest from (display and `doctor` only: nothing runs from it but
+  what `argv` names), and `added` the ISO instant of that add, which joins the subscription fingerprint. A hand-written
+  entry needs only `argv`. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the
+  relay, and no capability advertises them.
 - **The protocol** (`shared/src/adapter-protocol.ts`, the schema of record, as `types.ts` is for the wire). One UTF-8
   frame per line, at most `ADAPTER_LINE_MAX` (256 KiB). `shared/src/adapter-protocol.schema.json` is generated from it
   (`bun run adapter-schema`, then formatted) and committed beside it; `adapter-protocol.test.ts` holds the two equal.
   The adapter's lines go through `parseAdapterLine` into a fresh value, exact fields only. A line that does not parse
-  is answered `{kind: "error", code: "invalid"}`, and `deliver` and `tag` (protocol 1's, taken from 3b) are answered
-  `unsupported`.
+  is answered `{kind: "error", code: "invalid"}`, an unknown kind included.
 - **The handshake and versioning.** The daemon writes `hello` first: `{protocol: ADAPTER_PROTOCOLS, features:
-  ADAPTER_FEATURES (none yet), machine: {deviceId, name}, daemon: {version}}`. The adapter answers `{protocol, name,
+  ADAPTER_FEATURES (["deliver", "tag"]), machine: {deviceId, name}, daemon: {version}}`. The adapter answers `{protocol, name,
   version, wants, features}` within 10 s, or it is restarted (`reason=handshake`). Nothing else flows before both. A
   major outside `ADAPTER_PROTOCOLS` is audited `op=refused reason=protocol`, and a `name` other than its config key
   `op=refused reason=name`; either is stopped and never restarted (until the next daemon start). A frame kind goes out
   only for what `wants` names (`adapterWants`): `sessions` for `snapshot`, `session` and `session-gone`, `tasks` for
-  `task`; `messages` is accepted and means nothing until 3b. Additions inside a major are `features`, as
-  `CAPABILITIES` are on the wire.
+  `task`, `messages` for `message`; `result` and `delivery`, answers to the adapter's own frames, always go. An adapter
+  whose hello names no `messages` takes none: a session's message to it is `unknown`. Additions inside a major are
+  `features`, as `CAPABILITIES` are on the wire.
 - **The supervisor** (`createAdapterSupervisor`), one per adapter:
   - **Env.** The one a session gets (`childEnv`, so no `CREDENTIALS_DIRECTORY`) less every `TMUX*` variable, plus
     `SEANCE_ADAPTER_NAME` and `SEANCE_ADAPTER_DIR`. That is `stateDir()/adapters/<name>`, made 0700 before each start,
@@ -12258,7 +12579,7 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
     discarded: an adapter keeps its own log, and nothing it prints reaches the daemon's log or an audit line.
   - **Restarts.** Each exit is followed by a restart with backoff, 1 s doubling to 60 s. A run of 60 s resets the
     backoff. Five exits within ten minutes put the adapter in the `failed` hold until the next daemon start
-    (`op=failed exits=<n>`); 3c's `seance adapter restart` will lift it.
+    (`op=failed exits=<n>`); `seance adapter restart` lifts it ("Installing").
   - **Malformed lines.** Ten `invalid` lines within a minute restart the adapter (`reason=invalid`).
   - **The unread cap.** The daemon's writes to stdin are queued, and the bytes the adapter has not drained are counted.
     Past `ADAPTER_UNREAD_MAX` (2 MiB) the adapter has stopped reading and is restarted (`reason=unread`), never
@@ -12308,9 +12629,63 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   or is absent, is in no `snapshot`, `session` or `session-gone` for that adapter, and a task whose ledger `repo` is not
   listed is in no `task` frame. A session that leaves the list goes out as `session-gone` with `reason: "replaced"` to an
   adapter told of it, since what that adapter holds no longer describes anything it may see.
+- **Delivery in** (`deliver`, `Messages.deliverFromAdapter`): the built local delivery with the adapter as the sender,
+  never routed through the leader. The host checks `kinds` first (`refused`, `code: "kind"`). A text over `MESSAGE_MAX`,
+  or a `request` over `MESSAGE_PUSH_MAX`, is `too_long`. Exactly one address:
+  - **`to`**, a task id this machine's launch ledger holds, at a live pane carrying it: else `held` (launched, no pane
+    yet, within the grace), `ended` or `unknown` (not launched here).
+  - **`toSession`**, a conversation subscribed to this adapter (else `unknown`), re-verified at the act (`atAct`):
+    `ambiguous` when two live processes claim it, `unverified` when the daemon's own source now names another
+    conversation, `ended` when no pane is live (nothing held, D2). It reaches that `claude` process only (`only`).
+  - **`inReplyTo`**, a message a session sent this adapter (the `sent` entry names it; any other is `unknown`), at the
+    asker's pane, pid, task and session, waking it ("Replies by handle").
+
+  `repos` bounds every address (`refused`, `code: "repo"`): a task by its ledger repo, a session by its feed record.
+  Two rate buckets, both in memory: one per adapter for all its deliveries (`ADAPTER_RATE`, 60 a minute and 600 an
+  hour), then one per target (`MESSAGE_RATE`, 20 and 200). The text reads in the adapter wrapper
+  (`renderAdapterMessage`, `shared/src/messages.ts`): "the `<name>` adapter on `<machine>` relays a message from
+  "<label>"", `from` only as a display label through `displayTitle`'s scrub, never as the user or a session, and the
+  way to reply. Placed by the same listener write or hold a local message takes (the mod's `$.session.append` or
+  `$.prompt.submit`, never a key); a note submits a turn only with `wake: true`. `result` answers each `deliver`
+  (`delivered`, `sent` for one held for a listener, `held`, `ended` with `code: "nolistener"` past the grace, `unknown`,
+  `too_long`, `rate_limited`, `refused`, `ambiguous`, `unverified`, `unsupported` while stopping), with the message
+  `id` once placed; a delivery answered `sent` gets one `delivery` frame with its fate.
+
+- **Messages out** (`adapter:<name>` in `send_message`'s `to`, `MessageOutFrame`): local only, bound by peer pid like
+  every `message`, the sender tasked or not by the same rule. Refused before the adapter sees it: `unbound` (no
+  `claude` process on the peer's chain, so no key the adapter could know it by), `too_long` (over `MESSAGE_MAX`; an
+  adapter takes no stub, the whole text goes on one line, and a line over `ADAPTER_LINE_MAX` is `too_long` too),
+  `rate_limited` (the sender's own bucket), `unknown` (no such adapter, or one that takes no messages), `refused` (a
+  sender outside `repos`: neither delivered nor subscribed), `ended` (the adapter is not running past its handshake).
+  The frame carries the message `id` (the handle the adapter replies by), its kind and text, `from: {key, session?,
+  task?, title?}` (`session` only when subscribed), `inReplyTo` only when it names that adapter's delivery to this same
+  session (any other is dropped, never passed on), `subscribed`, and `leave`. Text flows out only when a session
+  addressed it to that adapter.
+- **The subscription** (docs/tags.md §8; D3 amended). A session's message to `adapter:<name>` subscribes its
+  conversation when the daemon holds a verified `agent.session` for the sender's bound `claude` process, which that
+  process alone claims (`Conversations.verifiedFor`), never one from the frame; the reply says `subscribed` and names
+  the conversation (`session`), so the session can give the tool the id it holds it under. A sender with no verified
+  conversation still reaches the adapter, `subscribed: false`, answerable by reply for the hour. A reply by handle
+  subscribes nothing. Kept at rest in `stateDir()/conversations.json` (`openSubscriptions`, 0600, written durably on
+  one chain, beside the owner's labels: "The owner's label"): ids, adapter names, fingerprints and times, never text; one the daemon cannot read loads empty. Ended
+  by the session's `leave` (`send_message`'s `leave: true`, no text needed; the frame still goes, with `leave`), by
+  the conversation not live for `CONVERSATION_IDLE_MS` (30 days; a verified, unconflicted session the feed reports
+  touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and at each
+  host start for a name no longer configured or configured as another program (`reconcile`: the fingerprint
+  (`adapterFingerprint`) is a hash of `argv`, the recorded `commit` and `added`, the last only when the entry has one,
+  so a hand-written entry keeps the fingerprint it had before 3c), so a replaced program inherits none. `seance adapter
+  add` and `remove` also end a name's subscriptions at once (`drop(name)`). Not a bearer, unlike a reply handle: usable
+  only by that adapter, over its own stdin, on this machine, to a conversation that messaged it and that the daemon
+  verified at the act.
+- **Tags** (`tag`, docs/tags.md §8.4): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
+  (one live in a session outside `repos` is `refused`) or on a task this ledger holds within `repos`; else `unknown`.
+  Memory only (`Conversations.setAdapterTag`, at most `ADAPTER_TAG_TARGETS_MAX` targets per adapter, the tag caps per
+  target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
+  conversation's tags show on the process whose verified, unconflicted claim it is. They reach the PWA's `sessions`
+  and that adapter's own records, never another adapter's (`tagsFor`) or MCP (`AGENT_VISIBLE_TAG_KEYS`).
 - **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
   account id, an absolute path, the PSK or anything derived from it.
-- **Audit**, origin `adapter` (`adapterAudit`), lifecycle lines only:
+- **Audit**, origin `adapter` (`adapterAudit`), the lifecycle lines and one line per message each way:
 
   ```
   audit adapter origin=adapter op=start name=<n> argv=<word count> argv0="<basename>" pid=<pid>
@@ -12319,15 +12694,94 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   audit adapter origin=adapter op=refused name=<n> reason=<protocol|name>
   audit adapter origin=adapter op=failed name=<n> exits=<n>
   audit adapter origin=adapter op=stop name=<n>
+  audit adapter origin=adapter op=deliver name=<n> dir=in to="<task id>|session|reply" kind=<kind> bytes=<n> outcome=<outcome> [code=<kind|repo|nolistener>]
+  audit adapter origin=adapter op=message name=<n> dir=out from=<"<task id>"|untasked|-> kind=<kind> bytes=<n> outcome=<outcome> subscribed=<true|false>
   ```
 
-  Never an argv word but `argv[0]`'s basename, and nothing the adapter wrote. The adapter modules load neither
-  `log.ts` nor `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what
-  the supervisor's own constants pass to `AdapterAudit`. 3b adds `op=deliver` and `op=message`.
+  Never an argv word but `argv[0]`'s basename, and nothing the adapter wrote: no text, `from` label, message id or
+  conversation id (both are handles), never a `ref`. A delivery's later fate is a second `op=deliver` line. Adapter
+  traffic is audited under origin `adapter` alone, never `message`. The adapter modules load neither `log.ts` nor
+  `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what their own
+  constants pass to `AdapterAudit`.
 
-- **Trust.** An adapter runs as the owner's uid, so Séance cannot contain it (docs/messaging.md §6.3). These rules
-  bound what Séance grants and audits, not what the program can do. They are not a sandbox, and the threat model does
-  not count them as one.
+- **Trust: an adapter is third-party code.** It runs as the owner's uid, so Séance cannot contain it: it can read
+  `state.json`, the keychain where it is unlocked and every worktree, and can drive tmux. Installing one trusts its code
+  as much as an MCP server or a Claude Code plugin the owner installs, and the README's setup step and `seance adapter
+  add` say so. These rules bound what Séance grants and audits (no text in a log, no queue write, no relay frame, no key
+  or credential handed over), and a well-behaved adapter's reach is exactly the protocol. They are not a sandbox, and
+  the threat model does not count them as one (its adapter invariant). What follows from that:
+  - **The tool is a new source of prompt text for every session on the machine.** Anyone who can write into the tool
+    (a project member, a bot, a compromised server) can put a note or question in a session and, if allowed, a
+    request. `kinds` bounds it, `["note", "question"]` by default, `request` the owner's opt-in per adapter; `repos`
+    bounds which sessions and tasks it sees and reaches.
+  - **State out is a disclosure to the tool's server**: titles, repos, branches, PR URLs, states, and the text of
+    messages sessions address to it. The owner chooses that by installing it; prompts are never part of it.
+  - **The tool's credentials are the adapter's**, in its own config or keychain entry, never in Séance's `config.json`
+    and never passed by the daemon.
+  - **A subscription outlives the hour a reply handle has.** It is bounded by the channel, not by time: anyone who can
+    write into the tool reaches a subscribed session while the subscription stands, within `kinds` and the rate
+    buckets, and a session that no longer wants it sends `leave`.
+  - **Integrity**: `add` records the checkout's commit, and `doctor` warns when it moved since, a reminder that new
+    code runs, not a refusal. Self-update never pulls or rebuilds an adapter: a daemon update restarts the adapters on
+    the code they have.
+- **Installing** (3c; `daemon/src/adapter-cli.ts`, `adapter-manifest.ts`, `adapter-control.ts`, `adapter-checks.ts`).
+  An adapter's repository carries `seance-adapter.json` at its root, and the owner installs it with four verbs typed at
+  the machine's shell. They are the owner's acts, never a frame, a local-socket op, a broker action, an app op or MCP,
+  and they are in the CLI's one `COMMANDS` table, so the custodian's fence denies `seance adapter` to a round under both
+  names (`custodian-fence.test.ts` names it). Setup is the README's step, with the trust statement below.
+  - **The manifest** (`readAdapterManifest`): exactly `{name, protocol, argv}`, at most 64 KiB, parsed strictly
+    (`parseAdapterManifest`: an unknown key, a bad name, a non-integer protocol or a malformed argv refuses it). A
+    `protocol` outside `ADAPTER_PROTOCOLS` is refused at `add`, before the daemon would refuse its handshake. `argv` is
+    resolved for `config.json`, since the adapter's cwd is its state dir, never the checkout: a bare `argv[0]` stays
+    bare (PATH at each start); a relative one must be an executable file in the checkout and is made absolute; a later
+    word that is a flag stays, one that holds a `/` or names something in the checkout is made absolute and must stay
+    inside it by realpath (a link out is refused), and any other word stays. An absolute word anywhere is refused: a
+    manifest names its own files and programs on PATH, nothing else. The checkout itself is realpath'd and recorded as
+    `dir`.
+  - **`add <dir> [--kinds <k,k>] [--repo <repo>]...`** reads the manifest, then writes `adapters.<name>` into this
+    machine's `config.json` and nothing else of it: `{argv, kinds, repos?, commit?, dir, added}`. The config must load
+    as it stands before the edit, and the new file is written beside it and loaded before it replaces it (`writeDurable`,
+    its mode kept), so a mistake never leaves the daemon a config it refuses. `kinds` defaults to `["note",
+    "question"]`, `request` only by `--kinds`; a re-add keeps the entry's `kinds` and `repos` unless given. A fifth
+    name is refused (`ADAPTERS_MAX`). `commit` is the checkout's `HEAD` through the hardened git (`checkoutCommit`), when
+    it is a git work tree. A `--repo` no scanned repo names is a warning, not a refusal (the scan may not have run).
+    Then it ends that name's subscriptions (`drop`), so a replaced program inherits none even under the same name, and
+    prints what it wrote, the trust statement and that `seance restart` starts it: a running daemon reads `config.json`
+    at its start only.
+  - **`remove <name>`** deletes the entry, ends its subscriptions, and leaves `stateDir()/adapters/<name>` as it is:
+    the adapter's own data, which Séance did not write.
+  - **The race the `added` stamp closes.** A running daemon keeps its subscriptions in memory and may rewrite
+    `conversations.json` after the CLI's `drop`, putting the old ones back. `added` is new at every add and joins the
+    fingerprint, so the next start's `reconcile` drops them anyway; `remove` needs no stamp, since the name is gone.
+  - **`restart [<name>]` and `status`** reach the running daemon through two files in `stateDir()`, never the socket
+    (widening the local op socket is a threat-model change this does not need). The daemon writes
+    `adapter-status.json` (0600, durably, on every supervisor change, coalesced: per adapter the supervisor's state,
+    pid, start time, hello `protocol` and `version`, exits in the window, the last exit's time, code and reason, the
+    entry's fingerprint, and counts of deliveries placed, messages out and owner restarts; never text, argv or a
+    conversation). The CLI believes it only under the pid `runtime.json` shows live. `restart` writes
+    `adapter-restart.json` (names only, honoured within 60 s), which the daemon takes by rename every 2 s
+    (`takeRestartRequest`) and acts on through `supervisor.restart()`: the run is ended (`reason=restarted`, not counted
+    toward the `failed` window), the window and the backoff reset, and the adapter started again; one held `failed` or
+    `refused` starts afresh. The CLI waits up to 10 s for the restart count to rise. A name not in the daemon's view
+    (added since it started) is told `seance restart`. `status` reads `config.json` alone when no daemon runs; the
+    adapter's hello `version` reaches the terminal only through `printable`, as the custodian's summary does, and a
+    fingerprint that differs from the entry's says the daemon runs an older config.
+  - **`doctor`** (`adapterChecks`, its "adapters" section): an absolute `argv[0]` that is missing or not executable
+    fails; a bare one not on the shell's PATH warns (the daemon's PATH may differ); an absolute argv word that is gone
+    warns. For an entry with `dir`: a manifest that is gone, renamed or whose resolved argv changed warns (`add` again);
+    a checkout no longer in git warns; and **a checkout whose `HEAD` moved since `add` warns, naming both commits**
+    ("Trust", Integrity: a reminder that new code runs at the next start, never a refusal). A live
+    adapter held `failed` or `refused` warns, pointing at `seance adapter restart`. An entry with no `dir` was written
+    by hand and has nothing to compare.
+  - **Audit**, origin `cli` (`adapterOwnerAudit`), one line per act, the daemon's own lines staying under `adapter`:
+
+    ```
+    audit adapter origin=cli op=add name=<n> argv=<word count> argv0="<basename>" kinds=<k,k> repos=<n|all> commit=<true|false> replaced=<true|false>
+    audit adapter origin=cli op=remove name=<n>
+    audit adapter origin=cli op=restart name=<n> outcome=<requested|not_running>
+    ```
+
+    No argv word but `argv[0]`'s basename, no path, repo name or sha. A refused `add` writes and audits nothing.
 - **The reference adapter** (`daemon/test/bin/reference-adapter.ts`) is the tests' stub, linked and exec'd once in
   `beforeAll`, and the template a new adapter starts from. It is standalone and imports nothing from Séance.
 - **Tested by** `daemon/test/adapter-supervisor.test.ts`, which covers:
@@ -12347,16 +12801,109 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   - the host's snapshot and its `repos` filter;
   - `tagsFor`.
 
+  `daemon/test/adapter-messages.test.ts` drives 3b through the reference adapter's outbox, with real panes, verified
+  conversations and inbox listeners:
+  - delivery by task with the wrapper and `wake`, a kind outside `kinds`, a held delivery and its `delivery` frame;
+  - `unknown`, `too_long`, a task outside `repos`, and the per-target rate;
+  - a question answered by the adapter's reply (waking the asker), and the adapter's question answered by the
+    session's reply by handle; a stray `inReplyTo` dropped;
+  - an unverified sender (`subscribed: false`, its reply still back), an unknown adapter, one that takes no
+    messages, a sender outside `repos`;
+  - a subscription across a `--resume` in another process and a daemon restart, `ambiguous`, `unverified` after a
+    `/clear`, ended by `leave` and by the name configured as another program;
+  - a tag refused on an unsubscribed conversation, and never seen by another adapter.
+
+  `daemon/src/adapter-subscriptions.test.ts` covers the file (mode, reopen, `reconcile`, `drop`, the idle prune, the
+  cap, an unreadable file, no text at rest).
+
+  3c: `daemon/test/adapter-cli.test.ts` runs the real CLI as a subprocess on a throwaway config and state dir, the test
+  process playing the daemon where one matters:
+  - `add` writing the entry (absolute argv, commit, dir, other keys and the file's mode kept) and its audit line;
+  - `add` under a name already there ending that name's subscriptions and no other's, keeping `kinds` and `repos`,
+    and changing the fingerprint at the same commit;
+  - a refused manifest (an argv word out of the checkout, an unknown protocol, no checkout) writing and auditing
+    nothing; the fifth adapter; usage errors;
+  - `remove`, its subscriptions, and the adapter's own directory left in place;
+  - `status` with no daemon and with one, the hello version scrubbed;
+  - `restart` with no daemon (`not_running`) and through the request file.
+
+  `daemon/test/adapter-supervisor.test.ts` adds the owner's restart (not counted, `reason=restarted`, no backoff) and
+  the restart lifting `failed` and `refused`; `daemon/src/adapter-manifest.test.ts` the manifest's parse and
+  resolution (a link out, `..`, an absolute word, a non-executable `argv[0]`); `daemon/src/adapter-checks.test.ts`
+  `doctor`'s checks.
+
   The parsers and the schema are tested in `shared/src/adapter-protocol.test.ts` and `daemon/src/config.test.ts`, and
   the audit lines in `daemon/src/audit.test.ts`.
 
-- **Rejected** (docs/messaging.md §6.7 has the rest):
-  - **Sending only titled (tasked) panes.** A hand-started session is the common case for a tool that mirrors a
-    machine.
-  - **Reading `closed` from the despawn's audit line.** That is a log, not a signal, and the custodian's and the
-    drain's closes go through the same `despawnSession` anyway.
-  - **Holding `repos` until 3b.** Leaving it for 3b would make a config written for 3b disclose the out-of-scope
-    sessions it means to hide, for as long as 3a runs.
+**The owner's brief (2026-11-14).** Séance owns a generic, tool-agnostic interface and never names a tool, in code,
+specs, names or tests; an adapter for a tool lives in its own repository (`seance-<tool>`), and that tool's code does
+not know Séance either. The seam is two-way: a tool delivers messages into sessions, and sessions, tasks and messages
+flow out. The same pattern is meant to serve work tracking later (docs/orchestrator.md §1), a different seam this one
+does not foreclose. An adapter may not spawn, despawn, enqueue, cancel, amend or pass (decided 2026-11-17: work a tool
+wants started goes through an orchestrator session it delivers to, which may be the tool's own coordinator); send
+cross-machine or reach the relay or the leader; read an inbox, a prompt, a transcript, a screen or a message not
+addressed to it; write a task tag or any tag outside its own namespace; send a key or deliver as the user; or be
+declared from anywhere but `config.json`.
+
+**Checked against three kinds of tool** (2026-11-17):
+
+| Need                                                            | A hosted workspace agents attach to  | A team chat bridge | A work tracker             |
+| --------------------------------------------------------------- | ------------------------------------ | ------------------ | -------------------------- |
+| Turn state of each session (busy, idle, needs input), lifecycle | `session`, `task`                    | `session`          | `task`                     |
+| A stable key per session                                        | `session.id` (conversation), task id | `session.id`       | task id                    |
+| Its own id and state on the session                             | `adapter.<name>.*` tags (`tag`)      | same               | —                          |
+| Text into a session, held while idle or waking it               | `deliver`, note or `wake`            | `deliver`          | —                          |
+| Whether and when it landed                                      | `result`, `delivery`                 | `result`           | —                          |
+| A session talking to the tool, and the tool answering           | `adapter:<name>`, `toSession`        | same               | —                          |
+| Inbox lifecycle (seen, deferred, declined, done, options)       | the tool's own CLI, by `session.id`  | same               | —                          |
+| PR URL and done                                                 | `session.prUrl`, `task` `done`       | —                  | `task`                     |
+| Start or resume a session for an item nobody holds              | **no**                               | —                  | **no**                     |
+| Create, amend or settle tasks                                   | —                                    | —                  | **no**: orchestrator.md §1 |
+| Tasks queued but not yet placed on any machine                  | —                                    | —                  | **no**                     |
+
+The first two fit the seam. A tracker's core needs (create and amend tasks, see the whole queue) are the queue's,
+which this seam is forbidden on purpose; it gets state out here and writes through an orchestrator session. An
+output-only tool (a notifier, a time log) is `wants: ["sessions"]` and nothing else. A tool that designates a
+coordinator session needs no second session on Séance's side: one session holds Séance's MCP and is the tool's
+coordinator, reached by `deliver` like any other, keyed by the `session.id` `send_message` returned it.
+
+**Rejected:**
+
+- **An adapter dialing the local socket and naming itself.** Any process of the same user could claim the name;
+  peer-pid binding names a pane, not a program.
+- **An inherited socketpair on fd 3.** It removes the rendezvous, but so do stdin and stdout, which every runtime has
+  with no fd plumbing, as MCP's stdio transport does. An adapter that prints to its stdout breaks its own stream; that
+  is its bug, answered `invalid` and restarted.
+- **An adapter loaded into the daemon (`import()`).** Third-party code inside the process that holds the PSK and a
+  service-delivered credential.
+- **An adapter as an MCP client of `seance mcp`, or as its own app-role relay client.** Both are fleet-wide and need
+  the PSK: the opposite of a local program trusted with this machine's sessions.
+- **The daemon calling the tool itself** (a webhook, a tool URL in Séance's config). Séance would hold a tool's
+  address and credentials, the coupling the brief forbids.
+- **One adapter for the fleet, on the leader.** Leadership moves, delivery happens on the machine with the pane, and
+  the leader keeps nothing a message carries.
+- **The adapter installing its own Claude mod.** Two mods would deliver into one session with no shared rule for
+  wake, and Séance would lose its say over what reaches a session.
+- **A `boundary` delivery mode, and an opaque `data` field passed through unread.** Kept out until a tool needs one; a
+  `data` field read by the model is prompt text Séance's wrappers would no longer frame. Structured acts go through the
+  tool's own CLI, keyed by the conversation id.
+- **Keeping the reply hour for adapter replies, or lengthening it.** A longer-lived bearer, still useless across
+  `--resume`; replaced by the subscription.
+- **`restart` and `status` as local-socket ops.** The socket's allowlist is a threat-model boundary, and the two need
+  nothing a file under the 0700 state dir cannot carry; the custodian's owner verbs set the pattern.
+- **`remove` deleting the adapter's own directory.** It holds the adapter's data and maybe its credentials, written by
+  the adapter, not Séance; the owner deletes it.
+- **Refusing a moved checkout, or pinning `argv` to the commit.** The owner updates an adapter by pulling it; `doctor`
+  says new code runs, `add` records it again, and an unreviewed pull is the same trust as installing.
+- **Containing the adapter** (the custodian round's masks with a network allowlist for the tool's host). Not in PR 3
+  (docs/messaging.md, open question 10): revisit before an adapter the owner did not write is installed, and drill it
+  as the custodian's was before claiming it.
+- **Sending only titled (tasked) panes.** A hand-started session is the common case for a tool that mirrors a
+  machine.
+- **Reading `closed` from the despawn's audit line.** That is a log, not a signal, and the custodian's and the
+  drain's closes go through the same `despawnSession` anyway.
+- **Holding `repos` until 3b.** Leaving it for 3b would make a config written for 3b disclose the out-of-scope
+  sessions it means to hide, for as long as 3a runs.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
@@ -13113,7 +13660,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     `message-layering.test.ts` holds the three modules that keep them off both sinks, type-only imports included.
   - **Rejected:** the custodian's per-pane tracker (`pane-activity.ts`) as the store. It is `ours`-only and keyed by
     pane for the custodian's own reads, so it would have had to change both to serve this.
-  - **The owner's label** (built 2026-11-18, docs/tags.md step 2; `daemon/src/conversation-store.ts`,
+  - **The owner's label** (built 2026-11-18, docs/tags.md step 2; `daemon/src/adapter-subscriptions.ts`,
     `Conversations.label`, `handleSessionTag` in `daemon/src/handlers.ts`). The owner names an **untasked**
     conversation; a tasked session's name stays its task's title until task tags (docs/tags.md step 3).
     - **The op.** `session-tag` (`SessionTagRequest`: `{ pane, session, key: "label", value }`, `""` clears),
@@ -13128,13 +13675,16 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       shortened; a write that throws, or a call before the table starts, is `internal_error`, holding nothing new. Audited `audit session-tag
       origin=relay key-count=<0|1> outcome=<set|cleared|code>`. `CAPABILITIES.sessionTag` advertises it,
       unconditionally: session events always run, so every daemon of this build has the table.
-    - **At rest.** `stateDir()/conversations.json`, 0600, written whole through `writeDurable` (temp, fsync, rename)
-      and serialized, keyed by conversation id: `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }],
-      lastLive }`. At most `CONVERSATIONS_KEPT_MAX` (256), the least recently live dropped first; an entry not live
-      for `CONVERSATION_IDLE_MS` (30 days), or holding nothing, dropped at load. `lastLive` is touched on every report
-      and reaches the disk at most hourly (`LAST_LIVE_WRITE_MS`), since only the prune reads it. A file the daemon
-      cannot read loads empty: labels are lost, never invented. `subscriptions` is docs/tags.md step 4's; nothing
-      writes it yet, but a label write carries it over, so a downgrade erases none.
+    - **At rest.** `stateDir()/conversations.json`, 0600, the adapter subscriptions' file ("Adapters"), with one
+      owner: `openSubscriptions`, opened once by the session-events capability and handed to the adapter host, so no
+      second writer of another shape erases its entries (each loading the other's as empty). Written whole through
+      `writeDurable` (temp, fsync, rename) on one chain: `{ v: 1, adapters, conversations }`, each conversation
+      `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }], lastLive }`. At most `CONVERSATIONS_KEPT_MAX`
+      (256), the least recently live dropped first; an entry not live for `CONVERSATION_IDLE_MS` (30 days), or holding
+      neither a label nor a subscription, dropped. `lastLive` is touched on every report and reaches the disk at most
+      hourly, since only the prune reads it. A file the daemon cannot read loads empty: labels are lost, never invented;
+      a malformed label drops the label, never the entry's subscriptions. A label write awaits its own write and puts
+      the label back when it fails; a subscription's end keeps the label, and a label's clear keeps the subscriptions.
     - **The join.** `tagsFor` adds `owner.label` (conversation scope) only to an untasked process, while its
       conversation's claim is verified, not through the `pane` fallback, and has exactly one claimant (a tasked
       process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
@@ -13338,7 +13888,7 @@ the binding with real panes.
 
 ### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4, 6 and 8), served on the round's own socket since custodian 4b
 
-The sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the custodian round's nine
+The custodian frame kind, beside `Plain`, `broker`, `session-event`, `message`, `inbox` and `watch`: the round's nine
 verbs, `sessions`, `close <pane>`, `capture <pane>`, `pr <pane>`, `flag <pane> <reason> [note]`, `nudge <pane>` (text on
 stdin), `interrupt <pane>`, `notes` and `done` (C22–C34, C37–C40, C42; `capture` and `pr` are 4b's).
 `seance custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the reply as JSON.

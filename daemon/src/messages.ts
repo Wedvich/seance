@@ -1,4 +1,7 @@
 import {
+  ADAPTER_RATE,
+  adapterOfAddress,
+  adapterStub,
   custodianRequest,
   displayTitle,
   droppedNotice,
@@ -10,9 +13,14 @@ import {
   MESSAGE_ROUTE_MAX,
   messageStub,
   receiptNote,
+  renderAdapterMessage,
   renderMessage,
   REPLAY_RETAIN_MS,
   routeBytes,
+  type AdapterDeliveryOutcome,
+  type AdapterResultCode,
+  type AdapterResultOutcome,
+  type DeliverFrame,
   type DeliverMessageRequest,
   type DeliverMessageResponse,
   type MessageKind,
@@ -22,7 +30,7 @@ import {
   type ReplyHandle,
   type SessionMessage,
 } from "@seance/shared";
-import { CUSTODIAN_SENDER, type CustodianSender, type MessageAudit } from "./audit.ts";
+import { CUSTODIAN_SENDER, type AdapterMessageOutcome, type CustodianSender, type MessageAudit } from "./audit.ts";
 import { log } from "./log.ts";
 import {
   LISTENER_GRACE_MS,
@@ -33,8 +41,9 @@ import {
   type MessageFrameRoute,
   type MessageReply,
 } from "./message-frame.ts";
-import { claudeProcessOf, sessionAlive, type SessionKey } from "./claude-process.ts";
+import { claudeProcessOf, sessionAlive, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
 import { ancestorBelow, peerPidSupported } from "./peer.ts";
+import type { Conversations } from "./conversations.ts";
 import type { BoundPane } from "./session-events.ts";
 
 /**
@@ -103,6 +112,66 @@ export interface MessagesDeps {
    * when it could not be sent. Absent, this daemon never routes and answers `unsupported` to a `send`.
    */
   readonly route?: (message: SessionMessage) => Promise<boolean>;
+  /** Session identity: what subscribes a sender to an adapter, and what a `toSession` delivery resolves through. */
+  readonly conversations?: Pick<Conversations, "verifiedFor" | "atAct">;
+}
+
+/** A session's message to an adapter, as messages hands it to the adapter host (`adapter-host.ts`). */
+export interface AdapterOutletMessage {
+  readonly id: string;
+  readonly kind: MessageKind;
+  readonly text: string;
+  readonly bytes: number;
+  /** The sending `claude` process (`Bound.session`). */
+  readonly key: SessionKey;
+  /** The sender's task, only one this machine launched. */
+  readonly task: string | null;
+  readonly title: string | null;
+  /** Only when it names a delivery from this adapter that this very session received. */
+  readonly inReplyTo?: string;
+  /** The sender's verified conversation, re-read at the act; null when it has none. */
+  readonly conversation: string | null;
+  readonly leave: boolean;
+  /** A message to `adapter:<name>` subscribes; a reply by handle to the adapter's delivery does not (docs/tags.md §8.2). */
+  readonly subscribe: boolean;
+}
+
+export type AdapterOutletAnswer =
+  | { readonly ok: true; readonly subscribed: boolean; readonly session?: string }
+  | { readonly ok: false; readonly code: "unknown" | "ended" | "refused" | "too_long" };
+
+/** Refusals messages answers before the host sees the message; the host audits them under its own origin. */
+export type AdapterEarlyRefusal = Extract<AdapterMessageOutcome, "unbound" | "too_long" | "rate_limited" | "stopping">;
+
+/** The adapter host as messages reaches it: bound late, since the host starts after messages exists. */
+export interface AdapterOutlet {
+  readonly message: (name: string, message: AdapterOutletMessage) => Promise<AdapterOutletAnswer>;
+  readonly refused: (
+    name: string,
+    line: {
+      readonly from: string | null | undefined;
+      readonly kind: MessageKind;
+      readonly bytes: number;
+      readonly outcome: AdapterEarlyRefusal;
+    },
+  ) => void;
+}
+
+/** What the host decides for one adapter's `deliver`: its config's scope and subscriptions, and where a later outcome goes. */
+export interface AdapterDeliveryContext {
+  /** The adapter's `repos` cover the target: its task, else the session `key` names. */
+  readonly inScope: (target: { readonly task: string | null; readonly key: SessionKey | null }) => boolean;
+  readonly subscribed: (conversation: string) => boolean;
+  /** The fate of a delivery first answered `sent`. */
+  readonly settle: (id: string, outcome: AdapterDeliveryOutcome) => void;
+}
+
+export interface AdapterDeliverResult {
+  readonly outcome: AdapterResultOutcome;
+  readonly code?: AdapterResultCode;
+  readonly id?: string;
+  /** The audit line's recipient: a task id, or the constant `session` or `reply` (never a conversation or message id). */
+  readonly to: string;
 }
 
 /** What became of a custodian nudge (`deliverAsCustodian`). */
@@ -148,6 +217,45 @@ export interface Messages {
    * task's pane, never message text. `dropped`: no live pane carries the task, or it can no longer take one.
    */
   readonly receipt: (request: MessageReceiptRequest) => Promise<MessageReceiptResponse>;
+  /**
+   * Whether a note for this pane's session would not be refused `nolistener` now: its own listener, a reconnect or
+   * launch within the grace, or this daemon's own start. Synchronous and places nothing: a watch asks before it exists
+   * (docs/gh-watch.md W1), including for an untasked pane, which `canDeliver` answers false for.
+   */
+  readonly canListen: (
+    pane: string,
+    expect: { readonly pid: number; readonly task: string | null; readonly session: SessionKey },
+  ) => boolean;
+  /**
+   * A watch's note (`watches.ts`; DESIGN.md, "Watches"): only to the listener of the `claude` process the table names,
+   * by the same write or hold a message takes, as a reply by handle reaches its asker, and not repliable by handle. A
+   * plain note unless `wake`, which the mod submits. `onFate` is told what became of a note that was held; no
+   * `message` audit line is written (the watch's own lines are its record). `gone`: no such live pane, or that session
+   * no longer runs. `unreadable`: the pane list came back empty, which is a failed tmux read as often as no panes, so
+   * nothing is concluded from it.
+   */
+  readonly deliverWatchNote: (
+    target: {
+      readonly pane: string;
+      readonly pid: number;
+      readonly task: string | null;
+      readonly session: SessionKey;
+    },
+    note: { readonly text: string; readonly wake: boolean },
+    onFate: WatchNoteFate,
+  ) => Promise<"delivered" | "sent" | "nolistener" | "gone" | "unreadable">;
+  /**
+   * An adapter's `deliver` (DESIGN.md, "Adapters"): to a task launched here, a conversation subscribed to it, or the
+   * session whose message it answers, by the same listener write or hold a local message takes, in the adapter wrapper.
+   * Never routed. `kinds` is the host's to check first.
+   */
+  readonly deliverFromAdapter: (
+    name: string,
+    frame: DeliverFrame,
+    context: AdapterDeliveryContext,
+  ) => Promise<AdapterDeliverResult>;
+  /** Binds the adapter host, or unbinds it (null): a message to `adapter:<name>` is then `unknown`. */
+  readonly setAdapters: (outlet: AdapterOutlet | null) => void;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
@@ -159,6 +267,31 @@ interface Listener {
   /** The `claude` process this listener belongs to (`Bound.session`), null when none stands above it. */
   readonly session: SessionKey | null;
   readonly sink: ListenerSink;
+}
+
+/** What became of a held item: the outcomes `auditHeld` records. */
+export type WatchNoteFate = (outcome: "delivered" | "ended" | "nolistener" | "dropped") => void;
+
+/**
+ * The live pane a peer's pid sits in and the `claude` process above it: replies by handle and watches bind the same
+ * way (DESIGN.md, "Replies by handle"; "Watches"), by the kernel-reported pid and never a field. Null when the host
+ * names no peer, the pid came back null or it is in no live pane; `session` is null when no `claude` stands on the
+ * chain between the peer and the pane process.
+ */
+export async function bindPeer(
+  peer: number | null,
+  panes: readonly BoundPane[],
+  hostNamesPeers: () => boolean = peerPidSupported,
+): Promise<{
+  readonly pane: BoundPane;
+  readonly below: readonly number[];
+  readonly session: ClaudeProcess | null;
+} | null> {
+  if (peer === null || !hostNamesPeers()) return null;
+  const live = panes.filter((pane) => !pane.dead);
+  const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
+  if (found === null) return null;
+  return { pane: found.hit, below: found.below, session: await claudeProcessOf([...found.below, found.hit.pid]) };
 }
 
 /** A peer bound to its pane, and to the session process inside it. */
@@ -180,6 +313,8 @@ interface SentHandle {
   readonly task: string | null;
   readonly kind: MessageKind;
   readonly at: number;
+  /** Sent to this adapter: only its `deliver` may answer it. */
+  readonly adapter?: string;
 }
 
 /** A message placed in a session's pane: only that session may answer it by handle. `origin` is null for a local sender. */
@@ -190,6 +325,8 @@ interface ReceivedHandle {
   readonly task: string | null;
   readonly origin: string | null;
   readonly at: number;
+  /** Delivered by this adapter: a reply to it goes back to the adapter. */
+  readonly adapter?: string;
 }
 
 interface Held {
@@ -210,6 +347,14 @@ interface Held {
   readonly bytes: number;
   /** A leader's receipt note: it has no outcome of its own to audit, the `receipt` line is its record. */
   readonly receipt?: true;
+  /** A watch's note: told its fate instead of a `message` audit line, and it may be held through the restart grace. */
+  readonly onFate?: WatchNoteFate;
+  /** Delivered by this adapter: a reply by handle goes back to it. */
+  readonly adapter?: string;
+  /** The adapter asked for a turn (`wake: true`): submitted even as a note, on any listener it meets. */
+  readonly wake?: true;
+  /** An adapter's delivery: its later outcome goes to the adapter (a `delivery` frame), not the message audit. */
+  readonly settle?: (outcome: AdapterDeliveryOutcome) => void;
   /** Its own grace, from the moment it was held: one timer per inbox would age a later message by an earlier one's clock. */
   timer: ReturnType<typeof setTimeout> | null;
 }
@@ -228,6 +373,7 @@ export function createMessages(deps: MessagesDeps): Messages {
   const mintId = deps.mintId ?? ((): string => crypto.randomUUID());
   const startedAt = now();
   let stopped = false;
+  let adapters: AdapterOutlet | null = null;
 
   const listeners = new Map<string, Listener>();
   /** A listener that dropped: its pane may reconnect within the grace without its messages being refused. */
@@ -331,19 +477,20 @@ export function createMessages(deps: MessagesDeps): Messages {
   };
   const auditHeld = (item: Held, outcome: "delivered" | "ended" | "nolistener" | "dropped"): void => {
     if (item.receipt === true) return;
+    if (item.onFate !== undefined) {
+      item.onFate(outcome);
+      return;
+    }
+    if (item.settle !== undefined) {
+      item.settle(outcome);
+      return;
+    }
     audit({ dir: "in", from: item.from, to: item.to, kind: item.messageKind, bytes: item.bytes, outcome });
   };
 
-  /** What a reply handle is bound to: the peer's `claude` process (`claudeProcessOf`). */
-  const sessionOf = async (pane: BoundPane, below: readonly number[]): Promise<SessionKey | null> =>
-    (await claudeProcessOf([...below, pane.pid]))?.key ?? null;
-
   const bind = async (peer: number | null, panes: readonly BoundPane[]): Promise<Bound | null> => {
-    if (peer === null || !hostNamesPeers()) return null;
-    const live = panes.filter((pane) => !pane.dead);
-    const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
-    if (found === null) return null;
-    return { pane: found.hit, session: await sessionOf(found.hit, found.below) };
+    const bound = await bindPeer(peer, panes, hostNamesPeers);
+    return bound === null ? null : { pane: bound.pane, session: bound.session?.key ?? null };
   };
 
   /** A message written to a listener can be answered by handle, from the session that read it. */
@@ -356,6 +503,7 @@ export function createMessages(deps: MessagesDeps): Messages {
       task: listener.taskId,
       origin: item.origin,
       at: now(),
+      ...(item.adapter === undefined ? {} : { adapter: item.adapter }),
     });
   };
 
@@ -423,7 +571,9 @@ export function createMessages(deps: MessagesDeps): Messages {
       messageKind: item.messageKind,
       push: prefix + item.push,
       ...(item.body === undefined ? {} : { body: prefix + item.body }),
-      ...(item.wakeSession !== undefined && item.wakeSession === listener.session ? { wake: true as const } : {}),
+      ...(item.wake === true || (item.wakeSession !== undefined && item.wakeSession === listener.session)
+        ? { wake: true as const }
+        : {}),
     };
     return JSON.stringify(line);
   };
@@ -485,14 +635,17 @@ export function createMessages(deps: MessagesDeps): Messages {
   };
 
   /** Records a send against its rate key; false when it would pass either limit. */
-  const admit = (key: string): boolean => {
+  const admit = (
+    key: string,
+    rate: { readonly perMinute: number; readonly perHour: number } = MESSAGE_RATE,
+  ): boolean => {
     const t = now();
     for (const [k, stamps] of sends) {
       if (stamps.every((s) => t - s >= HOUR_MS)) sends.delete(k);
     }
     const stamps = (sends.get(key) ?? []).filter((s) => t - s < HOUR_MS);
     const lastMinute = stamps.filter((s) => t - s < MINUTE_MS).length;
-    if (lastMinute >= MESSAGE_RATE.perMinute || stamps.length >= MESSAGE_RATE.perHour) {
+    if (lastMinute >= rate.perMinute || stamps.length >= rate.perHour) {
       sends.set(key, stamps);
       return false;
     }
@@ -506,7 +659,10 @@ export function createMessages(deps: MessagesDeps): Messages {
    * the ledger holds), from the listener's disconnect, or from this daemon's own start. `nolistener` past all of them,
    * with nothing kept. A message that is `only` for one session (a reply) meets only that session's listener or
    * reconnect: the next `claude` in the same pane is not its addressee, and the launch and restart graces, which a
-   * stranger's listener could meet, do not apply. The caller writes the audit lines.
+   * stranger's listener could meet, do not apply, with one exception: a watch's note (`onFate`) also holds through the
+   * restart grace, because after a restart a reloaded watch's first event can land before the session's `inbox` child
+   * has listened again, and `flush` still drops the note for any other session, so no stranger can read it. The caller
+   * writes the audit lines.
    */
   const place = (
     target: BoundPane,
@@ -541,7 +697,8 @@ export function createMessages(deps: MessagesDeps): Messages {
       (item.only === undefined &&
         ((launched !== undefined && t - launched <= graceMs) ||
           // A restart closed every listener and forgot every disconnect: each live pane is treated as just dropped.
-          t - startedAt <= graceMs));
+          t - startedAt <= graceMs)) ||
+      (item.onFate !== undefined && t - startedAt <= graceMs);
     if (!holds) return "nolistener";
     hold(target.id, to, item);
     return "sent";
@@ -675,7 +832,7 @@ export function createMessages(deps: MessagesDeps): Messages {
   }
 
   /** A sender with no session gets no handle: its message still goes, and an answer to it by id finds nobody. */
-  const rememberSent = (id: string, o: Outgoing): void => {
+  const rememberSent = (id: string, o: Pick<Outgoing, "sender" | "kind">, adapter?: string): void => {
     const { session } = o.sender;
     if (session === null) return;
     remember(
@@ -688,6 +845,7 @@ export function createMessages(deps: MessagesDeps): Messages {
         task: o.sender.pane.taskId,
         kind: o.kind,
         at: now(),
+        ...(adapter === undefined ? {} : { adapter }),
       },
       (held) => held.kind !== "note",
     );
@@ -765,6 +923,8 @@ export function createMessages(deps: MessagesDeps): Messages {
       return { ok: false, code: "unknown" };
     }
 
+    if (got.adapter !== undefined) return replyToAdapter(o, got.adapter, replyTo, bucket);
+
     if (got.origin !== null && got.origin !== deps.deviceId) {
       // A frame that carries the id as `to` comes from a caller that predates replies (a current one leaves `to` out),
       // which gated only on routing: the leader it checked may drop a reply it cannot read, so none is sent.
@@ -819,10 +979,114 @@ export function createMessages(deps: MessagesDeps): Messages {
     return { ok: true, id, outcome: placed };
   };
 
+  /**
+   * Hands a session's message to an adapter on this machine: the host checks the name, `repos`, subscribes or leaves,
+   * and audits under origin `adapter`. A sender with no `claude` process has no key the adapter could know it by.
+   */
+  const toAdapter = async (
+    name: string,
+    o: Pick<Outgoing, "sender" | "from" | "kind" | "text" | "bytes">,
+    opts: { readonly inReplyTo?: string; readonly leave: boolean; readonly subscribe: boolean },
+  ): Promise<MessageReply> => {
+    const outlet = adapters;
+    const key = o.sender.session;
+    if (outlet === null) return { ok: false, code: "unknown" };
+    if (key === null) {
+      outlet.refused(name, { from: o.from, kind: o.kind, bytes: o.bytes, outcome: "unbound" });
+      return { ok: false, code: "unbound" };
+    }
+    const conversation = (await deps.conversations?.verifiedFor(key)) ?? null;
+    const title = o.from === null ? null : displayTitle((await deps.windowName(o.sender.pane.id)) ?? "");
+    const id = mintId();
+    const answer = await outlet.message(name, {
+      id,
+      kind: o.kind,
+      text: o.text,
+      bytes: o.bytes,
+      key,
+      task: o.from,
+      title,
+      ...(opts.inReplyTo === undefined ? {} : { inReplyTo: opts.inReplyTo }),
+      conversation,
+      leave: opts.leave,
+      subscribe: opts.subscribe,
+    });
+    if (!answer.ok) return { ok: false, code: answer.code };
+    // The adapter answers by this id (`deliver.inReplyTo`), and only that adapter.
+    rememberSent(id, o, name);
+    return {
+      ok: true,
+      id,
+      outcome: "delivered",
+      subscribed: answer.subscribed,
+      ...(answer.subscribed && answer.session !== undefined ? { session: answer.session } : {}),
+      adapter: name,
+    };
+  };
+
+  /** A session's reply by handle to an adapter's delivery: back to that adapter, which subscribes nothing. */
+  const replyToAdapter = async (o: Outgoing, name: string, replyTo: string, bucket: string): Promise<MessageReply> => {
+    if (!admit(bucket)) {
+      adapters?.refused(name, { from: o.from, kind: o.kind, bytes: o.bytes, outcome: "rate_limited" });
+      return { ok: false, code: "rate_limited" };
+    }
+    return toAdapter(name, o, { inReplyTo: replyTo, leave: false, subscribe: false });
+  };
+
+  /** `to: "adapter:<name>"`: local only, never routed, refused before the host sees it only as a task message is. */
+  const sendToAdapter = async (
+    name: string,
+    frame: NonNullable<ReturnType<typeof parseMessageFrame>>,
+    peer: number | null,
+  ): Promise<MessageReply> => {
+    const { messageKind: kind, text } = frame;
+    const bytes = Buffer.byteLength(text, "utf8");
+    const outlet = adapters;
+    if (outlet === null) return { ok: false, code: "unknown" };
+    const panes = await deps.panes();
+    const sender = await bind(peer, panes);
+    if (sender === null) {
+      outlet.refused(name, { from: undefined, kind, bytes, outcome: "unbound" });
+      return { ok: false, code: "unbound" };
+    }
+    sweep(panes);
+    const taskId = sender.pane.taskId;
+    const from = taskId !== null && deps.launchedAt(taskId) !== undefined ? taskId : null;
+    // An adapter takes no stub: the push limit is a pane's, and the whole text goes on one line.
+    if (bytes > MESSAGE_MAX) {
+      outlet.refused(name, { from, kind, bytes, outcome: "too_long" });
+      return { ok: false, code: "too_long" };
+    }
+    const bucket = from === null ? `pane:${sender.pane.id}` : `task:${from}`;
+    if (!admit(bucket)) {
+      outlet.refused(name, { from, kind, bytes, outcome: "rate_limited" });
+      return { ok: false, code: "rate_limited" };
+    }
+    // An `inReplyTo` the adapter never sent this session is dropped, not passed on: the adapter takes the id as its own.
+    const got = frame.inReplyTo === undefined ? undefined : recall(received, frame.inReplyTo);
+    const answers =
+      got !== undefined &&
+      got.adapter === name &&
+      got.pane === sender.pane.id &&
+      got.pid === sender.pane.pid &&
+      got.session === sender.session;
+    return toAdapter(
+      name,
+      { sender, from, kind, text, bytes },
+      {
+        ...(answers && frame.inReplyTo !== undefined ? { inReplyTo: frame.inReplyTo } : {}),
+        leave: frame.leave === true,
+        subscribe: true,
+      },
+    );
+  };
+
   const send: Messages["send"] = async (raw, peer) => {
     const frame = parseMessageFrame(raw);
     if (frame === null) return { ok: false, code: "invalid" };
     if (stopped) return { ok: false, code: "stopping" };
+    const adapter = frame.to === undefined ? null : adapterOfAddress(frame.to);
+    if (adapter !== null) return sendToAdapter(adapter, frame, peer);
     const { messageKind: kind, text } = frame;
     // `to` left out, or the message id given as it (a model that fills the field): the id is the address.
     const replyTo =
@@ -965,6 +1229,57 @@ export function createMessages(deps: MessagesDeps): Messages {
     if (launched === undefined) return false;
     if (target.pid !== expect.pid || target.taskId !== expect.taskId) return false;
     return wouldPlace(target, target.taskId, launched);
+  };
+
+  const canListen: Messages["canListen"] = (paneId, expect) => {
+    if (stopped) return false;
+    const listener = listeners.get(paneId);
+    if (
+      listener !== undefined &&
+      listener.panePid === expect.pid &&
+      listener.taskId === expect.task &&
+      listener.session === expect.session
+    ) {
+      return true;
+    }
+    const t = now();
+    const dropped = disconnects.get(paneId);
+    if (
+      dropped !== undefined &&
+      dropped.taskId === expect.task &&
+      dropped.session === expect.session &&
+      t - dropped.at <= graceMs
+    ) {
+      return true;
+    }
+    if (t - startedAt <= graceMs) return true;
+    const launched = expect.task === null ? undefined : deps.launchedAt(expect.task);
+    return launched !== undefined && t - launched <= graceMs;
+  };
+
+  const deliverWatchNote: Messages["deliverWatchNote"] = async (target, note, onFate) => {
+    if (stopped) return "gone";
+    const panes = await deps.panes();
+    // A failed tmux read and no tmux server look alike: concluding "gone" from either would end every watch on a hiccup.
+    if (panes.length === 0) return "unreadable";
+    sweep(panes);
+    const pane = paneOf(panes, { pane: target.pane, pid: target.pid, task: target.task });
+    if (pane === undefined || !sessionAlive(target.session)) return "gone";
+    const item: Held = {
+      id: mintId(),
+      to: target.task ?? "watch",
+      messageKind: "note",
+      push: note.text,
+      only: target.session,
+      ...(note.wake ? { wakeSession: target.session } : {}),
+      from: null,
+      bytes: Buffer.byteLength(note.text, "utf8"),
+      timer: null,
+      onFate,
+    };
+    const placed = place(pane, target.task, target.task === null ? undefined : deps.launchedAt(target.task), item);
+    if (placed === "delivered") onFate("delivered");
+    return placed;
   };
 
   /** Replies to forwards by message id, held as promises so a replay racing the first is answered by it. */
@@ -1145,13 +1460,100 @@ export function createMessages(deps: MessagesDeps): Messages {
     return reply;
   };
 
+  const deliverFromAdapter: Messages["deliverFromAdapter"] = async (name, frame, context) => {
+    const label = "to" in frame ? frame.to : "toSession" in frame ? "session" : REPLY_LABEL;
+    const answer = (
+      outcome: AdapterResultOutcome,
+      extra: { readonly code?: AdapterResultCode; readonly id?: string } = {},
+    ): AdapterDeliverResult => ({ outcome, to: label, ...extra });
+    if (stopped) return answer("unsupported");
+    const { messageKind: kind, text } = frame;
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > MESSAGE_MAX || (kind === "request" && bytes > MESSAGE_PUSH_MAX)) return answer("too_long");
+    // One bucket for all of an adapter's deliveries, then each target's own below.
+    if (!admit(`adapter:${name}`, ADAPTER_RATE)) return answer("rate_limited");
+    const panes = await deps.panes();
+    sweep(panes);
+
+    let target: BoundPane | undefined;
+    let only: SessionKey | undefined;
+    let wakeSession: SessionKey | undefined;
+    let inReplyTo: string | undefined;
+    let targetKey: string;
+    if ("to" in frame) {
+      const launched = deps.launchedAt(frame.to);
+      if (launched === undefined) return answer("unknown");
+      const candidates = panes.filter((pane) => !pane.dead && pane.taskId === frame.to);
+      target = candidates.find((pane) => listeners.has(pane.id)) ?? candidates[0];
+      if (target === undefined) return answer(now() - launched <= graceMs ? "held" : "ended");
+      if (!context.inScope({ task: frame.to, key: null })) return answer("refused", { code: "repo" });
+      targetKey = `task:${frame.to}`;
+    } else if ("toSession" in frame) {
+      if (!context.subscribed(frame.toSession) || deps.conversations === undefined) return answer("unknown");
+      const act = await deps.conversations.atAct(frame.toSession);
+      if (!act.ok) return answer(act.code);
+      // `atAct`'s pid is the `claude` process's, not the pane's: `only` binds the delivery to that process.
+      target = panes.find((pane) => pane.id === act.pane && !pane.dead);
+      if (target === undefined) return answer("ended");
+      only = act.key;
+      targetKey = `session:${act.key}`;
+    } else {
+      const asker = recall(sent, frame.inReplyTo);
+      // Only the adapter the session messaged may answer it.
+      if (asker === undefined || asker.adapter !== name) return answer("unknown");
+      target = askerPane(panes, asker);
+      if (target === undefined) return answer("ended");
+      only = asker.session;
+      wakeSession = wakeFor(frame.inReplyTo, target);
+      inReplyTo = frame.inReplyTo;
+      targetKey = `session:${asker.session}`;
+    }
+    const task = target.taskId !== null && deps.launchedAt(target.taskId) !== undefined ? target.taskId : null;
+    if (!("to" in frame) && !context.inScope({ task, key: only ?? null })) {
+      return answer("refused", { code: "repo" });
+    }
+    if (!admit(`adapter:${name}:${targetKey}`)) return answer("rate_limited");
+
+    const id = mintId();
+    const from = { adapter: name, machine: deps.machine, label: displayTitle(frame.from ?? "") };
+    const full = renderAdapterMessage({ kind, id, from, text, ...(inReplyTo === undefined ? {} : { inReplyTo }) });
+    const pushed = bytes <= MESSAGE_PUSH_MAX;
+    const item: Held = {
+      id,
+      to: label,
+      messageKind: kind,
+      push: pushed ? full : adapterStub({ kind, id, from, bytes }),
+      ...(pushed ? {} : { body: full }),
+      // Answerable by handle: `received` holds it with the adapter, which a reply goes back to.
+      origin: null,
+      adapter: name,
+      ...(only === undefined ? {} : { only }),
+      ...(wakeSession === undefined ? {} : { wakeSession }),
+      ...(frame.wake === true ? { wake: true as const } : {}),
+      from: null,
+      bytes,
+      settle: (outcome) => context.settle(id, outcome),
+      timer: null,
+    };
+    const launched = target.taskId === null ? undefined : deps.launchedAt(target.taskId);
+    const placed = place(target, target.taskId, launched, item);
+    if (placed === "nolistener") return answer("ended", { code: "nolistener" });
+    return answer(placed, { id });
+  };
+
   return {
     listen,
     send,
     deliverAsCustodian,
     canDeliver,
+    canListen,
+    deliverWatchNote,
     deliverRouted,
     receipt,
+    deliverFromAdapter,
+    setAdapters: (outlet) => {
+      adapters = outlet;
+    },
     onEnded: (pane, taskId) => {
       if (inboxes.get(pane)?.taskId === taskId) dropInbox(pane, "ended");
       disconnects.delete(pane);

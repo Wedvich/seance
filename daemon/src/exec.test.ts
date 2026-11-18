@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exec } from "./exec.ts";
+import { exec, execFailure } from "./exec.ts";
 
 // Big enough to overflow the pipe buffer, so a child that never reads stdin
 // leaves the flush blocked (timeout case) or rejected with EPIPE (exit case).
@@ -36,6 +36,18 @@ describe("exec timeout", () => {
     const result = await exec(["sh", "-c", "sleep 30 & wait"], { timeoutMs: 250, killGroup: true });
     expect(result.timedOut).toBe(true);
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
+describe("exec signal", () => {
+  // A child killed from outside says nothing on stderr: only the signal tells it from a quiet failing exit.
+  test("names the signal that ended the child, and none for an exit", async () => {
+    const killed = await exec(["sh", "-c", "kill -9 $$"]);
+    expect(killed).toMatchObject({ exitCode: 137, signal: "SIGKILL", timedOut: false });
+    expect(execFailure(killed)).toBe("exit 137 (SIGKILL): ");
+    const exited = await exec(["sh", "-c", "echo no >&2; exit 3"]);
+    expect(exited.signal).toBeNull();
+    expect(execFailure(exited)).toBe("exit 3: no");
   });
 });
 
@@ -103,7 +115,7 @@ describe("exec environment", () => {
 
   test("discardStderr leaves the child's stderr unread: the result carries none", async () => {
     const result = await exec(["sh", "-c", "echo out; echo secret >&2; exit 3"], { discardStderr: true });
-    expect(result).toEqual({ exitCode: 3, stdout: "out\n", stderr: "", timedOut: false });
+    expect(result).toEqual({ exitCode: 3, stdout: "out\n", stderr: "", timedOut: false, signal: null });
   });
 
   test("discardStdout leaves the child's stdout unread: a flood cannot stall it, and the result carries none", async () => {
@@ -111,6 +123,6 @@ describe("exec environment", () => {
       discardStdout: true,
       timeoutMs: 10_000,
     });
-    expect(result).toEqual({ exitCode: 4, stdout: "", stderr: "", timedOut: false });
+    expect(result).toEqual({ exitCode: 4, stdout: "", stderr: "", timedOut: false, signal: null });
   });
 });

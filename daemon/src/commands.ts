@@ -36,6 +36,7 @@ export const COMMANDS = [
   "reap",
   "mcp",
   "mod",
+  "adapter",
   "session-event",
   "inbox",
   "custodian",
@@ -286,6 +287,35 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     summary: "install this checkout's Claude Code mods (claude-mods/) and séance's settings hooks into Claude",
     usage: "install | uninstall",
     verbs: INSTALL_VERBS("this checkout's Claude Code mods"),
+  },
+  adapter: {
+    summary: "run a tool's adapter on this machine: add, remove, restart, status",
+    usage: "add <dir> [--kinds <kinds>] [--repo <repo>]... | remove <name> | restart [<name>] | status",
+    details: [
+      "add reads <dir>/seance-adapter.json and writes adapters.<name> into config.json, ending that name's subscriptions",
+      "an adapter runs as you, with everything you can reach: install only code you trust as you would an MCP server",
+    ],
+    verbs: {
+      add: {
+        summary: "add, or re-add, the adapter checked out in <dir>; `seance restart` starts it",
+        flags: [
+          {
+            flag: "--kinds",
+            value: "kinds",
+            help: "what it may deliver (default note,question, or what it had; request is opt-in)",
+          },
+          {
+            flag: "--repo",
+            value: "repo",
+            repeatable: true,
+            help: "only sessions in this scanned repo (default all, or what it had)",
+          },
+        ],
+      },
+      remove: { summary: "remove <name> from config.json and end its subscriptions; `seance restart` stops it" },
+      restart: { summary: "restart one adapter, or every one, in the running daemon; lifts the failed hold" },
+      status: { summary: "each adapter's state, protocol, counts and last exit" },
+    },
   },
   "session-event": {
     summary:

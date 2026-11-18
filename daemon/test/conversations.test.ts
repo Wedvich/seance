@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { isRecord, parseTags, SCHEDULER_ID, type Plain, type SessionEntry } from "@seance/shared";
 import { ctimeUtcSeconds } from "../src/agent-session-file.ts";
 import type { SessionBackend } from "../src/backend.ts";
-import { loadConversationStore } from "../src/conversation-store.ts";
+import { openSubscriptions } from "../src/adapter-subscriptions.ts";
 import { createConversations, SETTLE_MS, type Conversations } from "../src/conversations.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import { createHandler, type HandlerContext } from "../src/handlers.ts";
@@ -13,7 +13,7 @@ import { processStart } from "../src/peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * Session identity with real processes (docs/tags.md §4): `claude`-named processes in panes of a private tmux server,
@@ -48,7 +48,7 @@ function boot(opts: { readonly hostNamesPeers?: boolean; readonly store?: string
     configDirs: () => [dirA, dirB],
     launchSession: (taskId) => launches.get(taskId),
     panes: listPanePids,
-    ...(opts.store === undefined ? {} : { store: loadConversationStore(opts.store) }),
+    ...(opts.store === undefined ? {} : { store: openSubscriptions(opts.store) }),
   });
   const ingest = createSessionEvents({
     panes: listPanePids,
@@ -71,7 +71,7 @@ beforeAll(async () => {
   await mkdir(join(dirA, "sessions"), { recursive: true });
   await mkdir(join(dirB, "sessions"), { recursive: true });
   exclaves = [{ id: "default", root: base, configDir: dirA, configFile: join(base, ".claude.json") }];
-  claude = await linkClaudeNamed(join(base, "bin"));
+  claude = await bunNamed("claude");
   privateTmux = usePrivateTmux(base, "conv");
   await tmuxOk(["new-session", "-d", "-s", "conv", "-c", base, "sleep", "600"]);
   ({ table, events } = boot());
@@ -282,7 +282,7 @@ describe("verification", () => {
     const { pane: p, pid } = await claudePane("t-clear");
     await report(pid, claim(id(13)));
     await pollUntil(() => sessionOf(p)?.verified === true, "the ledger's verification");
-    expect(await table.atAct(id(13))).toEqual({ ok: true, pane: p, pid });
+    expect(await table.atAct(id(13))).toMatchObject({ ok: true, pane: p, pid });
     // `/clear`: Claude Code writes the file for the new conversation; no report has come yet.
     await writeSessionFile(pid, id(14));
     expect(await table.atAct(id(13))).toEqual({ ok: false, code: "unverified" });
@@ -290,7 +290,7 @@ describe("verification", () => {
     await pollUntil(() => sessionOf(p) === null, "the ledger's id refuted", SETTLE_MS * 4);
     await report(pid, claim(id(14)));
     await pollUntil(() => sessionOf(p)?.verified === true, "the file's verification of the new id");
-    expect(await table.atAct(id(14))).toEqual({ ok: true, pane: p, pid });
+    expect(await table.atAct(id(14))).toMatchObject({ ok: true, pane: p, pid });
   });
 });
 
@@ -485,7 +485,7 @@ describe("the owner's label (session-tag)", () => {
 
   test("a label shows only while its conversation's one claimant is verified", async () => {
     const on = labelled();
-    await loadConversationStore(on.path).setLabel(id(36), "kept");
+    await openSubscriptions(on.path).setLabel(id(36), "kept");
     // The table reads its file at boot: one booted before the write would not see it.
     const fresh = boot({ store: on.path });
     const { pane: p, pid } = await claudePane();
@@ -505,7 +505,7 @@ describe("the owner's label (session-tag)", () => {
 
   test("a tasked process claiming a labelled id carries no label: its name is its task's", async () => {
     const on = labelled();
-    await loadConversationStore(on.path).setLabel(id(40), "scratch");
+    await openSubscriptions(on.path).setLabel(id(40), "scratch");
     const fresh = boot({ store: on.path });
     launches.set("t-resumed", id(40));
     const tasked = await claudePane("t-resumed");

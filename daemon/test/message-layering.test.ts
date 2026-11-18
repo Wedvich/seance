@@ -15,6 +15,8 @@ const SRC = resolve(import.meta.dir, "../src");
 const ENTRIES = [
   "send-message.ts",
   "message-frame.ts",
+  "watch-frame.ts",
+  "watch-github.ts",
   "inbox-cli.ts",
   "custodian-cli.ts",
   "custodian-frame.ts",
@@ -55,7 +57,7 @@ describe("the message paths that run where stdout is a protocol channel", () => 
  * that would put it there cannot be written without failing here.
  */
 describe("the modules that hold session tags", () => {
-  for (const entry of ["conversations.ts", "conversation-store.ts", "agent-session-file.ts", "claude-process.ts"]) {
+  for (const entry of ["conversations.ts", "adapter-subscriptions.ts", "agent-session-file.ts", "claude-process.ts"]) {
     test(`${entry} loads neither log.ts nor audit.ts`, async () => {
       const reached = await closure(entry);
       expect(reached.has(entry)).toBe(true);
@@ -94,7 +96,7 @@ describe("the paths that tell one session about another", () => {
     test(`${entry} reaches no session name`, async () => {
       const reached = await valueClosure(entry);
       expect(reached.has(entry)).toBe(true);
-      expect([...reached].filter((file) => file === "conversations.ts" || file === "conversation-store.ts")).toEqual(
+      expect([...reached].filter((file) => file === "conversations.ts" || file === "adapter-subscriptions.ts")).toEqual(
         [],
       );
       const sources = await Promise.all([...reached].map((file) => readFile(join(SRC, file), "utf8")));
