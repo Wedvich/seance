@@ -3,7 +3,7 @@ import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { CAPABILITIES, isRecord, type Task } from "@seance/shared";
 import { tmuxOk } from "../daemon/src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude } from "../daemon/test/fixtures.ts";
+import { bunNamed, pollUntil, underClaude } from "../daemon/test/fixtures.ts";
 import {
   cancelTask,
   PSK,
@@ -67,7 +67,7 @@ const bootBox = (): Promise<SecondDaemon> =>
 beforeAll(async () => {
   suite = await startSuite("e2e-messages");
   ({ base, stack } = suite);
-  claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
+  claudeBin = await bunNamed("claude");
   // Seeded first: `seedTask` restarts the suite's daemon, which must not be a second machine's takeover to survive.
   await stack.seedTask({
     id: PREDECESSOR,

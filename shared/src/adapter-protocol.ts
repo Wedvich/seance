@@ -1,9 +1,10 @@
-import { isRecord } from "./parse.ts";
-import type { SessionTag } from "./tags.ts";
-import { NEEDS_INPUT_REASONS, type NeedsInputReason } from "./types.ts";
+import { isMessageId, MESSAGE_KINDS, type MessageKind } from "./messages.ts";
+import { isRecord, isTaskId } from "./parse.ts";
+import { isAgentSessionId, TAG_SUFFIX_PATTERN, type SessionTag } from "./tags.ts";
+import { NEEDS_INPUT_REASONS, TASK_ID_PATTERN, type NeedsInputReason } from "./types.ts";
 
 /**
- * The adapter protocol (docs/messaging.md §6.1; DESIGN.md, "Adapters"): what the daemon and an adapter, a program the
+ * The adapter protocol (DESIGN.md, "Adapters"): what the daemon and an adapter, a program the
  * machine's owner names in its own `config.json`, say to each other over the adapter's stdin and stdout. The schema of
  * record: `adapter-protocol.schema.json` beside this file is generated from it (`adapterProtocolSchema`, written by
  * `bun run adapter-schema`, held equal by `adapter-protocol.test.ts`), so an adapter in any language can vendor a copy
@@ -14,16 +15,17 @@ import { NEEDS_INPUT_REASONS, type NeedsInputReason } from "./types.ts";
  * bumped only for a breaking change; additions inside a major are `features` strings, as `CAPABILITIES` are on the
  * wire. Adapters ignore unknown fields on frames they know; the daemon's parsers accept exactly their fields.
  *
- * Built so far (3a): the handshake, `snapshot`, `session`, `session-gone`, `task`, `error`, and the adapter's `resync`.
- * `deliver`, `tag`, `message`, `result` and `delivery` are 3b's: the daemon answers a `deliver` or `tag` `unsupported`.
+ * Built: the handshake, `snapshot`, `session`, `session-gone`, `task`, `error` and the adapter's `resync` (3a); the
+ * adapter's `deliver` and `tag`, and the daemon's `message`, `result` and `delivery` (3b). A daemon whose `features`
+ * name `deliver` and `tag` takes them; one from 3a answered both `unsupported`.
  */
 
 /** The protocol majors this daemon speaks. */
 export const ADAPTER_PROTOCOLS = [1] as const;
 export type AdapterProtocol = (typeof ADAPTER_PROTOCOLS)[number];
 
-/** Additions inside a major this daemon offers; none yet. */
-export const ADAPTER_FEATURES: readonly string[] = [];
+/** Additions inside a major this daemon offers: an adapter sends a frame only when the daemon's `features` name it. */
+export const ADAPTER_FEATURES: readonly string[] = ["deliver", "tag"];
 
 /** One line, either way. A delivery carries at most `MESSAGE_MAX` of text (64 KiB), which JSON escaping can grow. */
 export const ADAPTER_LINE_MAX = 256 * 1024;
@@ -37,6 +39,28 @@ export const ADAPTERS_MAX = 4;
 export function isAdapterName(value: unknown): value is string {
   return typeof value === "string" && ADAPTER_NAME_PATTERN.test(value);
 }
+
+/**
+ * How a session addresses an adapter on its own machine in `send_message`'s `to` (DESIGN.md, "Adapters"). Task ids
+ * are UUIDs, so the prefix cannot collide with one.
+ */
+export const ADAPTER_ADDRESS_PREFIX = "adapter:";
+
+/** The adapter name an address names, or null when it is not `adapter:<name>`. */
+export function adapterOfAddress(to: unknown): string | null {
+  if (typeof to !== "string" || !to.startsWith(ADAPTER_ADDRESS_PREFIX)) return null;
+  const name = to.slice(ADAPTER_ADDRESS_PREFIX.length);
+  return isAdapterName(name) ? name : null;
+}
+
+/** An adapter's own correlation id on a `deliver` or `tag`: printable ASCII, no space, handed back in its `result`. */
+export const ADAPTER_REF_PATTERN = /^[\u0021-\u007E]{1,64}$/u;
+
+/** Characters of a `deliver`'s `from` label before the wrapper's scrub (`displayTitle`) cuts it further. */
+export const ADAPTER_FROM_MAX = 256;
+
+/** Characters of a `tag`'s raw value before the printable rule (`displayLine`) cuts it to `TAG_VALUE_MAX` bytes. */
+const TAG_RAW_MAX = 4096;
 
 /** What an adapter may ask to be sent. */
 export const ADAPTER_WANTS = ["sessions", "tasks", "messages"] as const;
@@ -146,7 +170,85 @@ export interface ErrorFrame {
   readonly code: AdapterErrorCode;
 }
 
-export type AdapterDaemonFrame = DaemonHello | SnapshotFrame | SessionFrame | SessionGoneFrame | TaskFrame | ErrorFrame;
+/**
+ * A session's message to this adapter (`send_message` to `adapter:<name>`, DESIGN.md, "Adapters"), or a session's reply
+ * to one of its deliveries. `id` is the handle the adapter replies by (`deliver.inReplyTo`). `from.key` is the sending
+ * `claude` process, `from.session` its verified conversation, present exactly when `subscribed`. `leave`: the session
+ * ended its subscription with this message.
+ */
+export interface MessageOutFrame {
+  readonly kind: "message";
+  readonly id: string;
+  readonly messageKind: MessageKind;
+  readonly text: string;
+  readonly from: {
+    readonly key: string;
+    readonly session?: string;
+    readonly task?: string;
+    readonly title?: string;
+  };
+  readonly inReplyTo?: string;
+  readonly subscribed: boolean;
+  readonly leave?: true;
+}
+
+/**
+ * What became of one `deliver` or `tag`: the built local delivery's outcomes, plus `refused` (the adapter's `kinds` or
+ * `repos` do not allow it), `ambiguous` and `unverified` (a `toSession` two live sessions claim, or whose process now
+ * names another conversation), `ok` (a tag written) and `full` (past the tag budget).
+ */
+export const ADAPTER_RESULT_OUTCOMES = [
+  "delivered",
+  "sent",
+  "held",
+  "ended",
+  "unknown",
+  "too_long",
+  "rate_limited",
+  "unsupported",
+  "invalid",
+  "refused",
+  "ambiguous",
+  "unverified",
+  "ok",
+  "full",
+] as const;
+export type AdapterResultOutcome = (typeof ADAPTER_RESULT_OUTCOMES)[number];
+
+/** Why: `nolistener` beside `ended` (the session has no inbox listener), `kind` or `repo` beside `refused`. */
+export const ADAPTER_RESULT_CODES = ["nolistener", "kind", "repo"] as const;
+export type AdapterResultCode = (typeof ADAPTER_RESULT_CODES)[number];
+
+export interface ResultFrame {
+  readonly kind: "result";
+  /** The adapter's own `ref`, as it sent it. */
+  readonly ref: string;
+  /** The delivered message's id, beside `delivered` and `sent`: what a session's reply names as `inReplyTo`. */
+  readonly id?: string;
+  readonly outcome: AdapterResultOutcome;
+  readonly code?: AdapterResultCode;
+}
+
+/** The fate of a delivery first answered `sent` (held for a listener that had not connected yet). */
+export const ADAPTER_DELIVERY_OUTCOMES = ["delivered", "dropped", "nolistener", "ended"] as const;
+export type AdapterDeliveryOutcome = (typeof ADAPTER_DELIVERY_OUTCOMES)[number];
+
+export interface DeliveryFrame {
+  readonly kind: "delivery";
+  readonly id: string;
+  readonly outcome: AdapterDeliveryOutcome;
+}
+
+export type AdapterDaemonFrame =
+  | DaemonHello
+  | SnapshotFrame
+  | SessionFrame
+  | SessionGoneFrame
+  | TaskFrame
+  | MessageOutFrame
+  | ResultFrame
+  | DeliveryFrame
+  | ErrorFrame;
 
 export interface AdapterHello {
   readonly kind: "hello";
@@ -163,10 +265,32 @@ export interface ResyncFrame {
   readonly kind: "resync";
 }
 
-export type AdapterFrame = AdapterHello | ResyncFrame;
+/** Exactly one address: a task launched here (`to`), a subscribed conversation (`toSession`), or a reply (`inReplyTo`). */
+export type DeliverAddress = { readonly to: string } | { readonly toSession: string } | { readonly inReplyTo: string };
 
-/** Frame kinds protocol 1 defines from the adapter that this daemon does not take yet (3b). */
-const LATER_KINDS: ReadonlySet<string> = new Set(["deliver", "tag"]);
+/**
+ * Text for a session on this machine (DESIGN.md, "Adapters"). `wake` submits a note as a turn, as a
+ * question or request always is. `from` is a display label (a person or bot in the tool), scrubbed by the wrapper.
+ */
+export type DeliverFrame = {
+  readonly kind: "deliver";
+  readonly ref: string;
+  readonly messageKind: MessageKind;
+  readonly text: string;
+  readonly wake?: boolean;
+  readonly from?: string;
+} & DeliverAddress;
+
+/** One `adapter.<name>.<key>` tag on a subscribed conversation or a task's session; `""` clears it (docs/tags.md §8.4). */
+export type TagFrame = {
+  readonly kind: "tag";
+  readonly ref: string;
+  /** The bare suffix: the daemon writes it under the adapter's own namespace, never another. */
+  readonly key: string;
+  readonly value: string;
+} & ({ readonly session: string } | { readonly task: string });
+
+export type AdapterFrame = AdapterHello | ResyncFrame | DeliverFrame | TagFrame;
 
 export type AdapterLine =
   | { readonly ok: true; readonly frame: AdapterFrame }
@@ -198,9 +322,55 @@ function parseHello(raw: Record<string, unknown>): AdapterHello | null {
   };
 }
 
+function parseDeliver(raw: Record<string, unknown>): DeliverFrame | null {
+  if (!hasOnly(raw, ["kind", "ref", "to", "toSession", "inReplyTo", "messageKind", "text", "wake", "from"])) {
+    return null;
+  }
+  const { ref, to, toSession, inReplyTo, messageKind, text, wake, from } = raw;
+  if (typeof ref !== "string" || !ADAPTER_REF_PATTERN.test(ref)) return null;
+  const kind = MESSAGE_KINDS.find((k) => k === messageKind);
+  if (kind === undefined) return null;
+  // The size is the daemon's to refuse (`too_long`), with the ref in hand; the line cap already bounds it.
+  if (typeof text !== "string" || text === "") return null;
+  if (wake !== undefined && typeof wake !== "boolean") return null;
+  if (from !== undefined && (typeof from !== "string" || from.length > ADAPTER_FROM_MAX)) return null;
+  if ([to, toSession, inReplyTo].filter((each) => each !== undefined).length !== 1) return null;
+  let address: DeliverAddress;
+  if (to !== undefined) {
+    if (!isTaskId(to)) return null;
+    address = { to };
+  } else if (toSession !== undefined) {
+    if (!isAgentSessionId(toSession)) return null;
+    address = { toSession };
+  } else {
+    if (!isMessageId(inReplyTo)) return null;
+    address = { inReplyTo };
+  }
+  return {
+    kind: "deliver",
+    ref,
+    ...address,
+    messageKind: kind,
+    text,
+    ...(wake === undefined ? {} : { wake }),
+    ...(from === undefined ? {} : { from }),
+  };
+}
+
+function parseTag(raw: Record<string, unknown>): TagFrame | null {
+  if (!hasOnly(raw, ["kind", "ref", "session", "task", "key", "value"])) return null;
+  const { ref, session, task, key, value } = raw;
+  if (typeof ref !== "string" || !ADAPTER_REF_PATTERN.test(ref)) return null;
+  if (typeof key !== "string" || !TAG_SUFFIX_PATTERN.test(key)) return null;
+  if (typeof value !== "string" || value.length > TAG_RAW_MAX) return null;
+  if ((session === undefined) === (task === undefined)) return null;
+  if (session !== undefined) return isAgentSessionId(session) ? { kind: "tag", ref, session, key, value } : null;
+  return isTaskId(task) ? { kind: "tag", ref, task, key, value } : null;
+}
+
 /**
- * One line from an adapter: parsed into a fresh value by the frame's own rule, exact fields only. `unsupported` for a
- * kind protocol 1 defines that this daemon does not take yet; `invalid` for anything else, an unknown kind included.
+ * One line from an adapter: parsed into a fresh value by the frame's own rule, exact fields only; `invalid` for
+ * anything else, an unknown kind included.
  */
 export function parseAdapterLine(line: string): AdapterLine {
   let raw: unknown;
@@ -216,7 +386,8 @@ export function parseAdapterLine(line: string): AdapterLine {
     return hello === null ? { ok: false, code: "invalid" } : { ok: true, frame: hello };
   }
   if (kind === "resync") return hasOnly(raw, ["kind"]) ? { ok: true, frame: { kind } } : { ok: false, code: "invalid" };
-  return { ok: false, code: LATER_KINDS.has(kind) ? "unsupported" : "invalid" };
+  const frame = kind === "deliver" ? parseDeliver(raw) : kind === "tag" ? parseTag(raw) : null;
+  return frame === null ? { ok: false, code: "invalid" } : { ok: true, frame };
 }
 
 /** One frame as the line the daemon writes, newline included. */
@@ -233,6 +404,11 @@ export function adapterWants(wants: readonly AdapterWant[], frame: AdapterDaemon
       return wants.includes("sessions");
     case "task":
       return wants.includes("tasks");
+    case "message":
+      return wants.includes("messages");
+    // Answers to the adapter's own frames: it asked for them.
+    case "result":
+    case "delivery":
     case "hello":
     case "error":
       return true;
@@ -321,8 +497,39 @@ export function adapterProtocolSchema(): Schema {
       },
       ["kind", "task", "event"],
     ),
+    message: obj(
+      {
+        kind: { const: "message" },
+        id: str(),
+        messageKind: oneOf(MESSAGE_KINDS),
+        text: str(),
+        from: obj({ key: str(), session: str(), task: str(), title: str() }, ["key"]),
+        inReplyTo: str(),
+        subscribed: { type: "boolean" },
+        leave: { const: true },
+      },
+      ["kind", "id", "messageKind", "text", "from", "subscribed"],
+    ),
+    result: obj(
+      {
+        kind: { const: "result" },
+        ref: str(),
+        id: str(),
+        outcome: oneOf(ADAPTER_RESULT_OUTCOMES),
+        code: oneOf(ADAPTER_RESULT_CODES),
+      },
+      ["kind", "ref", "outcome"],
+    ),
+    delivery: obj({ kind: { const: "delivery" }, id: str(), outcome: oneOf(ADAPTER_DELIVERY_OUTCOMES) }, [
+      "kind",
+      "id",
+      "outcome",
+    ]),
     error: obj({ kind: { const: "error" }, code: oneOf(ADAPTER_ERROR_CODES) }, ["kind", "code"]),
   };
+  const ref = str({ pattern: ADAPTER_REF_PATTERN.source });
+  const uuid = str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" });
+  const taskId = str({ pattern: TASK_ID_PATTERN.source });
   const adapter = {
     hello: closed(
       obj(
@@ -338,8 +545,43 @@ export function adapterProtocolSchema(): Schema {
       ),
     ),
     resync: closed(obj({ kind: { const: "resync" } }, ["kind"])),
+    deliver: {
+      ...closed(
+        obj(
+          {
+            kind: { const: "deliver" },
+            ref,
+            to: taskId,
+            toSession: uuid,
+            inReplyTo: uuid,
+            messageKind: oneOf(MESSAGE_KINDS),
+            text: str({ minLength: 1 }),
+            wake: { type: "boolean" },
+            from: str({ maxLength: ADAPTER_FROM_MAX }),
+          },
+          ["kind", "ref", "messageKind", "text"],
+        ),
+      ),
+      oneOf: [{ required: ["to"] }, { required: ["toSession"] }, { required: ["inReplyTo"] }],
+    },
+    tag: {
+      ...closed(
+        obj(
+          {
+            kind: { const: "tag" },
+            ref,
+            session: uuid,
+            task: taskId,
+            key: str({ pattern: TAG_SUFFIX_PATTERN.source }),
+            value: str({ maxLength: TAG_RAW_MAX }),
+          },
+          ["kind", "ref", "key", "value"],
+        ),
+      ),
+      oneOf: [{ required: ["session"] }, { required: ["task"] }],
+    },
   };
-  const ref = (side: string, kinds: Record<string, Schema>): Schema => ({
+  const refs = (side: string, kinds: Record<string, Schema>): Schema => ({
     oneOf: Object.keys(kinds).map((kind) => ({ $ref: `#/$defs/${side}-${kind}` })),
   });
   return {
@@ -352,8 +594,8 @@ export function adapterProtocolSchema(): Schema {
     $defs: {
       tag,
       session,
-      daemonFrame: ref("daemon", daemon),
-      adapterFrame: ref("adapter", adapter),
+      daemonFrame: refs("daemon", daemon),
+      adapterFrame: refs("adapter", adapter),
       ...Object.fromEntries(Object.entries(daemon).map(([kind, schema]) => [`daemon-${kind}`, schema])),
       ...Object.fromEntries(Object.entries(adapter).map(([kind, schema]) => [`adapter-${kind}`, schema])),
     },

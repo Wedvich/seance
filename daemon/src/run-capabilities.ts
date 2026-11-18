@@ -1,7 +1,9 @@
 import { join } from "node:path";
 import type { CustodianEvent, CustodianStatus, QuotaReading, RepoEntry } from "@seance/shared";
+import { takeRestartRequest, writeAdaptersView } from "./adapter-control.ts";
 import { createAdapterFeed } from "./adapter-feed.ts";
 import { startAdapterHost } from "./adapter-host.ts";
+import { openSubscriptions } from "./adapter-subscriptions.ts";
 import { attachmentsRoot } from "./attachments.ts";
 import {
   adapterAudit,
@@ -87,6 +89,7 @@ import { createMessages, type Messages } from "./messages.ts";
 import { appRelayClient, LazyRelay } from "./app-relay.ts";
 import {
   adaptersDir,
+  conversationsPath,
   custodianActivityPath,
   custodianRoundsPath,
   custodianSessionsPath,
@@ -312,8 +315,14 @@ const sessionEvents: DaemonCapability = (ctx) => {
         });
   // Beside session events because that capability owns pane binding, the peer warnings above and the `ended` frame
   // that clears a pane's held messages: a second capability would need a late-bound hook into it.
+  const conversations = createConversations({
+    configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
+    launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
+    panes: listPanePids,
+  });
   const messages = createMessages({
     panes: listPanePids,
+    conversations,
     windowName: paneWindowName,
     launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
     machine: ctx.config.name,
@@ -342,11 +351,6 @@ const sessionEvents: DaemonCapability = (ctx) => {
     path: watchesPath(),
     audit: watchAudit(daemonSink),
     now: ctx.now,
-  });
-  const conversations = createConversations({
-    configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
-    launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
-    panes: listPanePids,
   });
   const events = createSessionEvents({
     panes: listPanePids,
@@ -456,6 +460,9 @@ export async function watchesSettled(): Promise<void> {
   await Promise.all(watchStops);
 }
 
+/** How often the daemon looks for `seance adapter restart`'s request file. */
+const ADAPTER_RESTART_POLL_MS = 2_000;
+
 /** Adapters' stops in flight: `run.ts`'s stop waits for them, so no child outlives the daemon unsignalled. */
 const adapterStops = new Set<Promise<void>>();
 
@@ -465,7 +472,7 @@ export async function adaptersSettled(): Promise<void> {
 }
 
 /**
- * The adapters `config.json` names (docs/messaging.md §6; DESIGN.md, "Adapters"): the state feed over the session-events
+ * The adapters `config.json` names (DESIGN.md, "Adapters"): the state feed over the session-events
  * capability's conversation table and this machine's launch ledger, and one supervised child per adapter, started once
  * the local socket is up and the feed's first read is done, never while the daemon drains for a restart (and once the
  * hold lifts, when an update is called off). Absent with no `adapters` key, or without session events.
@@ -473,6 +480,7 @@ export async function adaptersSettled(): Promise<void> {
 const adapters: DaemonCapability = (ctx) => {
   const configured = ctx.config.adapters;
   const conversations = conversationsOf.get(ctx);
+  const messages = messagesOf.get(ctx);
   if (configured === undefined || Object.keys(configured).length === 0 || conversations === undefined) {
     return { stop: (): void => {} };
   }
@@ -482,8 +490,27 @@ const adapters: DaemonCapability = (ctx) => {
     exclaves: () => ctx.exclaveScan().exclaves,
     repos: ctx.repos,
   });
+  // The status view, rewritten on each change, one write at a time and the latest state each time.
+  let viewWrite: Promise<void> = Promise.resolve();
+  let viewDirty = false;
+  const writeView = async (): Promise<void> => {
+    viewDirty = false;
+    await writeAdaptersView({ pid: process.pid, at: Date.now(), adapters: host.view() });
+  };
+  const publish = (): void => {
+    if (viewDirty) return;
+    viewDirty = true;
+    viewWrite = viewWrite
+      .then(writeView)
+      .catch((err: unknown) => log.warn(`adapters: status view not written (${String(err)})`));
+  };
   const host = startAdapterHost({
+    onChange: publish,
     adapters: configured,
+    conversations,
+    subscriptions: openSubscriptions(conversationsPath()),
+    launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
+    ...(messages === undefined ? {} : { messages }),
     feed,
     taskRepo: (taskId) => ctx.endedTasks.taskRepo(taskId),
     machine: { deviceId: ctx.deviceId, name: ctx.config.name },
@@ -496,6 +523,21 @@ const adapters: DaemonCapability = (ctx) => {
   const offGate = ctx.endedTasks.onGate((closed) => {
     if (!closed && !stopped) host.start();
   });
+  // `seance adapter restart`'s request file: a stat every 2 s, never a socket op.
+  let taking = false;
+  const restarts = setInterval(() => {
+    if (taking || stopped) return;
+    taking = true;
+    void takeRestartRequest(Date.now())
+      .then((names) => {
+        if (names !== null && !stopped) host.restart(names);
+      })
+      .catch((err: unknown) => log.warn(`adapters: restart request not read (${String(err)})`))
+      .finally(() => {
+        taking = false;
+      });
+  }, ADAPTER_RESTART_POLL_MS);
+  publish();
   return {
     afterLocal: (): void => {
       void feed
@@ -507,6 +549,7 @@ const adapters: DaemonCapability = (ctx) => {
     },
     stop: (): void => {
       stopped = true;
+      clearInterval(restarts);
       offGate();
       feed.stop();
       const stop = host.stop().finally(() => adapterStops.delete(stop));

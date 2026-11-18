@@ -1,4 +1,5 @@
 import {
+  adapterOfAddress,
   isMessageId,
   isRecord,
   isTaskId,
@@ -36,6 +37,8 @@ export interface SendMessageResult {
   readonly text: string;
   /** The message's id, on success: what a reply's `inReplyTo` carries. */
   readonly id?: string;
+  /** To an adapter: the conversation id it subscribed, the one the adapter (and the tool's own CLI) knows it by. */
+  readonly session?: string;
 }
 
 /**
@@ -90,7 +93,29 @@ const REFUSED = {
   remote: (to) =>
     `task ${to} is not on this machine, and this caller cannot route through the scheduler; nothing was sent`,
   no_leader: () => "this machine's daemon could not reach a scheduler leader, so nothing was sent",
+  refused: () => "the adapter does not serve this session's repository; nothing was sent",
 } as const satisfies Record<MessageReplyCode, (to: string) => string>;
+
+/** The answers that read differently for an adapter (`to: "adapter:<name>"`). */
+const REFUSED_ADAPTER = {
+  unknown: (name) => `this machine runs no adapter named ${name}, or none that takes messages; nothing was sent`,
+  ended: (name) => `the ${name} adapter is not running on this machine (or stopped reading); nothing was sent`,
+  refused: (name) => `the ${name} adapter does not serve this session's repository; nothing was sent`,
+  too_long: () => `the message is too long: at most ${MESSAGE_MAX} bytes`,
+  unbound: () =>
+    "this session is not a Claude Code session in a tmux pane this machine's daemon can see, or this machine cannot name a socket's peer process; messaging an adapter needs both",
+  invalid: () =>
+    "this machine's daemon could not read the message; it may predate adapters (`seance update`), and nothing was sent",
+} as const satisfies Partial<Record<MessageReplyCode, (name: string) => string>>;
+
+const ADAPTER_SENT = (name: string, id: string, session: string | undefined, leave: boolean): string => {
+  const head = `delivered to the ${name} adapter as message ${id}`;
+  if (leave)
+    return `${head}; this conversation's subscription to it has ended, so it can now reach you only by replying to a message you send it`;
+  return session === undefined
+    ? `${head}. This session has no verified conversation id, so the adapter can reach you only by replying to message ${id}, within the hour and while this Claude Code process runs`
+    : `${head}. This conversation, ${session}, is subscribed to it: the adapter may deliver to it by that id (across a restart with --resume) until you send it leave, and the tool's own CLI knows this session by that id`;
+};
 
 const NO_LISTENER = (who: string): string =>
   `${who}'s session has no inbox listener: its Claude account lacks the inbox mod (\`seance mod install\` on that machine) or the session started before it was installed`;
@@ -117,7 +142,16 @@ function parseReply(raw: unknown): MessageReply | null {
     const { id, outcome, receipt } = raw;
     if (typeof id !== "string") return null;
     if (outcome !== "delivered" && outcome !== "sent" && outcome !== "routed") return null;
-    return { ok: true, id, outcome, ...(receipt === false ? { receipt: false as const } : {}) };
+    const { subscribed, session, adapter } = raw;
+    return {
+      ok: true,
+      id,
+      outcome,
+      ...(receipt === false ? { receipt: false as const } : {}),
+      ...(typeof subscribed === "boolean" ? { subscribed } : {}),
+      ...(typeof session === "string" ? { session } : {}),
+      ...(typeof adapter === "string" ? { adapter } : {}),
+    };
   }
   const code = MESSAGE_REPLY_CODES.find((c) => c === raw["code"]);
   if (raw["ok"] !== false || code === undefined) return null;
@@ -134,10 +168,16 @@ export async function sendMessage(
     readonly kind: MessageKind;
     readonly text: string;
     readonly inReplyTo?: string;
+    /** To an adapter only: end this conversation's subscription to it. */
+    readonly leave?: boolean;
   },
   opts: SendMessageOpts = {},
 ): Promise<SendMessageResult> {
   const { kind, text, inReplyTo } = message;
+  const adapter = adapterOfAddress(message.to);
+  if (adapter !== null) return sendToAdapter(adapter, { kind, text, inReplyTo, leave: message.leave === true }, opts);
+  if (message.leave === true)
+    return { ok: false, text: "`leave` is only for a message to an adapter (`adapter:<name>`)" };
   if (inReplyTo !== undefined && !isMessageId(inReplyTo)) {
     return { ok: false, text: "`inReplyTo` is not a message id: it is the id a message you received names" };
   }
@@ -149,7 +189,9 @@ export async function sendMessage(
       text: "give `to` (a task id; get_queue lists them), or `inReplyTo` to answer a message you received",
     };
   }
-  if (to !== undefined && !isTaskId(to)) return { ok: false, text: "`to` is not a task id (get_queue lists them)" };
+  if (to !== undefined && !isTaskId(to)) {
+    return { ok: false, text: "`to` is not a task id (get_queue lists them) or an adapter (`adapter:<name>`)" };
+  }
   const who = to === undefined ? `the session that sent message ${inReplyTo}` : `task ${to}`;
   const replyWords: Partial<Record<MessageReplyCode, (id: string) => string>> = REFUSED_REPLY;
   const refusal = (code: MessageReplyCode): string => {
@@ -243,6 +285,64 @@ export async function sendMessage(
   }
   if (reply.outcome === "routed")
     return { ok: true, id: reply.id, text: ROUTED(who, reply.id, reply.receipt !== false) };
+  if (reply.adapter !== undefined) {
+    return { ok: true, id: reply.id, text: `delivered to the ${reply.adapter} adapter as message ${reply.id}` };
+  }
   const delivered = `delivered to ${who} as message ${reply.id}`;
   return { ok: true, id: reply.id, text: reply.outcome === "delivered" ? delivered : SENT(who, reply.id) };
+}
+
+/** A message to an adapter on this machine: local only, so no route is asked and nothing falls back. */
+async function sendToAdapter(
+  name: string,
+  message: { readonly kind: MessageKind; readonly text: string; readonly inReplyTo?: string; readonly leave: boolean },
+  opts: SendMessageOpts,
+): Promise<SendMessageResult> {
+  const { kind, text, inReplyTo, leave } = message;
+  if (inReplyTo !== undefined && !isMessageId(inReplyTo)) {
+    return { ok: false, text: "`inReplyTo` is not a message id: it is the id a message you received names" };
+  }
+  if (text === "" && !leave) return { ok: false, text: "the message has no text" };
+  if (Buffer.byteLength(text, "utf8") > MESSAGE_MAX) return { ok: false, text: REFUSED_ADAPTER.too_long() };
+  let raw: unknown;
+  try {
+    raw = await exchange(
+      {
+        v: MESSAGE_FRAME_VERSION,
+        kind: MESSAGE_FRAME_KIND,
+        to: `adapter:${name}`,
+        messageKind: kind,
+        text,
+        ...(inReplyTo === undefined ? {} : { inReplyTo }),
+        ...(leave ? { leave: true } : {}),
+      },
+      {
+        path: opts.path ?? socketPath(),
+        timeoutMs: SEND_TIMEOUT_MS,
+        timeoutText: "no answer from this machine's daemon; the message may or may not have been delivered",
+      },
+    );
+  } catch (err) {
+    if (err instanceof LocalTimedOut) return { ok: false, text: err.message };
+    if (err instanceof LocalConnectionLost) {
+      return {
+        ok: false,
+        text: "this machine's daemon closed the connection without answering; nothing was delivered",
+      };
+    }
+    if (err instanceof LocalUnavailable) return { ok: false, text: "the local daemon is not running" };
+    return { ok: false, text: err instanceof Error ? err.message : String(err) };
+  }
+  const reply = parseReply(raw);
+  if (reply === null) return { ok: false, text: "the daemon's answer was not a message reply" };
+  if (!reply.ok) {
+    const words: Partial<Record<MessageReplyCode, (name: string) => string>> = REFUSED_ADAPTER;
+    return { ok: false, text: (words[reply.code] ?? REFUSED[reply.code])(name) };
+  }
+  return {
+    ok: true,
+    id: reply.id,
+    text: ADAPTER_SENT(name, reply.id, reply.subscribed === true ? reply.session : undefined, leave),
+    ...(reply.subscribed === true && reply.session !== undefined ? { session: reply.session } : {}),
+  };
 }

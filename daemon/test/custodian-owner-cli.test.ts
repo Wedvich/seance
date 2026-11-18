@@ -37,12 +37,13 @@ describe("seance custodian, the owner's verbs", () => {
   const audit = async (): Promise<string> => readFile(join(root, "state", "seanced.log"), "utf8").catch(() => "");
 
   test("pause --for shows in status until resume clears it, both audited under origin=cli", async () => {
-    expect((await run("pause", "--for", "1h")).code).toBe(0);
-    expect((await run("status")).out).toMatch(/paused:\s+until /u);
-    expect((await run("resume")).out).toContain("resumed");
-    expect((await run("status")).out).toMatch(/paused:\s+no\n/u);
-    expect((await run("pause")).out).toContain("until resume");
-    expect((await run("status")).out).toMatch(/paused:\s+until resume/u);
+    // Whole results, so a failure under load prints the exit code and stderr beside the output it lacked.
+    expect(await run("pause", "--for", "1h")).toMatchObject({ code: 0 });
+    expect(await run("status")).toMatchObject({ code: 0, out: expect.stringMatching(/paused:\s+until /u) });
+    expect(await run("resume")).toMatchObject({ code: 0, out: expect.stringContaining("resumed") });
+    expect(await run("status")).toMatchObject({ code: 0, out: expect.stringMatching(/paused:\s+no\n/u) });
+    expect(await run("pause")).toMatchObject({ code: 0, out: expect.stringContaining("until resume") });
+    expect(await run("status")).toMatchObject({ code: 0, out: expect.stringMatching(/paused:\s+until resume/u) });
     const lines = (await audit()).split("\n").filter((line) => line.includes("audit custodian"));
     expect(lines.map((line) => /op=(\w+)/u.exec(line)?.[1])).toEqual(["pause", "resume", "pause"]);
     for (const line of lines) expect(line).toContain("origin=cli");

@@ -67,6 +67,8 @@ import {
 } from "./service.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { scanRepos } from "./scan.ts";
+import { adapterChecks } from "./adapter-checks.ts";
+import { readAdaptersView } from "./adapter-control.ts";
 import { defaultUpdateEffects, updateNow } from "./update.ts";
 import { checkoutRoot, describeCheckout, readSource, servingRoot, trimRoot } from "./selfsource.ts";
 import { deregisterMachine } from "./deregister.ts";
@@ -833,6 +835,12 @@ export async function cmdDoctor(): Promise<void> {
     if (config.custodian !== undefined) {
       console.log("custodian");
       render(await custodianChecks({ config, home: homedir(), platform: process.platform }));
+    }
+
+    if (config.adapters !== undefined && Object.keys(config.adapters).length > 0) {
+      console.log("adapters");
+      const [daemonPid, view] = await Promise.all([livePid(), readAdaptersView()]);
+      render(await adapterChecks(config.adapters, { view: view !== null && view.pid === daemonPid ? view : null }));
     }
 
     console.log("relay");

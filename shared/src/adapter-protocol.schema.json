@@ -136,6 +136,15 @@
           "$ref": "#/$defs/daemon-task"
         },
         {
+          "$ref": "#/$defs/daemon-message"
+        },
+        {
+          "$ref": "#/$defs/daemon-result"
+        },
+        {
+          "$ref": "#/$defs/daemon-delivery"
+        },
+        {
           "$ref": "#/$defs/daemon-error"
         }
       ]
@@ -147,6 +156,12 @@
         },
         {
           "$ref": "#/$defs/adapter-resync"
+        },
+        {
+          "$ref": "#/$defs/adapter-deliver"
+        },
+        {
+          "$ref": "#/$defs/adapter-tag"
         }
       ]
     },
@@ -258,6 +273,106 @@
       },
       "required": ["kind", "task", "event"]
     },
+    "daemon-message": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "message"
+        },
+        "id": {
+          "type": "string"
+        },
+        "messageKind": {
+          "type": "string",
+          "enum": ["note", "question", "request"]
+        },
+        "text": {
+          "type": "string"
+        },
+        "from": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "session": {
+              "type": "string"
+            },
+            "task": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": ["key"]
+        },
+        "inReplyTo": {
+          "type": "string"
+        },
+        "subscribed": {
+          "type": "boolean"
+        },
+        "leave": {
+          "const": true
+        }
+      },
+      "required": ["kind", "id", "messageKind", "text", "from", "subscribed"]
+    },
+    "daemon-result": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "result"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "delivered",
+            "sent",
+            "held",
+            "ended",
+            "unknown",
+            "too_long",
+            "rate_limited",
+            "unsupported",
+            "invalid",
+            "refused",
+            "ambiguous",
+            "unverified",
+            "ok",
+            "full"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "enum": ["nolistener", "kind", "repo"]
+        }
+      },
+      "required": ["kind", "ref", "outcome"]
+    },
+    "daemon-delivery": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "delivery"
+        },
+        "id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["delivered", "dropped", "nolistener", "ended"]
+        }
+      },
+      "required": ["kind", "id", "outcome"]
+    },
     "daemon-error": {
       "type": "object",
       "properties": {
@@ -319,6 +434,96 @@
       },
       "required": ["kind"],
       "additionalProperties": false
+    },
+    "adapter-deliver": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "deliver"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^[\\u0021-\\u007E]{1,64}$"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "toSession": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "inReplyTo": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "messageKind": {
+          "type": "string",
+          "enum": ["note", "question", "request"]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wake": {
+          "type": "boolean"
+        },
+        "from": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": ["kind", "ref", "messageKind", "text"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": ["to"]
+        },
+        {
+          "required": ["toSession"]
+        },
+        {
+          "required": ["inReplyTo"]
+        }
+      ]
+    },
+    "adapter-tag": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "tag"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^[\\u0021-\\u007E]{1,64}$"
+        },
+        "session": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "required": ["kind", "ref", "key", "value"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": ["session"]
+        },
+        {
+          "required": ["task"]
+        }
+      ]
     }
   }
 }

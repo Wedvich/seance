@@ -4,6 +4,12 @@ import { isMessageId, isRecord, isWatchHead, parseGithubPr, parseGithubRun, type
 
 export const WATCH_FRAME_VERSION = 1;
 
+// Here rather than in `watches.ts`, so `watch_github`'s words name the table's own numbers.
+export const WATCH_SESSION_MAX = 8;
+/** Equal to the leader's per-device cap (`WATCH_SET_MAX`), so a full table is never refused `invalid` for its size. */
+export const WATCH_MACHINE_MAX = 64;
+export const WATCH_TTL_MS = 24 * 60 * 60_000;
+
 /** A session's ask to its own daemon to watch a GitHub PR or Actions run (docs/gh-watch.md W1). */
 export const WATCH_FRAME_KIND = "watch";
 

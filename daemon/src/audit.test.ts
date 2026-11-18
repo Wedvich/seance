@@ -480,6 +480,24 @@ describe("adapterAudit", () => {
     ]);
     expect(emitted()).not.toContain("secret-value");
   });
+
+  test("text in and out: ids, kind, bytes and an outcome, never text, a label, a message or conversation id", async () => {
+    const audit = adapterAudit(collect);
+    await audit.deliver("tg", { to: "t-1", kind: "question", bytes: 12, outcome: "delivered" });
+    await audit.deliver("tg", { to: "session", kind: "note", bytes: 3, outcome: "refused", code: "kind" });
+    await audit.deliver("tg", { to: "reply", kind: "note", bytes: 3, outcome: "nolistener" });
+    await audit.message("tg", { from: "t-1", kind: "request", bytes: 40, outcome: "delivered", subscribed: true });
+    await audit.message("tg", { from: null, kind: "note", bytes: 2, outcome: "refused", subscribed: false });
+    await audit.message("tg", { from: undefined, kind: "note", bytes: 2, outcome: "unbound", subscribed: false });
+    expect(collected).toEqual([
+      'audit adapter origin=adapter op=deliver name=tg dir=in to="t-1" kind=question bytes=12 outcome=delivered',
+      'audit adapter origin=adapter op=deliver name=tg dir=in to="session" kind=note bytes=3 outcome=refused code=kind',
+      'audit adapter origin=adapter op=deliver name=tg dir=in to="reply" kind=note bytes=3 outcome=nolistener',
+      'audit adapter origin=adapter op=message name=tg dir=out from="t-1" kind=request bytes=40 outcome=delivered subscribed=true',
+      "audit adapter origin=adapter op=message name=tg dir=out from=untasked kind=note bytes=2 outcome=refused subscribed=false",
+      "audit adapter origin=adapter op=message name=tg dir=out from=- kind=note bytes=2 outcome=unbound subscribed=false",
+    ]);
+  });
 });
 
 describe("watchAudit", () => {

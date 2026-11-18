@@ -11,7 +11,8 @@ import type { LinearLink } from "./types.ts";
  */
 
 /** A key's suffix, and an adapter's name (#486's pattern). */
-const SUFFIX = /^[a-z][a-z0-9-]{0,31}$/u;
+export const TAG_SUFFIX_PATTERN = /^[a-z][a-z0-9-]{0,31}$/u;
+const SUFFIX = TAG_SUFFIX_PATTERN;
 
 /** The fixed namespaces; `adapter.<name>` is the one family besides them. */
 export const TAG_NAMESPACES = ["agent", "seance", "self", "owner", "creator", "scheduler"] as const;

@@ -12,7 +12,7 @@ import { processStart } from "../src/peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * Session identity with real processes (docs/tags.md §4): `claude`-named processes in panes of a private tmux server,
@@ -69,7 +69,7 @@ beforeAll(async () => {
   await mkdir(join(dirA, "sessions"), { recursive: true });
   await mkdir(join(dirB, "sessions"), { recursive: true });
   exclaves = [{ id: "default", root: base, configDir: dirA, configFile: join(base, ".claude.json") }];
-  claude = await linkClaudeNamed(join(base, "bin"));
+  claude = await bunNamed("claude");
   privateTmux = usePrivateTmux(base, "conv");
   await tmuxOk(["new-session", "-d", "-s", "conv", "-c", base, "sleep", "600"]);
   ({ table, events } = boot());
@@ -280,7 +280,7 @@ describe("verification", () => {
     const { pane: p, pid } = await claudePane("t-clear");
     await report(pid, claim(id(13)));
     await pollUntil(() => sessionOf(p)?.verified === true, "the ledger's verification");
-    expect(await table.atAct(id(13))).toEqual({ ok: true, pane: p, pid });
+    expect(await table.atAct(id(13))).toMatchObject({ ok: true, pane: p, pid });
     // `/clear`: Claude Code writes the file for the new conversation; no report has come yet.
     await writeSessionFile(pid, id(14));
     expect(await table.atAct(id(13))).toEqual({ ok: false, code: "unverified" });
@@ -288,7 +288,7 @@ describe("verification", () => {
     await pollUntil(() => sessionOf(p) === null, "the ledger's id refuted", SETTLE_MS * 4);
     await report(pid, claim(id(14)));
     await pollUntil(() => sessionOf(p)?.verified === true, "the file's verification of the new id");
-    expect(await table.atAct(id(14))).toEqual({ ok: true, pane: p, pid });
+    expect(await table.atAct(id(14))).toMatchObject({ ok: true, pane: p, pid });
   });
 });
 

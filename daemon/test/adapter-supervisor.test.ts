@@ -1,19 +1,17 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { link, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AdapterDaemonFrame, DaemonHello } from "@seance/shared";
 import { createAdapterSupervisor, type AdapterSupervisor, type SupervisorDeps } from "../src/adapter-supervisor.ts";
 import { adapterAudit } from "../src/audit.ts";
-import { exec } from "../src/exec.ts";
-import { pollUntil } from "./fixtures.ts";
+import { linkReferenceAdapter, pollUntil } from "./fixtures.ts";
 
 /**
  * The supervisor with the reference adapter (`test/bin/reference-adapter.ts`) as its child: the handshake, the
  * refusals, malformed lines, the unread cap, backoff and the `failed` hold, the stop by process group and the env.
  */
 
-const REFERENCE = resolve(import.meta.dir, "bin/reference-adapter.ts");
 const HELLO: DaemonHello = {
   kind: "hello",
   protocol: [1],
@@ -29,11 +27,7 @@ const supervisors: AdapterSupervisor[] = [];
 
 beforeAll(async () => {
   base = await realpath(await mkdtemp(join(tmpdir(), "seance-adapter-")));
-  // A link, exec'd once here: a fresh executable's first exec is scanned on macOS, never inside a timed window.
-  adapter = join(base, "reference-adapter.ts");
-  await link(REFERENCE, adapter);
-  const warmed = await exec([adapter, "--warm"]);
-  if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);
+  adapter = await linkReferenceAdapter(base);
 });
 
 afterEach(async () => {
@@ -197,6 +191,50 @@ describe("supervision", () => {
     ]);
     await Bun.sleep(100);
     expect(ops(h, "start")).toHaveLength(3);
+  });
+
+  test("the owner's restart ends a running adapter and starts it again at once, counting no exit", async () => {
+    let changes = 0;
+    const h = supervise([], {
+      backoffMs: 60_000,
+      onChange: () => {
+        changes += 1;
+      },
+    });
+    h.supervisor.start();
+    await pollUntil(() => h.supervisor.state() === "running", "the handshake");
+    const first = h.supervisor.info();
+    expect(first).toMatchObject({ state: "running", protocol: 1, version: "0.0.0-reference", exits: 0 });
+    expect(first.pid).toBe(await h.pid());
+    expect(changes).toBeGreaterThan(0);
+    h.supervisor.restart();
+    // Started at once: a backoff of a minute would hold it far past this wait.
+    await pollUntil(() => ops(h, "start").length === 2 && h.supervisor.state() === "running", "the second run");
+    const second = h.supervisor.info();
+    expect(second.pid).not.toBe(first.pid);
+    expect(second.exits).toBe(0);
+    expect(second.lastExit).toMatchObject({ reason: "restarted" });
+    expect(ops(h, "exit")[0]).toMatch(/ reason=restarted$/u);
+    expect(ops(h, "restart")).toEqual([]);
+  });
+
+  test("the owner's restart lifts the `failed` hold and a refusal, with the exit window reset", async () => {
+    const h = supervise(["--exit", "3"], { backoffMs: 10, failExits: 2 });
+    h.supervisor.start();
+    await pollUntil(() => h.supervisor.state() === "failed", "the failed hold");
+    expect(h.supervisor.info()).toMatchObject({ state: "failed", exits: 2, lastExit: { code: 3, reason: "exited" } });
+    h.supervisor.restart();
+    // Two more runs before the hold: the window was emptied, not carried over.
+    await pollUntil(() => ops(h, "start").length === 4 && h.supervisor.state() === "failed", "the hold again");
+    expect(h.audit.filter((line) => line.includes(" op=failed "))).toHaveLength(2);
+
+    const refused = supervise(["--protocol", "2"]);
+    refused.supervisor.start();
+    await pollUntil(() => ops(refused, "exit").length === 1, "the refusal");
+    expect(refused.supervisor.state()).toBe("refused");
+    refused.supervisor.restart();
+    await pollUntil(() => ops(refused, "start").length === 2 && ops(refused, "exit").length === 2, "a second try");
+    expect(refused.supervisor.state()).toBe("refused");
   });
 
   test("an argv[0] that cannot be started counts as an exit", async () => {

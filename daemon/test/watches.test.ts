@@ -22,7 +22,7 @@ import { listPanePids, type BoundPane } from "../src/session-events.ts";
 import { tmuxOk } from "../src/tmux.ts";
 import type { LeaderVerdict, WatchLeader } from "../src/watch-leader.ts";
 import { createWatches, WATCH_MACHINE_MAX, WATCH_SESSION_MAX, type Watches, type WatchesDeps } from "../src/watches.ts";
-import { linkClaudeNamed, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { bunNamed, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * The daemon's watch table with the binding real: panes in a private tmux server running a `claude`-named process, the
@@ -308,7 +308,7 @@ const idsOf = (set: WatchSet): readonly string[] => set.watches.map((w) => w.id)
 
 beforeAll(async () => {
   base = await realpath(await mkdtemp(join(tmpdir(), "seance-watch-")));
-  claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
+  claudeBin = await bunNamed("claude");
   privateTmux = usePrivateTmux(base, "wat");
   await tmuxOk(["new-session", "-d", "-s", "wat", "-c", base, "sleep", "600"]);
 });
