@@ -8,6 +8,12 @@ import {
   drainStuckText,
   drainSummary,
   drainView,
+  displayName,
+  joinTags,
+  parseTags,
+  type DisplayNameSource,
+  type JoinedTag,
+  type SessionTag,
   leaderCloseNote,
   leadsQueue,
   knownAccounts,
@@ -131,6 +137,60 @@ export interface MachineCard {
    * stay in its config.json (C46).
    */
   readonly custodianControls: boolean;
+  /** Its sessions by name, from its last `sessions` read; null while connected and unread, unanswered, or asleep. */
+  readonly sessions: readonly SessionRow[] | null;
+}
+
+/** One session on a machine card, named as the owner's own surfaces name it (`displayName`, docs/tags.md §6.1). */
+export interface SessionRow {
+  /** The tmux pane id: what `session-tag` names, beside the conversation. Null from a daemon too old to send it. */
+  readonly pane: string | null;
+  readonly name: string;
+  /** Said beside a name the owner did not choose: the session's own, or the window's. Null for a label or a task's title. */
+  readonly mark: string | null;
+  /**
+   * Rename: only for a session running no task (a task's session is named by its task) whose conversation its daemon
+   * verified, on a connected machine advertising `sessionTag` over an open relay. `label` is the owner's now, `""` for none.
+   */
+  readonly rename: { readonly pane: string; readonly session: string; readonly label: string } | null;
+}
+
+const NAME_MARKS: Record<DisplayNameSource, string | null> = {
+  owner: null,
+  task: null,
+  self: "(self-named)",
+  window: "(window)",
+};
+
+/** `SessionEntry.tags` by scope, then `joinTags`: a session entry carries no task tags (step 3's, from the record). */
+function sessionTagsJoined(entry: SessionEntry): Readonly<Record<string, JoinedTag>> {
+  const tags = parseTags(entry.tags, { scope: "session" }) ?? {};
+  const at = (scope: "conversation" | "process"): Record<string, SessionTag> =>
+    Object.fromEntries(Object.entries(tags).filter(([, tag]) => tag.scope === scope));
+  return joinTags(null, at("conversation"), at("process"));
+}
+
+export function sessionRows(
+  entries: readonly SessionEntry[],
+  tasks: readonly Task[] | null,
+  renameable: boolean,
+): readonly SessionRow[] {
+  return entries.map((entry) => {
+    const joined = sessionTagsJoined(entry);
+    const task = entry.taskId === undefined ? undefined : tasks?.find((t) => t.id === entry.taskId);
+    const name = displayName(joined, task?.spec, entry.window);
+    const session = joined["agent.session"];
+    const pane = entry.id ?? null;
+    return {
+      pane,
+      name: name.text,
+      mark: NAME_MARKS[name.source],
+      rename:
+        renameable && pane !== null && entry.taskId === undefined && session?.verified === true
+          ? { pane, session: session.value, label: joined["owner.label"]?.value ?? "" }
+          : null,
+    };
+  });
 }
 
 /**
@@ -540,6 +600,7 @@ function machineCard(
   archived: boolean,
   leader: { readonly drains: boolean; readonly softCloses: boolean },
   drains: DrainInputs,
+  relayOpen: boolean,
 ): MachineCard {
   const canDrain = leader.drains;
   const closed = closedAt(machine) !== null;
@@ -586,7 +647,15 @@ function machineCard(
     // Asleep, the seat reports nothing a reader can act on: the row would only ever say `no report yet`.
     custodian: machine.connected ? custodianRow(machine, status, now) : null,
     custodianControls: machine.connected && machine.capabilities?.includes(CAPABILITIES.custodian) === true,
+    sessions: sessionsOfCard(machine, drains, relayOpen),
   };
+}
+
+function sessionsOfCard(machine: Machine, inputs: DrainInputs, relayOpen: boolean): readonly SessionRow[] | null {
+  const entries = sessionsOf(inputs, machine.deviceId);
+  if (!machine.connected || entries === null) return null;
+  const renameable = relayOpen && machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
+  return sessionRows(entries, inputs.tasks, renameable);
 }
 
 interface AccountGroup {
@@ -789,7 +858,7 @@ export function deriveMachines(
   return {
     scheduler: schedulerLine(machines, scheduler),
     cards: machines.map((machine) =>
-      machineCard(machine, now, scheduler, aliases, known, archive.machine, leader, drains),
+      machineCard(machine, now, scheduler, aliases, known, archive.machine, leader, drains, relayOpen),
     ),
     accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account, {
       known: holds !== null,

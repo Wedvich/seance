@@ -323,6 +323,19 @@ export function availabilityAudit(
   };
 }
 
+/**
+ * A `session-tag` request: the owner labelling (or clearing the label of) an untasked conversation. No pane, session
+ * id or label reaches the line, only how many keys the request named (`0` for one that did not parse) and the outcome.
+ */
+export function sessionTagAudit(
+  origin: SpawnOrigin,
+  sink: AuditSink,
+): (parsed: boolean, outcome: string) => Promise<void> {
+  return async (parsed, outcome) => {
+    await sink(`audit session-tag origin=${origin} key-count=${parsed ? 1 : 0} outcome=${outcome}`);
+  };
+}
+
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
   /** A `run-now` that reserved the task past the concurrency limit and the queue's pause. */

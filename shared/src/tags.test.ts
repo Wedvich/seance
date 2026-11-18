@@ -8,6 +8,8 @@ import {
   joinTags,
   linearRefTags,
   ownerTagsOf,
+  parseSessionTagRequest,
+  parseSessionTagResponse,
   parseTags,
   parseSpawnRef,
   parseTagValue,
@@ -24,6 +26,7 @@ import {
   withOwnerTags,
   writeTags,
 } from "./tags.ts";
+import { TASK_REQUEST_LIMITS } from "./types.ts";
 
 const UUID = "0b3f5e0a-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
 
@@ -306,5 +309,62 @@ describe("task tags", () => {
     expect(parseSpawnRef({ ref: "linear:ENG-1", url: "javascript:x" })).toEqual({ ref: "linear:ENG-1" });
     expect(parseSpawnRef({ ref: "no" })).toBeUndefined();
     expect(parseSpawnRef("x")).toBeUndefined();
+  });
+});
+
+describe("session-tag", () => {
+  const ask = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    pane: "%12",
+    session: UUID,
+    key: "label",
+    value: "release notes",
+    ...extra,
+  });
+
+  test("a label is scrubbed and capped; an empty one clears", () => {
+    expect(parseSessionTagRequest(ask())).toEqual({ pane: "%12", session: UUID, key: "label", value: "release notes" });
+    expect(parseSessionTagRequest(ask({ value: " two\nlines\u0007 " }))?.value).toBe("two lines");
+    expect(parseSessionTagRequest(ask({ value: "" }))?.value).toBe("");
+    expect(parseSessionTagRequest(ask({ value: "\u0007" }))?.value).toBe("");
+    expect(parseSessionTagRequest(ask({ value: "x".repeat(TASK_REQUEST_LIMITS.title) }))?.value).toHaveLength(
+      TASK_REQUEST_LIMITS.title,
+    );
+  });
+
+  test("a multibyte label past the byte cap is refused, not shortened", () => {
+    const fits = "日".repeat(Math.floor(TAG_VALUE_MAX / 3));
+    expect(parseSessionTagRequest(ask({ value: fits }))?.value).toBe(fits);
+    // 120 characters, well under the character cap, 360 bytes.
+    expect(parseSessionTagRequest(ask({ value: "日".repeat(120) }))).toBeNull();
+    // Whitespace the scrub collapses does not count against it.
+    expect(parseSessionTagRequest(ask({ value: `a${" ".repeat(500)}b` }))?.value).toBe("a b");
+  });
+
+  test("a full key, another suffix, a bad pane or id, a long label or an extra field refuses the request", () => {
+    for (const bad of [
+      ask({ key: "owner.label" }),
+      ask({ key: "name" }),
+      ask({ pane: "12" }),
+      ask({ pane: "%12; rm" }),
+      ask({ session: UUID.toUpperCase() }),
+      ask({ value: 5 }),
+      ask({ value: "x".repeat(TASK_REQUEST_LIMITS.title + 1) }),
+      ask({ task: "t-1" }),
+      null,
+      "label",
+    ]) {
+      expect(parseSessionTagRequest(bad)).toBeNull();
+    }
+  });
+
+  test("a reply keeps its value or a known code", () => {
+    expect(parseSessionTagResponse({ ok: true, value: "x" })).toEqual({ ok: true, value: "x" });
+    expect(parseSessionTagResponse({ ok: false, code: "moved", message: "m" })).toEqual({
+      ok: false,
+      code: "moved",
+      message: "m",
+    });
+    expect(parseSessionTagResponse({ ok: false, code: "whatever", message: "m" })).toBeNull();
+    expect(parseSessionTagResponse({ ok: true })).toBeNull();
   });
 });

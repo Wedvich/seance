@@ -234,7 +234,7 @@ describe("the local op socket", () => {
 
   test("ops outside the allowlist are refused before they reach the handler", async () => {
     lines.length = 0;
-    for (const op of ["rescan", "update-available", "availability", "custodian"]) {
+    for (const op of ["rescan", "update-available", "availability", "custodian", "session-tag"]) {
       const line = await raw(`${JSON.stringify({ id: `x-${op}`, ts: Date.now(), op, payload: {} })}\n`);
       const reply = JSON.parse(line.trim()) as Plain;
       expect(reply.payload).toMatchObject({ ok: false });

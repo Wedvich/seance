@@ -1,10 +1,13 @@
-// The adapter subscriptions (docs/tags.md §8, amending docs/messaging.md D3): a session that messages `adapter:<name>`
-// subscribes its verified conversation to that adapter, which may then deliver to it by `toSession` for the
-// conversation's life. Nobody re-sends a subscription, so it is kept at rest (`conversations.json`, §3.2); nothing in
-// this module logs (an adapter module: `daemon/test/adapter-layering.test.ts`).
+// What no writer re-sends, kept at rest per conversation (docs/tags.md §3.2) in the one file
+// `stateDir()/conversations.json`, owned by this module alone (a second writer of its own format would erase this one's
+// entries, each loading the other's as empty): the adapter subscriptions (docs/tags.md §8, amending docs/messaging.md
+// D3) — a session that messages `adapter:<name>` subscribes its verified conversation to that adapter, which may then
+// deliver to it by `toSession` for the conversation's life — and the owner's label on an untasked conversation (§3.1,
+// the `session-tag` op). The label is the one text the file holds, the owner's own. Nothing in this module logs (an
+// adapter module: `daemon/test/adapter-layering.test.ts`; `message-layering.test.ts` holds it off both sinks too).
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { isAdapterName, isAgentSessionId, isRecord } from "@seance/shared";
+import { isAdapterName, isAgentSessionId, isRecord, parseTagValue } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
 
 /** A conversation not live this long is dropped with its subscriptions (docs/tags.md §3.2). */
@@ -23,9 +26,29 @@ interface Subscription {
   readonly since: number;
 }
 
+export interface OwnerLabel {
+  readonly value: string;
+  /** When the owner set it, ms. */
+  readonly at: number;
+}
+
 interface Entry {
+  readonly ownerLabel?: OwnerLabel;
   readonly subscriptions: readonly Subscription[];
   readonly lastLive: number;
+}
+
+/** The owner's label, as `conversations.ts` reads and writes it (the `session-tag` op). */
+export interface ConversationStore {
+  readonly label: (id: string) => OwnerLabel | undefined;
+  /**
+   * Sets the label (`""` clears it) and writes the file; throws, the label as it was, when the write fails. A write that
+   * fails after its rename (the directory's sync) leaves the new file on disk while memory keeps the old value: the next
+   * write overwrites it, a restart before then shows it. Accepted: the owner's retry settles it.
+   */
+  readonly setLabel: (id: string, value: string) => Promise<void>;
+  /** The conversation was live now (`touch`). */
+  readonly live: (id: string) => void;
 }
 
 /**
@@ -42,7 +65,7 @@ export function adapterFingerprint(config: {
   return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 }
 
-export interface Subscriptions {
+export interface Subscriptions extends ConversationStore {
   has(adapter: string, conversation: string): boolean;
   /** Subscribe, or renew `lastLive` on, a verified conversation. */
   add(adapter: string, conversation: string): void;
@@ -61,6 +84,15 @@ export interface Subscriptions {
   flushed(): Promise<void>;
 }
 
+/** A bad label drops the label, never the entry's subscriptions. */
+function parseLabel(raw: unknown): OwnerLabel | undefined {
+  if (!isRecord(raw)) return undefined;
+  const at = raw["at"];
+  if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return undefined;
+  const value = parseTagValue("owner.label", raw["value"], "conversation");
+  return value === null || value === "" ? undefined : { value, at };
+}
+
 function parseEntry(raw: unknown): Entry | null {
   if (!isRecord(raw)) return null;
   const { subscriptions, lastLive } = raw;
@@ -72,8 +104,11 @@ function parseEntry(raw: unknown): Entry | null {
     if (!isAdapterName(adapter) || typeof since !== "number" || !Number.isFinite(since)) return null;
     if (!kept.some((s) => s.adapter === adapter)) kept.push({ adapter, since });
   }
-  return { subscriptions: kept, lastLive };
+  const ownerLabel = parseLabel(raw["ownerLabel"]);
+  return { ...(ownerLabel === undefined ? {} : { ownerLabel }), subscriptions: kept, lastLive };
 }
+
+const holdsNothing = (entry: Entry): boolean => entry.subscriptions.length === 0 && entry.ownerLabel === undefined;
 
 interface Loaded {
   readonly adapters: Map<string, string>;
@@ -124,14 +159,15 @@ export function openSubscriptions(path: string, opts: { readonly now?: () => num
   function prune(): void {
     const horizon = now() - CONVERSATION_IDLE_MS;
     for (const [id, entry] of conversations) {
-      if (entry.lastLive < horizon || entry.subscriptions.length === 0) conversations.delete(id);
+      if (entry.lastLive < horizon || holdsNothing(entry)) conversations.delete(id);
     }
     if (conversations.size <= CONVERSATIONS_KEPT_MAX) return;
     const oldest = [...conversations].toSorted(([, a], [, b]) => a.lastLive - b.lastLive);
     for (const [id] of oldest.slice(0, conversations.size - CONVERSATIONS_KEPT_MAX)) conversations.delete(id);
   }
 
-  function persist(): void {
+  /** The returned write rejects on failure (for `setLabel`); every other caller leaves memory the truth until restart. */
+  function persist(): Promise<void> {
     prune();
     const body = {
       v: FILE_VERSION,
@@ -141,7 +177,15 @@ export function openSubscriptions(path: string, opts: { readonly now?: () => num
     const out = `${JSON.stringify(body)}\n`;
     for (const [id, entry] of conversations) written.set(id, entry.lastLive);
     // Serialized: two renames racing could publish the older body last.
-    chain = chain.then(() => writeDurable(path, out, 0o600)).catch(() => {});
+    const run = chain.then(() => writeDurable(path, out, 0o600));
+    chain = run.catch(() => {});
+    return run;
+  }
+
+  /** Keeps the entry while it holds a label or a subscription. */
+  function put(id: string, entry: Entry): void {
+    if (holdsNothing(entry)) conversations.delete(id);
+    else conversations.set(id, entry);
   }
 
   /** Ends every subscription to one adapter in memory; whether any ended. */
@@ -149,24 +193,30 @@ export function openSubscriptions(path: string, opts: { readonly now?: () => num
     let changed = false;
     for (const [id, entry] of conversations) {
       if (!entry.subscriptions.some((sub) => sub.adapter === adapter)) continue;
-      const rest = entry.subscriptions.filter((sub) => sub.adapter !== adapter);
-      if (rest.length === 0) conversations.delete(id);
-      else conversations.set(id, { ...entry, subscriptions: rest });
+      put(id, { ...entry, subscriptions: entry.subscriptions.filter((sub) => sub.adapter !== adapter) });
       changed = true;
     }
     return changed;
   }
 
   function set(id: string, subscriptions: readonly Subscription[], lastLive: number): void {
-    if (subscriptions.length === 0) conversations.delete(id);
-    else conversations.set(id, { subscriptions, lastLive });
-    persist();
+    const ownerLabel = conversations.get(id)?.ownerLabel;
+    put(id, { ...(ownerLabel === undefined ? {} : { ownerLabel }), subscriptions, lastLive });
+    void persist();
+  }
+
+  function touch(conversation: string): void {
+    const entry = conversations.get(conversation);
+    if (entry === undefined) return;
+    const at = now();
+    conversations.set(conversation, { ...entry, lastLive: at });
+    if (at - (written.get(conversation) ?? 0) >= TOUCH_WRITE_MS) void persist();
   }
 
   // A load that dropped idle entries writes the pruned file back.
   const before = conversations.size;
   prune();
-  if (conversations.size !== before) persist();
+  if (conversations.size !== before) void persist();
 
   return {
     has(adapter, conversation) {
@@ -191,16 +241,38 @@ export function openSubscriptions(path: string, opts: { readonly now?: () => num
         entry.lastLive,
       );
     },
-    touch(conversation) {
-      const entry = conversations.get(conversation);
-      if (entry === undefined) return;
+    touch,
+    live: touch,
+    label(id) {
+      return conversations.get(id)?.ownerLabel;
+    },
+    async setLabel(id, value) {
+      const held = conversations.get(id);
+      // Nothing to clear: no write, and no file made for it.
+      if (value === "" && held?.ownerLabel === undefined) return;
       const at = now();
-      conversations.set(conversation, { ...entry, lastLive: at });
-      if (at - (written.get(conversation) ?? 0) >= TOUCH_WRITE_MS) persist();
+      put(id, {
+        ...(value === "" ? {} : { ownerLabel: { value, at } }),
+        subscriptions: held?.subscriptions ?? [],
+        lastLive: at,
+      });
+      try {
+        await persist();
+      } catch (err) {
+        // Only the label goes back: a subscription change made meanwhile stands, and its own write follows.
+        const current = conversations.get(id);
+        const ownerLabel = held?.ownerLabel;
+        put(id, {
+          ...(ownerLabel === undefined ? {} : { ownerLabel }),
+          subscriptions: current?.subscriptions ?? [],
+          lastLive: current?.lastLive ?? held?.lastLive ?? at,
+        });
+        throw err;
+      }
     },
     drop(adapter) {
       const changed = strip(adapter);
-      if (adapters.delete(adapter) || changed) persist();
+      if (adapters.delete(adapter) || changed) void persist();
     },
     reconcile(configured) {
       let changed = false;
@@ -221,7 +293,7 @@ export function openSubscriptions(path: string, opts: { readonly now?: () => num
         adapters.set(name, fingerprint);
         changed = true;
       }
-      if (changed) persist();
+      if (changed) void persist();
     },
     flushed() {
       return chain;

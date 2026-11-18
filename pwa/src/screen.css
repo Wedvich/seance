@@ -2592,6 +2592,44 @@
   color: var(--warn);
 }
 
+/* A machine's sessions by name, under its exclaves: the name gives way, the mark and Rename keep their width. */
+.fleet-sessions {
+  margin: 0;
+  padding: 10px 0 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.fleet-session {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+
+.fleet-session-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.fleet-session-mark {
+  flex: none;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
+.fleet-session-rename {
+  flex: none;
+  margin-left: auto;
+}
+
 /* ---- history chart ---- */
 
 .chart {

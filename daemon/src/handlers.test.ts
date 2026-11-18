@@ -1927,6 +1927,49 @@ describe("a closed machine", () => {
       expect(trail().at(-1)).toBe("audit availability origin=relay open=false outcome=internal_error");
     });
   });
+
+  describe("the session-tag op", () => {
+    const session = "1a2b3c4d-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+    const ask = (extra: Record<string, unknown> = {}): Plain =>
+      request("session-tag", { pane: "%3", session, key: "label", value: "notes", ...extra });
+    const trail = (): string[] => lines.filter((l) => l.startsWith("audit session-tag"));
+
+    test("a malformed payload is invalid_request, no table is unsupported, the act's code and a throw pass through", async () => {
+      const acts: string[] = [];
+      const handle = createHandler({
+        ...ctx,
+        sessionTag: (_pane, _id, value) => {
+          acts.push(value);
+          return Promise.resolve({ ok: false, code: "tasked" });
+        },
+      });
+      for (const bad of [
+        { key: "title" },
+        { pane: "3" },
+        { session: "nope" },
+        { extra: 1 },
+        { value: 5 },
+        { value: "日".repeat(120) },
+      ]) {
+        expect((await handle(ask(bad), APP_ID))?.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      }
+      expect(acts).toEqual([]);
+      expect((await handle(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "tasked" });
+      expect((await createHandler(ctx)(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "unsupported" });
+      const broken = createHandler({ ...ctx, sessionTag: () => Promise.reject(new Error("disk full")) });
+      expect((await broken(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "internal_error" });
+      expect(trail()).toEqual([
+        ...Array.from({ length: 6 }, () => "audit session-tag origin=relay key-count=0 outcome=invalid_request"),
+        "audit session-tag origin=relay key-count=1 outcome=tasked",
+        "audit session-tag origin=relay key-count=1 outcome=unsupported",
+        "audit session-tag origin=relay key-count=1 outcome=internal_error",
+      ]);
+    });
+
+    test("the leader's in-process ops carry no session-tag op", () => {
+      expect(Object.keys(createLocalOps(ctx, "leader"))).not.toContain("session-tag");
+    });
+  });
 });
 
 describe("a task's spawn and the ref it carries", () => {
