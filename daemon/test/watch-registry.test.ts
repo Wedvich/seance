@@ -78,7 +78,8 @@ const runs = (...entries: [number, RunReading][]): { prs: Map<string, PrReading>
 });
 
 /** Every microtask the registry's send chain queued has run once a macrotask has. */
-const settle = (): Promise<void> => new Promise((resolve) => {
+const settle = (): Promise<void> =>
+  new Promise((resolve) => {
     setTimeout(resolve, 0);
   });
 
@@ -330,7 +331,9 @@ describe("level-triggered events", () => {
     f.registry.read(
       {
         prs: new Map<string, PrReading>([[prKey(1), { kind: "closed" }]]),
-        runs: new Map<string, RunReading>([[runKey(7), { kind: "completed", attempt: 2, conclusion: "failure", failing }]]),
+        runs: new Map<string, RunReading>([
+          [runKey(7), { kind: "completed", attempt: 2, conclusion: "failure", failing }],
+        ]),
       },
       10,
     );
