@@ -1,6 +1,18 @@
 import { homedir } from "node:os";
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, sep } from "node:path";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { CLI_NAME } from "./commands.ts";
 import type { CustodianConfig } from "./config.ts";
 import { roundSeed, NOTES_MAX } from "./custodian-agent.ts";
@@ -402,9 +414,24 @@ async function isShim(bunReal: string): Promise<boolean> {
   }
 }
 
+const LINK_HOPS_MAX = 40;
+
+/**
+ * A file's realpath, its own name reached by following its links rather than asked of the kernel: macOS answers that
+ * with whichever hard link of the inode any process looked up last, so a bun hard-linked under another name (the test
+ * suite's `9.9.9` claude stub, but any link would do) read as a shim, or put that link's dir in `allowRead`. Directories
+ * have one name each, so their realpath stands.
+ */
+export async function realpathOfFile(path: string, hops = 0): Promise<string> {
+  if (hops > LINK_HOPS_MAX) throw new Error(`more than ${LINK_HOPS_MAX} links from ${path}`);
+  const at = join(await realpath(dirname(path)), basename(path));
+  if (!(await lstat(at)).isSymbolicLink()) return at;
+  return realpathOfFile(resolve(dirname(at), await readlink(at)), hops + 1);
+}
+
 export async function roundToolchain(): Promise<RoundToolchain> {
   const bun = resolvedBun();
-  const bunReal = await realpath(bun).catch(() => bun);
+  const bunReal = await realpathOfFile(bun).catch(() => bun);
   const main = await resolvedMain();
   return { bun, bunReal, bunShim: await isShim(bunReal), main, checkout: dirname(dirname(dirname(main))) };
 }

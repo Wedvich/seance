@@ -20,6 +20,7 @@ import {
   existingPaths,
   PROTECTED_DIRS,
   PROTECTED_NAMES,
+  realpathOfFile,
   roundCommand,
   roundDirPlanted,
   roundEnv,
@@ -610,5 +611,52 @@ describe("existingPaths", () => {
       volume,
     );
     expect(found).toEqual([real, join(volume, "real-dir")]);
+  });
+});
+
+describe("realpathOfFile", () => {
+  // macOS answers a file's realpath with whichever hard link of its inode any process looked up last, and the suite's
+  // `9.9.9` claude stub is a hard link of bun: a round's toolchain once read bun as a shim. A second process keeps
+  // looking the other link up while this one resolves through a relative symlink, as Homebrew's `bin/bun` is.
+  test("names the file by the links followed, never by another hard link of it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "seance-realfile-"));
+    await Promise.all(["keg", "stub", "bin"].map((d) => mkdir(join(root, d))));
+    await writeFile(join(root, "keg", "bun"), "");
+    const other = join(root, "stub", "9.9.9");
+    await link(join(root, "keg", "bun"), other);
+    await symlink("../keg/bun", join(root, "bin", "bun"));
+    const expected = join(await realpath(join(root, "keg")), "bun");
+    const lookups = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `const { statSync } = require("fs"); statSync(${JSON.stringify(other)}); console.log("ready"); for (;;) statSync(${JSON.stringify(other)});`,
+      ],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    try {
+      // The window below opens only once the lookups run: a bun start can outlast it on a loaded machine.
+      const reader = lookups.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready\n");
+      reader.releaseLock();
+      const wrong: string[] = [];
+      let raced = 0;
+      for (const end = Date.now() + 500; Date.now() < end && raced < 5;) {
+        // oxlint-disable-next-line no-await-in-loop -- the race is between this process's lookups and the other's
+        const [ours, plain] = await Promise.all([
+          realpathOfFile(join(root, "bin", "bun")),
+          realpath(join(root, "bin", "bun")),
+        ]);
+        if (ours !== expected) wrong.push(ours);
+        if (plain !== expected) raced++;
+      }
+      expect(wrong).toEqual([]);
+      // The window was open: plain realpath named the other link (only macOS's has the window).
+      if (process.platform === "darwin") expect(raced).toBeGreaterThan(0);
+    } finally {
+      lookups.kill();
+      await lookups.exited;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
