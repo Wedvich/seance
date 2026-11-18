@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   chmod,
+  copyFile,
   link,
   lstat,
   mkdir,
@@ -621,10 +622,10 @@ describe("realpathOfFile", () => {
   test("names the file by the links followed, never by another hard link of it", async () => {
     const root = await mkdtemp(join(tmpdir(), "seance-realfile-"));
     await Promise.all(["keg", "stub", "bin"].map((d) => mkdir(join(root, d))));
-    // Bun's own inode, as `makeClaudeStub` links it: a GitHub macOS runner showed no race in 500 ms on a fresh empty
-    // file, where bun's raced in most calls (only looked up here, never exec'd, so no first-exec scan). A link across
-    // filesystems falls back to a plain file, which still proves the name.
-    await link(process.execPath, join(root, "keg", "bun")).catch(() => writeFile(join(root, "keg", "bun"), ""));
+    // A copy of bun: a GitHub macOS runner showed no race in 500 ms on a fresh empty file, where bun's inode raced in
+    // most calls. A copy, never bun's own inode: removing a link of that in teardown gets bun execs anywhere on the
+    // machine SIGKILLed by syspolicyd (`bunNamed`, test/fixtures.ts). Only looked up here, never exec'd.
+    await copyFile(process.execPath, join(root, "keg", "bun"));
     const other = join(root, "stub", "9.9.9");
     await link(join(root, "keg", "bun"), other);
     await symlink("../keg/bun", join(root, "bin", "bun"));

@@ -147,9 +147,11 @@ green:
 - Never let a test's first exec of a freshly written executable land inside a timed window. macOS
   scans every never-executed file on first exec, one at a time machine-wide, so concurrent shards
   queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
-  this stays green in CI while failing every local run. Link rather than copy, and exec it once in
-  setup — `makeClaudeStub` shows both and carries the measurements; a bash stub is a `scriptStub`
-  (`daemon/test/fixtures.ts`), a link to one committed file, never a new script. Setup means
+  this stays green in CI while failing every local run. Exec it once in setup, and don't write a
+  new one: a bash stub is a `scriptStub` (`daemon/test/fixtures.ts`), a link to one committed file,
+  never a new script; a bun under another name is `bunNamed`, a copy made once per machine and bun
+  build. Never a hard link of the installed bun: removing one makes macOS's syspolicyd SIGKILL bun
+  execs anywhere on the machine (`bunNamed` says how; `bun-links.test.ts` holds it). Setup means
   `beforeAll`: a stub written in `beforeEach` is a new file every test (`raycast-cli.test.ts` passes
   per-test paths in by env instead).
 - A shell stub that a test stops with SIGINT traps it before writing anything the test waits on,
