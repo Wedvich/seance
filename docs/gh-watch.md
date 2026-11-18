@@ -307,7 +307,7 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   URL, owner, repo, number, head, check names or the watch id (it joins nothing the line needs). The leader logs no
   line per watch, reading or event, only a refused set, a failed send and the poller's class changes.
 - **Not in the PWA, `get_queue`, `status` or the archivist.** A count of live watches on the Machines row is open
-  question 4.
+  question 3.
 
 ## Threat-model invariants this adds
 
