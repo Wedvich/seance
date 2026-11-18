@@ -662,9 +662,13 @@ describe("the capability bit", () => {
         await pollUntil(async () => (await paneInfo(stray)) === null, "the unreachable round pane to close");
         await pollUntil(async () => (await seatRecordNow()).round === undefined, "the round to end");
       });
-      const audit = lines.filter((line) => line.includes("audit custodian"));
-      expect(audit.some((line) => line.includes(`op=kill pane=${stray} reason=unreachable`))).toBe(true);
-      expect(audit.some((line) => line.includes(`op=end pane=${stray} outcome=failed reason=lost`))).toBe(true);
+      // Against every captured line, so a failure prints what the seat did instead (a refusal, another kill reason).
+      expect(lines).toContainEqual(
+        expect.stringMatching(new RegExp(`audit custodian .*op=kill pane=${stray} reason=unreachable `, "u")),
+      );
+      expect(lines).toContainEqual(
+        expect.stringMatching(new RegExp(`audit custodian .*op=end pane=${stray} outcome=failed reason=lost$`, "u")),
+      );
       const served = (await seatRecordNow()).socketDir;
       expect(served).toMatch(/^\/tmp\/seance-cu-s-/u);
       expect(served).not.toBe(socketDir);

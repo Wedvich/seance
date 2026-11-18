@@ -773,6 +773,10 @@ export async function captureLog(body: () => Promise<void>): Promise<string[]> {
   console.error = capture;
   try {
     await body();
+  } catch (err) {
+    // A wait that timed out inside the body is the failure the lines explain: keep them in its message.
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`${message}\n--- captured log ---\n${lines.join("\n")}`, { cause: err });
   } finally {
     console.log = realLog;
     console.error = realError;
