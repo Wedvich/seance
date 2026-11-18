@@ -135,6 +135,10 @@ export interface SpawnCliArgs {
   readonly not?: readonly string[];
   /** Queued spawn only (refused with `--now`): traits the machine must declare, each given by one `--requires`; present only when given. */
   readonly requires?: readonly string[];
+  /** Queued spawn only (refused with `--now`): what the task is for, `source:id` (`creator.ref`); present only when given. */
+  readonly ref?: string;
+  /** Queued spawn only, and only beside `ref`: its https: URL (`creator.ref-url`); present only when given. */
+  readonly refUrl?: string;
   /** Queued spawn only (refused with `--now`): start it past the concurrency limit and a paused queue once admitted, as `seance start`; present only when given. */
   readonly start?: true;
   /** The task's autonomy level, queued or `--now`; present only when given. */
@@ -155,13 +159,15 @@ const SPAWN_VALUE_FLAGS = {
   "--account": "account",
   "--not": "not",
   "--requires": "requires",
+  "--ref": "ref",
+  "--ref-url": "refUrl",
   "--autonomy": "autonomy",
   "--at": "at",
   "--in": "in",
 } as const;
 
 /** Given at most once each. */
-const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set(["machine", "account", "autonomy", "at", "in"]);
+const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set(["machine", "account", "autonomy", "at", "in", "ref", "refUrl"]);
 
 type SpawnValueFlag = keyof typeof SPAWN_VALUE_FLAGS;
 
@@ -187,6 +193,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let autonomy: AutonomyLevel | undefined;
   let at: string | undefined;
   let duration: string | undefined;
+  let ref: string | undefined;
+  let refUrl: string | undefined;
   const not: string[] = [];
   const requires: string[] = [];
   const promptParts: string[] = [];
@@ -202,6 +210,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       else if (expect === "account") account = arg;
       else if (expect === "at") at = arg;
       else if (expect === "in") duration = arg;
+      else if (expect === "ref") ref = arg;
+      else if (expect === "refUrl") refUrl = arg;
       else if (isAutonomyLevel(arg)) autonomy = arg;
       else throw new Error(SPAWN_USAGE);
       expect = null;
@@ -233,9 +243,14 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     expect === "requires" ||
     expect === "autonomy" ||
     expect === "at" ||
-    expect === "in"
+    expect === "in" ||
+    expect === "ref" ||
+    expect === "refUrl"
   ) {
     throw new Error(SPAWN_USAGE);
+  }
+  if (refUrl !== undefined && ref === undefined) {
+    throw new Error(`--ref-url is the URL of the --ref it comes with — give --ref too\n${SPAWN_USAGE}`);
   }
   if (at !== undefined && duration !== undefined) {
     throw new Error(`--at and --in both set the start time — give one\n${SPAWN_USAGE}`);
@@ -254,6 +269,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   if (now && requires.length > 0) {
     throw new Error(`--requires needs the scheduler: --now spawns directly and skips routing\n${SPAWN_USAGE}`);
   }
+  if (now && ref !== undefined) {
+    throw new Error(`--ref needs the scheduler: --now spawns directly and queues no task to tag\n${SPAWN_USAGE}`);
+  }
   if (now && start) {
     throw new Error(
       `--now spawns here directly; --start starts a queued spawn past the scheduler's limit — give one\n${SPAWN_USAGE}`,
@@ -271,6 +289,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
     ...(requires.length === 0 ? {} : { requires }),
+    ...(ref === undefined ? {} : { ref }),
+    ...(refUrl === undefined ? {} : { refUrl }),
     ...(autonomy === undefined ? {} : { autonomy }),
     ...(at === undefined ? {} : { at }),
     ...(duration === undefined ? {} : { in: duration }),

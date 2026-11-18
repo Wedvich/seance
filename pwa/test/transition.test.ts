@@ -39,6 +39,8 @@ function state(overrides: Partial<AppState> = {}): AppState {
     form: DEFAULT_FORM,
     autonomy: "checkpoint",
     notBefore: null,
+    ref: { ref: "", url: "" },
+    labelling: null,
     promptUndo: null,
     sheet: null,
     settings: false,

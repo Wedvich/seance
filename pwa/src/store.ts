@@ -53,6 +53,7 @@ import {
   AUTONOMY_LABELS,
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
+  EMPTY_REF,
   HELD_MAX,
   heldOrder,
   heldStale,
@@ -104,12 +105,15 @@ import {
   derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
+  deriveTaskTagsAvailability,
   deriveTraitsAvailability,
   heldNeedsLeader,
   leaderVerified,
   resolveRepo,
   scopedRepos,
+  refTagsOf,
   settlesOnReport,
+  TASK_TAGS_UNAVAILABLE,
   TRAITS_UNAVAILABLE,
 } from "./view.ts";
 
@@ -155,7 +159,8 @@ function openLayers(state: AppState): number {
     (machines ? 1 : 0) +
     (queue ? 1 : 0) +
     (verdict === null ? 0 : 1) +
-    (accounts.renaming === null ? 0 : 1)
+    (accounts.renaming === null ? 0 : 1) +
+    (state.labelling === null ? 0 : 1)
   );
 }
 
@@ -163,6 +168,8 @@ function openLayers(state: AppState): number {
 function closeTop(state: AppState): Partial<AppState> | null {
   // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
   if (state.accounts.renaming !== null) return { accounts: { ...state.accounts, renaming: null, notice: null } };
+  // Opened over the Queue screen, so it closes before it.
+  if (state.labelling !== null) return { labelling: null };
   const { sheet } = state;
   if (sheet !== null) {
     // Cleared on the way out, not on the next open: a failure that landed while
@@ -385,6 +392,8 @@ export class Store {
       form,
       autonomy: DEFAULT_AUTONOMY,
       notBefore: null,
+      ref: EMPTY_REF,
+      labelling: null,
       promptUndo: null,
       sheet: null,
       settings: false,
@@ -857,6 +866,11 @@ export class Store {
     void this.refreshPreview();
   }
 
+  /** Sets the next task's ref as typed; checked at the press, shown as it is typed on the Ref sheet. */
+  setRef(ref: string, url: string): void {
+    this.#patch({ ref: { ref, url } });
+  }
+
   setUntil(until: TaskUntil): void {
     this.#patch({ form: { ...this.#state.form, until } });
   }
@@ -909,6 +923,8 @@ export class Store {
     if (wide === this.#state.wide) return;
     // The dialog is drawn only by the Machines screen, which the other layout may not show.
     this.closeAccountRename();
+    // Likewise the label dialog: the Queue screen draws it.
+    this.closeLabel();
     // Likewise: only the Queue screen draws it, and the narrow layout may not be showing that.
     this.closeOlderSheet();
     this.#patch({ wide });
@@ -1133,6 +1149,7 @@ export class Store {
     // Any traversal leaves the entry that was current, held or not.
     this.#held = false;
     this.#renameClosing = false;
+    this.#labelClosing = false;
     this.#olderSheetClosing = false;
     // One delivered traversal, not all: a second back may still be in flight.
     this.#pendingBacks = Math.max(0, this.#pendingBacks - 1);
@@ -1276,6 +1293,30 @@ export class Store {
     const { accounts } = this.#state;
     if (accounts.renaming === null) this.#pushLayer();
     this.#patch({ accounts: { ...accounts, renaming: accountId, notice: null } });
+  }
+
+  /** Set from asking for the label layer's back until the traversal lands, as `#renameClosing` is. */
+  #labelClosing = false;
+
+  /** The one way the app closes the label dialog; a no-op while closed or already closing. */
+  closeLabel(): void {
+    if (this.#state.labelling === null || this.#labelClosing) return;
+    this.#labelClosing = true;
+    this.#back();
+  }
+
+  /** The label dialog for a task: a layer like the sheets, so back closes it. */
+  openLabel(taskId: string): void {
+    const { labelling } = this.#state;
+    if (labelling === null) this.#pushLayer();
+    this.#patch({ labelling: { taskId, saving: false, notice: null } });
+  }
+
+  /** Labels a task (blank clears it) through `amend`; true when it landed, which closes the dialog. */
+  async labelTask(taskId: string, label: string): Promise<boolean> {
+    const landed = await this.#queue.labelTask(taskId, label);
+    if (landed && this.#state.labelling?.taskId === taskId) this.closeLabel();
+    return landed;
   }
 
   /** Names a Claude account (blank clears it); every client shows it. True when the name landed, which closes its dialog. */
@@ -1554,6 +1595,13 @@ export class Store {
       const traitsProblem = this.#requiresProblem(form.requires, relay, form.machine, form.account);
       if (traitsProblem !== null) return refused(`${traitsProblem}.`);
     }
+    // A held task is checked when it is sent (`#sendOne`), like `requires`: no leader to ask now.
+    const refTagsEntry = refTagsOf(this.#state.ref);
+    if ("problem" in refTagsEntry) return refused(`${refTagsEntry.problem}.`);
+    const tags = Object.keys(refTagsEntry.tags).length === 0 ? undefined : refTagsEntry.tags;
+    if (tags !== undefined && !holding && !deriveTaskTagsAvailability(relay)) {
+      return refused(`${TASK_TAGS_UNAVAILABLE}, or clear the ref.`);
+    }
     const { autonomy, notBefore } = this.#state;
     // Resolved at the press, so "in 2 h" means 2 h from now however long the form sat open.
     const startAt = notBefore === null ? null : resolveNotBeforeChoice(notBefore, Date.now());
@@ -1592,6 +1640,7 @@ export class Store {
         ...(prompt === undefined ? {} : { prompt }),
         ...(form.machine === null && form.account === null ? {} : { pin }),
         ...(form.requires.length === 0 ? {} : { requires: form.requires }),
+        ...(tags === undefined ? {} : { tags }),
         client: "pwa" satisfies SpawnClient,
         ...(form.after.length === 0 ? {} : { deps: form.after }),
         ...(reported ? { until: form.until } : {}),
@@ -1657,6 +1706,7 @@ export class Store {
       },
       autonomy: DEFAULT_AUTONOMY,
       notBefore: null,
+      ref: EMPTY_REF,
       promptUndo: null,
       attachments: this.#state.attachments.filter((f) => f.upload.kind !== "stored" || !sent.has(f.upload.id)),
       attachNotice: null,
@@ -1719,6 +1769,11 @@ export class Store {
         task,
         "The scheduler's leader doesn't take account pins yet. Update seanced on its machine, or discard it.",
       );
+      return;
+    }
+    // An older leader holds a tagged record unreadable; checked here as the form could not (no leader to ask when held).
+    if (task.spec.tags !== undefined && !deriveTaskTagsAvailability(this.#state.relay)) {
+      this.#heldFailed(task, `${TASK_TAGS_UNAVAILABLE}. Try again once it does, or discard it.`);
       return;
     }
     // The same checks the form made, against the registry as it stands when the task is sent.

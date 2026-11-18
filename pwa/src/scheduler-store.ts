@@ -36,7 +36,9 @@ import {
   deriveLimitsAvailability,
   derivePassAvailability,
   deriveRunNowAvailability,
+  deriveTaskTagsAvailability,
   deriveTraitsAvailability,
+  TASK_TAGS_UNAVAILABLE,
   previewAsked,
   resolveRepo,
   scopedRepos,
@@ -927,7 +929,10 @@ export class SchedulerStore {
     };
     const offer = continueOffer(listed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : [], context);
     if (!offer.ok) return sentence(offer.reason);
-    const spec: TaskSpec = { ...offeredSpec(listed, offer), client: "pwa" };
+    const spec: TaskSpec = {
+      ...offeredSpec(listed, offer, undefined, deriveTaskTagsAvailability(this.#state.relay)),
+      client: "pwa",
+    };
     // The target is exact, so no name check: a leader that cannot route on `requires` would drop it and resume anywhere.
     if (spec.requires !== undefined && !deriveTraitsAvailability(this.#state.relay))
       return sentence(TRAITS_UNAVAILABLE);
@@ -937,6 +942,31 @@ export class SchedulerStore {
     if (!reply.ok) return sentence(storeErrorText(reply.code));
     this.#mergeTask(task);
     return null;
+  }
+
+  /**
+   * Sets a task's `owner.label` (blank clears it) through `amend`, taken in any state. Offered only to a verified
+   * leader that takes task tags: an older one refuses the field. The dialog stays open on a refusal, with its reason.
+   */
+  async labelTask(taskId: string, label: string): Promise<boolean> {
+    const { labelling, relay } = this.#state;
+    if (labelling?.taskId !== taskId || labelling.saving) return false;
+    if (!deriveTaskTagsAvailability(relay)) {
+      this.#patch({ labelling: { ...labelling, notice: `${TASK_TAGS_UNAVAILABLE}.` } });
+      return false;
+    }
+    this.#patch({ labelling: { ...labelling, saving: true, notice: null } });
+    let notice: string | null = null;
+    try {
+      const reply = await this.#client.amend({ taskId, ownerTags: { label: label.trim() } });
+      if (reply === null || "ok" in reply) notice = actionReplyText(reply);
+      else this.#mergeTask(reply.task);
+    } catch (err) {
+      notice = this.#actionFailure(err);
+    }
+    const now = this.#state.labelling;
+    if (now?.taskId === taskId) this.#patch({ labelling: { ...now, saving: false, notice } });
+    return notice === null;
   }
 
   async #actOnTask(action: TaskAction): Promise<void> {

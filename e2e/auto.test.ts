@@ -198,7 +198,14 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
 
-      const spawned = await call("spawn_session", { machine: "auto", repo: "myrepo", prompt: "route me by mcp" });
+      const refUrl = "https://linear.app/x/issue/ENG-7";
+      const spawned = await call("spawn_session", {
+        machine: "auto",
+        repo: "myrepo",
+        prompt: "route me by mcp",
+        ref: "linear:ENG-7",
+        ref_url: refUrl,
+      });
       expect(spawned.error).toBe(false);
       // The spawn is an enqueue: it answers queued, and the leader places it afterwards.
       expect(spawned.text).toMatch(/^task (\S+): queued/u);
@@ -207,15 +214,22 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const id = taskId;
 
       type Queue = {
-        tasks: { id: string; state: string; placement?: { machine: string; window?: string } }[];
+        tasks: {
+          id: string;
+          state: string;
+          placement?: { machine: string; window?: string };
+          tags?: Record<string, string>;
+        }[];
         holds: unknown[];
       };
-      const seen: { queue: Queue | null } = { queue: null };
+      const seen: { queue: Queue | null; text: string } = { queue: null, text: "" };
       await pollUntil(
         async () => {
-          const queue = JSON.parse((await call("get_queue", {})).text) as Queue;
+          const answer = await call("get_queue", {});
+          const queue = JSON.parse(answer.text) as Queue;
           if (queue.tasks.find((t) => t.id === id)?.state !== "running") return false;
           seen.queue = queue;
+          seen.text = answer.text;
           return true;
         },
         "the queued task to run",
@@ -225,6 +239,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(seenRunning?.tasks.find((t) => t.id === id)).toMatchObject({
         state: "running",
         placement: { machine: "TestMac" },
+        tags: { "creator.ref": "linear:ENG-7" },
+      });
+      // The ref is shown, its URL is not.
+      expect(seen.text).not.toContain(refUrl);
+      expect((await stack.queue().get(id))?.body?.spec.tags).toEqual({
+        "creator.ref": "linear:ENG-7",
+        "creator.ref-url": refUrl,
       });
       expect(seenRunning?.holds).toEqual([]);
       window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;

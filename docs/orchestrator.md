@@ -74,7 +74,8 @@ What Séance owes that session is a queue surface complete enough to keep a grap
 - **Amend deps**, the decided follow-up. This is the one missing op.
 - **An opaque external ref on a task** (`ref: { source, id, url? }`), display-only like an alias:
   never used to route, bind or settle. It replaces the spec's `linear` as the general form;
-  `linear` stays readable on the wire.
+  `linear` stays readable on the wire. Built as `creator.ref` and `creator.ref-url` (docs/tags.md §5.4, DESIGN.md,
+  "Task tags"): `spawn_session`'s `ref` and `ref_url`.
 - **A way to find its own tasks.** `get_queue` shows 20, unfinished first. An orchestrator needs
   every task of a project, by batch or by ref, including finished ones it must not queue twice.
 - **Settling from outside**, which exists: mark-done.

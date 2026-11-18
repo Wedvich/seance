@@ -303,7 +303,7 @@ Séance's noise is cover for a real intruder.
    in `archive.sqlite` (0600 in that 0700 dir), a plaintext history of finished tasks, accounts,
    fleet events and later metrics — on a box of its choosing, so it is one more place the key
    rests. The history holds no prompt text, no attachment manifest and no raw account id (only
-   the store's HMAC'd key), so a thief of the file alone learns titles, repos, PRs and timings,
+   the store's HMAC'd key), and of a task's tags only its ref, so a thief of the file alone learns titles, repos, PRs, refs and timings,
    not what was asked. Its key is held only the way this item ends: delivered
    by a systemd system unit (`LoadCredentialEncrypted=seance-psk:<blob>`, the name imported from
    `daemon/src/credential.ts`, never restated), read from `$CREDENTIALS_DIRECTORY` and nowhere
@@ -782,6 +782,13 @@ Séance's noise is cover for a real intruder.
    the leader forwards to (never a pane); the leader keeps no table of handles. The new party, a session that is
    answered without being addressable, gets only the answer to what it sent, 1 h at most, and a `wake` only for a
    question it asked itself.
+   A task tag (built 2026-11-18, "Task tags") is display text a PSK holder writes beside a prompt and sealed like a title:
+   it reaches a session only as `get_queue`'s allowlisted `creator.ref` and `owner.label` and an adapter's `task.ref`,
+   never as an instruction, a path or a spawn argument, and nothing binds, routes or places on one. It is held to
+   `parseTagValue` (printable text, bounded: a value past `TAG_VALUE_MAX` is cut, and a ref URL is refused, since a cut
+   URL opens another page) at every write, shown through `displayLine`, linked only when https, and
+   never in a push, a log line or an audit line. A tagged record carries `TAGS_DEP_SENTINEL`, so an older leader cannot
+   rewrite it without the tags, and a client's create seals `creator.*` alone: an app cannot forge an owner's label.
    An attachment (built 2026-10-28) is one more thing a PSK holder hands the
    session, read under the same permission mode as the prompt. Its name reaches the seed only
    as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
@@ -1004,6 +1011,13 @@ nothing checked it. The last is the gap they leave.
   `ExclaveInfo.traits`, and are believed only as that machine's own entry (`from` bound, as every
   `info` blob); no frame, app or other machine sets one. An audit line carries the count of
   names (`requires=<n>`), never a name.
+- **A task record carrying `tags` always carries `TAGS_DEP_SENTINEL`, and `owner.*` is the owner's.** Every such
+  record is sealed through the one task sealer, which appends `{ task: "", after: "tags" }` to its deps; an older
+  parser refuses it and holds the record unreadable instead of sealing it back without the label and the ref. A client
+  writes `tags` or `ownerTags` only to a verified leader advertising `CAPABILITIES.taskTags`; its create seals
+  `creator.*` alone (version 1: `bindTaskRecord` drops the rest) and `owner.*` changes only by the leader's write on an
+  `amend` from the PWA, in any state, never from `amend_task` or the broker. No tag is in a push, a log or an audit
+  line (Task tags).
 - **A trait probe runs only what the machine's own `config.json` names.** `traits.<name>.probe.argv`
   is read from that file alone (`parseTraitProbe`; no frame, app or other machine sets one) and exec'd
   as an argv array, never a shell string, with the environment a session gets (the daemon's, less
@@ -1650,6 +1664,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | HTTP `PUT /attachments/<id>`                                                                 | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                                                                                                                    | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
 | HTTP `GET /attachments/<id>`                                                                 | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                                                                                                                           | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                                                                                     |
 | field `attachments`                                                                          | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                                                                                                                 | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                                                                                           |
+| field `ref`                                                                                  | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) from `taskRef(spec.tags)`, only to a daemon advertising `CAPABILITIES.taskTags`                                                                                                                                                                                                                                                                                                              | built: `daemon/src/handlers.ts` `handleSpawn` (`refOf`), only from a spawn sealed from the scheduler with `client: "scheduler"` and a task id, in any mode, noted in the launch ledger's `TaskNote.ref` and sent in the adapter feed as `task.ref`                                                                                                                                                      |
+| field `ownerTags`                                                                            | built: `AmendRequest`, from the PWA's Label dialog (`pwa/src/store.ts`) to a verified leader advertising `taskTags`; `parseAmendDraft` refuses it for every other client                                                                                                                                                                                                                                                                                                       | built: `Scheduler.amend` (`scheduler/src/scheduler.ts`), taken in any task state when no other field is set                                                                                                                                                                                                                                                                                             |
 | field `inheritedPr`                                                                          | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                                                                                                                | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only on a worktree spawn sealed from the scheduler (or the leader in process) with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                     |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -2356,6 +2372,20 @@ an old peer's frames parse as before. Mixed versions:
   field, so an older leader rewriting a flagged record loses the flag: a display line, during mixed-version
   leadership only; no sentinel, since sentinels exist where an older leader would _act_ wrongly on a field it drops.
   An older service worker shows the fallback text for the two kinds, as for `quota-exhausted` and `pass-refused`.
+- `TaskSpec.tags`, `AmendRequest.ownerTags`, `SpawnRequest.ref` and `CAPABILITIES.taskTags` (2026-11-18, "Task tags"):
+  a record carrying `tags` carries `TAGS_DEP_SENTINEL`, which an older leader refuses, so it holds the record
+  unreadable. This is deliberately not the rule the entry above states ("sentinels exist where an older leader would
+  _act_ wrongly"): a tag acts on nothing, but an older leader's next write would erase the owner's label and the
+  creator's ref without a trace, and tags, unlike an attachment manifest, stay on finished records. The cost is real
+  while an older daemon leads (mixed-version leadership during an update): every tagged record is unreadable to it,
+  so a running tagged task cannot be moved by its session events, its dependents block, and a labelled finished
+  record cannot be pruned, which pushes the store toward `store_full` until a current daemon leads again. Clients
+  refuse `tags` and `ownerTags` locally until the verified leader advertises `taskTags`; a continuation drops its copied
+  tags instead of refusing. The leader sends `SpawnRequest.ref` only to a daemon advertising it, and an older
+  `isSpawnRequest` ignores the field anyway. An older archivist reads a tagged record as `malformed` and skips it, so a
+  tagged task pruned before the archivist updates is lost from history: update it with the fleet. An older keyless
+  broker daemon drops `tags` from an enqueue (its `parseTaskSpec`), so the task queues untagged: display data only, and
+  no `staleDaemonOf` check guards it.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -8100,8 +8130,9 @@ fields carry over), under the same gates.
   waiting" on the old one while the new one waits, and hides the button while a waiting or live
   continuation exists; nothing routes by it, so the old record may be pruned. A
   continuation is an ordinary new task: it counts against the global, account and quota caps, and
-  `until` and `linear` carry over (under `until: "reported"` the resumed conversation already holds the
-  report instruction). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
+  `until`, `linear` and the `creator.*` tags carry over (under `until: "reported"` the resumed conversation already
+  holds the report instruction; the leader copies `owner.*` at admission and a leader that does not take tags gets none,
+  "Task tags"). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
   is exact, and the old task's dependents stay `dependency_failed`.
 - **Blocked PR** (2026-11-12, `CAPABILITIES.continueHandoff`; `blockedOffer`,
   `shared/src/continue-task.ts`). An `awaiting-merge` task whose PR reads blocked (`taskPrBlock`, Scheduler,
@@ -8298,28 +8329,29 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 - **Names.** One vocabulary, binding for every PR; no identifier of this feature contains the
   hand-off's names.
 
-  | Concept                                  | Name                                                     |
-  | ---------------------------------------- | -------------------------------------------------------- |
-  | The act                                  | pass (a task to its successor)                           |
-  | Terminal state of the old task           | `superseded` (`TaskState`)                               |
-  | Old task's link forward                  | `Task.successor` (the new task's id)                     |
-  | New task's link back                     | `TaskSpec.succeeds`                                      |
-  | App → leader scheduler op                | `pass` (payload: `TaskRef`)                              |
-  | Scheduler → daemon request op: push      | `push-branch` (payload: `{ taskId, expect? }`)           |
-  | Scheduler → daemon request op: arm close | `pass-close` (payload: `{ taskId }`)                     |
-  | Daemon → leader event op (self path)     | `session-pass`                                           |
-  | Local socket frame (self path)           | `pass: true` and `record` on the frame                   |
-  | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)       |
-  | MCP tool, the session's own task         | `pass_to_successor`                                      |
-  | MCP tool, another task                   | `pass_task`                                              |
-  | CLI                                      | `seance pass <task-id>`                                  |
-  | PWA button                               | "Pass to successor"                                      |
-  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                 |
-  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                             |
-  | Audit origin (self path push and close)  | `successor`                                              |
-  | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "done" }`) |
-  | Failure code of an orphaned successor    | `pass_abandoned`                                         |
-  | Route reason                             | `predecessor_account` (stage 3 only)                     |
+  | Concept                                  | Name                                                             |
+  | ---------------------------------------- | ---------------------------------------------------------------- |
+  | The act                                  | pass (a task to its successor)                                   |
+  | Terminal state of the old task           | `superseded` (`TaskState`)                                       |
+  | Old task's link forward                  | `Task.successor` (the new task's id)                             |
+  | New task's link back                     | `TaskSpec.succeeds`                                              |
+  | App → leader scheduler op                | `pass` (payload: `TaskRef`)                                      |
+  | Scheduler → daemon request op: push      | `push-branch` (payload: `{ taskId, expect? }`)                   |
+  | Scheduler → daemon request op: arm close | `pass-close` (payload: `{ taskId }`)                             |
+  | Daemon → leader event op (self path)     | `session-pass`                                                   |
+  | Local socket frame (self path)           | `pass: true` and `record` on the frame                           |
+  | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)               |
+  | MCP tool, the session's own task         | `pass_to_successor`                                              |
+  | MCP tool, another task                   | `pass_task`                                                      |
+  | CLI                                      | `seance pass <task-id>`                                          |
+  | PWA button                               | "Pass to successor"                                              |
+  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                         |
+  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                                     |
+  | Audit origin (self path push and close)  | `successor`                                                      |
+  | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "done" }`)         |
+  | Forward-compat gate on a carried tag     | `TAGS_DEP_SENTINEL` (`{ task: "", after: "tags" }`), "Task tags" |
+  | Failure code of an orphaned successor    | `pass_abandoned`                                                 |
+  | Route reason                             | `predecessor_account` (stage 3 only)                             |
 
 - **Decided by the owner, 2026-11-12.**
   - **O1: the record is the successor's prompt.** The session writes it through
@@ -8457,7 +8489,8 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   PR-carrying task `pr_unreadable`. The head is validated with `isBranchName` and never logged.
 - **The successor (D7, D8).** `successorSpec(task, account, trigger)` in `shared/src/successor.ts`
   beside `continuationSpec`: it carries `repo`, `mode: "worktree"`, `title`, `model`, `effort`,
-  `until`, `linear`, `skill`, `avoid`, `requires`, `autonomy` and `plan`, the last two as
+  `until`, `linear`, `skill`, `avoid`, `requires`, its `creator.*` tags ("Task tags": the leader copies `owner.*` at
+  admission), `autonomy` and `plan`, the last two as
   `continuationSpec` carries them: `auto` stays `auto` and `checkpoint` stays `checkpoint` (an unattended failover must
   not stop at its first choice), and `steer` becomes `autonomy: "checkpoint"` with `plan` dropped, the
   plan having been approved (`withAutonomy` refuses `plan: true` beside `checkpoint`); `client` is
@@ -8712,6 +8745,82 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   docs/scheduler.md's Later). Not changed: no relay store rule, and Raycast, which is spawn-only and
   reads no task states.
 
+### Task tags — built 2026-11-18 (docs/tags.md step 3)
+
+A task carries display tags in `TaskSpec.tags` (full keys, `creator.*`, `owner.*`, `scheduler.*`), the task-scope half
+of docs/tags.md's model. They label a task for people and for the adapter feed; nothing routes, binds, places, settles
+or alerts on one.
+
+- **Vocabulary** (`shared/src/tags.ts`). At most `TASK_TAGS_MAX` (6) keys per task, within `TASK_TAG_BUDGET`
+  (`creator` 3, `owner` 2, `scheduler` 1), each value at most `TAG_VALUE_MAX` (256) and held to `parseTagValue`. A
+  `creator.ref-url` is the one key refused past that cap, never cut: it is held to 256 bytes both as typed and as the
+  normalised `href` (non-ASCII and quotes percent-encode and grow), so what is stored is a fixed point of every later
+  parse and a link is never a truncation of another.
+  `creator.ref` (`source:id`, `parseRef`) and `creator.ref-url` (https only) are the two keys a surface writes today; any
+  other `creator.*` key is opaque to the surfaces and shown only on the verdict's list. `owner.label` is the owner's.
+  `scheduler.*` is reserved: it has no known key in v1, so the leader writes none and a client's is refused.
+- **The sentinel.** A record carrying `tags` always carries `TAGS_DEP_SENTINEL`, `{ task: "", after: "tags" }`,
+  appended by the one task sealer (`taskRecordAtRest`). An older leader's dep parser refuses the empty `task` and the
+  unknown `after`, so it holds the record unreadable instead of sealing it back without the label and the ref. This is
+  the one sentinel that guards display data: an older leader's next write would erase the owner's label and the
+  creator's ref silently, and unlike an attachment manifest, tags stay on finished records. It is therefore an
+  exception to "sentinels exist where an older leader would _act_ wrongly on a field it drops" (the skew list, below),
+  and its cost is accepted: while an older daemon leads, every tagged record is unreadable to it, so running tagged
+  tasks cannot be moved by their session events, their dependents block, and labelled finished records cannot be
+  pruned. Its `after` is `tags`, where the attachments, requires and successor sentinels are `merged`, `opened` and
+  `done`, so each stays tied to its own field. The parser drops it only beside `tags` and nulls the spec over the
+  sentinel without them. It guards against leaders that predate tags and no further: a leader of this build drops a key
+  it does not know (`scheduler.*` has none in v1) and re-seals without it, with the sentinel still on the record. A
+  later build that defines a `scheduler.*` key, or any key an older tag-aware leader would drop, needs its own guard (a
+  new sentinel `after`, or a capability gate on its writer) or it is erased by the first leader that takes the term
+  before the update reaches it.
+- **Who writes what.** A client's create seals `creator.*` alone, so the record is version 1 and `bindTaskRecord`
+  strips every other key from it (`onlyCreatorTags`): an app cannot create a task wearing an owner's label or a
+  scheduler key. `owner.*` is written only by the leader, on an `amend` carrying `ownerTags`, and `AmendRequest.
+  ownerTags` is sent only by the PWA: `parseAmendDraft` refuses it, so neither the broker nor MCP's `amend_task` nor the
+  CLI carries it ("Amending a waiting task"). Adapters write none.
+- **The gate.** A client writes `tags` or `ownerTags` only to a verified leader advertising `CAPABILITIES.taskTags`
+  (`taskTagsGateError`, `daemon/src/auto.ts`): the CLI, MCP and the broker refuse a `--ref` / `ref` create with a
+  message naming the flag, and the PWA hides its inputs. A continuation or successor is the exception: display data must
+  not block a resume, so `offeredSpec` drops the copied `creator.*` tags when the leader lacks the capability.
+- **The bound.** Measured at the true worst case (`parse.test.ts`: opaque values of 256 `"`, which JSON-escape to two
+  bytes each, a 256-byte ref URL, a 96-character ref and a 200-character label, beside a full prompt, a full manifest
+  and every other field at its cap): a create with the three creator keys seals to 28252 of the 28672 create cap (420
+  spare; 144 with the legacy `linear` kept beside them, which no writer sets). Six keys do not fit the 40 KiB record
+  cap beside eight candidates, which have 216 bytes spare before any tag, so the leader's `#update` retries a
+  `too_large` write once with the held decision cut to its winner (`winnerOnly`; it does not retry a record that has
+  nothing to cut): the five keys a leader writes then fit with 1420 spare, and 2920 spare with no decision. A store
+  refusal of a label alone answers `tags_full`, never `prompt_too_long`. The key count was kept at six on that basis
+  rather than cut (docs/tags.md open question 7).
+- **Chains.** `continuationSpec` and `successorSpec` copy the predecessor's `creator.*` tags (`chainTags`), never
+  `owner.*` and never `scheduler.*`. The leader copies the predecessor's `owner.*` onto the new task at its first move
+  out of `queued` (`scheduler/src/chain-tags.ts`: the resumed or passed-from task, by `continues` or `succeeds`), so the
+  label follows the work even though the client's create was version 1. It copies only for a record still at store
+  version 1 (the client's create, which the leader has not written): an amend while it waited, a label set and cleared
+  included, leaves no key to show the owner spoke, so any leader write forgoes the copy and the owner's word stands. A
+  task already `blocked` moving on takes none either. The cost is a successor whose prompt was amended before its first
+  move carries no copied label. A successor's preamble carries a `Ref:` line from `creator.ref`
+  where it carried `Linear issue:`.
+- **The reserve compare ignores tags.** `#reserve` declines a reservation whose routed spec differs from the held one
+  (`isDeepStrictEqual`); a label set while the decision was in flight must not cost the task its placement, so both
+  sides pass `withoutTaskTags` first.
+- **`SpawnRequest.ref`** (`{ ref, url? }`). The leader's `#dispatch` sends `taskRef(spec.tags)` only to a daemon
+  advertising `taskTags`. `handleSpawn` takes it only from a spawn sealed from the scheduler with `client:
+  SCHEDULER_CLIENT` and a task id, in any mode (`refOf`), and notes it in the launch ledger (`TaskNote.ref`, re-checked
+  on read as `parseRef`/`httpsUrl` hold it, never in `progress`); any other sender's is ignored, as an older daemon
+  ignores it. The adapter feed sends it as `AdapterSession.task.ref` (`EndedTasks.ref`). Never logged: the audit line
+  for a spawn carries no ref.
+- **The join.** `taskTagEntries(spec, at)` is a task's tags as `TagEntry` records with `at` = the task's `createdAt`
+  (a task has no per-key time, so an amended label shows the task's age), and a legacy `linear` with no `creator.ref`
+  of its own reads as `creator.ref` = `linear:<issue>` (and `creator.ref-url` with a URL): mapped at the join only,
+  never parsed into `tags` and never written back. A writer whose `linear` fails the ref's rules keeps writing
+  `linear`.
+- **Readers.** MCP's `get_queue` carries only the allowlisted keys (`AGENT_VISIBLE_TAG_KEYS`: `creator.ref` and
+  `owner.label`, never `creator.ref-url` or an opaque `creator.*` key) as `tags` in place of the `linear` field it had.
+  The archivist keeps `creator.ref` and `creator.ref-url` and
+  drops every other tag. The PWA shows the label beside the title and the ref linked to its https URL, and the verdict
+  lists every key. A push, a log line or an audit line never carries a tag; an audit line names `fields=ownerTags`.
+
 ### Amending a waiting task — built 2026-11-12
 
 A queued stack learns things as it runs: session 1 finds what sessions 6, 8 and 9 should be told.
@@ -8725,6 +8834,13 @@ model and effort), and is audited as `fields=notBefore`, never the time ("Not be
   per-task serialized write path ("One write at a time per task"). The id stays, so dependents' `after`
   links and a held successor's `succeeds` link are untouched. It forgets the task's held decision and
   ticks, since that decision routed the old spec.
+- **Tags-only, in any state** (2026-11-18, "Task tags"). An `amend` carrying `ownerTags` and none of the other fields
+  is taken whatever the task's state, finished included, because a label changes nothing the leader routes: it
+  needs no `basis`, meets no state rule beyond `not_found` and forgets no decision. `ownerTags` holds bare `owner.*`
+  suffixes (`""` clears one); past `TASK_TAG_BUDGET.owner`, or when the store refuses the record as too large with
+  nothing left to cut, the leader answers `tags_full`, which reaches a client as `invalid_request`. Beside another field it meets the rules below. Only the PWA sends it, to a verified leader
+  advertising `taskTags`. Because the record is rewritten through the one sealer, a label on a finished record leaves
+  `TAGS_DEP_SENTINEL` on it, which is why the prune age is unchanged but an older leader cannot read it.
 - **Only before dispatch.** Accepted only while the task is `queued`, `blocked` or `ready` with no spawn
   out. A `reserved` task, or one whose spawn is in `#dispatches`, is `dispatching`; anything placed is
   `placed` (the session already has its prompt; there is no live edit); a finished one is `finished`.
@@ -11036,7 +11152,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   be removed. (A BATCH tile — an open batch the next enqueues joined, numbered from 1, until
   End batch — was removed 2026-10-29: never used by hand, and it cost the form a row. Batches
   stay MCP's `queue_batch`; a persisted form's `batch` is ignored, so an open one ends rather
-  than grouping tasks with no tile left to end it.) Deps and `until` belong to one
+  than grouping tasks with no tile left to end it.) A **REF** tile (2026-11-18, "Task tags") opens a sheet with the ref
+  (`source:id`) and its https URL, written as the creator's tags, and is hidden against a leader that does not advertise
+  `taskTags` unless a ref is already typed (shown off, with the leader's refusal as the problem). On a queue row the
+  card's menu opens the **Label task** dialog (`owner.label`, blank clears it) for any task, finished included, while
+  the verified leader takes tags; the label shows beside the task's title, never in place of it, and the ref links to
+  its URL only when that is https. An archived card shows the ref and no label, and offers no labelling. Deps and `until` belong to one
   task and reset after each enqueue. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task
@@ -11244,8 +11365,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   is a `store-put` through the app client, as the PWA's is.
 - **Authoring: `after`, `until`, `linear`, `queue_batch` and `report_task_done`** (2026-10-23, M4 #21).
   `spawn_session` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
-  `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
-  (`{issue}`, trimmed as the PWA's field is; a blank one is refused), with or without a named machine. **`queue_batch
+  `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `ref`
+  (`source:id`, with `ref_url`; a `queue_batch` member's are `external_ref` and `external_ref_url`, since `ref`
+  already names an earlier member there), with or without a named machine. `ref` replaced `linear` on 2026-11-18
+  ("Task tags"): it is written as the creator's tags, only to a verified leader advertising `taskTags`, and `get_queue`
+  shows the task's allowlisted tags where it showed the Linear link. `amend_task` has no `ownerTags`: a session never
+  labels a task. **`queue_batch
   { tasks }`** puts up to 16 members as one batch, a group with no order or limit of its own
   ("Batches"; its `strategy` and `max` went 2026-10-26; the schema still parses them loosely so a
   caller sending `sequential`, `parallel` or any `max` is refused with a pointer to `after`, never
@@ -11268,7 +11393,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   MCP only, with no CLI subcommand (`seance session-event` drops a `done` unsent): a session
   reports from inside Claude, and the tool's description tells it to call when the task's
   prompt says so, or when it opened no PR and its work is finished — for one, handed to a task it
-  queued, which `spawn_session`'s and `queue_batch`'s descriptions say too. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
+  queued, which `spawn_session`'s and `queue_batch`'s descriptions say too. `get_queue` also shows `until`, `merged`, the batch, `after` and the task's tags (`creator.ref` and `owner.label` only: `AGENT_VISIBLE_TAG_KEYS`).
   The session needs the seance MCP server installed in its exclave, which `seance mcp
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
@@ -12607,8 +12732,9 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   - **`tags`**: the joined map as `sessions` gives it, less other adapters' `adapter.*` keys (`tagsFor`, per
     adapter).
 
-  Not sent yet: `task.title` and `task.ref` (the dispatched record is the leader's; the daemon's ledger notes
-  neither) and `task`'s `continues`.
+  `task.ref` is sent for a task launched from a scheduler-sealed spawn that carried `SpawnRequest.ref` (noted in the
+  launch ledger, "Task tags"; `{ ref, url? }`, display only). Not sent yet: `task.title` (the dispatched record is the
+  leader's; the daemon's ledger notes none) and `task`'s `continues`.
 
 - **Triggers and diffs.** The feed refreshes every 5 s, 50 ms after any conversation-table change (a report, a sweep,
   a verification), and on task events. Each refresh is diffed against the last: a changed record goes out as one
@@ -13359,7 +13485,10 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   the spawn's `inheritedPr`, taken only from a worktree spawn sealed from the scheduler with `client: "scheduler"` and
   a task id, never from a session-event frame. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
-  "PR hand-off").
+  "PR hand-off"). The same spawn may carry `ref` (2026-11-18, "Task tags"): `handleSpawn` notes it in the same
+  launch note (`TaskNote.ref`, `{ ref, url? }`, kept only as `parseRef` and `httpsUrl` hold it, outside `progress`),
+  taken only from a spawn sealed from the scheduler with `client: "scheduler"` and a task id, in any mode; it reaches
+  only an adapter's `Session` (`task.ref`) and is never used to bind, route or move anything.
 - **`pass`** (built 2026-11-12; the fifth act past ingest, a threat-model change; Scheduler,
   "Passing to a successor"). A session running out of usage commits its work and passes the task to
   a successor. `pass_to_successor` (MCP) sends `{pass: true, record}` and nothing else: no state, so no
@@ -15017,7 +15146,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
   (a title-less task's window and worktree branch are slugged from the prompt's first words),
   `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its
-  column too) and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
+  column too), every task tag but `creator.ref` and `creator.ref-url` (an owner's label is a person's own words, an
+  opaque creator key is a tool's; "Task tags") and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
   placement stays in `assignment`). The store prunes these with the task; the archive would keep
   them for good. A row is
   written when the archive holds none or holds it at a lower store version (`ON CONFLICT … WHERE

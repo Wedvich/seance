@@ -54,7 +54,7 @@ async function runningPredecessor(app: AppHandle, prompt: string): Promise<{ id:
   return { id, window };
 }
 
-describe("authoring: dependencies, batches and Linear links, from the PWA and from MCP", () => {
+describe("authoring: dependencies, batches and refs, from the PWA and from MCP", () => {
   // "opened" needs a PR and a pushed branch, which a stub session never makes, so a dependent
   // stays blocked until the predecessor is marked done — which releases every edge on it.
   test("the PWA's After field reaches the stored task, which waits on its predecessor and then runs", async () => {
@@ -137,7 +137,7 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
               title: "authoring-m2",
               prompt: "second member",
               after: [{ ref: "m1", when: "opened" }],
-              linear: { issue: "ENG-9" },
+              external_ref: "linear:ENG-9",
             },
           ],
         },
@@ -165,7 +165,7 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
       expect(m2.spec.deps).toEqual([{ task: m1.id, after: "opened" }]);
       expect(m1.spec.batch?.id).toBe(m2.spec.batch?.id);
       expect([m1.spec.batch?.index, m2.spec.batch?.index]).toEqual([1, 2]);
-      expect(m2.spec.linear).toEqual({ issue: "ENG-9" });
+      expect(m2.spec.tags).toEqual({ "creator.ref": "linear:ENG-9" });
       expect(m1.spec.pin).toEqual({ deviceId: stack.deviceId });
       expect(m2.spec.pin).toBeUndefined();
 

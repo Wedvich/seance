@@ -184,6 +184,16 @@ export function VerdictView(props: {
       <div className="verdict-tail">
         <SwapText as="p" className="verdict-body" text={content.body} />
         {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
+        {content.tags.length > 0 && (
+          <dl className="verdict-tags">
+            {content.tags.map(({ key, value }) => (
+              <div key={key} className="verdict-tag">
+                <dt>{key}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
         <div className="verdict-actions">
           <button ref={primaryRef} type="button" className="primary" onClick={onPrimary}>
             {content.primary.label}

@@ -2,12 +2,14 @@ import {
   accountNameIn,
   CAPABILITIES,
   closedAt,
+  creatorTaskTags,
   endedBySignal,
   fleetTraits,
   formatNotBefore,
   knownAccounts,
   lastHeardAt,
   originLabel,
+  refTags,
   sentence,
   TASK_SPEC_LIMITS,
   taskFailureText,
@@ -31,9 +33,11 @@ import {
   type AccountsState,
   type HeldTask,
   type HistoryView,
+  type LabellingState,
   type OlderState,
   type PersistedForm,
   type PreviewState,
+  type RefDraft,
   type QueueState,
   type AvailabilityState,
   type CustodianControlState,
@@ -200,6 +204,9 @@ export interface ViewModel {
   /** Null while no machine declares a trait and the form requires none: there is nothing to pick. */
   readonly requiresTile: Tile | null;
   readonly requires: RequiresView;
+  /** Null while the leader takes no task tags and the form carries no ref: there is nothing to enter. */
+  readonly refTile: Tile | null;
+  readonly ref: RefView;
   /**
    * The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities),
    * or no relay can say: a held task is checked when it is sent.
@@ -253,6 +260,10 @@ export interface AppState {
   readonly autonomy: AutonomyLevel;
   /** The next task's not-before choice; transient as `autonomy` is. */
   readonly notBefore: NotBeforeChoice | null;
+  /** The next task's ref (`creator.ref` and its URL); transient as `autonomy` is. */
+  readonly ref: RefDraft;
+  /** The task whose label dialog is open on the Queue screen, a layer; null when none. */
+  readonly labelling: LabellingState | null;
   /**
    * Text a CLEAR took away, offered back for six seconds. Deliberately outside
    * `form`: a draft you already discarded shouldn't survive a reload.
@@ -548,6 +559,16 @@ export function deriveTraitsAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.traits);
 }
 
+/**
+ * Task tags (`ref`, `label`) are written only to a verified leader that advertises `taskTags`: an older one holds a
+ * tagged record unreadable (the dep sentinel) and refuses an `amend` carrying `ownerTags`.
+ */
+export function deriveTaskTagsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.taskTags);
+}
+
+export const TASK_TAGS_UNAVAILABLE = "The scheduler's leader doesn't take task tags yet. Update seanced on its machine";
+
 export const TRAITS_UNAVAILABLE = "The scheduler's leader can't route on traits yet. Update seanced on its machine";
 
 export const ATTACHMENTS_UNAVAILABLE =
@@ -646,6 +667,14 @@ export interface RequiresChoice {
   readonly disabled: boolean;
 }
 
+/** The Ref sheet: why it can't be written yet (a sentence), and whether the leader would take it. */
+export interface RefView {
+  readonly ref: string;
+  readonly url: string;
+  /** The entry's problem as a sentence, or the leader's lack; null when it is fine or empty. */
+  readonly problem: string | null;
+}
+
 export interface RequiresView {
   readonly choices: readonly RequiresChoice[];
   /** Shown beneath the list: why picking is off, or that a task requires at most N. */
@@ -681,6 +710,33 @@ function deriveRequires(state: AppState): RequiresView {
       ? `A task requires at most ${TASK_SPEC_LIMITS.requires} traits.`
       : null;
   return { choices, note };
+}
+
+/** The ref as the creator tags it would be written, or the sentence saying why not; `{}` for none. */
+export function refTagsOf(
+  draft: RefDraft,
+): { readonly tags: Readonly<Record<string, string>> } | { readonly problem: string } {
+  const ref = draft.ref.trim();
+  const url = draft.url.trim();
+  if (ref === "") {
+    return url === "" ? { tags: {} } : { problem: "A URL needs the ref it belongs to" };
+  }
+  const written = creatorTaskTags(refTags(ref, url === "" ? undefined : url));
+  return written.ok
+    ? { tags: written.tags }
+    : { problem: "The ref is source:id (e.g. linear:ENG-123), and its URL an https: address" };
+}
+
+function deriveRef(state: AppState): RefView {
+  const { ref, relay } = state;
+  const entry = refTagsOf(ref);
+  const problem =
+    "problem" in entry
+      ? entry.problem
+      : Object.keys(entry.tags).length > 0 && !deriveTaskTagsAvailability(relay)
+        ? `${TASK_TAGS_UNAVAILABLE}.`
+        : null;
+  return { ref: ref.ref, url: ref.url, problem };
 }
 
 function requiresValue(requires: PersistedForm["requires"]): string {
@@ -1152,6 +1208,17 @@ export function deriveView(state: AppState, now: number): ViewModel {
             tag: null,
           },
     requires: deriveRequires(state),
+    refTile:
+      !deriveTaskTagsAvailability(relay) && state.ref.ref === ""
+        ? null
+        : {
+            label: "REF",
+            value: state.ref.ref.trim() === "" ? "None" : state.ref.ref.trim(),
+            mono: state.ref.ref.trim() !== "",
+            dot: state.ref.ref !== "" && !deriveTaskTagsAvailability(relay) ? "off" : null,
+            tag: null,
+          },
+    ref: deriveRef(state),
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),
     heldDropped: heldDroppedText(state.heldDropped),

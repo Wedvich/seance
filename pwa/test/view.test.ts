@@ -83,6 +83,8 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     form: { ...DEFAULT_FORM, ...form },
     autonomy: "checkpoint",
     notBefore: null,
+    ref: { ref: "", url: "" },
+    labelling: null,
     promptUndo: null,
     sheet: null,
     settings: false,

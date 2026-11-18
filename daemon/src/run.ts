@@ -405,6 +405,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // It was advertised from step 2, before the frame existed: a daemon of that build closes a `watch` frame as
         // malformed, which a client reads as `unsupported` (DESIGN.md, "Watches").
         CAPABILITIES.watches,
+        // Unconditional: any daemon may lead, and any takes `SpawnRequest.ref` (display text, noted in its ledger).
+        CAPABILITIES.taskTags,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
         // so it could not receive.
         // `messageReply` beside it: the handle tables and the untasked ack bind by the same peer pid, and one gate

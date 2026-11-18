@@ -2631,3 +2631,41 @@ describe("the drain pass", () => {
     expect(s.creates).toHaveLength(1);
   });
 });
+
+describe("a successor's tags", () => {
+  const TAGGING = [...CAPABLE, CAPABILITIES.taskTags];
+  const tags = { "creator.ref": "linear:ENG-1", "owner.label": "mine" };
+
+  test("takes the creator's tags in its create, the owner's at its first move out of queued, and its ref in its dispatch", async () => {
+    const s = setup([machine("a", { capabilities: TAGGING })]);
+    const old = await running(s, true, { tags });
+    const result = ok(await s.scheduler.pass(old.id));
+    // The client's create is version 1 and seals `creator.*` alone: the label is the leader's to copy.
+    expect(s.creates[0]?.spec.tags).toEqual({ "creator.ref": "linear:ENG-1" });
+    await tick(s.scheduler);
+    expect(s.scheduler.task(result.successorId)?.spec.tags).toEqual(tags);
+    expect(s.fleet.spawns.at(-1)?.request).toMatchObject({ taskId: result.successorId, ref: { ref: "linear:ENG-1" } });
+  });
+
+  test("an owner's word on the successor before that move wins, and the predecessor's label is not laid over it", async () => {
+    const s = setup([machine("a", { capabilities: TAGGING })]);
+    const old = await running(s, true, { tags });
+    const result = ok(await s.scheduler.pass(old.id));
+    expect(await s.scheduler.amend({ taskId: result.successorId, ownerTags: { label: "yours" } })).toMatchObject({
+      ok: true,
+    });
+    await tick(s.scheduler);
+    expect(s.scheduler.task(result.successorId)?.spec.tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "owner.label": "yours",
+    });
+  });
+
+  test("a predecessor with no owner tags leaves the successor's as its create made them", async () => {
+    const s = setup([machine("a", { capabilities: TAGGING })]);
+    const old = await running(s, true, { tags: { "creator.ref": "linear:ENG-1" } });
+    const result = ok(await s.scheduler.pass(old.id));
+    await tick(s.scheduler);
+    expect(s.scheduler.task(result.successorId)?.spec.tags).toEqual({ "creator.ref": "linear:ENG-1" });
+  });
+});

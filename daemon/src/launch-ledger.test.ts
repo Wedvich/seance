@@ -920,3 +920,45 @@ describe("LaunchLedger interrupted launches", () => {
     await expect(readFile(path, "utf8")).rejects.toThrow();
   });
 });
+
+describe("LaunchLedger ref notes", () => {
+  const REF = { ref: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" };
+
+  test("a ref survives a reopen, stays out of progress and does not move `at` on a repeat; a relaunch starts without it", async () => {
+    let now = 9;
+    const ledger = await LaunchLedger.open(path, () => now);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/a" }, undefined, undefined, REF);
+    expect(ledger.notes()[0]).toMatchObject({ ref: REF });
+    expect(ledger.progress()).toEqual([]);
+
+    const reopened = await LaunchLedger.open(path, () => now);
+    expect(reopened.notes()[0]).toMatchObject({ ref: REF, at: 9 });
+    now = 12;
+    // A later note of progress keeps it, and a note that changes nothing leaves the record as it was.
+    await reopened.note("t1", { branch: "worktree-a" });
+    expect(reopened.notes()[0]).toMatchObject({ ref: REF });
+    expect(reopened.progress()[0]).not.toHaveProperty("ref");
+    expect(await reopened.apply("t1", { ref: REF })).toBe("same");
+
+    await reopened.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/b" });
+    expect(reopened.notes()[0]).not.toHaveProperty("ref");
+  });
+
+  test("a ref that is not a ref, or whose URL is not an https one, is dropped on read", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    for (const id of ["t1", "t2", "t3"]) await ledger.record(id);
+    for (const id of ["t1", "t2", "t3"])
+      await ledger.startNote(id, { repo: "/r", path: `/r/.claude/worktrees/${id}` }, undefined, undefined, REF);
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].ref = { ref: "not a ref" };
+    file.progress[1].ref = "linear:ENG-1";
+    file.progress[2].ref = { ref: "linear:ENG-1", url: "http://linear.app/x" };
+    await writeFile(path, JSON.stringify(file));
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).not.toHaveProperty("ref");
+    expect(reopened.notes()[1]).not.toHaveProperty("ref");
+    expect(reopened.notes()[2]).toMatchObject({ ref: { ref: "linear:ENG-1" } });
+    expect(reopened.notes()[2]?.ref).not.toHaveProperty("url");
+  });
+});

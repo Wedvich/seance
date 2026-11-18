@@ -2,6 +2,7 @@ import { Database, SQLiteError } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
 import {
   forgetPrompt,
+  REF_TAG_KEYS,
   TASK_PHASES,
   type ArchivedMachine,
   type ArchiveTableStatus,
@@ -201,7 +202,8 @@ export const ARCHIVED_SUCCEEDS_ACCOUNT = "-";
  * slug is the prompt's first words), `failure.message` (a daemon's text, which
  * may name the worktree) and `decision` (a `skill_absent` reason carries a
  * `/skill` read off the prompt) and `flag.note` (model-written from pane text; the reason and time stay). `failure.code`
- * and the placement stay.
+ * and the placement stay. Of `spec.tags` only `REF_TAG_KEYS` stay (where the task came from: an id and a URL the
+ * creator wrote as such), never an `owner.*` label, which is free text a person typed (docs/tags.md §5.1).
  */
 export function archivedTask(task: Task): Task {
   const {
@@ -216,12 +218,14 @@ export function archivedTask(task: Task): Task {
     ...rest
   } = forgetPrompt(task);
   // Dropped again whatever the phase: `forgetPrompt` leaves an unfinished record's spec whole, and a stored row's JSON is not held to its `state` column.
-  const { pin, succeeds, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
+  const { pin, succeeds, prompt: _prompt, attachments: _attachments, tags, ...specRest } = spec;
   const deviceId = pin?.deviceId;
+  const refs = Object.entries(tags ?? {}).filter(([key]) => (REF_TAG_KEYS as readonly string[]).includes(key));
   return {
     ...rest,
     spec: {
       ...specRest,
+      ...(refs.length === 0 ? {} : { tags: Object.fromEntries(refs) }),
       ...(deviceId === undefined ? {} : { pin: { deviceId } }),
       ...(succeeds === undefined ? {} : { succeeds: { ...succeeds, account: ARCHIVED_SUCCEEDS_ACCOUNT } }),
     },

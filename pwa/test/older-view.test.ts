@@ -75,6 +75,8 @@ function state(
     form: DEFAULT_FORM,
     autonomy: "checkpoint",
     notBefore: null,
+    ref: { ref: "", url: "" },
+    labelling: null,
     promptUndo: null,
     sheet: null,
     settings: false,
@@ -207,6 +209,22 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
       answer: null,
     });
     expect(card?.pr).toMatchObject({ label: "#12", state: "merged", checks: null, stale: false, blocked: null });
+  });
+
+  test("an archived card shows the ref the archive kept, never an owner's label, and offers no labelling", () => {
+    const row = archived("t-2", {
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        tags: { "creator.ref": "linear:ENG-1", "creator.ref-url": "https://linear.app/x/issue/ENG-1" },
+      },
+    });
+    const [card] = deriveOlder(state({ list: page([row]) }), NOW)?.rows ?? [];
+    expect(card).toMatchObject({
+      canLabel: false,
+      label: null,
+      ref: { text: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" },
+    });
   });
 
   test("an archived card says when the custodian kept a worktree for it, by reason and with no note", () => {

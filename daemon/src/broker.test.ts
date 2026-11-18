@@ -258,6 +258,13 @@ describe("parseBrokerRequest on scheduler frames", () => {
     expect(parsed["amend"]).toEqual(append);
     // A field the leader would not know is refused here too, never dropped on the way.
     expect(refusedCode(frame({ schedulerOp: "amend", amend: { ...append, deps: [] } }))).toBe("invalid_request");
+    // The owner's labels are the PWA's alone: a session's broker never carries them.
+    expect(refusedCode(frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, ownerTags: { label: "x" } } }))).toBe(
+      "invalid_request",
+    );
+    expect(refusedCode(frame({ schedulerOp: "amend", amend: { ...append, ownerTags: { label: "x" } } }))).toBe(
+      "invalid_request",
+    );
   });
 
   const refused: [string, Record<string, unknown>, string][] = [
@@ -472,6 +479,62 @@ describe("the broker's scheduler actions", () => {
         expect(fakes[0]?.creates ?? []).toEqual([]);
         broker.stop();
       }
+    });
+  });
+
+  describe("an enqueue carrying tags", () => {
+    const spec = { tags: { "creator.ref": "linear:ENG-1" } };
+
+    test("is sealed with them once the leader advertises taskTags", async () => {
+      const { broker, fakes } = rig(undefined, {
+        now: () => 5_000,
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.taskTags],
+      });
+      expect(await broker.handle(enqueue({ ...spec, client: "cli" }))).toMatchObject({ ok: true, data: { ok: true } });
+      expect(fakes[0]?.creates).toEqual([expect.objectContaining({ spec: expect.objectContaining(spec) })]);
+      broker.stop();
+    });
+
+    test("is refused, nothing stored, when the leader lacks the capability, is unverified, or there is none", async () => {
+      const cases = [
+        rig(undefined, { scheduler: LEADING }),
+        rig(undefined, {
+          scheduler: { kind: "unverified", deviceId: SELF, term: 4 },
+          capabilities: [CAPABILITIES.taskTags],
+        }),
+        rig(),
+      ];
+      for (const { broker, fakes } of cases) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
+        expect(failed(await broker.handle(enqueue(spec)))).toMatchObject({ code: "invalid_request" });
+        expect(fakes[0]?.creates ?? []).toEqual([]);
+        broker.stop();
+      }
+    });
+
+    test("is refused when a tag's value or key would be dropped, not queued untagged", async () => {
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.taskTags] });
+      for (const tags of [
+        { "creator.ref": "ENG-1" },
+        { "creator.ref": "linear:ENG-1", "creator.ref-url": "http://linear.app/x" },
+        { "creator.ref": "linear:ENG-1", "unknown.key": "x" },
+      ]) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
+        expect(failed(await broker.handle(enqueue({ tags })))).toMatchObject({ code: "invalid_request" });
+      }
+      expect(fakes[0]?.creates ?? []).toEqual([]);
+      broker.stop();
+    });
+
+    test("is refused beside a key that is not the creator's, even to a leader that takes tags", async () => {
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.taskTags] });
+      const reply = failed(
+        await broker.handle(enqueue({ tags: { "creator.ref": "linear:ENG-1", "owner.label": "x" } })),
+      );
+      expect(reply).toMatchObject({ code: "invalid_request" });
+      expect(fakes[0]?.creates ?? []).toEqual([]);
+      broker.stop();
     });
   });
 

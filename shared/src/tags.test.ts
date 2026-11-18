@@ -1,19 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import {
   agentVisibleTags,
+  chainTags,
+  creatorTaskTags,
   displayLine,
   displayName,
   joinTags,
+  linearRefTags,
+  ownerTagsOf,
   parseSessionTagRequest,
   parseSessionTagResponse,
   parseTags,
+  parseSpawnRef,
   parseTagValue,
+  parseTaskTags,
+  refTags,
   sessionTagsFit,
   splitTagKey,
+  taskRef,
+  taskTagEntries,
   TAG_VALUE_MAX,
   TAGS_PER_PANE_MAX,
   TAGS_PER_WRITER_MAX,
   TASK_TAG_BUDGET,
+  withOwnerTags,
   writeTags,
 } from "./tags.ts";
 import { TASK_REQUEST_LIMITS } from "./types.ts";
@@ -91,6 +101,24 @@ describe("known keys", () => {
     ["creator.ref", "linear:LIN-1", null, "conversation"],
   ] as const)("%s = %j", (key, raw, want, scope) => {
     expect(parseTagValue(key, raw, scope)).toBe(want);
+  });
+
+  test("a ref URL is refused past the cap, never cut, and what it normalises to is a fixed point of the parse", () => {
+    const at = (path: string): string => `https://linear.app/${path}`;
+    // 256 bytes exactly passes; one more is refused where any other value would be cut.
+    const fits = at("u".repeat(TAG_VALUE_MAX - at("").length));
+    expect(parseTagValue("creator.ref-url", fits, "task")).toBe(fits);
+    expect(parseTagValue("creator.ref-url", `${fits}u`, "task")).toBeNull();
+    expect(parseTagValue("creator.ref", `linear:${"x".repeat(64)}`, "task")).not.toBeNull();
+    // Normalising percent-encodes non-ASCII and quotes: grown past the cap it is refused, not cut mid-escape.
+    expect(parseTagValue("creator.ref-url", at("æ".repeat(100)), "task")).toBeNull();
+    expect(parseTagValue("creator.ref-url", at('"'.repeat(100)), "task")).toBeNull();
+    for (const raw of [at("Møtenotater-æøå"), at('a"b c'), at("x?q=ø#å")]) {
+      const stored = parseTagValue("creator.ref-url", raw, "task");
+      expect(stored).not.toBeNull();
+      expect(stored).not.toBe(raw);
+      expect(parseTagValue("creator.ref-url", stored, "task")).toBe(stored);
+    }
   });
 
   test("the printable rule: controls, bidi and separators gone, cut to bytes on a code point", () => {
@@ -208,6 +236,79 @@ describe("joinTags and displayName", () => {
     expect(displayName(self, { title: " \n" }, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName(self, null, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName({}, undefined, "zsh\u0007")).toEqual({ text: "zsh", source: "window" });
+  });
+});
+
+describe("task tags", () => {
+  const at = 1_760_000_000_000;
+
+  test("parseTaskTags drops what a task record does not hold, nulls on a bound, and is undefined when nothing is left", () => {
+    expect(parseTaskTags(undefined)).toBeUndefined();
+    expect(parseTaskTags("x")).toBeNull();
+    expect(
+      parseTaskTags({ "creator.ref": "linear:ENG-1", "owner.label": "mine", "mine.x": "1", "seance.x": "1" }),
+    ).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "owner.label": "mine",
+    });
+    expect(parseTaskTags({ "seance.x": "1" })).toBeUndefined();
+    expect(parseTaskTags({ "creator.ref": "not a ref" })).toBeUndefined();
+    // Over a namespace's budget, and over the whole map's.
+    const crowded = Object.fromEntries(
+      Array.from({ length: TASK_TAG_BUDGET.creator + 1 }, (_, i) => [`creator.k${i}`, "v"]),
+    );
+    expect(parseTaskTags(crowded)).toBeNull();
+    const huge = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`creator.k${i}`, "v"]));
+    expect(parseTaskTags(huge)).toBeNull();
+  });
+
+  test("creatorTaskTags writes bare suffixes as creator keys, and refuses a full key or a fourth", () => {
+    expect(creatorTaskTags(refTags("linear:ENG-1", "https://linear.app/x/issue/ENG-1"))).toEqual({
+      ok: true,
+      tags: { "creator.ref": "linear:ENG-1", "creator.ref-url": "https://linear.app/x/issue/ENG-1" },
+    });
+    expect(creatorTaskTags({ "creator.ref": "linear:ENG-1" })).toMatchObject({ ok: false, code: "invalid" });
+    expect(creatorTaskTags({ a: "1", b: "2", c: "3", d: "4" })).toMatchObject({ ok: false, code: "full" });
+    expect(creatorTaskTags({ ref: "not a ref" })).toMatchObject({ ok: false });
+  });
+
+  test("linearRefTags maps an issue and its URL, and refuses one that is no ref", () => {
+    expect(linearRefTags({ issue: "ENG-123" })).toEqual({ "creator.ref": "linear:ENG-123" });
+    expect(linearRefTags({ issue: "ENG 123" })).toBeNull();
+  });
+
+  test("taskTagEntries maps a legacy `linear` to the creator ref, and an explicit ref wins over it", () => {
+    const linear = { issue: "ENG-1", url: "https://linear.app/x/issue/ENG-1" };
+    expect(taskTagEntries({ linear }, at)).toEqual({
+      "creator.ref": { value: "linear:ENG-1", at },
+      "creator.ref-url": { value: linear.url, at },
+    });
+    expect(taskTagEntries({ linear, tags: { "creator.ref": "github:a/b#2" } }, at)).toEqual({
+      "creator.ref": { value: "github:a/b#2", at },
+    });
+  });
+
+  test("withOwnerTags replaces the owner's keys only, and clearing the last leaves undefined", () => {
+    const tags = { "creator.ref": "linear:ENG-1", "owner.label": "mine" };
+    expect(withOwnerTags(tags, { label: "yours" })).toEqual({ "creator.ref": "linear:ENG-1", "owner.label": "yours" });
+    expect(withOwnerTags(tags, {})).toEqual({ "creator.ref": "linear:ENG-1" });
+    expect(withOwnerTags({ "owner.label": "mine" }, {})).toBeUndefined();
+    expect(ownerTagsOf(tags)).toEqual({ label: "mine" });
+  });
+
+  test("chainTags and taskRef take one namespace and the ref pair, and never the rest", () => {
+    const tags = { "creator.ref": "linear:ENG-1", "creator.note": "n", "owner.label": "mine", "scheduler.x": "1" };
+    expect(chainTags(tags, "creator")).toEqual({ "creator.ref": "linear:ENG-1", "creator.note": "n" });
+    expect(chainTags(tags, "owner")).toEqual({ "owner.label": "mine" });
+    expect(chainTags({ "scheduler.x": "1" }, "owner")).toBeUndefined();
+    expect(taskRef({ ...tags, "creator.ref-url": "https://x.example/1" })).toEqual({
+      ref: "linear:ENG-1",
+      url: "https://x.example/1",
+    });
+    expect(taskRef({ "owner.label": "mine" })).toBeUndefined();
+    expect(parseSpawnRef({ ref: "linear:ENG-1", url: "javascript:x" })).toEqual({ ref: "linear:ENG-1" });
+    expect(parseSpawnRef({ ref: "no" })).toBeUndefined();
+    expect(parseSpawnRef("x")).toBeUndefined();
   });
 });
 

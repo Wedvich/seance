@@ -330,6 +330,31 @@ describe("continuationSpec", () => {
     }
   });
 
+  test("copies the creator tags, never the owner's or the scheduler's, and none when there are none", () => {
+    const spec = continuationSpec(
+      failed(
+        {},
+        {
+          tags: {
+            "creator.ref": "linear:ENG-1",
+            "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+            "creator.note": "n",
+            "owner.label": "mine",
+            "scheduler.x": "1",
+          },
+        },
+      ),
+      at,
+    );
+    expect(spec.tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+      "creator.note": "n",
+    });
+    expect(continuationSpec(failed({}, { tags: { "owner.label": "mine" } }), at)).not.toHaveProperty("tags");
+    expect(continuationSpec(failed(), at)).not.toHaveProperty("tags");
+  });
+
   test("never carries notBefore", () => {
     expect(continuationSpec(failed({}, { notBefore: 1_900_000_000_000 }), at)).not.toHaveProperty("notBefore");
   });
@@ -499,25 +524,45 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
     const task = stuck({ continuedBy: { task: "t-c1", createdAt: 2 } }, { model: "opus" });
     const offer = continueOffer(task, handoffable, [], context);
     if (!offer.ok) throw new Error(offer.reason);
-    const spec = offeredSpec(task, offer, "  mind the lockfile  ");
+    const spec = offeredSpec(task, offer, "  mind the lockfile  ", true);
     expect(spec.continues).toEqual({ task: "t-c1", at: target });
     expect(spec.model).toBe("opus");
     expect(spec.prompt).toBe(`${offer.brief}\n\nmind the lockfile`);
-    expect(offeredSpec(task, offer).prompt).toBe(offer.brief);
+    expect(offeredSpec(task, offer, undefined, true).prompt).toBe(offer.brief);
     const plain = continueOffer(stuck(), handoffable, [], context);
     if (!plain.ok) throw new Error(plain.reason);
-    expect(offeredSpec(stuck(), plain).continues).toEqual({ task: "t-old", at: target });
+    expect(offeredSpec(stuck(), plain, undefined, true).continues).toEqual({ task: "t-old", at: target });
   });
 
   test("offeredSpec names an untitled task's continuation by its PR, not by the brief, and keeps a title it has", () => {
     const untitled = stuck();
     const offer = continueOffer(untitled, handoffable, [], context);
     if (!offer.ok) throw new Error(offer.reason);
-    expect(offeredSpec(untitled, offer).title).toBe("Unblock PR #7");
+    expect(offeredSpec(untitled, offer, undefined, true).title).toBe("Unblock PR #7");
     const titled = stuck({}, { title: "Add export" });
     const again = continueOffer(titled, handoffable, [], context);
     if (!again.ok) throw new Error(again.reason);
-    expect(offeredSpec(titled, again).title).toBe("Add export");
+    expect(offeredSpec(titled, again, undefined, true).title).toBe("Add export");
+  });
+
+  test("offeredSpec copies the creator tags to a leader that takes them and drops them for one that does not", () => {
+    const tagged = stuck(
+      {},
+      {
+        tags: {
+          "creator.ref": "linear:ENG-1",
+          "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+          "owner.label": "mine",
+        },
+      },
+    );
+    const offer = continueOffer(tagged, handoffable, [], context);
+    if (!offer.ok) throw new Error(offer.reason);
+    expect(offeredSpec(tagged, offer, undefined, true).tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+    });
+    expect(offeredSpec(tagged, offer, undefined, false)).not.toHaveProperty("tags");
   });
 });
 

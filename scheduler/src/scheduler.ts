@@ -2,6 +2,8 @@ import {
   amendSpec,
   CAPABILITIES,
   continuationUnderway,
+  taskRef,
+  withoutTaskTags,
   DECISION_MAX_CANDIDATES,
   autonomyOf,
   PASS_CLOSE_GRACE_MS,
@@ -49,6 +51,7 @@ import {
 } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
+import { chainOwnerTags } from "./chain-tags.ts";
 import { continuedChange } from "./continued.ts";
 import { admission } from "./deps.ts";
 import { resolveMessageTarget, type MessageRoute } from "./message-route.ts";
@@ -1365,12 +1368,22 @@ export class Scheduler {
    * cancel serialized ahead of it wins and it answers what the task became instead. `basis` is
    * checked against the prompt held when the request arrives and again inside the write, so a prompt
    * changed by another amend in between is `prompt_changed`, never overwritten. An amendment that
-   * changes nothing answers the task as it stands, writing nothing.
+   * changes nothing answers the task as it stands, writing nothing. An amendment of the owner's tags alone (`ownerTags`,
+   * docs/tags.md §5.2) is taken in any state, finished included: a label changes nothing the leader routes, so it
+   * needs no `basis`, meets no state rule beyond `not_found` and forgets no decision. Beside another field it meets
+   * today's rules.
    */
   async amend(request: AmendRequest): Promise<AmendResult> {
     const { taskId } = request;
+    const tagsOnly =
+      request.ownerTags !== undefined &&
+      request.prompt === undefined &&
+      request.title === undefined &&
+      request.model === undefined &&
+      request.effort === undefined &&
+      request.notBefore === undefined;
     const task = this.task(taskId);
-    const early = this.#unamendable(task, taskId);
+    const early = tagsOnly ? this.#missing(task) : this.#unamendable(task, taskId);
     if (early !== null) return early;
     const against = task?.spec.prompt;
     if (request.basis !== undefined && (await promptBasis(against)) !== request.basis) {
@@ -1382,7 +1395,9 @@ export class Scheduler {
       taskId,
       (current) => {
         const moved = request.basis !== undefined && current.spec.prompt !== against;
-        const refused = this.#unamendable(current, taskId) ?? (moved ? PROMPT_CHANGED : null);
+        const refused = tagsOnly
+          ? this.#missing(current)
+          : (this.#unamendable(current, taskId) ?? (moved ? PROMPT_CHANGED : null));
         if (refused !== null) {
           outcome = refused;
           return null;
@@ -1402,9 +1417,14 @@ export class Scheduler {
         tooLarge = code === "too_large";
       },
     );
-    if (next === null) return tooLarge ? { ok: false, code: "prompt_too_long" } : outcome;
-    this.#forgetDecision(taskId);
+    // A label alone sent no prompt: the store's refusal is about the record's room for it.
+    if (next === null) return tooLarge ? { ok: false, code: tagsOnly ? "tags_full" : "prompt_too_long" } : outcome;
+    if (!tagsOnly) this.#forgetDecision(taskId);
     return { ok: true, task: next };
+  }
+
+  #missing(task: Task | undefined): AmendFailure | null {
+    return task === undefined ? { ok: false, code: "not_found" } : null;
   }
 
   /** Why `task` cannot be amended now, or null: only the three states before a reservation take one. */
@@ -2313,8 +2333,9 @@ export class Scheduler {
     now: number,
   ): Promise<Task | null> {
     const reservation: Reservation = { ...chosen, expiresAt: now + this.#config.reservationTtlMs };
+    // Tags never route (docs/tags.md §2.2): a label set while the decision was in flight must not decline the reservation.
     const reserved = await this.#update(id, (current) =>
-      current.state === "ready" && isDeepStrictEqual(current.spec, routed)
+      current.state === "ready" && isDeepStrictEqual(withoutTaskTags(current.spec), withoutTaskTags(routed))
         ? advance(current, "reserved", { reservation, decision, reservedAt: now })
         : null,
     );
@@ -2339,14 +2360,21 @@ export class Scheduler {
     });
     // Only a chain still unreadable stays noted: a pruned task leaves it, and a later stall is logged again.
     for (const id of this.#stalled) if (!stalled.has(id)) this.#stalled.delete(id);
+    const byId = new Map(this.tasks().map((t) => [t.id, t]));
     await Promise.all(
       [...moves].map(([id, move]) =>
         this.#update(id, (current) => {
           if ((current.state !== "queued" && current.state !== "blocked") || current.state === move.state) return null;
-          if (move.state === "failed") return advance(current, move.state, { failure: move.failure });
+          // The first write out of `queued` takes the predecessor's `owner.*`, but only for the record as the client
+          // created it (store version 1): an amend while it waited (a label set and cleared leaves no key to show it)
+          // is the owner's word, and a blocked task moving on takes none either.
+          const untouched = this.#held.get(id)?.version === 1;
+          const chained = current.state === "queued" && untouched ? chainOwnerTags(current, byId) : null;
+          const from = chained === null ? current : { ...current, spec: chained };
+          if (move.state === "failed") return advance(from, move.state, { failure: move.failure });
           // A successor whose predecessor merged while it waited: its work is done, and nothing was placed.
-          if (move.state === "done") return advance(current, move.state, { doneBy: move.doneBy });
-          return advance(current, move.state);
+          if (move.state === "done") return advance(from, move.state, { doneBy: move.doneBy });
+          return advance(from, move.state);
         }),
       ),
     );
@@ -2364,6 +2392,13 @@ export class Scheduler {
     // Read now, not at routing: a predecessor's merge or push in between changes the base, never the target,
     // since routing filtered every daemon that cannot stack by the spec alone (`base_unsupported`).
     const stack = stackOf(task, new Map(this.tasks().map((t) => [t.id, t])));
+    // Only to a daemon that reads it: an older one ignores the field anyway, and a tag is display text.
+    const ref = this.#fleet
+      .machines()
+      .find((m) => m.deviceId === at.deviceId)
+      ?.capabilities?.includes(CAPABILITIES.taskTags)
+      ? taskRef(spec.tags)
+      : undefined;
     const reply = await this.#fleet.spawn(at.deviceId, {
       repo: at.clone,
       mode: spec.mode,
@@ -2383,6 +2418,7 @@ export class Scheduler {
       ...(spec.succeeds === undefined || task.prUrl === undefined || spec.until === "reported"
         ? {}
         : { inheritedPr: task.prUrl }),
+      ...(ref === undefined ? {} : { ref }),
       client: SCHEDULER_CLIENT,
       // This leader routes a `machine_closed` refusal again; an older one would fail the task.
       routesClosed: true,
@@ -2653,7 +2689,8 @@ export class Scheduler {
           this.#noteSuccessor(held.task, next);
           return next;
         }
-        if (write.code === "too_large" && !trim && next.decision !== undefined) {
+        // Only a cut that changes the record is worth the second write: the same bytes would be refused again.
+        if (write.code === "too_large" && !trim && trimmed(changed) !== changed) {
           trim = true;
           continue;
         }

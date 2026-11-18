@@ -138,7 +138,7 @@ export type FeedFrame = SessionFrame | SessionGoneFrame | TaskFrame;
 
 export interface AdapterFeedDeps {
   readonly conversations: Pick<Conversations, "sweep" | "process" | "tagsFor" | "taskTags" | "listen" | "ended">;
-  readonly tasks: Pick<EndedTasks, "prUrl" | "onTask">;
+  readonly tasks: Pick<EndedTasks, "prUrl" | "ref" | "onTask">;
   readonly exclaves: () => readonly Exclave[];
   readonly repos: () => readonly RepoEntry[];
   readonly panes?: () => Promise<readonly FeedPane[]>;
@@ -254,6 +254,7 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
             : (deps.conversations.taskTags(pane.taskId) ?? {})
           : (deps.conversations.tagsFor(pane.id) ?? {});
       const prUrl = pane.taskId === null ? undefined : deps.tasks.prUrl(pane.taskId);
+      const ref = pane.taskId === null ? undefined : deps.tasks.ref(pane.taskId);
       const state = toState(view?.state ?? null);
       const session: AdapterSession = {
         key,
@@ -266,7 +267,7 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
                 ...(view.session.conflict ? { conflict: true as const } : {}),
               },
             }),
-        ...(pane.taskId === null ? {} : { task: { id: pane.taskId } }),
+        ...(pane.taskId === null ? {} : { task: { id: pane.taskId, ...(ref === undefined ? {} : { ref }) } }),
         exclave: exclaveOf(pane.path, exclaves),
         ...(repo === undefined ? {} : { repo }),
         ...(branch === null ? {} : { branch }),

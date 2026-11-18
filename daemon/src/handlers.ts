@@ -35,6 +35,7 @@ import {
   isBranchName,
   isTaskId,
   parseAttachmentManifest,
+  parseSpawnRef,
   parseDeliverMessageRequest,
   parseMessageReceiptRequest,
   parseWatchEvent,
@@ -392,6 +393,22 @@ function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | unde
 }
 
 /**
+ * The ref a task's spawn carries (`SpawnRequest.ref`): from the scheduler's own task spawn alone, sealed from the
+ * scheduler (or its own process), `client: SCHEDULER_CLIENT`, with a task id to note it under, in any mode. Anything
+ * else, or a value `parseSpawnRef` does not hold, drops the claim, never refuses it: it is display text, and the spawn
+ * runs as an older daemon runs it. Never logs the value.
+ */
+function refOf(request: SpawnRequest, scheduler: boolean): { readonly ref: string; readonly url?: string } | undefined {
+  if (request.ref === undefined) return undefined;
+  const { taskId } = request;
+  const held =
+    scheduler && request.client === SCHEDULER_CLIENT && taskId !== undefined ? parseSpawnRef(request.ref) : undefined;
+  if (held !== undefined) return held;
+  log.warn(`spawn: ignored a ref this daemon does not take${taskId === undefined ? "" : ` (task ${quote(taskId)})`}`);
+  return undefined;
+}
+
+/**
  * Who may start a session from another branch: the scheduler's own task spawn, the gate attachments and an
  * inherited PR have. Refused, never dropped: dropped, the session would start from the default branch.
  */
@@ -545,6 +562,7 @@ async function handleSpawn(
     continuation = site;
   }
   const inherited = inheritedPrOf(payload, scheduler);
+  const ref = refOf(payload, scheduler);
   // Before the write-ahead record: a refused or abandoned fetch then leaves no ledger entry, and
   // the leader's TTL check proves the task never landed. Past its deadline nothing launches.
   let attachments: SessionAttachments | undefined;
@@ -615,6 +633,7 @@ async function handleSpawn(
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),
+      ...(ref === undefined ? {} : { ref }),
     });
     // A continuation finds the directory by this note; `here` has no worktree, and the age prune covers it.
     if (payload.attachments !== undefined && payload.taskId !== undefined && payload.mode === "worktree") {

@@ -103,7 +103,10 @@ export interface AdapterSession {
    * same id. Absent until a conversation is reported or read; a refuted claim is never sent.
    */
   readonly session?: { readonly id: string; readonly verified: boolean; readonly conflict?: true };
-  /** `title` and `ref` are protocol 1's but not sent yet: the daemon holds neither for its launches (docs/tags.md step 3). */
+  /**
+   * `ref` is sent for a task launched with `SpawnRequest.ref` (the scheduler's spawn, noted in the launch ledger); `title`
+   * is protocol 1's but not sent: the daemon holds none for its launches.
+   */
   readonly task?: {
     readonly id: string;
     readonly title?: string;

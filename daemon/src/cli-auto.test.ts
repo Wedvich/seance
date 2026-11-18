@@ -567,6 +567,56 @@ describe("spawnAuto's placement flags", () => {
     });
   });
 
+  describe("--ref", () => {
+    const tagging = (leaderCaps: readonly Capability[] = [CAPABILITIES.taskTags]) => {
+      const fake = fakeRelay([
+        machine({
+          repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: ORIGIN }],
+          capabilities: leaderCaps,
+        }),
+      ]);
+      fake.setState({ scheduler: LEADING });
+      return fake;
+    };
+
+    test("is stored as the creator's ref and URL on a leader that takes task tags, and the audit never names it", async () => {
+      const fake = tagging();
+      const { ok, audited } = await run(fake, { ref: "linear:ENG-1", refUrl: "https://linear.app/x/issue/ENG-1" });
+      expect(ok).toBe(true);
+      expect(fake.creates[0]?.spec.tags).toEqual({
+        "creator.ref": "linear:ENG-1",
+        "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+      });
+      expect(audited.join("\n")).not.toContain("ENG-1");
+    });
+
+    test("a spawn with no ref writes no tags, and needs no capability", async () => {
+      const fake = tagging([]);
+      expect((await run(fake)).ok).toBe(true);
+      expect(fake.creates[0]?.spec).not.toHaveProperty("tags");
+    });
+
+    test("is refused, before anything is created, by a leader that does not take tags", async () => {
+      const fake = tagging([]);
+      const { ok, text } = await run(fake, { ref: "linear:ENG-1" });
+      expect(ok).toBe(false);
+      expect(text).toContain("does not take task tags yet");
+      expect(text).toContain("retry without --ref");
+      expect(fake.creates).toEqual([]);
+    });
+
+    test("a ref that is no source:id, or a URL that is no https one, is refused naming the flags", async () => {
+      for (const bad of [{ ref: "ENG-1" }, { ref: "linear:ENG-1", refUrl: "http://linear.app/x" }]) {
+        const fake = tagging();
+        // oxlint-disable-next-line no-await-in-loop -- one case at a time keeps each answer readable
+        const { ok, text } = await run(fake, bad);
+        expect(ok).toBe(false);
+        expect(text).toContain("--ref must be source:id");
+        expect(fake.creates).toEqual([]);
+      }
+    });
+  });
+
   test("here without a state file is refused before the relay is dialled", async () => {
     const fake = placingRelay();
     const { ok, text } = await run(fake, { not: ["here"] }, async () => null);
