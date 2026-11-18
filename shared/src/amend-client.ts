@@ -71,10 +71,12 @@ const NO_BASIS = "0".repeat(64);
 
 /**
  * A draft as the fleet broker takes it from a keyless peer: `parseAmendRequest`'s checks, with
- * `basis` optional beside `prompt` (the broker's daemon reads the task for it), built afresh.
+ * `basis` optional beside `prompt` (the broker's daemon reads the task for it), built afresh. Never
+ * `ownerTags`: the owner's labels come from the PWA alone (docs/tags.md §5.2), so the broker, MCP and
+ * the CLI refuse them here.
  */
 export function parseAmendDraft(value: unknown): AmendDraft | null {
-  if (!isRecord(value)) return null;
+  if (!isRecord(value) || value["ownerTags"] !== undefined) return null;
   if (value["prompt"] === undefined || value["basis"] !== undefined) return parseAmendRequest(value);
   const parsed = parseAmendRequest({ ...value, basis: NO_BASIS });
   return parsed === null ? null : withoutBasis(parsed);

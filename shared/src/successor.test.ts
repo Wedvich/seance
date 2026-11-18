@@ -194,6 +194,28 @@ describe("successorSpec", () => {
     expect(of({ autonomy: "checkpoint" })).toMatchObject({ autonomy: "checkpoint" });
   });
 
+  test("copies the creator tags, never the owner's or the scheduler's, and none when there are none", () => {
+    const of = (spec: Partial<TaskSpec>): TaskSpec =>
+      successorSpec({ ...running({}, spec), assignment }, "org:a", "manual");
+    expect(
+      of({
+        tags: {
+          "creator.ref": "linear:ENG-1",
+          "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+          "creator.note": "n",
+          "owner.label": "mine",
+          "scheduler.x": "1",
+        },
+      }).tags,
+    ).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+      "creator.note": "n",
+    });
+    expect(of({ tags: { "owner.label": "mine" } })).not.toHaveProperty("tags");
+    expect(of({})).not.toHaveProperty("tags");
+  });
+
   test("never carries notBefore", () => {
     const next = successorSpec({ ...running({}, { notBefore: 1_900_000_000_000 }), assignment }, "org:a", "manual");
     expect(next).not.toHaveProperty("notBefore");
@@ -234,6 +256,15 @@ describe("successorPrompt", () => {
     // The remote branch's own name, never a switch to it under that name.
     expect(prompt).not.toContain("git switch");
     expect(prompt).not.toContain("git checkout");
+  });
+
+  test("names the ref of a task that carries one, a legacy `linear` task's too, and nothing for a task with neither", () => {
+    const tagged = successorPrompt(input(running({}, { tags: { "creator.ref": "github:acme/app#12" } }))).prompt;
+    expect(tagged).toContain("\n\nRef: github:acme/app#12");
+    const legacy = successorPrompt(input(running({}, { linear: { issue: "PEN-7" } }))).prompt;
+    expect(legacy).toContain("\n\nRef: linear:PEN-7");
+    expect(successorPrompt(input(running({}, { tags: { "owner.label": "mine" } }))).prompt).not.toContain("Ref:");
+    expect(successorPrompt(input(running())).prompt).not.toContain("Ref:");
   });
 
   test("a branch name no shell would take bare is quoted", () => {
@@ -292,7 +323,7 @@ describe("successorPrompt", () => {
     test("comes last and once when the old prompt fits whole", () => {
       const { prompt } = successorPrompt({ ...input(reported("fix it", { linear: { issue: "PEN-7" } })) });
       expect(endsWithOnce(prompt)).toBe(true);
-      expect(prompt).toContain("fix it\n\nLinear issue: PEN-7");
+      expect(prompt).toContain("fix it\n\nRef: linear:PEN-7");
     });
 
     test("survives the old prompt's cut", () => {

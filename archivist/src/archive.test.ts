@@ -276,6 +276,32 @@ describe("task rows", () => {
     expect(archivedTask(task({ state: "done" })).flag).toBeUndefined();
   });
 
+  test("of a task's tags only the ref and its URL are kept: never an owner's label, an opaque creator key or a scheduler key", () => {
+    const tags = {
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+      "creator.secret-note": "OPAQUE-CREATOR",
+      "owner.label": "OWNER-LABEL",
+      "scheduler.x": "SCHEDULER-KEY",
+    };
+    const finished = task({ state: "done", spec: { repo: "r", mode: "here", tags } });
+    expect(archivedTask(finished).spec.tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+    });
+    const row = taskRow(finished, 2, context);
+    if (row === null) throw new Error("done refused");
+    for (const hidden of ["OPAQUE-CREATOR", "OWNER-LABEL", "SCHEDULER-KEY"]) expect(row.record).not.toContain(hidden);
+    expect(parseTask(JSON.parse(row.record))?.spec.tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+    });
+    // None left: no empty map, and a task with none stays without.
+    const labelled = task({ state: "done", spec: { repo: "r", mode: "here", tags: { "owner.label": "OWNER-LABEL" } } });
+    expect(archivedTask(labelled).spec).not.toHaveProperty("tags");
+    expect(archivedTask(task({ state: "done" })).spec).not.toHaveProperty("tags");
+  });
+
   test("a record not in a finished state still loses its prompt and attachment manifest", () => {
     const { spec } = archivedTask(task({ state: "running" }));
     expect(spec.prompt).toBeUndefined();

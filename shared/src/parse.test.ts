@@ -156,6 +156,7 @@ import {
   type TaskRequest,
   type TaskSpec,
 } from "./types.ts";
+import { TAG_VALUE_MAX } from "./tags.ts";
 import { TRAIT_LIMITS } from "./traits.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
@@ -1718,6 +1719,18 @@ describe("store", () => {
   // Every field at its bound, two UTF-8 bytes a character wherever a field is free text.
   const device = "A".repeat(43);
   const placement = { deviceId: device, exclave: "x".repeat(TASK_SPEC_LIMITS.placement) };
+  // Task tags at their bounds: a ref of the longest pattern match, a 256-byte URL, and one opaque key of 256 `"`
+  // (the worst JSON escaping), per namespace; the owner's label at its cap.
+  const refUrl = `https://linear.app/${"u".repeat(256 - "https://linear.app/".length)}`;
+  const creatorTags = {
+    "creator.ref": `a${"b".repeat(31)}:${"c".repeat(64)}`,
+    "creator.ref-url": refUrl,
+    [`creator.${"k".repeat(32)}`]: "ø".repeat(TAG_VALUE_MAX / 2),
+  };
+  const ownerTags = {
+    "owner.label": "ø".repeat(TAG_VALUE_MAX / 2),
+    [`owner.${"k".repeat(32)}`]: "ø".repeat(TAG_VALUE_MAX / 2),
+  };
   const created: Task = {
     id: crypto.randomUUID(),
     state: "queued",
@@ -1796,6 +1809,32 @@ describe("store", () => {
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  // Task tags at their bounds (values 256 bytes, two-byte text as everywhere here), measured by these two tests: a
+  // create with the three creator keys seals to 27912 of 28672 (760 spare), with the legacy `linear` they replace
+  // absent (+272 with it: no writer sets both). A decided record with eight candidates and a legacy `linear` has only
+  // 216 of 40960 spare before any tag, so the six keys cannot be asked to fit beside eight candidates: they fit
+  // (39068, 1892 spare) where the leader cuts, a decision of its winner alone (`winnerOnly`, the one cut its retry
+  // makes on `too_large`, since everything else a record holds is bounded). Key count was not cut to fit: no count
+  // above one key fits the eight-candidate bound.
+  const taggedSpec = (spec: TaskSpec, tags: Readonly<Record<string, string>>): TaskSpec => ({ ...spec, tags });
+  const schedulerTags = { [`scheduler.${"k".repeat(32)}`]: "ø".repeat(TAG_VALUE_MAX / 2) };
+
+  test("a create with its creator tags at their bounds, the legacy `linear` they replace absent, fits the create cap", async () => {
+    const { linear: _linear, ...rest } = created.spec;
+    const tagged: Task = { ...created, spec: taggedSpec(rest, creatorTags) };
+    expect(parseTask(tagged)).toEqual(tagged);
+    expect(await sealedLength(tagged)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
+  });
+
+  test("the leader's record with all it adds at every bound and every task tag key, the decision cut to its winner, fits", async () => {
+    const decided: Task = {
+      ...written,
+      spec: taggedSpec(written.spec, { ...creatorTags, ...ownerTags, ...schedulerTags }),
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: [candidate] },
+    };
+    expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
   test("a needs-input record carrying its wait at every bound, in place of the failure, fits beside eight candidates", async () => {
@@ -3235,6 +3274,20 @@ describe("parseAmendRequest", () => {
     });
     expect(parseAmendRequest({ taskId: "t-1", notBefore: null })).toEqual({ taskId: "t-1", notBefore: null });
     for (const bad of ["x", 0, -5, 1.5]) expect(parseAmendRequest({ taskId: "t-1", notBefore: bad })).toBeNull();
+  });
+
+  test("ownerTags: bare suffixes in a printable-text map, empty string clears, never an empty or full-key map", () => {
+    expect(parseAmendRequest({ taskId: "t-1", ownerTags: { label: "mine" } })).toEqual({
+      taskId: "t-1",
+      ownerTags: { label: "mine" },
+    });
+    expect(parseAmendRequest({ taskId: "t-1", ownerTags: { label: "" } })).toEqual({
+      taskId: "t-1",
+      ownerTags: { label: "" },
+    });
+    for (const bad of [{}, { "owner.label": "x" }, { label: 7 }, { Label: "x" }, "x", null, []]) {
+      expect(parseAmendRequest({ taskId: "t-1", ownerTags: bad })).toBeNull();
+    }
   });
 
   test("takes a prompt with its basis, and title, model and effort, each alone or together", () => {

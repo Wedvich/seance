@@ -2,6 +2,7 @@ import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
 import { blockedBrief, taskPrBlock } from "./pr-blocked.ts";
 import { TASK_PHASES } from "./task-phase.ts";
+import { chainTags, withoutTaskTags } from "./tags.ts";
 import {
   CAPABILITIES,
   LAUNCH_LEDGER_MAX_AGE_MS,
@@ -318,7 +319,8 @@ function blockedOffer(
 
 /**
  * The spec of the task that continues `task`. Carries what shapes the session
- * (model, effort, plan, autonomy, title) and what settles it (`until`, `linear`), and
+ * (model, effort, plan, autonomy, title), what settles it (`until`, `linear`) and its `creator.*` tags (never `owner.*`:
+ * the leader copies those at admission; never `scheduler.*`), and
  * nothing that places or orders it (never `notBefore`, DESIGN.md "Not before"): the target is exact, and the old task's
  * dependents stay failed. The caller stamps `client`.
  *
@@ -333,6 +335,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
   const { spec } = task;
   const note = prompt?.trim();
   const steered = autonomyOf(spec) === "steer";
+  const creator = chainTags(spec.tags, "creator");
   return {
     repo: spec.repo,
     mode: "continue",
@@ -349,6 +352,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.requires === undefined ? {} : { requires: spec.requires }),
+    ...(creator === undefined ? {} : { tags: creator }),
     continues: { task: continues, at },
   };
 }
@@ -356,11 +360,19 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
 /**
  * What every client writes for an accepted offer: the continuation's spec with the blocked PR's brief ahead of
  * the user's own note (a blank line between), resuming the session the offer names. One place, so no client
- * can skip the brief.
+ * can skip the brief. `leaderTakesTags` is whether the verified leader advertises `CAPABILITIES.taskTags`: when it does
+ * not, the copied `creator.*` tags are dropped, never refused, since display data must not block a resume and an older
+ * leader would hold a tagged record unreadable. Both clients go through here, so neither drops them on its own.
  */
-export function offeredSpec(task: Task, offer: Extract<ContinueOffer, { ok: true }>, prompt?: string): TaskSpec {
+export function offeredSpec(
+  task: Task,
+  offer: Extract<ContinueOffer, { ok: true }>,
+  prompt: string | undefined,
+  leaderTakesTags: boolean,
+): TaskSpec {
   const joined = [offer.brief, prompt?.trim()].filter((part) => part !== undefined && part !== "").join("\n\n");
-  const spec = continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  const copied = continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  const spec: TaskSpec = leaderTakesTags ? copied : withoutTaskTags(copied);
   // An untitled task would otherwise be named by its prompt's first line, the brief's: on its card and as its window.
   return offer.brief === undefined || spec.title !== undefined ? spec : { ...spec, title: blockedTitle(task) };
 }

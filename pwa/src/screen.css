@@ -3223,6 +3223,43 @@
 /* Inline in the mono meta line, after the age; back to the body face for `.fleet-badge`'s reason.
    `.fleet-badge` is styled as a flex item, so here it needs its own box: an inline span's padding
    and border overlap the line above when the pill wraps onto a line by itself. */
+.queue-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.queue-label,
+.queue-ref {
+  font-family: var(--sans);
+  overflow-wrap: anywhere;
+}
+
+.queue-ref {
+  text-decoration: none;
+}
+
+.verdict-tags {
+  margin: 12px 0 0;
+  font-size: 0.8125rem;
+}
+
+.verdict-tag {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.verdict-tag dt {
+  font-family: var(--mono);
+  color: var(--fg2);
+}
+
+.verdict-tag dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .queue-autonomy {
   display: inline-block;
   margin-left: 6px;

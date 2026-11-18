@@ -1207,6 +1207,10 @@ export interface MachineInfo {
  * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
  * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
  * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
+ * `taskTags`: as a leader, parses, keeps and re-seals `TaskSpec.tags` behind `TAGS_DEP_SENTINEL` and takes
+ * `AmendRequest.ownerTags`, and sends `SpawnRequest.ref` to a daemon advertising it; as a daemon, takes
+ * `SpawnRequest.ref`. A client writes `tags` or `ownerTags` only to a verified leader advertising it (a continuation
+ * drops its copied tags instead of refusing), since an older leader holds a tagged record unreadable.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1239,6 +1243,7 @@ export const CAPABILITIES = {
   custodian: "custodian",
   limits: "limits",
   watches: "watches",
+  taskTags: "taskTags",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1882,6 +1887,14 @@ export interface SpawnRequest {
    * else it is ignored. Never logged.
    */
   readonly inheritedPr?: string;
+  /**
+   * The task's ref (`creator.ref`, and `creator.ref-url` as `url`), set only by the leader's dispatch and only to a
+   * daemon advertising `CAPABILITIES.taskTags`. The daemon notes it in its launch ledger (`TaskNote.ref`) and reads it
+   * only into an adapter's `Session` (`AdapterSession.task.ref`), only from a spawn sealed from the scheduler with
+   * `client: SCHEDULER_CLIENT` and a `taskId`, in any mode; from any other sender it is ignored, as an older daemon
+   * ignores it. Each value as `parseTagValue` holds it, else it is ignored. Display only, never logged.
+   */
+  readonly ref?: { readonly ref: string; readonly url?: string };
 }
 
 /**
@@ -2951,6 +2964,16 @@ export const REQUIRES_DEP_SENTINEL = { task: "", after: "opened" } as const;
  */
 export const SUCCESSOR_DEP_SENTINEL = { task: "", after: "done" } as const;
 
+/**
+ * Sealed into `spec.deps` whenever a spec carries `tags` (`taskRecordAtRest`), as `REQUIRES_DEP_SENTINEL` is: an older
+ * leader's dep parser refuses the empty `task`, so it holds the record unreadable rather than seal it back without the
+ * owner's label and the creator's ref (a tag changes nothing it would route, so this is the one sentinel that guards
+ * display data: the next write would erase it silently). `after: "tags"` is outside `DEP_AFTER`, so an older parser
+ * refuses it twice (the empty id, the unknown `after`), and it stays apart from the `merged`, `opened` and `done`
+ * sentinels of the other three fields. This build's parser drops it only beside `tags`, and refuses it without.
+ */
+export const TAGS_DEP_SENTINEL = { task: "", after: "tags" } as const;
+
 /** What a session may send as the record of a pass, UTF-16 units: the successor's prompt below the preamble. */
 export const SUCCESSOR_RECORD_MAX = 7_168;
 
@@ -3078,6 +3101,14 @@ export interface TaskSpec extends TaskRequest {
    * leader advertises `CAPABILITIES.traits`. Never in a `SpawnRequest`.
    */
   readonly requires?: readonly string[];
+  /**
+   * Display tags, full keys (`creator.*`, `owner.*`, `scheduler.*`; docs/tags.md §5): at most `TASK_TAGS_MAX`, each
+   * namespace within `TASK_TAG_BUDGET`. Display only: never routes, binds, places, settles or alerts. `creator.*` is
+   * written at create, `owner.*` only by the leader on an `amend`, and `scheduler.*` by the leader (none in v1). Sealed
+   * only through `taskRecordAtRest`, which appends `TAGS_DEP_SENTINEL`; a client writes it only when the verified
+   * leader advertises `CAPABILITIES.taskTags`.
+   */
+  readonly tags?: Readonly<Record<string, string>>;
   /**
    * The task whose work this one continues, passed on because its account ran out or its owner
    * asked (`pass`): the predecessor's id, the account its exclave bills (`ExclaveInfo.accountId`),
@@ -4262,6 +4293,12 @@ export interface AmendRequest {
   readonly effort?: string | null;
   /** Set or move the not-before time; `null` clears it; needs no `basis`. */
   readonly notBefore?: number | null;
+  /**
+   * The owner's labels: bare `owner.*` suffixes, `""` clears a key (`writeTags`). Taken in any task state, finished
+   * included, and only when no other field is set. Sent only by the PWA, to a verified leader advertising
+   * `CAPABILITIES.taskTags`; `parseAmendDraft` refuses it, so the broker, MCP and the CLI never carry it.
+   */
+  readonly ownerTags?: Readonly<Record<string, string>>;
 }
 
 /**

@@ -71,6 +71,7 @@ export type SheetKind =
   | "autonomy"
   | "after"
   | "requires"
+  | "ref"
   | "notBefore";
 
 /**
@@ -470,6 +471,26 @@ export interface AccountsState {
   /** The account whose rename dialog is open: a layer, so back closes it. */
   readonly renaming: string | null;
   /** The last rename's refusal or failure, as a sentence; cleared by the next rename or a dismiss. */
+  readonly notice: string | null;
+}
+
+/**
+ * The next task's ref as typed (`creator.ref` and its URL, docs/tags.md §5). Transient like the autonomy level, so
+ * never persisted: a ref names one task's work and must not ride along unnoticed on the next.
+ */
+export interface RefDraft {
+  readonly ref: string;
+  readonly url: string;
+}
+
+export const EMPTY_REF: RefDraft = { ref: "", url: "" };
+
+/** The label dialog on the Queue screen: a layer, so back closes it. */
+export interface LabellingState {
+  readonly taskId: string;
+  /** The `amend` is in flight. */
+  readonly saving: boolean;
+  /** The last save's refusal or failure, as a sentence; cleared by the next save or a dismiss. */
   readonly notice: string | null;
 }
 

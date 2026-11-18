@@ -257,6 +257,26 @@ describe("the state feed", () => {
     expect(sessionOf(d, key)?.state).toBe("unknown");
   });
 
+  test("a tasked session's record carries the ref its spawn noted, the URL included, and a task with none carries none", async () => {
+    const ref = { ref: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" };
+    const tagged = id(20);
+    const bare = id(21);
+    await (
+      await ended.launch(tagged)
+    )(true, { site: { repo: "proj", worktree: project }, ref });
+    await (
+      await ended.launch(bare)
+    )(true, { site: { repo: "proj", worktree: project } });
+    const withRef = await claudePane({ taskId: tagged });
+    const without = await claudePane({ taskId: bare });
+    await report(d, withRef.pid, { state: "busy" });
+    await report(d, without.pid, { state: "busy" });
+    await pollUntil(() => sessionOf(d, withRef.key)?.task?.ref !== undefined, "the record with its ref");
+    expect(sessionOf(d, withRef.key)?.task).toEqual({ id: tagged, ref });
+    await pollUntil(() => sessionOf(d, without.key)?.state === "busy", "the busy record");
+    expect(sessionOf(d, without.key)?.task).toEqual({ id: bare });
+  });
+
   test("after a daemon restart every session reads `unknown` until it reports", async () => {
     const { key, pid } = await claudePane();
     await report(d, pid, { state: "busy" });

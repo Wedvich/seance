@@ -266,6 +266,7 @@ const AMEND_REFUSALS: Record<Exclude<AmendResult, { readonly ok: true }>["code"]
   prompt_changed: schedulerError("prompt_changed", "the prompt changed since it was read; read it again"),
   prompt_too_long: schedulerError("prompt_too_long", "the amended prompt is past the task's bound; nothing changed"),
   append_only: schedulerError("append_only", "a successor's prompt is the leader's; it takes an append only"),
+  tags_full: schedulerError("invalid_request", "the task already holds as many owner tags as it may; clear one first"),
   conflict: schedulerError("conflict", "the task changed while it was amended; ask again"),
 };
 

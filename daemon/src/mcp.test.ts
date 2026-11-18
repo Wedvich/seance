@@ -1362,7 +1362,9 @@ describe("spawn_session on auto", () => {
       [{ autonomy: "auto", promt: "typo" }, 'Unrecognized key: "promt"'],
       [{ pin: { machine: "Linux Box", acount: "work" } }, 'pin: Unrecognized key: "acount"'],
       [{ after: [{ task: PRED, wehn: "merged" }] }, 'after.0: Unrecognized key: "wehn"'],
-      [{ linear: { issue: "ENG-1", title: "x" } }, 'linear: Unrecognized key: "title"'],
+      // The Linear field `ref` replaced: refused, never stripped into a task with no link.
+      [{ linear: { issue: "ENG-1" } }, 'Unrecognized key: "linear"'],
+      [{ ref: { ref: "linear:ENG-1" } }, "expected string"],
     ];
     for (const [extra, text] of cases) {
       // oxlint-disable-next-line no-await-in-loop -- one call each
@@ -1579,6 +1581,12 @@ function reportingMachines(): Machine[] {
   return [machine({ ...leader, capabilities: [CAPABILITIES.reportedDone] }), ...rest];
 }
 
+/** A leader that reports and takes task tags. */
+function taggingMachines(): Machine[] {
+  const [leader, ...rest] = autoMachines();
+  return [machine({ ...leader, capabilities: [CAPABILITIES.reportedDone, CAPABILITIES.taskTags] }), ...rest];
+}
+
 async function callTool(
   fake: ReturnType<typeof fakeRelay>,
   name: string,
@@ -1598,12 +1606,13 @@ async function callTool(
 const PRED = "3f1c2b7e-9d4a-4c1e-8a55-0b6f2d9e7a10";
 
 describe("spawn_session on auto, authoring fields", () => {
-  test("after, until and linear reach the stored record; reported appends the instruction to the prompt", async () => {
-    const fake = leaderRelay([], reportingMachines());
+  test("after, until and ref reach the stored record; reported appends the instruction to the prompt", async () => {
+    const fake = leaderRelay([], taggingMachines());
     const { error } = await callAuto(fake, {
       after: [{ task: PRED }, { task: PRED, when: "done" }],
       until: "reported",
-      linear: { issue: "ENG-123", url: "https://linear.app/pengefix/issue/ENG-123" },
+      ref: "linear:ENG-123",
+      ref_url: "https://linear.app/pengefix/issue/ENG-123",
     });
     expect(error).toBe(false);
     expect(fake.creates[0]?.spec).toEqual({
@@ -1616,30 +1625,43 @@ describe("spawn_session on auto, authoring fields", () => {
         { task: PRED, after: "done" },
       ],
       until: "reported",
-      linear: { issue: "ENG-123", url: "https://linear.app/pengefix/issue/ENG-123" },
+      tags: { "creator.ref": "linear:ENG-123", "creator.ref-url": "https://linear.app/pengefix/issue/ENG-123" },
     } satisfies TaskSpec);
   });
 
-  test("the default until is not written, and an empty linear url is left off", async () => {
-    const fake = leaderRelay();
-    const { error } = await callAuto(fake, { until: "merged", linear: { issue: "ENG-1", url: "" } });
+  test("the default until is not written, and an empty ref url is left off", async () => {
+    const fake = leaderRelay([], taggingMachines());
+    const { error } = await callAuto(fake, { until: "merged", ref: "linear:ENG-1", ref_url: "" });
     expect(error).toBe(false);
     expect(fake.creates[0]?.spec).toEqual({
       repo: ORIGIN,
       mode: "worktree",
       prompt: "fix it",
       client: "mcp",
-      linear: { issue: "ENG-1" },
+      tags: { "creator.ref": "linear:ENG-1" },
     } satisfies TaskSpec);
   });
 
-  test("a Linear issue is trimmed as the PWA trims it, and a blank one is refused", async () => {
-    const fake = leaderRelay();
-    expect((await callAuto(fake, { linear: { issue: "  ENG-7 " } })).error).toBe(false);
-    expect(fake.creates[0]?.spec.linear).toEqual({ issue: "ENG-7" });
-    const blank = await callAuto(fake, { linear: { issue: "   " } });
-    expect(blank.error).toBe(true);
-    expect(blank.text).toContain("linear.issue is empty");
+  test("a ref is trimmed, a blank one is none, and a url with no ref is refused", async () => {
+    const fake = leaderRelay([], taggingMachines());
+    expect((await callAuto(fake, { ref: "  linear:ENG-7 " })).error).toBe(false);
+    expect(fake.creates[0]?.spec.tags).toEqual({ "creator.ref": "linear:ENG-7" });
+    expect((await callAuto(fake, { ref: "   " })).error).toBe(false);
+    expect(fake.creates[1]?.spec).not.toHaveProperty("tags");
+    const orphan = await callAuto(fake, { ref_url: "https://linear.app/x/issue/ENG-1" });
+    expect(orphan.error).toBe(true);
+    expect(orphan.text).toContain("ref_url needs ref");
+    expect(fake.creates).toHaveLength(2);
+  });
+
+  test("a leader that does not take task tags refuses a ref, by field, and a spawn with none still queues", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const refused = await callAuto(fake, { ref: "linear:ENG-1" });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("does not take task tags yet");
+    expect(refused.text).toContain("retry without ref");
+    expect(fake.creates).toEqual([]);
+    expect((await callAuto(fake, {})).error).toBe(false);
     expect(fake.creates).toHaveLength(1);
   });
 
@@ -1648,9 +1670,10 @@ describe("spawn_session on auto, authoring fields", () => {
     const cases: [Record<string, unknown>, string][] = [
       [{ after: [{ task: "not an id" }] }, 'after: "not an id" is not a task id from get_queue'],
       [{ after: Array.from({ length: 17 }, () => ({ task: PRED })) }, "expected array to have <=16 items"],
-      [{ linear: { issue: "" } }, "linear.issue is empty"],
-      [{ linear: { issue: "E".repeat(65) } }, "linear.issue is 65 characters; at most 64"],
-      [{ linear: { issue: "ENG-1", url: "http://linear.app/x" } }, "linear.url must be an https: URL"],
+      [{ ref: "ENG-1" }, "ref must be source:id"],
+      [{ ref: "linear:" + "E".repeat(65) }, "ref must be source:id"],
+      [{ ref: "linear:ENG-1", ref_url: "http://linear.app/x" }, "ref_url an https: URL"],
+      [{ ref_url: "https://linear.app/x" }, "ref_url needs ref"],
       [{ until: "reported", prompt: "" }, 'until "reported" needs a prompt'],
     ];
     for (const [extra, text] of cases) {
@@ -1769,7 +1792,7 @@ function pinRelay(): FakeRelay {
 function reportingPinRelay(machines: readonly Machine[] = pinMachines()): FakeRelay {
   const withCaps = machines.map((m) =>
     m.deviceId === "device-thad"
-      ? machine({ ...m, capabilities: [CAPABILITIES.pinAccount, CAPABILITIES.reportedDone] })
+      ? machine({ ...m, capabilities: [CAPABILITIES.pinAccount, CAPABILITIES.reportedDone, CAPABILITIES.taskTags] })
       : m,
   );
   const fake = leaderRelay([], withCaps);
@@ -1795,21 +1818,21 @@ describe("spawn_session with a machine", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test("after, until reported and linear reach the record beside a named machine", async () => {
+  test("after, until reported and ref reach the record beside a named machine", async () => {
     const fake = reportingPinRelay();
     const { error } = await callAuto(fake, {
       machine: "wsl",
       repo: "pengefix-hq",
       after: [{ task: PRED }],
       until: "reported",
-      linear: { issue: "ENG-1" },
+      ref: "linear:ENG-1",
     });
     expect(error).toBe(false);
     expect(fake.creates[0]?.spec).toMatchObject({
       pin: { deviceId: "device-wsl" },
       until: "reported",
       deps: [{ task: PRED, after: "opened" }],
-      linear: { issue: "ENG-1" },
+      tags: { "creator.ref": "linear:ENG-1" },
     });
   });
 
@@ -2584,10 +2607,10 @@ describe("queue_batch", () => {
   const member = (extra: Record<string, unknown> = {}) => ({ repo: "seance", prompt: "do it", ...extra });
 
   test("queues the members in order under one batch, resolving refs to the ids it minted", async () => {
-    const fake = leaderRelay([], reportingMachines());
+    const fake = leaderRelay([], taggingMachines());
     const { text, error } = await callTool(fake, "queue_batch", {
       tasks: [
-        member({ ref: "schema", title: "Schema", linear: { issue: "ENG-1" } }),
+        member({ ref: "schema", title: "Schema", external_ref: "linear:ENG-1" }),
         member({ ref: "api", after: [{ ref: "schema" }] }),
         member({ after: [{ ref: "api", when: "merged" }, { task: PRED }] }),
       ],
@@ -2603,7 +2626,8 @@ describe("queue_batch", () => {
       { id: batchId, index: 3 },
     ]);
     expect(first?.spec.deps).toBeUndefined();
-    expect(first?.spec.linear).toEqual({ issue: "ENG-1" });
+    expect(first?.spec.tags).toEqual({ "creator.ref": "linear:ENG-1" });
+    expect(second?.spec).not.toHaveProperty("tags");
     expect(second?.spec.deps).toEqual([{ task: first?.id ?? "", after: "opened" }]);
     expect(third?.spec.deps).toEqual([
       { task: second?.id ?? "", after: "merged" },
@@ -2685,7 +2709,11 @@ describe("queue_batch", () => {
         "task 2: each after entry names exactly one",
       ],
       [[member(), member({ until: "reported", prompt: "" })], 'task 2: until "reported" needs a prompt'],
-      [[member(), member({ linear: { issue: "ENG-1", url: "http://x" } })], "task 2: linear.url must be an https: URL"],
+      [
+        [member(), member({ external_ref: "linear:ENG-1", external_ref_url: "http://x" })],
+        "task 2: external_ref must be source:id",
+      ],
+      [[member(), member({ external_ref_url: "https://x.example/1" })], "task 2: external_ref_url needs external_ref"],
     ];
     for (const [tasks, text] of cases) {
       const fake = leaderRelay([], reportingMachines());
@@ -2696,6 +2724,17 @@ describe("queue_batch", () => {
       expect(fake.creates).toEqual([]);
       expect(fake.started).toBe(0);
     }
+  });
+
+  test("a leader that does not take task tags refuses the batch naming the member that carries one", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { text, error } = await callTool(fake, "queue_batch", {
+      tasks: [member(), member({ external_ref: "linear:ENG-1" })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("task 2 refused: the scheduler's leader does not take task tags yet");
+    expect(text).toContain("retry without external_ref");
+    expect(fake.creates).toEqual([]);
   });
 
   test("an unknown repo on any member refuses the batch before the first create", async () => {
@@ -3082,7 +3121,7 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
-  test("shows a task's dependencies, stack, batch, reported settle and Linear link", async () => {
+  test("shows a task's dependencies, stack, batch, reported settle and ref", async () => {
     const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
@@ -3096,7 +3135,13 @@ describe("get_queue", () => {
               until: "reported",
               batch,
               deps: [{ task: "t-0", after: "done" }],
-              linear: { issue: "ENG-9" },
+              tags: {
+                "creator.ref": "linear:ENG-9",
+                "creator.ref-url": "https://linear.app/x/issue/ENG-9",
+                "creator.secret-note": "SECRET-TAG",
+                "owner.label": "mine",
+                "scheduler.x": "SECRET-SCHED",
+              },
             },
           }),
           task({ id: "t-2", state: "running", merged: true, stack: { task: "t-0", on: "branch" } }),
@@ -3111,8 +3156,12 @@ describe("get_queue", () => {
     expect(tasks[0]).toMatchObject({
       until: "reported",
       after: [{ task: "t-0", when: "done" }],
-      linear: { issue: "ENG-9" },
+      tags: { "creator.ref": "linear:ENG-9", "owner.label": "mine" },
     });
+    // The allowlist alone: no URL, no opaque creator key, no scheduler key, in the serialized answer.
+    const text = JSON.stringify(tasks[0]);
+    for (const hidden of ["ref-url", "linear.app", "SECRET-TAG", "SECRET-SCHED"]) expect(text).not.toContain(hidden);
+    expect(tasks[0]).not.toHaveProperty("linear");
     expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
     // What its worktree started from: the predecessor's branch, or the default branch and why.
@@ -3856,6 +3905,13 @@ describe("amend_task", () => {
       lazy.stop();
     }
   }
+
+  test("the owner's tags are not a tool field: amend_task refuses them by name and sends nothing", async () => {
+    const { text, error, fake } = await callAmend({ ownerTags: { label: "x" } }, () => new Error("never asked"));
+    expect(error).toBe(true);
+    expect(text).toContain('Unrecognized key: "ownerTags"');
+    expect(fake.requests).toEqual([]);
+  });
 
   test("an append is sent once, naming the basis of the prompt the store holds, and answers the state", async () => {
     const { text, error, fake } = await callAmend({ append: "also this", title: null }, () => ({

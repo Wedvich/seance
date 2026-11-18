@@ -1,5 +1,6 @@
 import { httpsUrl, isRecord, isRemoteSessionId } from "./parse.ts";
 import { TASK_REQUEST_LIMITS } from "./types.ts";
+import type { LinearLink } from "./types.ts";
 
 /**
  * Tags: one vocabulary for every writer and reader (docs/tags.md §2.1). A tag is a key in a writer's namespace and a
@@ -91,7 +92,7 @@ export function splitTagKey(key: string): { readonly namespace: TagNamespace; re
   return adapter !== undefined && SUFFIX.test(adapter) ? { namespace: `adapter.${adapter}`, suffix } : null;
 }
 
-const ref = (value: string): string | null => {
+const refValue = (value: string): string | null => {
   const match = /^([a-z][a-z0-9-]{0,31}):([A-Za-z0-9._#/-]{1,64})$/u.exec(value);
   return match === null ? null : value;
 };
@@ -109,7 +110,7 @@ const KNOWN: Readonly<Record<string, (value: string) => string | null>> = {
   "self.doing": (value) => value,
   "self.name": nameCap,
   "owner.label": nameCap,
-  "creator.ref": ref,
+  "creator.ref": refValue,
   "creator.ref-url": (value) => httpsUrl(value),
 };
 
@@ -323,4 +324,156 @@ export function displayName(
   const self = joined["self.name"]?.value;
   if (self !== undefined) return { text: self, source: "self" };
   return { text: displayLine(window), source: "window" };
+}
+
+/** The namespaces a task's record holds, each with its own `TASK_TAG_BUDGET`. */
+export const TASK_TAG_NAMESPACES = ["creator", "owner", "scheduler"] as const;
+export type TaskTagNamespace = (typeof TASK_TAG_NAMESPACES)[number];
+
+/** The two keys that name where a task came from: what the archivist keeps and what a spawn carries (§5.1, §6.1). */
+export const REF_TAG_KEYS = ["creator.ref", "creator.ref-url"] as const;
+
+function isTaskNamespace(value: string): value is TaskTagNamespace {
+  return (TASK_TAG_NAMESPACES as readonly string[]).includes(value);
+}
+
+function taskNamespaceOf(key: string): TaskTagNamespace | null {
+  const namespace = splitTagKey(key)?.namespace;
+  return namespace !== undefined && isTaskNamespace(namespace) ? namespace : null;
+}
+
+/**
+ * A task record's tags off the wire (full keys): undefined when absent, null for a value that is no record, for more
+ * than `TASK_TAGS_MAX` keys or for a namespace over its `TASK_TAG_BUDGET` (the spec nulls), otherwise each key in a
+ * task namespace whose value passes `parseTagValue` at `task` scope. Anything else is dropped, never the map, so a
+ * newer writer's key never breaks an older reader; undefined when nothing is left.
+ */
+export function parseTaskTags(raw: unknown): Readonly<Record<string, string>> | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) return null;
+  const entries = Object.entries(raw);
+  if (entries.length > TASK_TAGS_MAX) return null;
+  const kept: Record<string, string> = {};
+  const per: Record<TaskTagNamespace, number> = { creator: 0, owner: 0, scheduler: 0 };
+  for (const [key, value] of entries) {
+    const namespace = taskNamespaceOf(key);
+    if (namespace === null) continue;
+    const parsed = parseTagValue(key, value, "task");
+    if (parsed === null || parsed === "") continue;
+    kept[key] = parsed;
+    per[namespace] += 1;
+  }
+  if (TASK_TAG_NAMESPACES.some((namespace) => per[namespace] > TASK_TAG_BUDGET[namespace])) return null;
+  return Object.keys(kept).length === 0 ? undefined : kept;
+}
+
+/**
+ * A creator's bare-suffix write (`writeTags` at task scope), as full `creator.<suffix>` keys: the one validator every
+ * enqueue surface runs, so none spells the namespace or the bounds itself.
+ */
+export function creatorTaskTags(
+  bare: unknown,
+):
+  | { readonly ok: true; readonly tags: Readonly<Record<string, string>> }
+  | { readonly ok: false; readonly code: TagWriteRefusal } {
+  const written = writeTags("creator", bare, "task");
+  if (!written.ok) return written;
+  return {
+    ok: true,
+    tags: Object.fromEntries(Object.entries(written.tags).map(([suffix, value]) => [`creator.${suffix}`, value])),
+  };
+}
+
+/** The bare map of a ref, for `creatorTaskTags`: surfaces never spell the suffixes. */
+export function refTags(ref: string, url?: string): Readonly<Record<string, string>> {
+  return url === undefined ? { ref } : { ref, "ref-url": url };
+}
+
+/**
+ * A legacy `linear` as the `creator.*` tags that replace it (full keys), or null when the issue or its URL fails the
+ * ref's rules: a writer then keeps writing `linear` (§5.4).
+ */
+export function linearRefTags(linear: LinearLink): Readonly<Record<string, string>> | null {
+  const written = creatorTaskTags(refTags(`linear:${linear.issue}`, linear.url));
+  return written.ok ? written.tags : null;
+}
+
+/** The `owner.*` keys of a task's tags as bare suffixes (`writeTags`' `current`). */
+export function ownerTagsOf(tags: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(tags ?? {})) {
+    if (key.startsWith("owner.")) out[key.slice("owner.".length)] = value;
+  }
+  return out;
+}
+
+/** `tags` with its `owner.*` keys replaced by `bareOwner`'s (bare suffixes); undefined when nothing is left. */
+export function withOwnerTags(
+  tags: Readonly<Record<string, string>> | undefined,
+  bareOwner: Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> | undefined {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(tags ?? {})) {
+    if (!key.startsWith("owner.")) out[key] = value;
+  }
+  for (const [suffix, value] of Object.entries(bareOwner)) out[`owner.${suffix}`] = value;
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
+/** The part of a task's tags a chain copies: one namespace's keys; undefined when it holds none. */
+export function chainTags(
+  tags: Readonly<Record<string, string>> | undefined,
+  keep: "creator" | "owner",
+): Readonly<Record<string, string>> | undefined {
+  const kept = Object.entries(tags ?? {}).filter(([key]) => key.startsWith(`${keep}.`));
+  return kept.length === 0 ? undefined : Object.fromEntries(kept);
+}
+
+/**
+ * A task's ref as a spawn carries it (`SpawnRequest.ref`): `creator.ref`, and `creator.ref-url` as `url` beside it;
+ * undefined without a ref. Never a legacy `linear` (mapped at the join only, §5.4), never another tag.
+ */
+export function taskRef(
+  tags: Readonly<Record<string, string>> | undefined,
+): { readonly ref: string; readonly url?: string } | undefined {
+  const ref = tags?.["creator.ref"];
+  if (ref === undefined) return undefined;
+  const url = tags?.["creator.ref-url"];
+  return url === undefined ? { ref } : { ref, url };
+}
+
+/**
+ * A ref off the wire or a file (`SpawnRequest.ref`, a ledger note's `ref`), held to `creator.ref`'s and
+ * `creator.ref-url`'s own rules: undefined for anything but a record with a valid `ref`, and a bad `url` drops alone.
+ */
+export function parseSpawnRef(raw: unknown): { readonly ref: string; readonly url?: string } | undefined {
+  if (!isRecord(raw)) return undefined;
+  const ref = parseTagValue("creator.ref", raw["ref"], "task");
+  if (ref === null || ref === "") return undefined;
+  const url = parseTagValue("creator.ref-url", raw["url"], "task");
+  return url === null || url === "" ? { ref } : { ref, url };
+}
+
+/** A spec without its `tags`: what a client seals when the leader does not take them, and what `#reserve` compares. */
+export function withoutTaskTags<T extends { readonly tags?: unknown }>(spec: T): Omit<T, "tags"> {
+  const { tags: _tags, ...rest } = spec;
+  return rest;
+}
+
+/**
+ * A task's tags as the join's task layer: every entry of `spec.tags`, each at the task's creation time (a record holds
+ * no per-key time, so an amended `owner.label` shows the task's age). A legacy `linear` with no `creator.ref` of its
+ * own reads as `creator.ref` = `linear:<issue>` and, with a URL, `creator.ref-url`: mapped here only, never parsed
+ * (§5.4) and never written back.
+ */
+export function taskTagEntries(
+  spec: { readonly tags?: Readonly<Record<string, string>>; readonly linear?: LinearLink },
+  at: number,
+): Readonly<Record<string, TagEntry>> {
+  const out: Record<string, TagEntry> = {};
+  for (const [key, value] of Object.entries(spec.tags ?? {})) out[key] = { value, at };
+  if (spec.linear === undefined || out["creator.ref"] !== undefined) return out;
+  out["creator.ref"] = { value: `linear:${displayLine(spec.linear.issue)}`, at };
+  if (spec.linear.url !== undefined) out["creator.ref-url"] = { value: spec.linear.url, at };
+  return out;
 }

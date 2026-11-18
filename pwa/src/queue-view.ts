@@ -41,6 +41,7 @@ import {
 import { settlingInput } from "./input-debounce.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
+import { taskTagLines } from "./task-tags.ts";
 import { taskTitle } from "./task-title.ts";
 import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
@@ -51,6 +52,7 @@ import {
   deriveReportedOffered,
   deriveRunNowAvailability,
   deriveRunNowPastPause,
+  deriveTaskTagsAvailability,
   failedBody,
   formatSeen,
   seen,
@@ -140,6 +142,15 @@ export interface QueueRow {
    * Only ever in the menu: it ends the session, so it asks twice.
    */
   readonly canPass: boolean;
+  /**
+   * The owner can label the task (`amend` with `ownerTags`): any task, finished included, while the verified leader
+   * takes task tags. Never an archived row: its record left the leader's store.
+   */
+  readonly canLabel: boolean;
+  /** Its `owner.label`, shown beside the title (never in place of it); null when unset. */
+  readonly label: string | null;
+  /** Its `creator.ref`, linked to `creator.ref-url` when that is an https: URL; null without one. */
+  readonly ref: { readonly text: string; readonly url: string | null } | null;
   /** Continue is the card's primary action: a blocked PR is what the person was alerted to fix. */
   readonly inlinePrimary: boolean;
   /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules and until it is `ready`; null once it is no longer waiting. */
@@ -595,6 +606,7 @@ function rowOf(
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   const session = sessionOf(task, state.sessions);
   const autonomy = autonomyOf(task.spec);
+  const tags = taskTagLines(task);
   return {
     id: task.id,
     title: taskTitle(task),
@@ -615,6 +627,9 @@ function rowOf(
     canFollowUp,
     canContinue,
     canPass,
+    canLabel: deriveTaskTagsAvailability(state.relay),
+    label: tags.label,
+    ref: tags.ref,
     startNow,
     inline: primaryAction({ canContinue }),
     inlinePrimary: canContinue && taskPrBlock(task) !== null,

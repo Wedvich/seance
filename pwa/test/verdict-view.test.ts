@@ -175,3 +175,32 @@ describe("a deferred task's verdict", () => {
     expect(past.body).not.toContain("Not placed");
   });
 });
+
+describe("a queued verdict's tags", () => {
+  test("lists every task tag with its full key, sorted, and a legacy `linear` as the ref", () => {
+    const tagged = verdictOf(
+      task("queued", {
+        spec: {
+          repo: "github.com/acme/app",
+          mode: "worktree",
+          tags: { "owner.label": "Mine", "creator.ref": "linear:ENG-1" },
+        },
+      }),
+    );
+    expect(tagged.tags).toEqual([
+      { key: "creator.ref", value: "linear:ENG-1" },
+      { key: "owner.label", value: "Mine" },
+    ]);
+    const legacy = verdictOf(
+      task("queued", { spec: { repo: "github.com/acme/app", mode: "worktree", linear: { issue: "ENG-9" } } }),
+    );
+    expect(legacy.tags).toEqual([{ key: "creator.ref", value: "linear:ENG-9" }]);
+  });
+
+  test("an untagged task and every other verdict list none", () => {
+    expect(verdictOf(task("queued")).tags).toEqual([]);
+    expect(
+      describeVerdict({ kind: "unqueued", message: "no answer.", mayHaveLanded: false }, [], {}, NOW, null).tags,
+    ).toEqual([]);
+  });
+});

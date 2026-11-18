@@ -8,6 +8,7 @@ import {
   isTaskId,
   LAUNCH_LEDGER_MAX_AGE_MS,
   parseTaskProgressList,
+  parseSpawnRef,
   SIGKILL_STATUS,
   type TaskProgress,
 } from "@seance/shared";
@@ -154,6 +155,12 @@ export interface TaskNote {
    * of the task carries it over. Sticky; internal, never in `TaskProgress`, never read from a frame.
    */
   readonly stackedOn?: string;
+  /**
+   * The task's ref from the scheduler's spawn (`SpawnRequest.ref`: `creator.ref` and `creator.ref-url`), noted at
+   * launch. Display only, read into an adapter's `Session` and never used to bind, route or move anything; internal,
+   * never in `TaskProgress`, never read from a frame but that spawn.
+   */
+  readonly ref?: { readonly ref: string; readonly url?: string };
 }
 
 /** How `LaunchLedger.apply` ended; see there. */
@@ -233,6 +240,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     continuedPr,
     vanished,
     stackedOn,
+    ref,
   } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
@@ -241,6 +249,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   const tipText = typeof tip === "string" && TIP_PATTERN.test(tip) ? tip : undefined;
   const url = typeof prUrl === "string" && httpsUrl(prUrl) === prUrl ? prUrl : undefined;
   const inherited = typeof continuedPr === "string" && httpsUrl(continuedPr) === continuedPr ? continuedPr : undefined;
+  const heldRef = parseSpawnRef(ref);
   return {
     taskId,
     at,
@@ -265,6 +274,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(inherited === undefined ? {} : { continuedPr: inherited }),
     ...(vanished === true ? { vanished: true as const } : {}),
     ...(typeof stackedOn === "string" && TIP_PATTERN.test(stackedOn) ? { stackedOn } : {}),
+    ...(heldRef === undefined ? {} : { ref: heldRef }),
   };
 }
 
@@ -376,6 +386,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
       : { continuedPr: patch.continuedPr ?? base?.continuedPr }),
     ...(patch.vanished === true || base?.vanished === true ? { vanished: true as const } : {}),
     ...((patch.stackedOn ?? base?.stackedOn) === undefined ? {} : { stackedOn: patch.stackedOn ?? base?.stackedOn }),
+    ...((patch.ref ?? base?.ref) === undefined ? {} : { ref: patch.ref ?? base?.ref }),
   };
 }
 
@@ -409,7 +420,7 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
   );
 }
 
-/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr`, `stackedOn` and `session` write but are no progress: they never move `at`. */
+/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr`, `stackedOn`, `session` and `ref` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
   return (
     sameProgress(a, b) &&
@@ -420,7 +431,9 @@ function sameNote(a: NotedTask, b: NotedTask): boolean {
     a.cancelled === b.cancelled &&
     a.continuedPr === b.continuedPr &&
     a.stackedOn === b.stackedOn &&
-    a.session === b.session
+    a.session === b.session &&
+    a.ref?.ref === b.ref?.ref &&
+    a.ref?.url === b.ref?.url
   );
 }
 
@@ -693,13 +706,14 @@ export class LaunchLedger {
     },
     prUrl?: string,
     server?: number,
+    ref?: { readonly ref: string; readonly url?: string },
   ): Promise<void> {
     if (!this.#tasks.has(taskId)) return;
     // The launch landed: both marks go with it, even where no note is written (a `here` launch with no PR).
     const wasPending = this.#pending.delete(taskId);
     const wasInterrupted = this.#interrupted.delete(taskId);
     const unmarked = wasPending || wasInterrupted;
-    if (site === undefined && prUrl === undefined && server === undefined) {
+    if (site === undefined && prUrl === undefined && server === undefined && ref === undefined) {
       if (!this.#notes.delete(taskId) && !unmarked) return;
     } else {
       const at = this.#now();
@@ -712,6 +726,7 @@ export class LaunchLedger {
         ...(site?.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
         ...(prUrl === undefined ? {} : { prUrl }),
         ...(server === undefined ? {} : { server }),
+        ...(ref === undefined ? {} : { ref }),
       });
     }
     try {

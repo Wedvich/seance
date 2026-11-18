@@ -896,6 +896,7 @@ describe("daemon ↔ relay integration", () => {
         "softClose",
         "messageRoute",
         "watches",
+        "taskTags",
         "messages",
         "messageReply",
         "drainAsk",

@@ -77,6 +77,8 @@ function state(
     form: DEFAULT_FORM,
     autonomy: "checkpoint",
     notBefore: null,
+    ref: { ref: "", url: "" },
+    labelling: null,
     promptUndo: null,
     sheet: null,
     settings: false,
@@ -1694,5 +1696,73 @@ describe("a task deferred by its not-before time", () => {
     const row = rowAt(stale(), 3_600_001);
     expect(lineText(row?.headline ?? [])).not.toContain("until");
     expect(lineText(row?.body ?? [])).not.toContain("Not placed before");
+  });
+});
+
+describe("a task's tags on its row", () => {
+  const rowOf = (t: Task, capabilities: readonly string[] = [CAPABILITIES.taskTags]) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id);
+
+  const tagged = task("t", {
+    spec: {
+      repo: ORIGIN,
+      mode: "worktree",
+      title: "Fix the thing",
+      tags: {
+        "creator.ref": "linear:ENG-1",
+        "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+        "owner.label": "Mine",
+      },
+    },
+  });
+
+  test("the label sits beside the title, never in place of it, and the ref links to its https URL", () => {
+    expect(rowOf(tagged)).toMatchObject({
+      title: "Fix the thing",
+      label: "Mine",
+      ref: { text: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" },
+    });
+  });
+
+  test("a task with no tags has no label and no ref", () => {
+    expect(rowOf(task("t"))).toMatchObject({ label: null, ref: null });
+  });
+
+  test("a ref URL that is not https is text only, and control characters are cut from every value", () => {
+    const hostile = task("t", {
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        tags: { "creator.ref": "linear:ENG-1", "creator.ref-url": "javascript:alert(1)", "owner.label": "a\nb" },
+      },
+    });
+    const row = rowOf(hostile);
+    expect(row?.ref).toEqual({ text: "linear:ENG-1", url: null });
+    expect(row?.label).not.toContain("\n");
+  });
+
+  test("a legacy `linear` reads as the ref, and a ref of its own wins over it", () => {
+    const legacy = task("t", {
+      spec: { repo: ORIGIN, mode: "worktree", linear: { issue: "ENG-9", url: "https://linear.app/x/issue/ENG-9" } },
+    });
+    expect(rowOf(legacy)?.ref).toEqual({ text: "linear:ENG-9", url: "https://linear.app/x/issue/ENG-9" });
+    const both = task("t", {
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        linear: { issue: "ENG-9" },
+        tags: { "creator.ref": "gh:42" },
+      },
+    });
+    expect(rowOf(both)?.ref).toEqual({ text: "gh:42", url: null });
+  });
+
+  test("labelling is offered on any task, finished included, only while the verified leader takes task tags", () => {
+    for (const s of ["queued", "running", "done", "failed"] as const) {
+      expect(rowOf(task("t", { state: s, assignment: placedAt }))?.canLabel, s).toBe(true);
+      expect(rowOf(task("t", { state: s, assignment: placedAt }), [])?.canLabel, s).toBe(false);
+    }
   });
 });

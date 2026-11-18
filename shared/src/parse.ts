@@ -3,6 +3,7 @@ import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
 import { isTraitName, TRAIT_LIMITS } from "./traits.ts";
 import { isPromptBasis } from "./amend.ts";
 import { isNotBefore } from "./not-before.ts";
+import { chainTags, parseTaskTags, writeTags } from "./tags.ts";
 import {
   isMessageId,
   MESSAGE_KINDS,
@@ -85,6 +86,7 @@ import {
   SUCCESSOR_DEP_SENTINEL,
   SUCCESSOR_RECORD_MAX,
   SUCCESSOR_TRIGGERS,
+  TAGS_DEP_SENTINEL,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
   TASK_PRS_MAX,
@@ -1336,6 +1338,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const member = batch === undefined ? undefined : parseBatch(batch);
   const files = value["attachments"] === undefined ? undefined : parseAttachmentManifest(value["attachments"]);
   const needs = value["requires"] === undefined ? undefined : parseRequires(value["requires"]);
+  const tags = parseTaskTags(value["tags"]);
   const edges =
     deps === undefined
       ? undefined
@@ -1343,12 +1346,15 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
           attached: files !== undefined,
           required: needs !== undefined,
           succeeding: follows !== undefined,
+          // The raw field, not `tags`: a record whose every tag this build drops still carries its sentinel.
+          tagged: value["tags"] !== undefined,
         });
   const issue = linear === undefined ? undefined : parseLinear(linear);
   const notBefore = value["notBefore"];
   if (notBefore !== undefined && !isNotBefore(notBefore)) return null;
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
   if (issue === null || resumes === null || files === null || needs === null || follows === null) return null;
+  if (tags === null) return null;
   // A successor is a plain worktree spawn that resets its own branch: a resumed session or files would contradict that.
   if (follows !== undefined && (request.mode !== "worktree" || resumes !== undefined || files !== undefined)) {
     return null;
@@ -1375,20 +1381,26 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(resumes === undefined ? {} : { continues: resumes }),
     ...(files === undefined ? {} : { attachments: files }),
     ...(needs === undefined ? {} : { requires: needs }),
+    ...(tags === undefined ? {} : { tags }),
     ...(follows === undefined ? {} : { succeeds: follows }),
     ...(notBefore === undefined ? {} : { notBefore }),
   };
 }
 
 /**
- * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`) is
+ * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`, `TAGS_DEP_SENTINEL`) is
  * dropped before the bound applies, and only beside its field: one without it is a record
  * something stripped the field from — or a sentinel with nothing it guards — and fails
  * `isTaskId`, nulling the spec. A requirement stripped is the reverse, `requires` without its
  * sentinel, and reads fine: no leader older than this one wrote it. Deps that were
  * sentinels alone read as none, as the spec was before sealing.
  */
-type DepGuards = { readonly attached: boolean; readonly required: boolean; readonly succeeding: boolean };
+type DepGuards = {
+  readonly attached: boolean;
+  readonly required: boolean;
+  readonly succeeding: boolean;
+  readonly tagged: boolean;
+};
 
 function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null | undefined {
   if (!Array.isArray(value)) return null;
@@ -1396,11 +1408,16 @@ function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null
     (dep) =>
       !(guards.attached && isAttachmentsSentinel(dep)) &&
       !(guards.required && isRequiresSentinel(dep)) &&
-      !(guards.succeeding && isSuccessorSentinel(dep)),
+      !(guards.succeeding && isSuccessorSentinel(dep)) &&
+      !(guards.tagged && isTagsSentinel(dep)),
   );
   if (real.length === 0 && value.length > 0) return undefined;
   const edges = parseList(real, parseDep);
   return edges === null || edges.length > TASK_SPEC_LIMITS.deps ? null : edges;
+}
+
+function isTagsSentinel(value: unknown): boolean {
+  return isRecord(value) && value["task"] === TAGS_DEP_SENTINEL.task && value["after"] === TAGS_DEP_SENTINEL.after;
 }
 
 function isSuccessorSentinel(value: unknown): boolean {
@@ -1997,7 +2014,22 @@ export function bindTaskRecord(
   if (record.task.spec.continues?.task === record.task.id) return "malformed";
   // Likewise a successor of itself: it would wait on its own `superseded` for ever.
   if (record.task.spec.succeeds?.task === record.task.id) return "malformed";
-  return record;
+  return record.version === 1 ? onlyCreatorTags(record) : record;
+}
+
+/**
+ * A client's create seals `creator.*` alone: `owner.*` is the leader's, by `amend` or at admission, and `scheduler.*` its
+ * own, so what a version-1 record holds of them is dropped here, for every reader to agree, and the leader's next write
+ * re-seals without them.
+ */
+function onlyCreatorTags(record: TaskRecord): TaskRecord {
+  const { tags, ...spec } = record.task.spec;
+  if (tags === undefined || Object.keys(tags).every((key) => key.startsWith("creator."))) return record;
+  const creator = chainTags(tags, "creator");
+  return {
+    ...record,
+    task: { ...record.task, spec: { ...spec, ...(creator === undefined ? {} : { tags: creator }) } },
+  };
 }
 
 function isAccountId(value: unknown): value is string {
@@ -2439,6 +2471,7 @@ const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set([
   "model",
   "effort",
   "notBefore",
+  "ownerTags",
 ]);
 const AMEND_PROMPT_KEYS: ReadonlySet<string> = new Set(["mode", "text"]);
 
@@ -2485,12 +2518,15 @@ export function parseAmendRequest(value: unknown): AmendRequest | null {
   if (effort !== undefined && efforted === undefined) return null;
   const deferred = value["notBefore"];
   if (deferred !== undefined && deferred !== null && !isNotBefore(deferred)) return null;
+  const owner = value["ownerTags"] === undefined ? undefined : parseOwnerTags(value["ownerTags"]);
+  if (owner === null) return null;
   if (
     amended === undefined &&
     titled === undefined &&
     modelled === undefined &&
     efforted === undefined &&
-    deferred === undefined
+    deferred === undefined &&
+    owner === undefined
   ) {
     return null;
   }
@@ -2501,7 +2537,20 @@ export function parseAmendRequest(value: unknown): AmendRequest | null {
     ...(modelled === undefined ? {} : { model: modelled }),
     ...(efforted === undefined ? {} : { effort: efforted }),
     ...(deferred === undefined ? {} : { notBefore: deferred }),
+    ...(owner === undefined ? {} : { ownerTags: owner }),
   };
+}
+
+/** An amendment's `ownerTags`: non-empty and valid as `writeTags` takes owner suffixes, kept bare (`""` clears). */
+function parseOwnerTags(value: unknown): Readonly<Record<string, string>> | null {
+  if (!isRecord(value) || Object.keys(value).length === 0) return null;
+  if (!writeTags("owner", value, "task").ok) return null;
+  const bare: Record<string, string> = {};
+  for (const [suffix, text] of Object.entries(value)) {
+    if (typeof text !== "string") return null;
+    bare[suffix] = text;
+  }
+  return bare;
 }
 
 /**

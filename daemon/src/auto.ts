@@ -14,6 +14,8 @@ import {
   isTransportError,
   passOffer,
   parseTaskSpec,
+  parseTaskTags,
+  TASK_TAG_BUDGET,
   queuedTask,
   RequestFailure,
   QUEUE_MAX_TASKS,
@@ -149,7 +151,10 @@ function overBound(
 
 /** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), a pin and avoid, never lineage or base. */
 export type AutoSpec = TaskRequest &
-  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires" | "notBefore">;
+  Pick<
+    TaskSpec,
+    "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires" | "notBefore" | "tags"
+  >;
 
 /**
  * `machine` is the human name from the target's config, resolved against the
@@ -445,9 +450,17 @@ export function taskRequestError(request: TaskRequest, surface: EnqueueSurface =
 export function specError(spec: AutoSpec, surface: EnqueueSurface = "mcp"): string | null {
   const request = taskRequestError(spec, surface);
   if (request !== null) return request;
-  const { deps, linear, pin, avoid, requires } = spec;
+  const { deps, linear, pin, avoid, requires, tags } = spec;
   if (pin !== undefined && pin.deviceId === undefined && pin.account === undefined) {
     return "pin names neither a machine nor an account";
+  }
+  if (tags !== undefined) {
+    if (Object.keys(tags).some((key) => !key.startsWith("creator.")))
+      return "tags: only creator tags are set at create";
+    const kept = parseTaskTags(tags);
+    if (kept === null || kept === undefined || Object.keys(kept).length !== Object.keys(tags).length) {
+      return `tags: at most ${TASK_TAG_BUDGET.creator} creator tags; ref must be source:id (a-z, 0-9, - for the source; letters, digits and ._#/- for the id, at most 64), ref-url an https: URL`;
+    }
   }
   if (requires !== undefined) {
     if (requires.length === 0) return "requires is empty; leave it out to require nothing";
@@ -566,8 +579,10 @@ export async function continueAuto(
     leaderHandoff: leaderAdvertises(lease, CAPABILITIES.continueHandoff),
   });
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
-  // Its own, never the continued task's: `offeredSpec` carries none.
-  const spec: AutoSpec = { ...offeredSpec(task, offer, prompt), ...(notBefore === undefined ? {} : { notBefore }) };
+  // Tags are dropped, not refused, under a leader without `taskTags`: nobody asked for them on a continue.
+  const copied = offeredSpec(task, offer, prompt, leaderAdvertises(lease, CAPABILITIES.taskTags));
+  // `notBefore` is its own, never the continued task's: `offeredSpec` carries none.
+  const spec: AutoSpec = { ...copied, ...(notBefore === undefined ? {} : { notBefore }) };
   const invalid = specError(spec, surface);
   if (invalid !== null) return failed(`${label} refused: ${invalid}`);
   // No unknown-name check: the target is exact and the names came from the stored task. A leader that
@@ -603,6 +618,18 @@ export function traitsGateError(lease: SchedulerLease, field: string, label = "s
   return lease.scheduler.availability().kind === "ready"
     ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seance update\``
     : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to route on ${field} — try again once one leads`;
+}
+
+/**
+ * The submit-time half of the `taskTags` gate (the record's `TAGS_DEP_SENTINEL` is the other): an older leader holds a
+ * tagged record unreadable, so nothing is written to one — or to none, which cannot say. Unlike `traits` there is no
+ * stale-daemon check: a tag routes nothing, so an older broker daemon that drops it only loses display data.
+ */
+export function taskTagsGateError(lease: SchedulerLease, label: string, field: string): string | null {
+  if (leaderAdvertises(lease, CAPABILITIES.taskTags)) return null;
+  return lease.scheduler.availability().kind === "ready"
+    ? `${label} refused: the scheduler's leader does not take task tags yet — its daemon needs \`seance update\`; retry without ${field}`
+    : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to take task tags — try again once one leads, or retry without ${field}`;
 }
 
 /** A refused `requires`: the line to show, and what to count in its audit line. */

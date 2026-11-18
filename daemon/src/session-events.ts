@@ -309,7 +309,12 @@ export const ENDED_MAX = 128;
  */
 export type SettleLaunch = (
   launched: boolean,
-  landed?: { readonly site?: LaunchSite; readonly server?: number },
+  landed?: {
+    readonly site?: LaunchSite;
+    readonly server?: number;
+    /** The task's ref from the scheduler's spawn (`SpawnRequest.ref`): display only, read into an adapter's `Session`. */
+    readonly ref?: { readonly ref: string; readonly url?: string };
+  },
   /**
    * `unknown`: the backend crashed (threw something that is no refusal), so a window may exist untagged. With
    * `launched: true`; the id is then marked `interrupted` rather than cleared, like a launch the process died in.
@@ -475,6 +480,7 @@ export class EndedTasks {
             },
             launches.prUrl,
             landed?.server,
+            landed?.ref,
           );
           sample = true;
         }
@@ -679,6 +685,11 @@ export class EndedTasks {
   /** Whether this launch noted a PR (`handoffCheck`'s lookup, a continuation's or successor's inherited one included), for a pass: a branch with no upstream then has to be the PR's. */
   hasPr(taskId: string): boolean {
     return this.prUrl(taskId) !== undefined;
+  }
+
+  /** The ref the scheduler's spawn of this task carried (`TaskNote.ref`), for an adapter's `Session`. Display only. */
+  ref(taskId: string): { readonly ref: string; readonly url?: string } | undefined {
+    return this.#ledger.notes().find((n) => n.taskId === taskId)?.ref;
   }
 
   /** The PR URL this launch noted, a continuation's or successor's inherited one included: the one lookup `handoffCheck`, `hasPr` and the custodian's `sessions` share. */

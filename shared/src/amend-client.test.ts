@@ -111,6 +111,11 @@ describe("parseAmendDraft", () => {
     expect(parseAmendDraft({ taskId: "t-1", effort: null })).toEqual({ taskId: "t-1", effort: null });
   });
 
+  test("refuses ownerTags: the owner's labels come from the PWA alone", () => {
+    expect(parseAmendDraft({ taskId: "t-1", ownerTags: { label: "x" } })).toBeNull();
+    expect(parseAmendDraft({ ...append, ownerTags: { label: "x" } })).toBeNull();
+  });
+
   test("holds the leader parser's other rules", () => {
     expect(parseAmendDraft({ taskId: "t-1", basis: "b".repeat(64), title: "x" })).toBeNull();
     expect(parseAmendDraft({ ...append, basis: "nope" })).toBeNull();

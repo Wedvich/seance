@@ -195,6 +195,26 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--requires"])).toThrow("usage:");
   });
 
+  test("--ref and --ref-url take the next word, once each, and a url without a ref is a usage error", () => {
+    expect(parseSpawnArgs(["--ref", "linear:ENG-1", "--ref-url", "https://linear.app/x", "seance", "go"])).toEqual({
+      repo: "seance",
+      here: false,
+      prompt: "go",
+      ref: "linear:ENG-1",
+      refUrl: "https://linear.app/x",
+    });
+    expect(parseSpawnArgs(["seance"])).not.toHaveProperty("ref");
+    expect(() => parseSpawnArgs(["--ref-url", "https://linear.app/x", "seance"])).toThrow("give --ref too");
+    expect(() => parseSpawnArgs(["seance", "--ref"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--ref", "a:1", "--ref", "b:2", "seance"])).toThrow("usage:");
+  });
+
+  test("--ref is refused with --now", () => {
+    expect(() => parseSpawnArgs(["--now", "seance", "--ref", "linear:ENG-1"])).toThrow(
+      "--ref needs the scheduler: --now spawns directly and queues no task to tag",
+    );
+  });
+
   test("--now refuses every pin flag", () => {
     expect(() => parseSpawnArgs(["--now", "seance", "--machine", "x"])).toThrow("--now spawns on this machine now");
     expect(() => parseSpawnArgs(["--now", "seance", "--account", "a"])).toThrow("--now spawns on this machine now");

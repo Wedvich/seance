@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
 import { isTaskId } from "./parse.ts";
+import { joinTags, taskTagEntries } from "./tags.ts";
 import {
   APP_ID,
   AT_REST_OPS,
@@ -9,6 +10,7 @@ import {
   PIN_SENTINEL,
   REQUIRES_DEP_SENTINEL,
   SCHEDULER_ID,
+  TAGS_DEP_SENTINEL,
   TASK_SPEC_LIMITS,
   type Task,
   type TaskRecord,
@@ -198,6 +200,85 @@ describe("task records at rest", () => {
     // Without `requires` the manifest's sentinel stands alone, and no deps are invented.
     expect(await sealedDeps({ ...base.spec, attachments })).toEqual([ATTACHMENTS_DEP_SENTINEL]);
     expect(await sealedDeps(base.spec)).toBeUndefined();
+  });
+
+  describe("`tags`", () => {
+    const tagged = (tags: Readonly<Record<string, string>>, over: Partial<Task["spec"]> = {}): Task => {
+      const base = queued();
+      return { ...base, spec: { ...base.spec, tags, ...over } };
+    };
+    const open = async (task: Task, version: number, payload?: unknown): Promise<unknown> => {
+      const env =
+        payload === undefined
+          ? await sealTaskRecord(key, APP_ID, { version, task })
+          : await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", payload);
+      return openTaskRecord(key, { key: taskKey(task.id), version, env }, NOW);
+    };
+    const sealedDeps = async (task: Task): Promise<unknown> => {
+      const env = await sealTaskRecord(key, APP_ID, { version: 2, task });
+      const { payload } = await openAtRest(key, env, "task");
+      return field(field(field(payload, "task"), "spec"), "deps");
+    };
+    // The previous release's dep reader (52544564, `parseDep`): a dep is a task id and an `after` it knows.
+    const olderDepParses = (dep: unknown): boolean =>
+      isTaskId(field(dep, "task")) && ["opened", "merged", "done"].includes(String(field(dep, "after")));
+
+    test("seals with the sentinel in deps, an older dep reader refuses it, and it reads back equal to what was sealed", async () => {
+      const task = tagged({ "creator.ref": "linear:ENG-1", "owner.label": "mine" });
+      const deps = await sealedDeps(task);
+      expect(deps).toEqual([TAGS_DEP_SENTINEL]);
+      expect(Array.isArray(deps) && deps.every(olderDepParses)).toBe(false);
+      expect(await open(task, 2)).toEqual({ version: 2, task });
+      const real = [{ task: "t-1", after: "done" as const }];
+      expect(await sealedDeps(tagged({ "creator.ref": "linear:ENG-1" }, { deps: real }))).toEqual([
+        ...real,
+        TAGS_DEP_SENTINEL,
+      ]);
+    });
+
+    test("a payload carrying the sentinel without tags is malformed, and tags without the sentinel read", async () => {
+      const task = tagged({ "creator.ref": "linear:ENG-1" });
+      const { spec, ...rest } = task;
+      const { tags: _tags, ...bare } = spec;
+      expect(await open(task, 2, { version: 2, task: { ...rest, spec: { ...bare, deps: [TAGS_DEP_SENTINEL] } } })).toBe(
+        "malformed",
+      );
+      expect(await open(task, 2, { version: 2, task })).toEqual({ version: 2, task });
+    });
+
+    test("a record whose only tag this build drops reads with no tags, and is not nulled", async () => {
+      const task = tagged({ "seance.x": "1" });
+      const read = await open(task, 2, {
+        version: 2,
+        task: { ...task, spec: { ...task.spec, deps: [TAGS_DEP_SENTINEL] } },
+      });
+      if (typeof read === "string" || typeof read !== "object" || read === null) throw new Error(`unreadable: ${read}`);
+      expect(field(field(field(read, "task"), "spec"), "tags")).toBeUndefined();
+    });
+
+    test("a version-1 record keeps only its creator tags, and version 2 keeps the owner's too", async () => {
+      const tags = { "creator.ref": "linear:ENG-1", "owner.label": "mine" };
+      const task = tagged(tags);
+      expect(await open(task, 1)).toEqual({
+        version: 1,
+        task: { ...task, spec: { ...task.spec, tags: { "creator.ref": "linear:ENG-1" } } },
+      });
+      expect(await open(task, 2)).toEqual({ version: 2, task });
+    });
+
+    test("a legacy `linear` with no tags re-seals with no sentinel, keeps `linear`, and joins as `creator.ref`", async () => {
+      const base = queued();
+      const task: Task = {
+        ...base,
+        spec: { ...base.spec, linear: { issue: "ENG-1", url: "https://linear.app/x/issue/ENG-1" } },
+      };
+      const deps = await sealedDeps(task);
+      expect(deps).toBeUndefined();
+      expect(await open(task, 2)).toEqual({ version: 2, task });
+      const joined = joinTags(taskTagEntries(task.spec, task.createdAt));
+      expect(joined["creator.ref"]).toEqual({ value: "linear:ENG-1", at: task.createdAt, scope: "task" });
+      expect(joined["creator.ref-url"]?.value).toBe("https://linear.app/x/issue/ENG-1");
+    });
   });
 
   test("a continuation keeps its mode and link through seal and open; the link without the mode is unreadable", async () => {

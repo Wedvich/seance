@@ -310,6 +310,21 @@ export function createBroker(opts: BrokerOpts): Broker {
             );
           }
         }
+        // A client's create seals `creator.*` alone (the leader drops anything else from a version-1 record), so refuse
+        // rather than store dead text, and only to a leader that takes tags: an older one holds the record unreadable.
+        if (request.spec.tags !== undefined) {
+          if (Object.keys(request.spec.tags).some((key) => !key.startsWith("creator."))) {
+            return await fail(id, "invalid_request", "a task is created with creator tags only");
+          }
+          const { machines, scheduler } = client.getState();
+          if (!advertises(machines, scheduler, CAPABILITIES.taskTags)) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not take task tags yet, or no verified scheduler is leading",
+            );
+          }
+        }
         // Built here, never taken from the peer: its id and spec, this daemon's clock.
         const task = queuedTask(request.spec, now(), request.taskId);
         const audited = enqueueAudit(opts.auditSink, "local-broker", surface);

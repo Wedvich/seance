@@ -45,6 +45,7 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   autonomy: "How much should it decide?",
   after: "Wait for which tasks?",
   requires: "Which traits must it have?",
+  ref: "What is it for?",
   notBefore: "Not before when?",
 };
 
@@ -87,6 +88,8 @@ export interface SpawnActions {
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
   readonly toggleRequires: (trait: string) => void;
+  /** Sets the next task's ref and its URL as typed (`creator.ref`, `creator.ref-url`). */
+  readonly setRef: (ref: string, url: string) => void;
   /** Sets the not-before choice, or clears it with `null`. */
   readonly setNotBefore: (choice: NotBeforeChoice | null) => void;
   /** Picked, pasted or dropped files; the store applies the limits. */
@@ -644,6 +647,10 @@ function ActiveSheet(props: {
     );
   }
 
+  if (kind === "ref") {
+    return <RefSheet actions={actions} view={view} closing={closing} onExited={onExited} />;
+  }
+
   if (kind === "after") {
     return (
       <Sheet title={SHEET_TITLES.after} closing={closing} onExited={onExited} onClose={close}>
@@ -662,6 +669,54 @@ function ActiveSheet(props: {
           onClick={() => actions.setEffort(effort)}
         />
       ))}
+    </Sheet>
+  );
+}
+
+function RefSheet(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, view, closing, onExited } = props;
+  const { ref, url, problem } = view.ref;
+  return (
+    <Sheet title={SHEET_TITLES.ref} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      <label className="sheet-note">
+        Ref
+        <input
+          type="text"
+          className="rename-input"
+          placeholder="linear:ENG-123"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellcheck={false}
+          maxLength={100}
+          value={ref}
+          aria-invalid={problem !== null}
+          onInput={(event) => actions.setRef(event.currentTarget.value, url)}
+        />
+      </label>
+      <label className="sheet-note">
+        Ref URL
+        <input
+          type="url"
+          className="rename-input"
+          placeholder="https://linear.app/…"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellcheck={false}
+          value={url}
+          aria-invalid={problem !== null}
+          onInput={(event) => actions.setRef(ref, event.currentTarget.value)}
+        />
+      </label>
+      {ref !== "" || url !== "" ? <SheetItem label="Clear" action onClick={() => actions.setRef("", "")} /> : null}
+      <p className="sheet-note">
+        {problem ??
+          "The issue or PR this task is for, as source:id. Shown on its card and by get_queue; nothing reads the tracker."}
+      </p>
     </Sheet>
   );
 }
@@ -1341,6 +1396,7 @@ export function SpawnScreen(props: {
           {view.requiresTile !== null && (
             <TileButton tile={view.requiresTile} onClick={() => actions.openSheet("requires")} />
           )}
+          {view.refTile !== null && <TileButton tile={view.refTile} onClick={() => actions.openSheet("ref")} />}
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}

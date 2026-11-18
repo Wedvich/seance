@@ -156,7 +156,7 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     summary: "queue a session for the scheduler",
     usage:
       "[--now | [--start | --at <HH:MM|ISO> | --in <duration>] [--machine <name|here>] [--account <alias|email|id>] " +
-      "[--not <machine|here>]... [--requires <trait>]...] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
+      "[--not <machine|here>]... [--requires <trait>]... [--ref <source:id> [--ref-url <url>]]] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
     details: [RELAY_NOTE],
     arg: "repo",
     flags: [
@@ -172,6 +172,12 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         repeatable: true,
         help: "only place it where every named trait is declared (traits in config.json; list_machines shows them)",
       },
+      {
+        flag: "--ref",
+        value: "source:id",
+        help: "what the task is for, e.g. linear:ENG-123 or github:owner/repo#12: shown in the app and by get_queue, read by nothing",
+      },
+      { flag: "--ref-url", value: "url", help: "the ref's https: URL, shown beside it; only with --ref" },
       {
         flag: "--start",
         help: "once the scheduler admits it, start it past the concurrency limit and a paused queue (as seance start)",
@@ -194,7 +200,7 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
       },
       {
         flag: "--now",
-        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires, --start, --at or --in",
+        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires, --ref, --start, --at or --in",
       },
     ],
   },

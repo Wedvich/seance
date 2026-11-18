@@ -121,6 +121,10 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onContinue={(id) => void store.continueTask(id)}
           onPass={(id) => void store.passTask(id)}
           onFollowUp={(id) => store.followUp(id)}
+          labelling={state.labelling}
+          onOpenLabel={(id) => store.openLabel(id)}
+          onCloseLabel={() => store.closeLabel()}
+          onLabel={(id, label) => store.labelTask(id, label)}
           onPause={() => void store.pauseQueue()}
           onResume={(account) => void store.resumeQueue(account)}
           onDiscard={() => void store.discardUnreadable()}
@@ -361,6 +365,7 @@ function useSpawnActions(store: Store): SpawnActions {
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
       toggleRequires: (trait) => store.toggleRequires(trait),
+      setRef: (ref, url) => store.setRef(ref, url),
       setNotBefore: (choice) => store.setNotBefore(choice),
       addFiles: (files) => store.addFiles(files),
       removeFile: (key) => store.removeFile(key),

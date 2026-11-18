@@ -6,6 +6,9 @@ import {
   accountNameIn,
   agentVisibleTags,
   CAPABILITIES,
+  creatorTaskTags,
+  refTags,
+  taskTagEntries,
   MESSAGE_KINDS,
   MESSAGE_MAX,
   MESSAGE_ROUTE_MAX,
@@ -91,6 +94,7 @@ import {
   startAuto,
   startGateError,
   startQueuedAuto,
+  taskTagsGateError,
   traitsGateError,
   requiresCheck,
   usesReported,
@@ -582,7 +586,7 @@ function isAutoRef(ref: string): boolean {
  * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins, avoided machines and required traits are set with spawn_session's after, until, linear, pin, avoid and requires fields and with queue_batch. A start time (not_before) holds a task until then; it is not a deadline.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, refs (the issue or PR a task is for), pins, avoided machines and required traits are set with spawn_session's after, until, ref, pin, avoid and requires fields and with queue_batch. A start time (not_before) holds a task until then; it is not a deadline.";
 
 /** `not_before` on the tools that create a task: ISO 8601 with an offset, so the model resolves a relative request itself. */
 const NOT_BEFORE_FIELD = z
@@ -764,17 +768,9 @@ const AFTER_WHEN = z
     '"opened" (the default): the task has a PR and its branch is pushed. A worktree task\'s first "opened" entry is what it stacks on: its worktree starts from that task\'s pushed branch, not the default branch, so it builds on that work before it merges (from the default branch instead if that PR merged first, or if the task finished with nothing pushed). "merged": its branch merged, and the worktree starts from the default branch, which then holds the work: the choice for work that should not build on an unmerged branch. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
   );
 
-const LINEAR_FIELD = z
-  .strictObject({
-    issue: z
-      .string()
-      .describe(`The Linear issue identifier, e.g. "ENG-123" (at most ${TASK_SPEC_LIMITS.linearIssue} characters)`),
-    url: z.string().optional().describe("The issue's https: URL"),
-  })
-  .optional()
-  .describe(
-    "The Linear issue this task is for. Informational: the scheduler stores and shows it, and reads nothing from Linear",
-  );
+const REF_DESCRIPTION =
+  'What this task is for, as source:id — e.g. "linear:ENG-123" or "github:owner/repo#12" (a lowercase source of letters, digits and hyphens, then a colon, then an id of at most 64 letters, digits and ._#/-). Informational: the scheduler stores and shows it (get_queue lists it as tags["creator.ref"]), and reads nothing from the tracker';
+const REF_URL_DESCRIPTION = "The ref's https: URL, shown beside it in the app; only with the ref";
 
 const AUTONOMY_FIELD = z
   .enum(AUTONOMY_LEVELS)
@@ -860,27 +856,34 @@ function requestFields(input: {
   return withAutonomy(fields) ?? fields;
 }
 
-/**
- * The authoring fields as a spec holds them: `until` only when it is not the default, `linear.url` only
- * when given, and `linear.issue` trimmed as the PWA's form trims it (a blank one is then refused by `specError`).
- */
-function authoredFields(
-  deps: readonly TaskDep[],
-  until: TaskUntil | undefined,
-  linear: { readonly issue: string; readonly url?: string | undefined } | undefined,
-): Pick<AutoSpec, "deps" | "until" | "linear"> {
+/** The authoring fields as a spec holds them: `until` only when it is not the default. */
+function authoredFields(deps: readonly TaskDep[], until: TaskUntil | undefined): Pick<AutoSpec, "deps" | "until"> {
   return {
     ...(deps.length === 0 ? {} : { deps }),
     ...(until === "reported" ? { until } : {}),
-    ...(linear === undefined
-      ? {}
-      : {
-          linear: {
-            issue: linear.issue.trim(),
-            ...(linear.url === undefined || linear.url === "" ? {} : { url: linear.url }),
-          },
-        }),
   };
+}
+
+/**
+ * A caller's ref as the creator tags a spec holds (`creatorTaskTags`, the one validator), or the refusal naming the
+ * fields the caller wrote. A blank ref is none, and a URL beside none is a mistake worth saying so.
+ */
+function refInput(
+  ref: string | undefined,
+  url: string | undefined,
+  names: { readonly ref: string; readonly url: string },
+): Pick<AutoSpec, "tags"> | { readonly error: string } {
+  const bare = url === undefined || url.trim() === "" ? undefined : url;
+  if (ref === undefined || ref.trim() === "") {
+    return bare === undefined ? {} : { error: `${names.url} needs ${names.ref}` };
+  }
+  const written = creatorTaskTags(refTags(ref.trim(), bare));
+  if (!written.ok) {
+    return {
+      error: `${names.ref} must be source:id (a lowercase source, a colon, then an id of at most 64 letters, digits and ._#/-) and ${names.url} an https: URL`,
+    };
+  }
+  return { tags: written.tags };
 }
 
 /**
@@ -907,6 +910,11 @@ function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   return " (the instruction to report is appended to the prompt and counts)";
 }
 
+function shownTags(spec: Task["spec"], at: number): Readonly<Record<string, string>> | undefined {
+  const visible = agentVisibleTags(taskTagEntries(spec, at));
+  return visible === undefined ? undefined : Object.fromEntries(Object.entries(visible).map(([k, e]) => [k, e.value]));
+}
+
 function describeTask(
   task: Task,
   machines: readonly Machine[],
@@ -923,6 +931,7 @@ function describeTask(
   const { spec } = task;
   const level = autonomyOf(spec);
   const blocked = taskPrBlock(task);
+  const tags = shownTags(spec, task.createdAt);
   return {
     id: task.id,
     state: task.state,
@@ -970,7 +979,8 @@ function describeTask(
     ...(task.merged === true ? { merged: true } : {}),
     ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
     ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
-    ...(spec.linear === undefined ? {} : { linear: spec.linear }),
+    // Only what `AGENT_VISIBLE_TAG_KEYS` allows: never the ref's URL or an opaque creator tag (a legacy `linear` reads as `creator.ref`).
+    ...(tags === undefined ? {} : { tags }),
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     ...(spec.notBefore === undefined ? {} : { notBefore: new Date(spec.notBefore).toISOString() }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
@@ -1370,7 +1380,8 @@ export function buildMcpServer(
             'Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents. With when "opened" (the default), a worktree task is stacked: it starts from the first such task\'s pushed branch (get_queue\'s stackedOn says what it started from); use when "merged" for work that should start from the default branch',
           ),
         until: UNTIL_FIELD,
-        linear: LINEAR_FIELD,
+        ref: z.string().optional().describe(REF_DESCRIPTION),
+        ref_url: z.string().optional().describe(REF_URL_DESCRIPTION),
         pin: PIN_FIELD,
         avoid: AVOID_FIELD,
         requires: REQUIRES_FIELD,
@@ -1395,7 +1406,8 @@ export function buildMcpServer(
       autonomy,
       after,
       until,
-      linear,
+      ref,
+      ref_url,
       pin,
       avoid,
       requires,
@@ -1418,6 +1430,8 @@ export function buildMcpServer(
       if ("error" in reported) return errorResult(`spawn refused: ${reported.error}`);
       const placement = placementInput(pin, avoid, names, machinePin);
       if ("error" in placement) return errorResult(`spawn refused: ${placement.error}`);
+      const refFields = refInput(ref, ref_url, { ref: "ref", url: "ref_url" });
+      if ("error" in refFields) return errorResult(`spawn refused: ${refFields.error}`);
       // `client` is not a TaskRequest field: the leader stamps its own
       // dispatch `client=scheduler`, so the target audits the session as the
       // scheduler's.
@@ -1427,8 +1441,8 @@ export function buildMcpServer(
         ...authoredFields(
           (after ?? []).map(({ task, when }) => ({ task, after: when })),
           until,
-          linear,
         ),
+        ...refFields,
         ...(requires === undefined ? {} : { requires }),
         ...(deferred === null ? {} : { notBefore: deferred.at }),
       };
@@ -1448,6 +1462,9 @@ export function buildMcpServer(
         if (gate !== null) return errorResult(gate);
         const traitsGate = requires === undefined ? null : traitsGateError(leg, "requires");
         if (traitsGate !== null) return errorResult(traitsGate);
+        // A create asked for the ref, so a leader that cannot take it refuses; the caller retries without it.
+        const tagsGate = spec.tags === undefined ? null : taskTagsGateError(leg, "spawn", "ref");
+        if (tagsGate !== null) return errorResult(tagsGate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
         if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
         // The origin a clone name resolved to is what the leader bounds, not the name.
@@ -1510,7 +1527,13 @@ export function buildMcpServer(
                   'Each entry names exactly one of task and ref. As spawn_session\'s after: with when "opened" (the default) a worktree member stacks on the first such task\'s pushed branch; when "merged" starts it from the default branch',
                 ),
               until: UNTIL_FIELD,
-              linear: LINEAR_FIELD,
+              external_ref: z
+                .string()
+                .optional()
+                .describe(
+                  `As spawn_session's ref, named apart because a member's ref names it within the batch. ${REF_DESCRIPTION}`,
+                ),
+              external_ref_url: z.string().optional().describe(REF_URL_DESCRIPTION),
               pin: PIN_FIELD,
               avoid: AVOID_FIELD,
               requires: REQUIRES_FIELD,
@@ -1572,6 +1595,11 @@ export function buildMcpServer(
         const deferred = member.not_before === undefined ? null : notBeforeInput(member.not_before);
         if (deferred !== null && "error" in deferred)
           return errorResult(`queue_batch refused: task ${n}: ${deferred.error}`);
+        const refFields = refInput(member.external_ref, member.external_ref_url, {
+          ref: "external_ref",
+          url: "external_ref_url",
+        });
+        if ("error" in refFields) return errorResult(`queue_batch refused: task ${n}: ${refFields.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
           ...requestFields({
@@ -1579,7 +1607,8 @@ export function buildMcpServer(
             autonomy: member.autonomy ?? autonomy,
             prompt: reported.prompt,
           }),
-          ...authoredFields(deps, member.until, member.linear),
+          ...authoredFields(deps, member.until),
+          ...refFields,
           ...(member.requires === undefined ? {} : { requires: member.requires }),
           ...(deferred === null ? {} : { notBefore: deferred.at }),
           batch: { id: batchId, index: n },
@@ -1602,6 +1631,12 @@ export function buildMcpServer(
         }
         if (planned.some(({ spec }) => spec.requires !== undefined)) {
           const gate = traitsGateError(leg, "requires");
+          if (gate !== null) return errorResult(gate);
+        }
+        // Naming the first member that asked for a ref: the caller retries that member without it.
+        const tagged = planned.findIndex(({ spec }) => spec.tags !== undefined);
+        if (tagged !== -1) {
+          const gate = taskTagsGateError(leg, `queue_batch task ${tagged + 1}`, "external_ref");
           if (gate !== null) return errorResult(gate);
         }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
