@@ -9578,8 +9578,8 @@ decision is recorded here.
   (`toolchainProblem`) is refused `op=refused reason=toolchain`: a `main.ts` outside `<checkout>/daemon/`; a bun that is a
   version manager's shim (its real file is a script, or is not named `bun*`), whose target sits under the masked home and
   outside every allow entry (the real file found by following its links, `realpathOfFile`: macOS's realpath names a
-  hard-linked file by whichever of its links any process looked up last, so the test suite's `9.9.9` claude stub, a hard
-  link of bun, made the seat refuse now and then); and an allow entry that is, or contains, any path the fence masks (`sandboxMasks`, the one
+  hard-linked file by whichever of its links any process looked up last, so the test suite's `9.9.9` claude stub, then a
+  hard link of bun, made the seat refuse now and then); and an allow entry that is, or contains, any path the fence masks (`sandboxMasks`, the one
   list the fence is made from: home, the state and config dirs, the tmux socket dir, repo and exclave roots, the
   checkout, and the system roots, before any is dropped as nested; srt lets an allow beat a deny, so `~/bun` would
   re-open the whole home and `<checkout>/bun` the relay's `.dev.vars`). The seat checks at its start (with the tmux

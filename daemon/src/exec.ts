@@ -3,6 +3,8 @@ export interface ExecResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  /** The signal that ended the child, beside the 128+n `exitCode` Bun reports for it; null for a normal exit. */
+  readonly signal: NodeJS.Signals | null;
 }
 
 /**
@@ -196,12 +198,17 @@ export async function exec(
   // Strict mode's SIGKILL timer outlives the pipes (a TERM-trapping member may have closed
   // its stdio) and is cleared only when the leader is reaped, above.
   if (!strict) clearTimeout(killTimer);
-  return { exitCode, stdout, stderr, timedOut };
+  return { exitCode, stdout, stderr, timedOut, signal: proc.signalCode };
 }
 
-/** Failure detail for error messages: names the timeout instead of a bare kill signal. */
+/**
+ * Failure detail for error messages: names the timeout instead of a bare kill signal, and any other signal, since a
+ * kill from outside (macOS's syspolicyd SIGKILLs at exec) leaves stderr empty.
+ */
 export function execFailure(result: ExecResult): string {
-  return result.timedOut ? "timed out" : `exit ${result.exitCode}: ${result.stderr.trim()}`;
+  if (result.timedOut) return "timed out";
+  const signal = result.signal === null ? "" : ` (${result.signal})`;
+  return `exit ${result.exitCode}${signal}: ${result.stderr.trim()}`;
 }
 
 export async function git(cwd: string, args: readonly string[], timeoutMs?: number): Promise<ExecResult> {

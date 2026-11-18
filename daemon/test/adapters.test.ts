@@ -16,7 +16,7 @@ import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { paneInfo } from "../src/sessions.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * State out to adapters (docs/messaging.md §6.1) with real processes: `claude`-named processes in panes of a private
@@ -85,8 +85,9 @@ beforeAll(async () => {
   await exec(["git", "init", "-q", "-b", "feature-x", project]);
   exclaves = [{ id: "default", root: base, configDir: join(base, ".claude"), configFile: join(base, ".claude.json") }];
   repos = [{ name: "proj", path: project, defaultBranch: "main" }];
-  claude = await linkClaudeNamed(join(base, "bin"));
+  claude = await bunNamed("claude");
   adapter = join(base, "bin", "reference-adapter.ts");
+  await mkdir(join(base, "bin"));
   await link(REFERENCE, adapter);
   const warmed = await exec([adapter, "--warm"]);
   if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);

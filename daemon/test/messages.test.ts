@@ -29,7 +29,7 @@ import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { processNames } from "../src/peer.ts";
 import { paneWindowName, tmuxOk } from "../src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * Session messages with the binding real: panes in a private tmux server, the kernel's peer pid, and for the
@@ -178,8 +178,8 @@ const inAudits = (outcome: string): AuditLine[] => audits.filter((a) => a.dir ==
 beforeAll(async () => {
   base = await realpath(await mkdtemp(join(tmpdir(), "seance-msg-")));
   stateDir = join(base, "state");
-  claudeBin = await linkClaudeNamed(join(base, "claude-bin"));
-  versionedBin = await linkClaudeNamed(join(base, "versioned-bin"), "9.9.9");
+  claudeBin = await bunNamed("claude");
+  versionedBin = await bunNamed("9.9.9");
   sockPath = join(stateDir, "run", "seanced.sock");
   await mkdir(stateDir, { recursive: true });
   privateTmux = usePrivateTmux(base, "msg");
