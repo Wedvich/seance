@@ -1,6 +1,8 @@
 # Fleet GitHub watches — spec
 
-**Status: spec, nothing built. Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
+**Status: spec; build step 1 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the reset-time
+backoff — DESIGN.md, Scheduler, "PR status", "A spent budget is waited out"); steps 2–4 (the watches) are not.
+Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
 session asks the fleet to watch a pull request or an Actions run and is told through its inbox when something
 happens, instead of polling GitHub itself. The leader already reads every task's PR in batches (DESIGN.md, "PR
 status") and the daemon already delivers text into a session (DESIGN.md, "Session messages"); a watch joins the two.
@@ -132,8 +134,8 @@ lacks the event's key:
 - **All checks, not only required ones.** A session fixing CI cares about an optional check too. The note marks which
   failing names are required (W5), so a session can tell a merge blocker from noise.
 - **A PR watch spans the PR's life** until it is merged or closed: a push, a failure, a fix, a conflict, a rebase and
-  the merge are one watch, which is /ship's whole step 8. No per-event subscription; open question 1 weighs a
-  `quiet: passing` option.
+  the merge are one watch, which is /ship's whole step 8. No per-event subscription, and no `quiet: passing` option
+  (decided, open question 1).
 - **`head` closes the stale-run race.** Right after a push the rollup can still be the previous head's (why /ship
   sleeps 20 s before `gh pr checks --watch`). A watch made with `head` fires `checks` and `conflict` only for readings
   whose head is that commit. If the PR's head moves to another commit, the watch follows it and the next note says the
@@ -224,23 +226,21 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   would be met by each daemon on its own clock instead of one reader backing off for the fleet.
 - **Pace**: the poller's 60 s. A watch's note lands within about one interval of the change (plus the blocked-state
   read's few seconds), against the 30 s the owner's rule allows a session. Accepted: a minute's latency on a CI wait of
-  ten, for one read where there were N. No faster pace for watched targets (open question 2).
+  ten, for one read where there were N. No faster pace for watched targets (decided, open question 2).
 - **Budget at the caps**, before S1's measurement: 100 watched PRs are 2 merge chunks and up to 10 blocked-state runs
   a poll, 100 runs 2 queries: about 14 points a minute, 840 an hour, of the 5000 GraphQL points, and **no REST at
   all**. Today a single `gh run watch` at its default costs more REST than that in GraphQL. Each query also selects
-  `rateLimit{ cost remaining resetAt }`, which costs nothing extra, so the cost is measured, not assumed.
+  `rateLimit{ cost remaining resetAt }` (built: DESIGN.md, "PR status"), so the cost is measured, not assumed.
 
 ### W8. Rate limits, a lapsed login, a leaderless fleet
 
-- **A rate-limit answer is its own class.** `askGithub` (`daemon/src/gh.ts`) gains `limited`: a body with no `data`
-  whose errors carry `type: "RATE_LIMITED"`, or a 403/429 whose message says rate limit (the exact shapes are S3). The
-  reset time is the last in-query `resetAt`, else `gh api rate_limit`'s `graphql.reset` (that endpoint is not
-  counted). The poller then sleeps until the reset plus a minute's jitter, instead of its 1-to-15-minute ladder,
-  which would hammer an empty budget at minute 1, 2, 4. It warns once on entering it (the reset time, never `gh`'s
-  words) and once on leaving it, as today's classes do.
+- **A rate-limit answer is its own class, and the poller waits for the reset.** Built 2026-11-18: DESIGN.md,
+  Scheduler, "PR status", "A spent budget is waited out" (the class, S3's shapes, the reset's sources and the
+  backoff).
 - **A reserve for tasks.** When the last reading's `remaining` is under 500 points, the poller reads only tasks' PRs
   (which settle tasks and release dependents) and drops watched targets until `resetAt`. A watch is a convenience; a
-  merge settling is not.
+  merge settling is not. Lands with step 2: until watched targets exist there is nothing to drop; step 1 keeps the
+  term's newest in-query `remaining` and `resetAt` for it.
 - **Watchers are told, once per suspension.** When a watch's reads stop for longer than two intervals (a rate limit,
   the reserve, `unauthenticated`, `missing`, `failed`), the leader sends `suspended` with a reason enum and, for a
   limit, the reset time. The daemon delivers a fixed note: for a limit "GitHub's budget for this fleet's account is
@@ -306,8 +306,8 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   `audit watch origin=watch op=<add|remove|event|end> kind=<pr|run> event=<…> reason=<…> outcome=<…>`. Never the
   URL, owner, repo, number, head, check names or the watch id (it joins nothing the line needs). The leader logs no
   line per watch, reading or event, only a refused set, a failed send and the poller's class changes.
-- **Not in the PWA, `get_queue`, `status` or the archivist.** A count of live watches on the Machines row is open
-  question 3.
+- **Not in the PWA, `get_queue`, `status` or the archivist.** No count of live watches on the Machines row (decided,
+  open question 3).
 
 ## Threat-model invariants this adds
 
@@ -397,27 +397,24 @@ wants it, it is its own decision against the "manual" one above.
   (W7's fallback) is the plan, with S1 measuring how often a running run's ETag changes.
 - **S2.** Does `statusCheckRollup.state` read `FAILURE` while other contexts are still pending? If not, fail-fast
   needs the blocked-state read's contexts rather than the rollup.
-- **S3.** The exact GraphQL rate-limit answer through `gh api graphql` (exit code, body shape, `type`), and the
-  secondary limit's (`Retry-After`), so `askGithub`'s `limited` class matches both and nothing else.
+- **S3 (done 2026-11-18, from `gh`'s source and GitHub's docs, not a live spent budget).** Recorded beside the
+  `limited` class in DESIGN.md, "PR status".
 - **S4.** An idle Claude session woken by a `wake` note after 30-plus minutes, with the session waiting by ended turn
   and no background shell: that the note starts a turn the model acts on (the messaging spikes measured minutes, not
   a CI's length).
 
-## Open questions
+## Open questions (all decided by the owner, 2026-11-18, as recommended; recorded in DESIGN.md, "PR status" and Daemon, "GitHub rate limits")
 
-1. **`quiet: ["passing"]`** for a session that only cares about failures (an armed PR). **Recommend no** until notes
-   prove noisy: one note per head is cheap, and a pass is often when /ship merges.
-2. **A faster pace for watched targets** (30 s while any watch is live). **Recommend no**: it doubles the poll's cost
-   for every task's PR too, unless watched targets get their own cadence, which is a second clock in the poller.
-3. **A live-watch count on the Machines row** (`MachineStatus`), and a fleet REST/GraphQL budget gauge from the
-   leader's free `rate_limit` read. **Recommend** the gauge as its own small change: it would have shown 2026-11-17's
-   burn as it happened, watches or not.
+1. **`quiet: ["passing"]`**: no. One note per head is cheap, and a pass is often when /ship merges.
+2. **A faster pace for watched targets**: no. The poller keeps one 60 s clock.
+3. **A budget gauge**: built as #547 (`MachineStatus.gh`, the leader's `github` alert). **A live-watch count on the
+   Machines row**: not built.
 
 ## Build order
 
-1. **Leader side, no new surface**: `askGithub`'s `limited` class and the in-query `rateLimit`, the reset-time backoff
-   and the reserve (W8). Worth having on its own: the poller stops hammering an empty budget.
-2. **Spikes S1–S3**, then the run query and the watch registry in the poller (W4, W7), behind
+1. **Leader side, no new surface** (built 2026-11-18): `askGithub`'s `limited` class and the in-query `rateLimit`,
+   the reset-time backoff (W8). The reserve moved to step 2.
+2. **Spikes S1 and S2**, then the run query, the watch registry and the reserve for tasks in the poller (W4, W7, W8), behind
    `CAPABILITIES.watches`, with `watch-set` and `watch-event` (W6, W9) and their parsers, tests against a `gh` stub.
 3. **The daemon's table, `watches.json`, the `watch` frame, delivery and the custodian hold** (W3, W5, W6, W9), the
    audit origin, and the threat-model invariants into CLAUDE.md and DESIGN.md.

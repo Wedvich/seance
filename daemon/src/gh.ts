@@ -15,8 +15,8 @@ const MAX_OUTPUT_BYTES = 1 << 20;
 const EXIT_AUTH = 4;
 
 /**
- * `limited` is GitHub refusing for a spent rate limit, primary or secondary (DESIGN.md, "PR status", "Outcome classes"):
- * its own class so a poller can wait for the reset rather than retry into an empty budget.
+ * `limited` is GitHub refusing for a spent rate limit, primary or secondary (DESIGN.md, "PR status", "A spent
+ * budget is waited out"): its own class so a poller can wait for the reset rather than retry into an empty budget.
  */
 export type GhFailure = "missing" | "unauthenticated" | "limited" | "failed";
 
