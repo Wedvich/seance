@@ -7,6 +7,7 @@ import {
   CONVERSATION_IDLE_MS,
   CONVERSATIONS_KEPT_MAX,
   openSubscriptions,
+  reconcileWith,
 } from "./adapter-subscriptions.ts";
 
 const id = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -79,12 +80,19 @@ describe("adapter subscriptions", () => {
     expect(third.has("tg", id(3))).toBe(true);
   });
 
-  test("drop ends a name's subscriptions (`seance adapter add` under the same name)", () => {
+  test("reconcileWith a config: a re-add's new `added` stamp, and no adapter left at all, end a name's subscriptions", () => {
     const subs = openSubscriptions(path, { now });
-    subs.reconcile(new Map([["tg", tg]]));
+    const added = { argv: ["/opt/tg"], added: "2026-11-18T10:00:00.000Z" };
+    reconcileWith(subs, { tg: added, mail: { argv: ["/opt/mail"] } });
     subs.add("tg", id(1));
-    subs.drop("tg");
+    subs.add("mail", id(1));
+    // `seance adapter add` again: the same argv and commit, a new stamp.
+    reconcileWith(subs, { tg: { ...added, added: "2026-11-18T11:00:00.000Z" }, mail: { argv: ["/opt/mail"] } });
     expect(subs.has("tg", id(1))).toBe(false);
+    expect(subs.has("mail", id(1))).toBe(true);
+    // `seance adapter remove` of the last one leaves `adapters` out of config.json.
+    reconcileWith(subs, undefined);
+    expect(subs.has("mail", id(1))).toBe(false);
   });
 
   test("a conversation not live for 30 days is dropped at load; one touched is kept", async () => {
@@ -119,7 +127,7 @@ describe("adapter subscriptions", () => {
     expect(openSubscriptions(path, { now }).has("tg", "not-an-id")).toBe(false);
   });
 
-  test("holds no text: ids, names, fingerprints and times only", async () => {
+  test("a subscription holds no argv: ids, names, fingerprints and times (the owner's label is the file's one text)", async () => {
     const subs = openSubscriptions(path, { now });
     subs.reconcile(new Map([["tg", adapterFingerprint({ argv: ["/opt/tg", "--token", "secret-value"] })]]));
     subs.add("tg", id(1));

@@ -4,8 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { takeRestartRequest, writeAdaptersView, type AdapterView } from "../src/adapter-control.ts";
-import { adapterFingerprint, openSubscriptions } from "../src/adapter-subscriptions.ts";
-import { configSkeleton } from "../src/config.ts";
+import {
+  adapterFingerprint,
+  openSubscriptions,
+  reconcileWith,
+  type Subscriptions,
+} from "../src/adapter-subscriptions.ts";
+import { configSkeleton, loadConfig } from "../src/config.ts";
 import { pollUntil } from "./fixtures.ts";
 
 const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
@@ -118,26 +123,45 @@ describe("seance adapter", () => {
     ]);
   });
 
-  test("add under a name already there ends that name's subscriptions, and only that name's", async () => {
+  /**
+   * This test process as the daemon's `conversations.json` store, running while the CLI acts or started after it (a
+   * fresh store from disk): either way it ends subscriptions only through `reconcileWith` over the config it reads.
+   */
+  const daemonStore = async (): Promise<Subscriptions> => {
+    const store = openSubscriptions(join(state, "conversations.json"));
+    reconcileWith(store, (await loadConfig(configFile)).adapters);
+    return store;
+  };
+  const conversationsBytes = (): Promise<string | null> =>
+    readFile(join(state, "conversations.json"), "utf8").catch(() => null);
+
+  test("add under a name already there: the daemon ends that name's subscriptions and only that name's; the CLI writes none", async () => {
     const dir = await checkout("chat");
     expect((await run("add", dir, "--kinds", "note,question,request", "--repo", "web")).code).toBe(0);
+    expect((await run("add", await checkout("other"))).code).toBe(0);
     const first = (await adapters())?.["chat"];
     const conversation = "0f3c9a8e-1b2d-4c5e-8f70-123456789abc";
-    const path = join(state, "conversations.json");
-    const before = openSubscriptions(path);
-    before.add("chat", conversation);
-    before.add("other", conversation);
-    await before.flushed();
+    const live = await daemonStore();
+    live.add("chat", conversation);
+    live.add("other", conversation);
+    await live.flushed();
+    const before = await conversationsBytes();
 
     const again = await run("add", dir);
     expect(again.code).toBe(0);
     expect(again.out).toContain("replaced adapter chat");
-    expect(again.out).toContain("its subscriptions are ended");
-    const after = openSubscriptions(path);
-    expect(after.has("chat", conversation)).toBe(false);
-    expect(after.has("other", conversation)).toBe(true);
-    // Kinds and repos carry over unless given; the commit is the same, yet the fingerprint is not: a daemon that
-    // rewrote the old subscriptions before its restart still has them dropped by `reconcile` at that start.
+    expect(again.out).toContain("its subscriptions end when the daemon reads this config");
+    // One writer: the CLI left the file to the daemon.
+    expect(await conversationsBytes()).toBe(before);
+    // The daemon was down: its next start reads the file and the new config.
+    const restarted = await daemonStore();
+    expect(restarted.has("chat", conversation)).toBe(false);
+    expect(restarted.has("other", conversation)).toBe(true);
+    // The daemon was running: the reload the config write triggers reconciles the store it holds.
+    reconcileWith(live, (await loadConfig(configFile)).adapters);
+    expect(live.has("chat", conversation)).toBe(false);
+    expect(live.has("other", conversation)).toBe(true);
+    // Kinds and repos carry over unless given; the commit is the same, yet the fingerprint is not, which ends them.
     const second = (await adapters())?.["chat"];
     expect(second).toMatchObject({ kinds: ["note", "question", "request"], repos: ["web"], commit: first?.["commit"] });
     expect(second?.["added"]).not.toBe(first?.["added"]);
@@ -181,19 +205,23 @@ describe("seance adapter", () => {
     expect((await run("frobnicate")).code).toBe(2);
   });
 
-  test("remove drops the entry and its subscriptions and leaves the adapter's own directory", async () => {
+  test("remove drops the entry and leaves the adapter's own directory; the daemon ends its subscriptions, the last name's too", async () => {
     expect((await run("add", await checkout("chat"))).code).toBe(0);
     const own = join(state, "adapters", "chat");
     await mkdir(own, { recursive: true });
-    const subs = openSubscriptions(join(state, "conversations.json"));
-    subs.add("chat", "0f3c9a8e-1b2d-4c5e-8f70-123456789abc");
-    await subs.flushed();
+    const conversation = "0f3c9a8e-1b2d-4c5e-8f70-123456789abc";
+    const live = await daemonStore();
+    live.add("chat", conversation);
+    await live.flushed();
+    const before = await conversationsBytes();
     const result = await run("remove", "chat");
     expect(result.code).toBe(0);
     expect(await adapters()).toBeUndefined();
-    expect(
-      openSubscriptions(join(state, "conversations.json")).has("chat", "0f3c9a8e-1b2d-4c5e-8f70-123456789abc"),
-    ).toBe(false);
+    expect(await conversationsBytes()).toBe(before);
+    // No adapter left in config.json: a start or reload still reconciles (`run-capabilities.ts`, `adapters`).
+    expect((await daemonStore()).has("chat", conversation)).toBe(false);
+    reconcileWith(live, (await loadConfig(configFile)).adapters);
+    expect(live.has("chat", conversation)).toBe(false);
     expect((await stat(own)).isDirectory()).toBe(true);
     expect((await auditLines()).at(-1)).toMatch(/origin=cli op=remove name=chat$/u);
     const again = await run("remove", "chat");

@@ -111,7 +111,8 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
   const fingerprints = new Map(
     Object.entries(deps.adapters).map(([name, config]) => [name, adapterFingerprint(config)]),
   );
-  // A name no longer configured, or configured as another program, inherits no subscription (docs/tags.md §8.2).
+  // A name no longer configured, or configured as another program, inherits no subscription (DESIGN.md, "Adapters",
+  // "The subscription").
   subscriptions?.reconcile(fingerprints);
 
   for (const [name, config] of Object.entries(deps.adapters)) {

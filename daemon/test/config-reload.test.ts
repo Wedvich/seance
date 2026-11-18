@@ -1,9 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rename, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
 import { pskFingerprint } from "../src/config-checks.ts";
+import { conversationsPath } from "../src/paths.ts";
+import { subscriptionsFor } from "../src/run-capabilities.ts";
 import { saveState, type State } from "../src/state.ts";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
 import {
@@ -283,6 +285,36 @@ describe("config hot reload", () => {
     await reload();
 
     expect(relay.connectionCount()).toBe(connectionsBefore);
+  });
+
+  test("a label written just before a reload survives it: one conversations file, one store", async () => {
+    relay = startTestRelay(TOKEN);
+    const path = await configFile();
+    await writeConfig(path, "Labelled", relay.url);
+    await startSupervised(path);
+    await registerAs(relay, "Labelled");
+
+    const file = conversationsPath();
+    const store = subscriptionsFor(file);
+    const first = "0f3c9a8e-1b2d-4c5e-8f70-123456789abc";
+    const second = "1f3c9a8e-1b2d-4c5e-8f70-123456789abc";
+    // Not awaited: its write is still on the store's chain when the reload stops this daemon and starts the next.
+    const written = store.setLabel(first, "before the reload");
+    await writeConfig(path, "Relabelled", relay.url);
+    await reload();
+    await written;
+
+    // The reloaded daemon's session events took the same store, so its writes carry the label made before.
+    expect(subscriptionsFor(file)).toBe(store);
+    await store.setLabel(second, "after the reload");
+    await store.flushed();
+    const onDisk: unknown = JSON.parse(await readFile(file, "utf8"));
+    expect(onDisk).toMatchObject({
+      conversations: {
+        [first]: { ownerLabel: { value: "before the reload" } },
+        [second]: { ownerLabel: { value: "after the reload" } },
+      },
+    });
   });
 
   test("stop() stops watching", async () => {
