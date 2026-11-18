@@ -69,14 +69,12 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   adapter invariant). What is left in the file is the problem, the spike evidence, the owner's decisions D1 to D4 and the
   open questions. Read it, and DESIGN.md's "Adapters", before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
-- **docs/gh-watch.md** — spec, build steps 1 to 4 built (`askGithub`'s `limited` class, the poll queries' in-query
-  `rateLimit` and the reset-time backoff, the leader's side of the watches: its registry, the run query, the reserve
-  for tasks, `watch-set` and `watch-event`, recorded in DESIGN.md, "PR status", and the daemon's side: the `watch`
-  frame, the table, `watches.json`, the notes and the custodian hold, recorded in DESIGN.md, "Watches"; and step 4, MCP's
-  `watch_github` and `unwatch_github`, in "MCP server"; only spike S4, live, remains): a session asks the fleet to watch a GitHub PR or Actions run and is woken
-  by a fixed note in its inbox, the leader folding watched targets into its batched GraphQL PR poll (`watch-set`,
-  `watch-event`, `CAPABILITIES.watches`), with the weighing against extending `hand_off_task`. Read it before touching
-  the PR poller, `askGithub`, or adding a way for sessions to wait on GitHub.
+- **docs/gh-watch.md** — what is left of the spec: built (steps 1 to 4, spikes S1 to S4) and recorded in DESIGN.md,
+  "PR status" (the leader's poller, registry and reserve), "Watches" (the daemon's table and notes, W1–W11 with their
+  rejected alternatives, the weighing against extending `hand_off_task`, S4) and "MCP server". A session asks the fleet
+  to watch a GitHub PR or Actions run and is woken by a fixed note in its inbox. The file keeps an index of where each
+  part lives and the proposed /ship and owner-instruction changes (outside this repo, not applied). Read it, and those
+  sections, before touching the PR poller, `askGithub`, watches, or adding a way for sessions to wait on GitHub.
 - **docs/custodian.md** — what is left of the custodian spec: what 4b's drills left unsettled (the round's
   containment — its own socket, the masks, the built environment, no network — is built, rounds are live, and it was
   drilled on macOS and on Linux in both bwrap modes under its vsock filter: strict on WSL2, weaker nested on LXC), the open build-time details, and an
