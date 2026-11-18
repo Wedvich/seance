@@ -2,15 +2,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseGithubPr, quote, type PrStatus } from "@seance/shared";
+import { parseGithubPr, parseWatchSet, quote, type PrStatus, type WatchEvent } from "@seance/shared";
 import type { Task } from "../src/leader.ts";
-import {
-  LIMIT_JITTER_MS,
-  limitedDelay,
-  readPrHead,
-  startPrPoller,
-  type PrPollerOpts,
-} from "../src/pr-status.ts";
+import { LIMIT_JITTER_MS, limitedDelay, readPrHead, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
+import { createWatchRegistry, type WatchRegistry } from "../src/watch-registry.ts";
 import { makeGhStub, pollUntil, type GhRun, type GhStub } from "./fixtures.ts";
 
 let base: string;
@@ -63,6 +58,10 @@ type Fake = {
   readonly oid?: string;
   readonly contexts?: readonly unknown[];
   readonly mergeStateStatus?: string;
+  /** What a watch reads of the head (`headRefOid`, `mergeable`) and of a long check list (`totalCount`). */
+  readonly headRefOid?: string;
+  readonly mergeable?: string;
+  readonly totalCount?: number;
   readonly autoMerge?: boolean;
   readonly inMergeQueue?: boolean;
   readonly reviewRequests?: number;
@@ -78,8 +77,19 @@ function run(
   required = true,
   status = "COMPLETED",
   databaseId?: number,
+  suite?: number,
+  detailsUrl?: string,
 ): unknown {
-  return { __typename: "CheckRun", databaseId, name, status, conclusion, isRequired: required };
+  return {
+    __typename: "CheckRun",
+    databaseId,
+    name,
+    status,
+    conclusion,
+    isRequired: required,
+    ...(suite === undefined ? {} : { checkSuite: { databaseId: suite } }),
+    ...(detailsUrl === undefined ? {} : { detailsUrl }),
+  };
 }
 
 function statusContext(context: string, state: string, required = true): unknown {
@@ -91,6 +101,9 @@ function wideOf(fake: Exclude<Fake, null>): boolean {
     fake.oid !== undefined ||
     fake.contexts !== undefined ||
     fake.mergeStateStatus !== undefined ||
+    fake.headRefOid !== undefined ||
+    fake.mergeable !== undefined ||
+    fake.totalCount !== undefined ||
     fake.autoMerge !== undefined ||
     fake.inMergeQueue !== undefined ||
     fake.reviewRequests !== undefined ||
@@ -129,6 +142,8 @@ function reply(...prs: readonly Fake[]): string {
           : {
               pullRequest: {
                 mergeStateStatus: fake.mergeStateStatus ?? "CLEAN",
+                mergeable: fake.mergeable,
+                headRefOid: fake.headRefOid,
                 isInMergeQueue: fake.inMergeQueue ?? false,
                 autoMergeRequest: fake.autoMerge === true ? { enabledAt: "2026-11-12T00:00:00Z" } : null,
                 reviewRequests: { totalCount: fake.reviewRequests ?? 0 },
@@ -137,7 +152,10 @@ function reply(...prs: readonly Fake[]): string {
                     {
                       commit: {
                         oid: fake.oid ?? HEAD,
-                        statusCheckRollup: fake.contexts === undefined ? null : { contexts: { nodes: fake.contexts } },
+                        statusCheckRollup:
+                          fake.contexts === undefined
+                            ? null
+                            : { contexts: { totalCount: fake.totalCount, nodes: fake.contexts } },
                       },
                     },
                   ],
@@ -158,7 +176,7 @@ interface Seen {
 /** `rejects` names the tasks whose write the caller's `onStatus` refuses. */
 function start(
   tasks: readonly Task[],
-  opts: PrPollerOpts & { readonly now?: () => number } = {},
+  opts: PrPollerOpts & { readonly now?: () => number; readonly watches?: WatchRegistry } = {},
   rejects: ReadonlySet<string> = new Set(),
 ) {
   const logs = { info: [] as string[], warn: [] as string[] };
@@ -1260,5 +1278,369 @@ describe("readPrHead", () => {
     await gh.setReply("{}", 4);
     expect(await readPrHead(prUrl(1), { gh: stub.path })).toEqual({ kind: "unreadable" });
     expect(await readPrHead(prUrl(1), { gh: join(base, "no-such-gh") })).toEqual({ kind: "unreadable" });
+  });
+});
+
+describe("watched targets", () => {
+  const BOOT = "00000000-0000-4000-8000-000000009000";
+  const wid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const runUrl = (id: number): string => `https://github.com/octo-org/widgets/actions/runs/${id}`;
+  const JOB = "https://github.com/octo-org/widgets/actions/runs/77/job/88";
+
+  interface Entry {
+    readonly id: number;
+    readonly url: string;
+    readonly kind?: "pr" | "run";
+    readonly head?: string;
+  }
+
+  /** A real registry with a recording send; its set is accepted at `at`, and its watches are unread-suspended after `2 * intervalMs`. */
+  function watching(entries: readonly Entry[], intervalMs = 60_000, at = 0) {
+    const sent: { readonly events: readonly WatchEvent[] }[] = [];
+    const registry = createWatchRegistry({
+      send: (_to, request) => {
+        sent.push(request);
+        return Promise.resolve({ ok: true, delivered: request.events.map((e) => e.id) });
+      },
+      canReceive: () => true,
+      intervalMs,
+      log: { info: () => undefined, warn: () => undefined },
+    });
+    const set = parseWatchSet({
+      gen: { boot: BOOT, n: 1 },
+      watches: entries.map((e) => ({
+        id: wid(e.id),
+        kind: e.kind ?? "pr",
+        url: e.url,
+        seen: [],
+        ...(e.head === undefined ? {} : { head: e.head }),
+      })),
+    });
+    if (set === null) throw new Error("test set did not parse");
+    registry.accept("dev", set, at);
+    const events = (): WatchEvent[] => sent.flatMap((request) => request.events);
+    return { registry, events };
+  }
+
+  const checksOn = (contexts: readonly unknown[], totalCount = contexts.length): Exclude<Fake, null> => ({
+    state: "OPEN",
+    oid: HEAD,
+    headRefOid: HEAD,
+    contexts,
+    totalCount,
+  });
+
+  test("an open PR only a watch holds is read, and its passing checks reach the registry as one event", async () => {
+    await gh.setReply(reply(checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)])), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    const { seen, logs } = start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the checks event");
+    expect(events()[0]).toEqual({
+      id: wid(1),
+      key: `checks:${HEAD}:pass`,
+      event: { kind: "checks", outcome: "pass", head: HEAD },
+    });
+    const argv = await gh.argv();
+    expect(argv).toContain("n0=5");
+    expect(argv.join(" ")).not.toContain(wid(1));
+    expect(seen).toEqual([]);
+    expect(logs.info).toEqual([]);
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("every failing context counts, required or not, and a failure names its job only in the watched repo", async () => {
+    await gh.setReply(
+      reply(
+        checksOn([
+          run("lint", "FAILURE", false, "COMPLETED", 2, 10, JOB),
+          run(
+            "deploy",
+            "TIMED_OUT",
+            false,
+            "COMPLETED",
+            3,
+            10,
+            "https://github.com/other/widgets/actions/runs/1/job/2",
+          ),
+          run("build", "SUCCESS", true, "COMPLETED", 4, 10),
+        ]),
+      ),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the fail event");
+    expect(events()[0]?.event).toEqual({
+      kind: "checks",
+      outcome: "fail",
+      head: HEAD,
+      failing: [{ name: "lint", job: { run: "77", job: "88" } }, { name: "deploy" }],
+    });
+  });
+
+  test("the same check name in two suites is two contexts: one suite's success never hides the other's failure", async () => {
+    await gh.setReply(
+      reply(
+        checksOn([run("test", "SUCCESS", true, "COMPLETED", 5, 10), run("test", "FAILURE", true, "COMPLETED", 6, 11)]),
+      ),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the fail event");
+    expect(events()[0]?.event).toMatchObject({
+      kind: "checks",
+      outcome: "fail",
+      failing: [{ name: "test", required: true }],
+    });
+  });
+
+  test("pending contexts and a truncated list are no reading: nothing is sent until the head's checks are complete", async () => {
+    await gh.setReply(reply(checksOn([run("build", null, true, "IN_PROGRESS", 1, 10)])), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 4, "two polls");
+    expect(events()).toEqual([]);
+
+    await gh.setReply(reply(checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)], 80)), 0);
+    const before = await gh.calls();
+    await pollUntil(async () => (await gh.calls()) >= before + 4, "two polls of a truncated list");
+    expect(events()).toEqual([]);
+
+    await gh.setReply(reply(checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)])), 0);
+    await pollUntil(() => events().length > 0, "the pass once the list is complete");
+    expect(events()[0]?.event).toMatchObject({ kind: "checks", outcome: "pass" });
+  });
+
+  test("rollup of another commit than the head says nothing of it", async () => {
+    await gh.setReply(
+      reply({ ...checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)]), oid: "f".repeat(40) }),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 4, "two polls");
+    expect(events()).toEqual([]);
+  });
+
+  test("a conflict is an event of its own, from mergeStateStatus or mergeable", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD, headRefOid: HEAD, mergeable: "CONFLICTING" }), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the conflict event");
+    expect(events()[0]?.event).toEqual({ kind: "conflict", head: HEAD });
+  });
+
+  test("a draft PR is read wide for a watch, so its checks are seen", async () => {
+    await gh.setReply(reply({ ...checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)]), isDraft: true }), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the draft's checks event");
+    expect(events()[0]?.event).toMatchObject({ kind: "checks", outcome: "pass" });
+  });
+
+  test("merged and closed PRs end as their own events", async () => {
+    await gh.setReply(reply({ state: "MERGED" }, { state: "CLOSED" }), 0);
+    // One slice answers p0 and p1 from one body.
+    const { registry, events } = watching([
+      { id: 1, url: prUrl(5) },
+      { id: 2, url: prUrl(6) },
+    ]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length >= 2, "both events");
+    expect(events().map((e) => [e.id, e.event.kind])).toEqual([
+      [wid(1), "merged"],
+      [wid(2), "closed"],
+    ]);
+  });
+
+  test("a PR the forge answers null for is unreadable only from its second poll", async () => {
+    await gh.setReply(reply(null), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the unreadable event");
+    // The first null went unsent: the event came on a later poll.
+    expect(await gh.calls()).toBeGreaterThanOrEqual(2);
+    expect(events()[0]?.event).toEqual({ kind: "unreadable" });
+  });
+
+  test("a PR a task also holds is read once, in the task's chunk, and the task's status is what it was without the watch", async () => {
+    const body = reply({
+      state: "OPEN",
+      oid: HEAD,
+      headRefOid: HEAD,
+      contexts: [run("build", "SUCCESS", true, "COMPLETED", 1, 10)],
+      totalCount: 1,
+    });
+    const task = pr(5, { state: "awaiting-merge" });
+
+    await gh.setReply(body, 0);
+    const alone = start([task]);
+    await pollUntil(() => alone.seen.length > 0, "the task's own reading");
+    alone.stop();
+
+    gh = await stub.fresh();
+    await gh.setReply(body, 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    const both = start([task], { watches: registry });
+    await pollUntil(() => events().length > 0 && both.seen.length > 0, "both readings");
+    expect(both.seen[0]?.status).toEqual(alone.seen[0]?.status);
+    expect(events()[0]?.event).toMatchObject({ kind: "checks", outcome: "pass" });
+    // One merge read and one blocked read for the one PR: the watch asked for nothing of its own.
+    expect((await gh.argvs()).slice(0, 2).every((argv) => argv.includes("n0=5") && !argv.includes("n1=5"))).toBe(true);
+  });
+
+  test("a task's draft PR stays unread by the blocked query when only a watch would want it", async () => {
+    await gh.setReply(reply({ ...checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)]), isDraft: true }), 0);
+    const { seen } = start([pr(5, { state: "awaiting-merge" })]);
+    await pollUntil(() => seen.length > 0, "the task's reading");
+    expect(seen[0]?.status).toEqual({ state: "draft", at: 1234 });
+  });
+
+  test("watch-only PRs are read after every task read, and a watch's failed read changes no task's reading or the poller's class", async () => {
+    // Calls 1 and 2 are the task's merge and blocked reads; 3 is the watch-only PR's merge read, which fails.
+    await gh.setReply(
+      reply({ state: "OPEN", oid: HEAD, contexts: [run("build", "SUCCESS", true, "COMPLETED", 1)] }),
+      0,
+    );
+    await gh.setCallReply(3, "{}", 1);
+    const { registry } = watching([{ id: 1, url: prUrl(6) }]);
+    const { seen, logs } = start([pr(5, { state: "awaiting-merge" })], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 3, "the watch-only read");
+    expect(seen[0]).toMatchObject({ id: "t5", url: prUrl(5), status: { state: "open", required: "passing" } });
+    const argvs = await gh.argvs();
+    expect(argvs[0]).toContain("n0=5");
+    expect(argvs[1]).toContain("n0=5");
+    expect(argvs[2]).toContain("n0=6");
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("a watched run's attempt and conclusion are an event, and a failing one names its jobs", async () => {
+    await gh.setReply(
+      JSON.stringify({
+        data: {
+          w0: {
+            databaseId: 99,
+            runAttempt: 2,
+            checkSuite: {
+              status: "COMPLETED",
+              conclusion: "FAILURE",
+              checkRuns: {
+                nodes: [
+                  { __typename: "CheckRun", name: "unit", conclusion: "FAILURE", databaseId: 3, detailsUrl: JOB },
+                  { __typename: "CheckRun", name: "lint", conclusion: "SUCCESS", databaseId: 4 },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the completed event");
+    expect(events()[0]?.event).toEqual({
+      kind: "completed",
+      attempt: 2,
+      conclusion: "failure",
+      failing: [{ name: "unit", job: { run: "77", job: "88" } }],
+    });
+    const argv = await gh.argv();
+    expect(argv).toContain(`u0=${runUrl(99)}`);
+    expect(argv.find((a) => a.startsWith("query="))).not.toContain("99");
+  });
+
+  test("a run still going is not an event", async () => {
+    await gh.setReply(
+      JSON.stringify({
+        data: { w0: { databaseId: 99, runAttempt: 1, checkSuite: { status: "IN_PROGRESS", conclusion: null } } },
+      }),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
+    start([], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 2, "two polls");
+    expect(events()).toEqual([]);
+  });
+
+  test("a run read is no poll failure: a failing run query leaves the tasks' reads, class and logs alone", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    await gh.setCallReply(2, "{}", 1);
+    const { registry } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
+    const { seen, logs } = start([pr(5)], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 2, "the run read");
+    expect(seen[0]).toMatchObject({ id: "t5", status: { state: "open" } });
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("a GitHub budget under the reserve reads tasks only, says so once without a URL, and reads watches again past it", async () => {
+    const reset = Date.now() + 600_000;
+    const low = JSON.parse(reply({ state: "OPEN" }));
+    low.data.rateLimit = { cost: 1, remaining: 100, resetAt: new Date(reset).toISOString() };
+    await gh.setReply(JSON.stringify(low), 0);
+    // A set lives 15 minutes and a watch unread for two intervals is suspended: neither may end the test early.
+    const { registry, events } = watching([{ id: 1, url: prUrl(6) }], 3_600_000, Date.now());
+    let now = Date.now();
+    const { logs, seen } = start([pr(5)], { watches: registry, now: () => now });
+    await pollUntil(() => logs.warn.length === 1, "the reserve warning");
+    expect(logs.warn[0]).toContain("(reserve)");
+    expect(logs.warn[0]).not.toContain(prUrl(6));
+    // The budget is unknown until the first answer, so the first poll read the watch too; a non-event cannot be polled
+    // for, so give the later polls time to (wrongly) name it again.
+    const named = async (n: number): Promise<number> =>
+      (await gh.argvs()).filter((argv) => argv.includes(`n0=${n}`)).length;
+    const watchReads = await named(6);
+    const taskReads = await named(5);
+    await Bun.sleep(150);
+    expect(await named(6)).toBe(watchReads);
+    expect(await named(5)).toBeGreaterThan(taskReads);
+    expect(logs.warn).toHaveLength(1);
+    expect(seen.length).toBeGreaterThan(0);
+
+    const calls = await gh.calls();
+    now = reset + 1;
+    await gh.setReply(reply({ state: "MERGED" }), 0);
+    await pollUntil(() => events().length > 0, "the watch read after the reset");
+    expect(await gh.calls()).toBeGreaterThan(calls);
+    expect(logs.info.some((line) => line.includes("recovered"))).toBe(true);
+  });
+
+  test("a watch unread for two intervals is suspended `failed`, from the poller's own clock", async () => {
+    await gh.setReply("{}", 1);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }], 50, Date.now());
+    const { logs } = start([], { watches: registry, now: () => Date.now() });
+    await pollUntil(() => events().length > 0, "the suspension");
+    expect(events()[0]?.event).toMatchObject({ kind: "suspended", reason: "failed" });
+    expect(JSON.stringify(logs)).not.toContain(prUrl(5));
+  });
+
+  test("a spent budget parks the poll chain, and the clock still suspends the watch `limited` with the reset", async () => {
+    const reset = Date.now() + 3_600_000;
+    await gh.setReply(
+      JSON.stringify({
+        errors: [
+          {
+            type: "RATE_LIMITED",
+            code: "graphql_rate_limit",
+            message: "API rate limit already exceeded for user ID 77.",
+          },
+        ],
+      }),
+      1,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }], 50, Date.now());
+    start([], { watches: registry, now: () => Date.now(), graphqlReset: () => reset, random: () => 0 });
+    await pollUntil(() => events().length > 0, "the suspension");
+    expect(events()[0]?.event).toMatchObject({ kind: "suspended", reason: "limited", resetAt: reset });
+    // The chain is parked until the reset: one run of gh, however long the clock ran.
+    expect(await gh.calls()).toBe(1);
+  });
+
+  test("with no registry a poll reads exactly what it did before: no watch query, no clock", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    const { seen } = start([pr(5)]);
+    await pollUntil(() => seen.length > 0, "the task's reading");
+    for (const argv of await gh.argvs()) expect(argv.find((a) => a.startsWith("query="))).not.toContain("resource(");
   });
 });

@@ -7,6 +7,7 @@ import {
   PR_MERGE_STATES,
   quote,
   type GithubPr,
+  type GithubRun,
   type PrChecks,
   type PrMergeState,
   type PrState,
@@ -15,8 +16,15 @@ import {
   TASK_PHASES,
   taskPrs,
   wantsPrReading,
+  runUrlOf,
+  WATCH_CONCLUSIONS,
+  WATCH_FAILING_MAX,
+  type WatchConclusion,
+  type WatchFailing,
+  type WatchSuspendReason,
 } from "@seance/shared";
 import { askGithub, type GhAnswer, type GhFailure } from "./gh.ts";
+import type { PollerWatches, PrReading, RunReading, WatchedPr, WatchedRun } from "./watch-registry.ts";
 
 /**
  * Live PR status from the scheduler leader (DESIGN.md, "PR status"): one
@@ -55,13 +63,18 @@ export interface PrPollerOpts {
 }
 
 export interface PrPollerDeps extends PrPollerOpts {
+  /**
+   * The leader's watch registry (docs/gh-watch.md; DESIGN.md, "PR status"): what it wants read beside the tasks' PRs,
+   * and where each poll's readings go. Unset, a poll reads and writes exactly what it did before watches existed.
+   */
+  readonly watches?: PollerWatches;
   readonly tasks: () => readonly Task[];
   readonly onStatus: (taskId: string, prUrl: string, status: PrStatus) => Promise<void>;
   readonly now: () => number;
   readonly log: { info(line: string): void; warn(line: string): void };
 }
 
-const DEFAULT_INTERVAL_MS = 60_000;
+export const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_BACKOFF_MS = 15 * 60_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** Well under GraphQL's node limit; one chunk is one request against the rate limit. */
@@ -71,6 +84,13 @@ const CHUNK = 50;
  * GitHub cuts a query off at about 10 s, so these run 10 at a time.
  */
 const BLOCKED_CHUNK = 10;
+/** Run aliases per query: 50 cost one point (docs/gh-watch.md S1). */
+const RUN_CHUNK = 50;
+/**
+ * Under this many GraphQL points remaining, with the reset still ahead, a poll reads tasks' PRs only: the budget is the
+ * token's, and a task's merge must never wait on a watch (docs/gh-watch.md W8).
+ */
+const WATCH_RESERVE_POINTS = 500;
 
 type Failure = GhFailure;
 
@@ -132,6 +152,8 @@ interface Target {
     /** Primary PR of an `awaiting-merge` task not under `until: "reported"`: the only one `taskPrBlock` can name. */
     readonly wide: boolean;
   }[];
+  /** The registry's key for this PR when a watch holds it: its reading goes there as well as to its tasks. */
+  readonly watchKey?: string;
 }
 
 type WideFields = Pick<PrStatus, "head" | "required" | "failing" | "merge" | "armed" | "reviewRequested">;
@@ -207,7 +229,7 @@ function blockedQueryText(wide: readonly Wide[]): string {
   const reads = wide
     .map(
       ({ index: i }) =>
-        `b${i}: repository(owner:$o${i},name:$r${i}){ pullRequest(number:$n${i}){ mergeStateStatus isInMergeQueue autoMergeRequest{ enabledAt } reviewRequests{ totalCount } commits(last:1){ nodes{ commit{ oid statusCheckRollup{ contexts(first:50){ nodes{ __typename ... on CheckRun{ databaseId name status conclusion isRequired(pullRequestNumber:$n${i}) } ... on StatusContext{ context state isRequired(pullRequestNumber:$n${i}) } } } } } } } } }`,
+        `b${i}: repository(owner:$o${i},name:$r${i}){ pullRequest(number:$n${i}){ mergeStateStatus mergeable headRefOid isInMergeQueue autoMergeRequest{ enabledAt } reviewRequests{ totalCount } commits(last:1){ nodes{ commit{ oid statusCheckRollup{ contexts(first:50){ totalCount nodes{ __typename ... on CheckRun{ databaseId name status conclusion detailsUrl checkSuite{ databaseId } isRequired(pullRequestNumber:$n${i}) } ... on StatusContext{ context state isRequired(pullRequestNumber:$n${i}) } } } } } } } } }`,
     )
     .join(" ");
   return `query(${vars}){ ${reads} ${RATE_LIMIT_SELECTION} }`;
@@ -222,6 +244,24 @@ function blockedVariables(wide: readonly Wide[]): string[] {
     "-F",
     `n${i}=${pr.number}`,
   ]);
+}
+
+/** A watched run's read: `w<i>` is alias `i`, its URL a `URI!` variable, never in the query text. */
+function runQueryText(count: number): string {
+  const indices = Array.from({ length: count }, (_, i) => i);
+  const vars = indices.map((i) => `$u${i}:URI!`).join(",");
+  const reads = indices
+    .map(
+      (i) =>
+        `w${i}: resource(url:$u${i}){ ... on WorkflowRun{ databaseId runAttempt checkSuite{ status conclusion checkRuns(first:20, filterBy:{checkType: LATEST}){ nodes{ __typename name conclusion databaseId detailsUrl } } } } }`,
+    )
+    .join(" ");
+  return `query(${vars}){ ${reads} ${RATE_LIMIT_SELECTION} }`;
+}
+
+/** `-f` always: `-F` reads `@file`. The URL is rebuilt from the parsed id, never the session's string. */
+function runVariables(runs: readonly WatchedRun[]): string[] {
+  return runs.flatMap(({ run }, i) => ["-f", `u${i}=${runUrlOf(run)}`]);
 }
 
 function checksOf(rollup: unknown): PrChecks | undefined {
@@ -284,19 +324,24 @@ function contextOf(node: Record<string, unknown>): { readonly checks: PrChecks; 
     return { checks: checksOf(node["state"]) ?? "pending", name: node["context"] };
   }
   if (node["status"] !== "COMPLETED") return { checks: "pending", name: node["name"] };
-  switch (node["conclusion"]) {
+  return { checks: conclusionOf(node["conclusion"]), name: node["name"] };
+}
+
+/** How a finished CheckRun's conclusion counts: one classification for a task's rollup, a watch's checks and a run's jobs. */
+function conclusionOf(conclusion: unknown): PrChecks {
+  switch (conclusion) {
     case "SUCCESS":
     case "NEUTRAL":
     case "SKIPPED":
-      return { checks: "passing", name: node["name"] };
+      return "passing";
     case "FAILURE":
     case "TIMED_OUT":
     case "CANCELLED":
     case "ACTION_REQUIRED":
     case "STARTUP_FAILURE":
-      return { checks: "failing", name: node["name"] };
+      return "failing";
     default:
-      return { checks: "pending", name: node["name"] };
+      return "pending";
   }
 }
 
@@ -309,26 +354,43 @@ function contextOf(node: Record<string, unknown>): { readonly checks: PrChecks; 
  * already one per context. Each name keeps its first run's place: the failing names' cap cuts from
  * the end, and a re-run must not reorder what it cuts.
  */
-function latestRuns(nodes: readonly unknown[]): Record<string, unknown>[] {
+function latestRuns(
+  nodes: readonly unknown[],
+  keyOf: (node: Record<string, unknown>) => string,
+): Record<string, unknown>[] {
   const latest = new Map<string, { readonly id: number; readonly node: Record<string, unknown> }>();
   for (const node of nodes) {
     if (!isRecord(node) || node["__typename"] !== "CheckRun" || typeof node["name"] !== "string") continue;
     const raw = node["databaseId"];
     const id = typeof raw === "number" ? raw : -1;
-    const seen = latest.get(node["name"]);
+    const key = keyOf(node);
+    const seen = latest.get(key);
     // An equal id ties to the later run, which is always this one.
-    if (seen === undefined || id >= seen.id) latest.set(node["name"], { id, node });
+    if (seen === undefined || id >= seen.id) latest.set(key, { id, node });
   }
   const placed = new Set<string>();
   return nodes.flatMap((node): Record<string, unknown>[] => {
     if (!isRecord(node)) return [];
-    const name = node["name"];
-    if (node["__typename"] !== "CheckRun" || typeof name !== "string") return [node];
-    const winner = latest.get(name);
-    if (winner === undefined || placed.has(name)) return [];
-    placed.add(name);
+    if (node["__typename"] !== "CheckRun" || typeof node["name"] !== "string") return [node];
+    const key = keyOf(node);
+    const winner = latest.get(key);
+    if (winner === undefined || placed.has(key)) return [];
+    placed.add(key);
     return [winner.node];
   });
+}
+
+/** A task's rollup dedupes by name alone, as GitHub's merge gate does. */
+const nameKey = (node: Record<string, unknown>): string => String(node["name"]);
+
+/**
+ * A watch's judgement dedupes per (check suite, name): two workflows with a job of one name are two contexts, so a
+ * failure in one is never hidden by a success in the other. `?` stands for a suite the read did not name.
+ */
+function suiteNameKey(node: Record<string, unknown>): string {
+  const suite = node["checkSuite"];
+  const id = isRecord(suite) ? suite["databaseId"] : undefined;
+  return `${typeof id === "number" ? id : "?"}:${String(node["name"])}`;
 }
 
 /**
@@ -348,7 +410,7 @@ function requiredOf(
   let failing = false;
   let pending = false;
   const names = new Set<string>();
-  for (const node of latestRuns(nodes)) {
+  for (const node of latestRuns(nodes, nameKey)) {
     if (node["isRequired"] !== true) continue;
     any = true;
     const { checks, name } = contextOf(node);
@@ -396,6 +458,86 @@ function wideOf(pullRequest: Record<string, unknown>): WideFields {
     ...(armedOf(pullRequest) ? { armed: true as const } : {}),
     ...(reviewRequestedOf(pullRequest) ? { reviewRequested: true as const } : {}),
   };
+}
+
+/** What a watch reads of an open or draft PR: never a task's `PrStatus`, which `wideOf` alone builds. */
+interface WatchPr {
+  readonly head?: string;
+  readonly conflict: boolean;
+  readonly checks?: "pass" | "fail";
+  readonly failing: readonly WatchFailing[];
+}
+
+const JOB_URL =
+  /^https:\/\/github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})\/actions\/runs\/([1-9][0-9]{0,19})\/job\/([1-9][0-9]{0,19})$/u;
+
+/**
+ * The job a check run's `detailsUrl` names, only in the watched repo (compared case-insensitively) and rebuilt from the
+ * two id strings by whoever sends it: a repo's own URL never reaches a session as it was written.
+ */
+function jobOf(detailsUrl: unknown, owner: string, repo: string): WatchFailing["job"] | undefined {
+  if (typeof detailsUrl !== "string") return undefined;
+  const match = JOB_URL.exec(detailsUrl);
+  if (match === null) return undefined;
+  const [, urlOwner, urlRepo, run, job] = match;
+  if (run === undefined || job === undefined) return undefined;
+  if (urlOwner?.toLowerCase() !== owner.toLowerCase() || urlRepo?.toLowerCase() !== repo.toLowerCase()) {
+    return undefined;
+  }
+  return { run, job };
+}
+
+function failingOf(
+  node: Record<string, unknown>,
+  owner: string,
+  repo: string,
+  name: unknown,
+): WatchFailing | undefined {
+  const clean = cleanName(name);
+  if (clean === undefined) return undefined;
+  const job = node["__typename"] === "CheckRun" ? jobOf(node["detailsUrl"], owner, repo) : undefined;
+  return {
+    name: clean,
+    ...(node["isRequired"] === true ? { required: true as const } : {}),
+    ...(job === undefined ? {} : { job }),
+  };
+}
+
+/**
+ * A watched PR's head, conflict and checks (docs/gh-watch.md W4, S2). The head is `headRefOid`. The checks are judged
+ * over every context of the last commit, required or not, deduped per (check suite, name), and only when that
+ * commit is the head: a rollup of another commit says nothing of this one. `fail` is any failing context. `pass` is a
+ * non-empty list that is all passing, none pending (a CheckRun not completed, `STALE`, an unknown conclusion, a
+ * pending or expected status) and not truncated (`totalCount` within the nodes read). Anything else is no reading.
+ */
+function watchPrOf(pullRequest: Record<string, unknown>, pr: GithubPr): WatchPr {
+  const raw = pullRequest["headRefOid"];
+  const head = typeof raw === "string" && COMMIT_OID.test(raw) ? raw : undefined;
+  const conflict = pullRequest["mergeStateStatus"] === "DIRTY" || pullRequest["mergeable"] === "CONFLICTING";
+  const base = { ...(head === undefined ? {} : { head }), conflict };
+  const commit = commitOf(pullRequest);
+  if (commit === undefined || head === undefined || commit["oid"] !== head) return { ...base, failing: [] };
+  const rollup = commit["statusCheckRollup"];
+  const contexts = isRecord(rollup) ? rollup["contexts"] : undefined;
+  const nodes = isRecord(contexts) ? contexts["nodes"] : undefined;
+  if (!isRecord(contexts) || !Array.isArray(nodes)) return { ...base, failing: [] };
+  let anyFailing = false;
+  let pending = false;
+  const failing: WatchFailing[] = [];
+  const latest = latestRuns(nodes, suiteNameKey);
+  for (const node of latest) {
+    const { checks, name } = contextOf(node);
+    if (checks === "pending") pending = true;
+    if (checks !== "failing") continue;
+    anyFailing = true;
+    const one = failingOf(node, pr.owner, pr.repo, name);
+    if (one !== undefined && failing.length < WATCH_FAILING_MAX) failing.push(one);
+  }
+  if (anyFailing) return { ...base, checks: "fail", failing };
+  const total = contexts["totalCount"];
+  const complete = typeof total === "number" && total <= nodes.length;
+  if (latest.length > 0 && !pending && complete) return { ...base, checks: "pass", failing: [] };
+  return { ...base, failing: [] };
 }
 
 function stateOf(pullRequest: Record<string, unknown>): PrState | null {
@@ -447,12 +589,21 @@ interface Owing {
   readonly chunk: readonly Target[];
   readonly reads: readonly Read[];
   readonly wide: readonly Wide[];
+  /** The indices a task itself would have read wide: only these write the blocked fields to a task. */
+  readonly taskWide: ReadonlySet<number>;
+  /** The indices a watch holds: their blocked read also feeds the registry. */
+  readonly watched: ReadonlySet<number>;
   readonly at: number;
 }
 
 type Chunk =
   | { readonly kind: Failure }
-  | { readonly kind: "ok"; readonly reads: readonly Read[]; readonly wide: readonly Wide[] };
+  | {
+      readonly kind: "ok";
+      readonly reads: readonly Read[];
+      readonly wide: readonly Wide[];
+      readonly taskWide: ReadonlySet<number>;
+    };
 
 /** The poller's own deps: `observe` sees every answer, for the budget and for a `limited` run. */
 interface PollDeps extends PrPollerDeps {
@@ -504,8 +655,10 @@ async function readBlocked(
   deps: PollDeps,
   wide: readonly Wide[],
   onFailure: () => void,
-): Promise<ReadonlyMap<number, WideFields>> {
+  watched: ReadonlySet<number>,
+): Promise<{ readonly fields: ReadonlyMap<number, WideFields>; readonly watch: ReadonlyMap<number, WatchPr> }> {
   const fields = new Map<number, WideFields>();
+  const watch = new Map<number, WatchPr>();
   for (let from = 0; from < wide.length; from += BLOCKED_CHUNK) {
     const run = wide.slice(from, from + BLOCKED_CHUNK);
     // oxlint-disable-next-line no-await-in-loop -- runs go one after another, never overlapping
@@ -515,13 +668,15 @@ async function readBlocked(
       onFailure();
       continue;
     }
-    for (const { index } of run) {
+    for (const { index, pr } of run) {
       const repository = answer.data[`b${index}`];
       const pullRequest = isRecord(repository) ? repository["pullRequest"] : null;
-      if (isRecord(pullRequest)) fields.set(index, wideOf(pullRequest));
+      if (!isRecord(pullRequest)) continue;
+      fields.set(index, wideOf(pullRequest));
+      if (watched.has(index)) watch.set(index, watchPrOf(pullRequest, pr));
     }
   }
-  return fields;
+  return { fields, watch };
 }
 
 /**
@@ -529,7 +684,12 @@ async function readBlocked(
  * The blocked-state read (`readBlocked`) is the caller's, after every chunk's merge reading is written:
  * its latency must not hold a merge back. `wide` names the open PRs of `wideIndices` that await it.
  */
-async function readChunk(deps: PollDeps, prs: readonly GithubPr[], wideIndices: ReadonlySet<number>): Promise<Chunk> {
+async function readChunk(
+  deps: PollDeps,
+  prs: readonly GithubPr[],
+  wideIndices: ReadonlySet<number>,
+  watchedIndices: ReadonlySet<number>,
+): Promise<Chunk> {
   const answer = await ask(deps, queryText(prs.length), prVariables(prs));
   if (answer.kind !== "ok") return answer;
   const { body, data } = answer;
@@ -559,11 +719,15 @@ async function readChunk(deps: PollDeps, prs: readonly GithubPr[], wideIndices: 
     });
   });
   const wide: Wide[] = [];
+  const taskWide = new Set<number>();
   reads.forEach((read, i) => {
     const pr = prs[i];
-    if (pr !== undefined && wideIndices.has(i) && read.kind === "status" && read.state === "open") {
-      wide.push({ index: i, pr });
-    }
+    if (pr === undefined || read.kind !== "status") return;
+    const forTask = read.state === "open" && wideIndices.has(i);
+    if (forTask) taskWide.add(i);
+    // CI runs on a draft: a watch on one must see its checks. A task's draft stays unread, as before.
+    const forWatch = (read.state === "open" || read.state === "draft") && watchedIndices.has(i);
+    if (forTask || forWatch) wide.push({ index: i, pr });
   });
   const landed = await landedOnDefault(deps, landings);
   return {
@@ -574,6 +738,7 @@ async function readChunk(deps: PollDeps, prs: readonly GithubPr[], wideIndices: 
       return rest;
     }),
     wide,
+    taskWide,
   };
 }
 
@@ -610,6 +775,105 @@ function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>, read: 
   return [...byKey.values()];
 }
 
+const prKeyOf = (pr: GithubPr): string => `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase();
+
+/**
+ * Splits the registry's wanted PRs over the tasks' targets: one a task holds is marked (`watchKey`) and stays in the
+ * task chunks, sharing their aliases; the rest, in the registry's order, are watch-only, read after every task read so
+ * a watch never delays or fails one. The task list's order and content are otherwise unchanged.
+ */
+function withWatches(
+  tasks: readonly Target[],
+  watched: readonly WatchedPr[],
+): { readonly tasks: readonly Target[]; readonly watchOnly: readonly Target[] } {
+  const keys = new Map(watched.map((w) => [prKeyOf(w.pr), w.key]));
+  const held = new Set<string>();
+  const marked = tasks.map((target): Target => {
+    const key = prKeyOf(target.pr);
+    held.add(key);
+    const watchKey = keys.get(key);
+    return watchKey === undefined ? target : { ...target, watchKey };
+  });
+  const watchOnly = watched
+    .filter((w) => !held.has(prKeyOf(w.pr)))
+    .map((w): Target => ({ pr: w.pr, tasks: [], watchKey: w.key }));
+  return { tasks: marked, watchOnly };
+}
+
+/**
+ * What a chunk's merge reads tell the registry of each watched PR. An open or draft PR is told nothing yet: its head
+ * and checks come from the blocked read, and one whose blocked read fails is a PR not read (it goes unread, and the
+ * registry suspends it), never a reading with nothing in it.
+ */
+function recordMerges(chunk: readonly Target[], reads: readonly Read[], readings: Map<string, PrReading>): void {
+  chunk.forEach((target, i) => {
+    const read = reads[i];
+    if (target.watchKey === undefined || read === undefined) return;
+    if (read.kind === "none") {
+      if (read.error !== null) readings.set(target.watchKey, { kind: "unreadable" });
+      return;
+    }
+    if (read.state === "merged") readings.set(target.watchKey, { kind: "merged", stacked: read.stacked === true });
+    else if (read.state === "closed") readings.set(target.watchKey, { kind: "closed" });
+  });
+}
+
+/** The registry's reading of an open or draft PR from its blocked read. */
+function openReading(watch: WatchPr): PrReading {
+  return {
+    kind: "open",
+    conflict: watch.conflict,
+    failing: watch.failing,
+    ...(watch.head === undefined ? {} : { head: watch.head }),
+    ...(watch.checks === undefined ? {} : { checks: watch.checks }),
+  };
+}
+
+function runReadingOf(resource: unknown, run: GithubRun): RunReading {
+  if (!isRecord(resource) || typeof resource["databaseId"] !== "number") return { kind: "unreadable" };
+  const suite = resource["checkSuite"];
+  if (!isRecord(suite)) return { kind: "unreadable" };
+  if (suite["status"] !== "COMPLETED") return { kind: "running" };
+  const attempt = resource["runAttempt"];
+  const lower = typeof suite["conclusion"] === "string" ? suite["conclusion"].toLowerCase() : "";
+  const conclusion: WatchConclusion | undefined = WATCH_CONCLUSIONS.find((c) => c === lower);
+  if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1 || conclusion === undefined) {
+    return { kind: "running" };
+  }
+  const checkRuns = suite["checkRuns"];
+  const nodes = isRecord(checkRuns) ? checkRuns["nodes"] : undefined;
+  const failing: WatchFailing[] = [];
+  if (Array.isArray(nodes)) {
+    for (const node of latestRuns(nodes, nameKey)) {
+      if (conclusionOf(node["conclusion"]) !== "failing" || failing.length >= WATCH_FAILING_MAX) continue;
+      const one = failingOf(node, run.owner, run.repo, node["name"]);
+      if (one !== undefined) failing.push(one);
+    }
+  }
+  return { kind: "completed", attempt, conclusion, failing };
+}
+
+/**
+ * The watched runs, `RUN_CHUNK` to a query. A `limited` answer stops the rest. Any other failed chunk leaves its runs
+ * unread this poll and is no poll failure: a broken run read must not back off the tasks' PR reads, and the registry
+ * suspends what stays unread. Logs nothing: a run's URL is a session's word.
+ */
+async function readRuns(
+  deps: PollDeps,
+  runs: readonly WatchedRun[],
+  readings: Map<string, RunReading>,
+): Promise<"ok" | "limited"> {
+  for (let from = 0; from < runs.length; from += RUN_CHUNK) {
+    const chunk = runs.slice(from, from + RUN_CHUNK);
+    // oxlint-disable-next-line no-await-in-loop -- chunks go one after another, never overlapping
+    const answer = await ask(deps, runQueryText(chunk.length), runVariables(chunk));
+    if (answer.kind === "limited") return "limited";
+    if (answer.kind !== "ok") continue;
+    chunk.forEach(({ key, run }, i) => readings.set(key, runReadingOf(answer.data[`w${i}`], run)));
+  }
+  return "ok";
+}
+
 /**
  * Polls on a timer chain — one poll at a time — starting now. A failing poll
  * (no `gh`, not logged in, a timeout, garbage) writes nothing, warns once on
@@ -626,13 +890,16 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   const random = deps.random ?? Math.random;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let clock: ReturnType<typeof setInterval> | null = null;
   let state: "ok" | Failure = "ok";
   let failures = 0;
   const unreadable = new Set<string>();
   const readThisTerm = new Set<string>();
   let blockedFailed = false;
-  // The newest in-query reading this term; docs/gh-watch.md W8's reserve for tasks will read `remaining`.
+  // The newest in-query reading this term; docs/gh-watch.md W8's reserve for tasks reads `remaining`.
   let budget: GraphqlBudget | null = null;
+  /** The reserve for tasks holds: watched targets are not read until the budget recovers. */
+  let reserveHeld = false;
   // Set by any run of the poll in flight that GitHub refused for its rate limit.
   let limited = false;
   /** The current `limited` stay has warned with a reset time. */
@@ -697,13 +964,15 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
 
   /** The writes for one owed chunk's open PRs; without `fields` they carry the base reading only. */
   const owed = (
-    { chunk, reads, wide, at }: Owing,
+    { chunk, reads, wide, taskWide, at }: Owing,
     fields: ReadonlyMap<number, WideFields> | undefined,
   ): Promise<void>[] =>
     wide.flatMap(({ index }) => {
       const target = chunk[index];
       const read = reads[index];
-      return target === undefined || read === undefined ? [] : write(target, read, at, fields?.get(index));
+      if (target === undefined || read === undefined) return [];
+      // A watch never changes a task's record: only an index the task itself would have read wide carries the fields.
+      return write(target, read, at, taskWide.has(index) ? fields?.get(index) : undefined);
     });
 
   /**
@@ -711,22 +980,31 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
    * pushed on `owing`: it runs once every chunk's merge reading is written, so a slow or stalled one delays only
    * the chip fields it adds, never a merge (or the dependents it releases).
    */
-  async function readAll(wanted: readonly Target[], owing: Owing[]): Promise<"ok" | Failure | null> {
+  async function readAll(
+    wanted: readonly Target[],
+    owing: Owing[],
+    prReadings: Map<string, PrReading>,
+  ): Promise<"ok" | Failure | null> {
     // A finished task's read is spent only once every chunk answered: its PRs may sit in several.
     const spent = new Set<string>();
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
+      const watched = new Set(chunk.flatMap((target, i) => (target.watchKey === undefined ? [] : [i])));
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
       const answer = await readChunk(
         pollDeps,
         chunk.map((target) => target.pr),
         new Set(chunk.flatMap((target, i) => (target.tasks.some((task) => task.wide) ? [i] : []))),
+        watched,
       );
       if (stopped) return null;
       if (answer.kind !== "ok") return answer.kind;
       const at = deps.now();
+      recordMerges(chunk, answer.reads, prReadings);
       const waiting = new Set(answer.wide.map(({ index }) => index));
-      if (waiting.size > 0) owing.push({ chunk, reads: answer.reads, wide: answer.wide, at });
+      if (waiting.size > 0) {
+        owing.push({ chunk, reads: answer.reads, wide: answer.wide, taskWide: answer.taskWide, watched, at });
+      }
       const writes: Promise<void>[] = [];
       chunk.forEach((target, i) => {
         const read = answer.reads[i];
@@ -753,8 +1031,12 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     for (const id of spent) readThisTerm.add(id);
     for (let next = owing[0]; next !== undefined; next = owing[0]) {
       // oxlint-disable-next-line no-await-in-loop -- as above
-      const fields = await readBlocked(pollDeps, next.wide, blockedFailure);
+      const { fields, watch } = await readBlocked(pollDeps, next.wide, blockedFailure, next.watched);
       if (stopped) return null;
+      for (const [index, reading] of watch) {
+        const key = next.chunk[index]?.watchKey;
+        if (key !== undefined) prReadings.set(key, openReading(reading));
+      }
       // Off `owing` before its write: `poll`'s flush must not retry a rejected one, which could overwrite a
       // sibling that landed with its fields.
       owing.shift();
@@ -767,20 +1049,99 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     return "ok";
   }
 
+  /**
+   * The PRs only a watch holds, after every task chunk and every task's blocked read. A failed slice (anything but
+   * `limited`) is skipped: it calls no `enter` and no `blockedFailure`, owes nothing to a task and logs nothing, so no
+   * class or backoff changes; the registry suspends those watches once they stay unread. `limited` is the token's
+   * budget, so nothing more is asked this poll. Null when stopped.
+   */
+  async function readWatchOnly(
+    watchOnly: readonly Target[],
+    prReadings: Map<string, PrReading>,
+  ): Promise<"ok" | "limited" | null> {
+    for (let from = 0; from < watchOnly.length; from += CHUNK) {
+      const slice = watchOnly.slice(from, from + CHUNK);
+      const all = new Set(slice.map((_target, i) => i));
+      // oxlint-disable-next-line no-await-in-loop -- slices go one after another, never overlapping
+      const answer = await readChunk(
+        pollDeps,
+        slice.map((target) => target.pr),
+        new Set(),
+        all,
+      );
+      if (stopped) return null;
+      if (answer.kind === "limited") return "limited";
+      if (answer.kind !== "ok") continue;
+      recordMerges(slice, answer.reads, prReadings);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const { watch } = await readBlocked(pollDeps, answer.wide, () => undefined, all);
+      if (stopped) return null;
+      for (const [index, reading] of watch) {
+        const key = slice[index]?.watchKey;
+        if (key !== undefined) prReadings.set(key, openReading(reading));
+      }
+      if (limited) return "limited";
+    }
+    return "ok";
+  }
+
+  /** Logs the reserve once per stay, without a URL: the poller's class changes are the only thing a watch may log. */
+  const noteReserve = (held: boolean): void => {
+    if (deps.watches === undefined || held === reserveHeld) return;
+    reserveHeld = held;
+    if (held && budget !== null) {
+      deps.log.warn(
+        `pr-status: GitHub's GraphQL budget is under ${WATCH_RESERVE_POINTS} points; watched targets wait until ${new Date(budget.resetAt).toISOString()} (reserve)`,
+      );
+    } else if (!held) deps.log.info("pr-status: GitHub's budget recovered — watched targets resumed");
+  };
+
   /** The class the poll ended in, or null when there was nothing to poll. */
   async function poll(): Promise<"ok" | Failure | null> {
     limited = false;
-    const wanted = targets(deps.tasks(), unreadable, readThisTerm);
-    if (wanted.length === 0) return null;
+    const now = deps.now();
+    const reserve =
+      deps.watches !== undefined && budget !== null && budget.remaining < WATCH_RESERVE_POINTS && now < budget.resetAt;
+    noteReserve(reserve);
+    const watched = deps.watches === undefined || reserve ? { prs: [], runs: [] } : deps.watches.wanted(now);
+    const { tasks: wanted, watchOnly } = withWatches(targets(deps.tasks(), unreadable, readThisTerm), watched.prs);
+    if (wanted.length === 0 && watchOnly.length === 0 && watched.runs.length === 0) return null;
     const owing: Owing[] = [];
+    const prReadings = new Map<string, PrReading>();
+    const runReadings = new Map<string, RunReading>();
     try {
-      return await readAll(wanted, owing);
+      const outcome = await readAll(wanted, owing, prReadings);
+      if (outcome !== "ok") return outcome;
+      if (watchOnly.length > 0) {
+        const read = await readWatchOnly(watchOnly, prReadings);
+        if (read === null) return null;
+        if (read === "limited") return "limited";
+      }
+      if (watched.runs.length > 0) {
+        const read = await readRuns(pollDeps, watched.runs, runReadings);
+        if (stopped) return null;
+        if (read === "limited" || limited) return "limited";
+      }
+      return "ok";
     } finally {
       // A later chunk's failure or a rejected write must not take an earlier chunk's open readings with it: they go
       // out as the base reading, as before blocked state existed, and the blocked fields wait for the next poll.
       if (!stopped) await Promise.allSettled(owing.flatMap((entry) => owed(entry, undefined)));
+      // Whatever was read, a partial poll's included: a watch is judged on its own readings.
+      if (!stopped) deps.watches?.read({ prs: prReadings, runs: runReadings }, deps.now());
     }
   }
+
+  /** Why a watch unread for two intervals is suspended: the poller's class, else the reserve, else a read that failed. */
+  const suspendReason = (): WatchSuspendReason => {
+    if (state !== "ok") return state;
+    return reserveHeld ? "reserve" : "failed";
+  };
+
+  const suspendReset = (): number | null => {
+    if (state === "limited") return resetAt(deps.now());
+    return state === "ok" && reserveHeld ? (budget?.resetAt ?? null) : null;
+  };
 
   const schedule = (delay: number): void => {
     if (stopped) return;
@@ -816,11 +1177,17 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   }
 
   void run();
+  // Its own clock: a `limited` wait parks the poll chain for up to an hour, and a suspension must still go out.
+  if (deps.watches !== undefined) {
+    clock = setInterval(() => deps.watches?.tick(deps.now(), suspendReason(), suspendReset()), intervalMs);
+  }
   return {
     stop: () => {
       stopped = true;
       if (timer !== null) clearTimeout(timer);
       timer = null;
+      if (clock !== null) clearInterval(clock);
+      clock = null;
     },
   };
 }
