@@ -476,7 +476,10 @@ describe("add", () => {
     expect(b).toMatchObject({ ok: true });
     const ids = [a, b].map((reply) => ("id" in reply ? reply.id : ""));
     expect(ids[0]).not.toBe(ids[1]);
-    expect(idsOf(r.latest())).toEqual([ids[1]]);
+    // Whichever bound first ran first (the peer's binding reads the process table): the other replaced it.
+    const [survivor, ...rest] = idsOf(r.latest());
+    expect(rest).toEqual([]);
+    expect(ids.filter((id) => id === survivor)).toHaveLength(1);
     expect(lineCount(r, "reason=replaced")).toBe(1);
   });
 
