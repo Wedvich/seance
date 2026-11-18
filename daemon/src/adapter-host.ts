@@ -30,7 +30,7 @@ import type { AdapterDeliveryContext, AdapterOutlet, AdapterOutletAnswer, Messag
  * The adapters `config.json` names (DESIGN.md, "Adapters"): one supervised child each, fed the
  * one state feed. An adapter is declared only in this machine's own `config.json`, never from a frame, the PWA, MCP or
  * another machine, and nothing about it crosses the relay. With `repos` set, an adapter sees only the sessions whose
- * `repo` it lists and the tasks launched in them (§6.2); an untasked session outside every known repo has no `repo`
+ * `repo` it lists and the tasks launched in them ("Adapters", the state feed); an untasked session outside every known repo has no `repo`
  * and is out of scope too. Every session's `tags` reach it less any other adapter's `adapter.*` namespace.
  *
  * Text in and out (3b): an adapter's `deliver` goes through messages' local delivery, bounded by its `kinds` and

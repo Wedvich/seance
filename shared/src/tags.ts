@@ -11,8 +11,8 @@ import {
  * Tags: one vocabulary for every writer and reader (DESIGN.md, "Tags and session identity"). A tag is a key in a writer's namespace and a
  * short printable value. The namespace is the access rule: the path a write arrives on decides it, so every write
  * carries bare suffixes (`writeTags`), and only what a writer builds itself, and every read-side view, holds full
- * keys. No tag binds, routes, places, settles, alerts, authorizes or moves anything (§2.2); the one exception, a
- * verified `agent.session` addressing adapter delivery, is the daemon's (§8), never a reader's of this module.
+ * keys. No tag binds, routes, places, settles, alerts, authorizes or moves anything ("What every tag is not"); the one exception, a
+ * verified `agent.session` addressing adapter delivery, is the daemon's ("Adapters", "The subscription"), never a reader's of this module.
  */
 
 /** A key's suffix, and an adapter's name (#486's pattern). */
@@ -126,7 +126,7 @@ const REFUSED_PAST_CAP: ReadonlySet<string> = new Set(["creator.ref-url"]);
 /** Namespaces that accept their known keys alone (`seance.*` and `scheduler.*` have none in v1: reserved). */
 const KNOWN_ONLY: ReadonlySet<TagNamespace> = new Set(["agent", "seance", "self", "scheduler"]);
 
-/** The scopes each namespace's keys live at; `agent.remote` is the process's (one bridge per process, §1). */
+/** The scopes each namespace's keys live at; `agent.remote` is the process's (one bridge per process, "Three levels and the task"). */
 function scopesOf(namespace: TagNamespace, suffix: string): readonly TagScope[] {
   switch (namespace) {
     case "agent":
@@ -220,7 +220,7 @@ export function sessionTagsFit(keys: readonly string[]): boolean {
 }
 
 /**
- * The keys another agent's context may see (MCP's `get_sessions` and `get_queue`, §6.3): by writer, and narrow. Never
+ * The keys another agent's context may see (MCP's `get_sessions` and `get_queue`, "Another agent's context"): by writer, and narrow. Never
  * `agent.session` (no reader needs another session's conversation id, and it only helps one claim another's), and
  * never a tag a session or a tool chose (`self.*`, `adapter.*`, an opaque `creator.*` suffix, `creator.ref-url`).
  */
@@ -343,7 +343,7 @@ export function displayName(
 export const TASK_TAG_NAMESPACES = ["creator", "owner", "scheduler"] as const;
 export type TaskTagNamespace = (typeof TASK_TAG_NAMESPACES)[number];
 
-/** The two keys that name where a task came from: what the archivist keeps and what a spawn carries (§5.1, §6.1). */
+/** The two keys that name where a task came from: what the archivist keeps and what a spawn carries ("Task tags"). */
 export const REF_TAG_KEYS = ["creator.ref", "creator.ref-url"] as const;
 
 function isTaskNamespace(value: string): value is TaskTagNamespace {
@@ -404,7 +404,7 @@ export function refTags(ref: string, url?: string): Readonly<Record<string, stri
 
 /**
  * A legacy `linear` as the `creator.*` tags that replace it (full keys), or null when the issue or its URL fails the
- * ref's rules: a writer then keeps writing `linear` (§5.4).
+ * ref's rules: a writer then keeps writing `linear` ("Task tags").
  */
 export function linearRefTags(linear: LinearLink): Readonly<Record<string, string>> | null {
   const written = creatorTaskTags(refTags(`linear:${linear.issue}`, linear.url));
@@ -444,7 +444,7 @@ export function chainTags(
 
 /**
  * A task's ref as a spawn carries it (`SpawnRequest.ref`): `creator.ref`, and `creator.ref-url` as `url` beside it;
- * undefined without a ref. Never a legacy `linear` (mapped at the join only, §5.4), never another tag.
+ * undefined without a ref. Never a legacy `linear` (mapped at the join only, "The join and the name"), never another tag.
  */
 export function taskRef(
   tags: Readonly<Record<string, string>> | undefined,
@@ -477,7 +477,7 @@ export function withoutTaskTags<T extends { readonly tags?: unknown }>(spec: T):
  * A task's tags as the join's task layer: every entry of `spec.tags`, each at the task's creation time (a record holds
  * no per-key time, so an amended `owner.label` shows the task's age). A legacy `linear` with no `creator.ref` of its
  * own reads as `creator.ref` = `linear:<issue>` and, with a URL, `creator.ref-url`: mapped here only, never parsed
- * (§5.4) and never written back.
+ * ("The join and the name") and never written back.
  */
 export function taskTagEntries(
   spec: { readonly tags?: Readonly<Record<string, string>>; readonly linear?: LinearLink },
