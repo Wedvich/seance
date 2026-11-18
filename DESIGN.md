@@ -5150,8 +5150,8 @@ for the lot with its own `gh`.
   newest `databaseId` per name. A run is `completed` once its check suite is, with its `runAttempt` and a conclusion
   from `WATCH_CONCLUSIONS`; anything else is `running`.
   - **S1 (2026-11-18):** 50 aliases cost 1 point with and without `checkRuns(first:20)` (and with `runAttempt`), so
-    the failing jobs are read in the same query and no fourth query exists. A blocked read of 10 PRs costs 1 point with
-    or without `detailsUrl`. The first live `rateLimit.cost` with `filterBy` is still to be recorded.
+    the failing jobs are read in the same query and no fourth query exists; with `filterBy:{checkType: LATEST}` as
+    built, 50 aliases still cost 1 point. A blocked read of 10 PRs costs 1 point with or without `detailsUrl`.
   - An unseeable or nonexistent run answers a `null` alias with no `errors` entry and `gh` exit 0, unlike a PR's
     `NOT_FOUND`.
   - `resource(url:)` is reliable, so the REST and ETag fallback is not needed. A run read that fails is no poll
