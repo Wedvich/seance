@@ -54,7 +54,7 @@ describe("the message paths that run where stdout is a protocol channel", () => 
  * that would put it there cannot be written without failing here.
  */
 describe("the modules that hold session tags", () => {
-  for (const entry of ["conversations.ts", "agent-session-file.ts", "claude-process.ts"]) {
+  for (const entry of ["conversations.ts", "conversation-store.ts", "agent-session-file.ts", "claude-process.ts"]) {
     test(`${entry} loads neither log.ts nor audit.ts`, async () => {
       const reached = await closure(entry);
       expect(reached.has(entry)).toBe(true);
