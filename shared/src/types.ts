@@ -41,11 +41,14 @@ export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING
  * Plaintext `register.roles` values — the one capability the relay itself
  * reads. `scheduler`: the daemon may be nominated leader. `archivist`: the
  * fleet's one history seat (DESIGN.md, "Archivist"), honoured only from the id on
- * the relay's `ARCHIVIST` secret and never beside `scheduler`. Only a v2
+ * the relay's `ARCHIVIST` secret and never beside `scheduler`. `fallback`, only
+ * beside `scheduler`: nominate this daemon only when no eligible daemon without
+ * it is connected — a closed machine that has emptied (DESIGN.md, "Closing a
+ * machine", "A closed, empty machine leads only as a fallback"). Only a v2
  * register (signature over the roles) carries them; the relay acts on no other
  * value, and accepts an unknown one only so the signature covering it still verifies.
  */
-export const DAEMON_ROLES = { scheduler: "scheduler", archivist: "archivist" } as const;
+export const DAEMON_ROLES = { scheduler: "scheduler", archivist: "archivist", fallback: "fallback" } as const;
 
 export type DaemonRole = (typeof DAEMON_ROLES)[keyof typeof DAEMON_ROLES];
 

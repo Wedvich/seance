@@ -56,7 +56,13 @@ export interface RelayClientOpts {
    * roleless register would admit it as an ordinary machine — and never
    * proves a `lead`, which the relay sends only to a scheduler candidate.
    */
-  readonly role?: DaemonRole;
+  readonly role?: Exclude<DaemonRole, typeof DAEMON_ROLES.fallback>;
+  /**
+   * Read at every register a scheduler candidate builds: true signs `fallback` beside `scheduler`, so the
+   * relay nominates this daemon only when no eligible one without it is connected (a closed machine that
+   * emptied: `lead-fallback.ts`). Kept across redials, unlike `resign`; the caller `reRegister`s on a change.
+   */
+  readonly fallback?: () => boolean;
   /** Fresh encrypted machine-info blob — called on every register. */
   readonly buildInfo: () => Promise<Envelope>;
   /**
@@ -121,7 +127,7 @@ export class RelayClient {
     >
   > &
     RelayClientOpts;
-  readonly #role: DaemonRole;
+  readonly #role: Exclude<DaemonRole, typeof DAEMON_ROLES.fallback>;
   readonly #guard = new ReplayGuard();
   /** Store requests awaiting their reply, by id; each is bound to the socket it left on. */
   readonly #storePending = new Map<
@@ -442,6 +448,13 @@ export class RelayClient {
     return next;
   }
 
+  #rolesClaimed(): readonly string[] {
+    if (this.#role === DAEMON_ROLES.scheduler && this.#opts.fallback?.() === true) {
+      return [this.#role, DAEMON_ROLES.fallback];
+    }
+    return [this.#role];
+  }
+
   async #sendRegister(ws: WebSocket | null): Promise<boolean> {
     if (ws === null || this.#ws !== ws) return false;
     const { identity } = this.#opts;
@@ -451,7 +464,7 @@ export class RelayClient {
     const ts = Date.now();
     // Every daemon may lead: the relay nominates among those that say so. A
     // resigned one still signs v2, over no roles — explicit, not merely absent.
-    const roles = this.#signV1 ? undefined : this.#resigned ? [] : [this.#role];
+    const roles = this.#signV1 ? undefined : this.#resigned ? [] : this.#rolesClaimed();
     const frame: DaemonFrame = {
       t: "register",
       deviceId: identity.deviceId,

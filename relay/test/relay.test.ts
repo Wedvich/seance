@@ -1093,7 +1093,7 @@ describe("scheduler leadership", () => {
   beforeAll(async () => {
     // Same settle as the sweep suite: the previous suite's dispose() just ran.
     await Bun.sleep(500);
-    listed.push(...(await Promise.all(Array.from({ length: 22 }, () => newDeviceId()))));
+    listed.push(...(await Promise.all(Array.from({ length: 24 }, () => newDeviceId()))));
     padded = await newDeviceId();
     const junk = ["", "  ", "not an id!", "x".repeat(65), SCHEDULER_ID, APP_ID];
     hub = await startRelay(TOKEN, {
@@ -1471,6 +1471,35 @@ describe("scheduler leadership", () => {
 
     await leave(app, b.daemon, bId);
     await leave(app, a.daemon, aId);
+    app.close();
+  });
+
+  // A closed machine that emptied re-registers with `fallback` beside `scheduler` (DESIGN.md, "Closing a machine").
+  test("a leader that signs fallback keeps the role alone, hands it over when a listed one joins, and gets it back", async () => {
+    const app = await connectApp(hub);
+    const closedId = listedId();
+    const openId = listedId();
+    const closed = await join(app, closedId, { roles: SCHEDULER });
+    const { term } = await closed.daemon.waitFor<LeadFrame>("lead");
+
+    // Nobody else can lead: the re-register moves nothing.
+    closed.daemon.send(await register(closedId, { roles: [...SCHEDULER, "fallback"] }));
+    expect((await nextRegistry(app, connected(closedId, true))).scheduler).toEqual({ deviceId: closedId, term });
+    await closed.daemon.expectNo("follow");
+
+    const opened = await join(app, openId, { roles: SCHEDULER });
+    expect(await opened.daemon.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 1 });
+    expect(await closed.daemon.waitFor("follow")).toEqual({ t: "follow" });
+    expect(opened.registry.scheduler).toEqual({ deviceId: openId, term: term + 1 });
+
+    expect((await leave(app, opened.daemon, openId)).scheduler).toEqual({ deviceId: closedId, term: term + 2 });
+    expect(await closed.daemon.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 2 });
+    await pollUntil(
+      () => hub.logs().some((line) => line.includes(`registered ${closedId} (scheduler fallback)`)),
+      "the fallback register's line",
+    );
+
+    await leave(app, closed.daemon, closedId);
     app.close();
   });
 

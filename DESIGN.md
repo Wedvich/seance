@@ -2408,7 +2408,8 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   roleless: the relay never guesses which half of a frame to believe. Roles stay raw strings on
   the wire, bounded like ids (≤8, id charset, so neither separator can appear), because the
   signature covers the list as sent and a role minted later must still verify; the hub keeps only
-  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises `scheduler`.
+  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises `scheduler`; a closed one
+  that emptied adds `fallback` (nomination, below; "Closing a machine").
   A daemon whose v2 register is refused signs its next one v1 and alternates from there
   (`#signV1` in `daemon/src/relay-client.ts`), so a daemon that self-updated ahead of its relay's
   deploy gets in roleless instead of being locked out; any other refusal cause fails both alike.
@@ -2416,7 +2417,9 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
 - **Nomination is a pure function**, `nominate(candidates, current, leaders)`: the connected,
   registered daemons' `{ deviceId, roles, connectedAt }` — one per id, its newest socket's — the
   current leader and the allowlist in, the next leader (or null) out. Eligible is capable _and_
-  listed. A current leader that is still eligible keeps the role, even across its own reconnect;
+  listed. Within the eligible, those that also signed `fallback` count only while no other is
+  connected (built 2026-11-18, "Closing a machine", "A closed, empty machine leads only as a fallback").
+  A current leader that is still eligible keeps the role, even across its own reconnect;
   otherwise the earliest `connectedAt` wins, ties to the lowest `deviceId`. Stickiness matters only in the race where a leader's new socket registers
   before its old one's close is processed — without it the role would move to whoever has sat
   connected longest on every redial. Its suite (`relay/test/leadership.test.ts`) needs no workerd, and
@@ -8874,8 +8877,9 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
     The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
     `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
     row, `--wait` and `list_machines`' `drain` (below); item 3 adds `now` and the ask's wording.
-- **A closed leader keeps leading** (docs/drain.md §6). The drain's passes need a leader, and moving the term
-  mid-drain only adds a takeover; it stops leading when it leaves. So closing the leader warns that the queue
+- **A closed leader keeps leading until it is empty** (docs/drain.md §6). The drain's passes need a leader, and
+  moving the term mid-drain only adds a takeover; once empty it leads only as a fallback (next bullet). Until then,
+  and after it if no other machine can lead, it stops leading when it leaves. So closing the leader warns that the queue
   goes down with the box: the close sheet ends with, and `seance close` and `set_machine_open` append on a line
   of its own to any close that stands (fresh or already closed; never a reopen), `leaderCloseNote` ("<name> runs
   the queue: while it is down, the queue stops unless another machine can take over"), one text in
@@ -8886,7 +8890,49 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
   one nominee, the relay keeps the signed `roles` (every daemon claims `scheduler`) and its `SCHEDULER_LEADERS`
   list, so no client can see a standby. _Rejected:_ counting connected machines as standbys (every one claims the
   role, so it would hide the warning on a fleet with no other allowlisted id — the wrong direction), and a relay
-  push of the standby count (a relay and wire change for one sentence; kept as the way to sharpen it).
+  push of the standby count (a relay and wire change for one sentence; kept as the way to sharpen it). The note is
+  unchanged by the fallback below: it is still true (the queue stops while the box is down unless another machine
+  can lead, the fallback only moving the term earlier when one can), and a client cannot tell whether the relay
+  and the leader both run the fallback.
+- **A closed, empty machine leads only as a fallback** (docs/drain.md §6's "Later"; built 2026-11-18,
+  `daemon/src/lead-fallback.ts`). Once a closed machine is empty, every register it sends signs the role
+  `fallback` beside `scheduler` (`DAEMON_ROLES.fallback`, v2, so the signature covers it), and `nominate` counts a
+  candidate carrying it only while no eligible candidate without it is connected ("Leadership", above): a leader
+  that re-registers so hands the term to the earliest-connected open nominee at once (`lead`/`follow`, a new
+  term), takes it back if the last of them leaves, and loses it again when one returns, each on the relay's own
+  register, close or sweep. A fleet with no other nominee keeps its closed leader, as before.
+  - **Empty is the daemon's own fact:** the status loop's sessions read (the list `drainView` and the `drain:
+    empty` line read; any listed pane counts, a hand-started session too) shows no pane while closed at `cl`, read
+    unchanged around the list (`watchedSessions`), and no task launch is in flight (`EndedTasks.launching`: a
+    launch accepted before the close whose pane is not listed yet). A failed read decides nothing.
+  - **Once per `cl`, never thrashing:** set at the first empty read under a `cl`, it holds until `cl` changes, even
+    if a pane appears again meanwhile (a session started by hand). A reopen drops it at once (the `availability`
+    handler, not the next read) and the next register claims plain `scheduler`; it takes nothing back, since a
+    current leader keeps the role while eligible. A reopen and a new close must empty afresh. Memory only: a
+    restart while closed registers plain `scheduler` and may lead until its first read finds the box empty, a
+    takeover per restart. Logged once each way (`scheduler: closed and empty (cl=…), registering as a fallback
+    leader`, `… claiming the scheduler role plainly`), and the relay's `registered` line carries
+    `(scheduler fallback)`.
+  - **Why the relay decides "another nominee is connected":** the allowlist (`SCHEDULER_LEADERS`) is the relay's
+    secret and no op exposes it, the registry push names only the current nominee, and every daemon claims
+    `scheduler`, so a daemon cannot tell a standby from an unlisted machine. Ranking in `nominate` uses exactly
+    the inputs that decide leadership already, moves the term back if the standby leaves, and needs no new frame,
+    op or capability.
+  - **Skew.** An older relay keeps only the roles it knows (`knownRoles`), so it reads the fallback register as
+    plain `scheduler` and the closed machine keeps leading: today's behaviour. The v2 signature still verifies,
+    since it covers the list as sent. An older daemon never sends the role, which the new relay reads as before.
+    A daemon admitted v1 (its relay a deploy behind) signs no roles at all and is not a candidate anyway. No
+    client reads roles, and no `CAPABILITIES` flag is added: nothing is offered or refused on it.
+  - **Threat model.** The role is only ever a demotion: it can make the relay prefer another listed, verified
+    daemon, never nominate an unlisted one or one without `scheduler`. Only the machine's key signs it (a register
+    moves only its own socket), and it reaches the relay only as signed `roles`; no field of any other frame sets
+    it, and it is on no local op, broker action or MCP tool.
+  - _Rejected:_ registering with no roles (the suggested shape: with no other nominee connected the queue would
+    have no leader until the daemon noticed and re-claimed, and it could never learn that one connected later
+    without re-claiming on every registry change), the daemon deciding from the registry which machines could lead
+    (it cannot see the allowlist), stepping down before empty (moving the term mid-drain only adds a takeover to
+    the drain's passes), persisting the mark (one takeover per restart is cheap, and a mark surviving a missed
+    reopen would hold leadership away from an open box), and a new `CAPABILITIES` flag (no client acts on it).
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
   sealed and replay-guarded, answered only for an app, and audited. A soft close does strictly less than a close.
 - **Skew and rollback (soft close).** Daemons self-update independently and any may lead. An old leader passes on

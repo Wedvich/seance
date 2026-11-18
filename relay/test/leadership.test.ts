@@ -17,7 +17,22 @@ function daemon(deviceId: string, connectedAt: number, roles: readonly string[] 
 }
 
 /** Every id the suites below use, so the allowlist stays out of the way of the rules it does not decide. */
-const ALL = new Set(["a", "b", "c", "k", "m", "Z", "old", "new", "other", "early", "leader"]);
+const ALL = new Set([
+  "a",
+  "b",
+  "c",
+  "k",
+  "m",
+  "Z",
+  "old",
+  "new",
+  "other",
+  "early",
+  "leader",
+  "closed",
+  "open",
+  "roleless",
+]);
 
 describe("nominate", () => {
   test("the earliest-connected capable daemon leads, wherever it sits in the list", () => {
@@ -46,6 +61,33 @@ describe("nominate", () => {
     expect(nominate([daemon("b", 300), daemon("a", 200)], "gone", ALL)).toBe("a");
     expect(nominate([daemon("leader", 100, []), daemon("b", 300)], "leader", ALL)).toBe("b");
     expect(nominate([daemon("leader", 100, [])], "leader", ALL)).toBeNull();
+  });
+});
+
+describe("nominate, with fallbacks", () => {
+  const FALLBACK = ["scheduler", "fallback"];
+
+  test("a leader that signs fallback hands the role to a connected eligible one without it, however late it came", () => {
+    expect(nominate([daemon("closed", 1, FALLBACK), daemon("open", 900)], "closed", ALL)).toBe("open");
+  });
+
+  test("with no other eligible candidate a fallback keeps leading, or leads", () => {
+    expect(nominate([daemon("closed", 1, FALLBACK)], "closed", ALL)).toBe("closed");
+    expect(nominate([daemon("closed", 1, FALLBACK)], null, ALL)).toBe("closed");
+    // Unlisted or roleless candidates do not count as someone else who can lead.
+    expect(nominate([daemon("closed", 500, FALLBACK), daemon("squatter", 1)], "closed", new Set(["closed"]))).toBe(
+      "closed",
+    );
+    expect(nominate([daemon("closed", 500, FALLBACK), daemon("roleless", 1, [])], "closed", ALL)).toBe("closed");
+  });
+
+  test("among fallbacks only, a current leader keeps the role and otherwise the earliest wins", () => {
+    expect(nominate([daemon("a", 1, FALLBACK), daemon("b", 900, FALLBACK)], "b", ALL)).toBe("b");
+    expect(nominate([daemon("b", 900, FALLBACK), daemon("a", 1, FALLBACK)], "gone", ALL)).toBe("a");
+  });
+
+  test("fallback without scheduler is not capable", () => {
+    expect(nominate([daemon("a", 1, ["fallback"])], null, ALL)).toBeNull();
   });
 });
 

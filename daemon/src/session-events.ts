@@ -544,6 +544,11 @@ export class EndedTasks {
     if (!this.#final) this.#setClosed(false);
   }
 
+  /** A task launch accepted and not yet over, or its handler's reply not yet out: its pane may not be listed yet. */
+  get launching(): boolean {
+    return this.#inFlight.size + this.#holds.size > 0;
+  }
+
   /** True while task launches are refused (`LaunchesClosed`): what routing reads as draining. */
   get draining(): boolean {
     return this.#closed;
