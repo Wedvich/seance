@@ -12,6 +12,7 @@ import type {
   TagFrame,
 } from "@seance/shared";
 import { ADAPTER_FEATURES, ADAPTER_LINE_MAX, ADAPTER_PROTOCOLS, encodeDaemonFrame } from "@seance/shared";
+import type { AdapterView } from "./adapter-control.ts";
 import type { AdapterFeed, FeedFrame } from "./adapter-feed.ts";
 import { adapterFingerprint, type Subscriptions } from "./adapter-subscriptions.ts";
 import {
@@ -26,7 +27,7 @@ import type { Conversations } from "./conversations.ts";
 import type { AdapterDeliveryContext, AdapterOutlet, AdapterOutletAnswer, Messages } from "./messages.ts";
 
 /**
- * The adapters `config.json` names (docs/messaging.md §6; DESIGN.md, "Adapters"): one supervised child each, fed the
+ * The adapters `config.json` names (DESIGN.md, "Adapters"): one supervised child each, fed the
  * one state feed. An adapter is declared only in this machine's own `config.json`, never from a frame, the PWA, MCP or
  * another machine, and nothing about it crosses the relay. With `repos` set, an adapter sees only the sessions whose
  * `repo` it lists and the tasks launched in them (§6.2); an untasked session outside every known repo has no `repo`
@@ -56,12 +57,18 @@ export interface AdapterHostDeps extends SupervisorTiming {
   readonly subscriptions?: Subscriptions;
   /** The launch's time when this machine's ledger holds the task (a `tag` by task names only such a task). */
   readonly launchedAt?: (taskId: string) => number | undefined;
+  /** What `view` returns moved: an adapter's state, process or counts. */
+  readonly onChange?: () => void;
 }
 
 export interface AdapterHost {
   /** Starts every adapter not held; call again when the hold lifts. */
   readonly start: () => void;
   readonly state: (name: string) => SupervisorState | undefined;
+  /** Every configured adapter as `seance adapter status` shows it. */
+  readonly view: () => Readonly<Record<string, AdapterView>>;
+  /** The owner's `seance adapter restart` (`AdapterSupervisor.restart`); the names it acted on, the others not configured. */
+  readonly restart: (names: readonly string[]) => readonly string[];
   readonly stop: () => Promise<void>;
 }
 
@@ -83,6 +90,14 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
     daemon: { version: deps.version },
   };
   const supervisors = new Map<string, AdapterSupervisor>();
+  const counts = new Map<string, { delivered: number; messages: number; restarts: number }>();
+  const changed = (): void => deps.onChange?.();
+  const count = (name: string, key: "delivered" | "messages" | "restarts"): void => {
+    const each = counts.get(name);
+    if (each === undefined) return;
+    each[key] += 1;
+    changed();
+  };
   /** Per adapter, whether a target (its task, else the session the key names) is inside its `repos`. */
   const scopes = new Map<string, (target: { readonly task: string | null; readonly key: string | null }) => boolean>();
   const unlisten: (() => void)[] = [];
@@ -93,10 +108,11 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
     void write.catch(() => {});
   };
 
-  // A name no longer configured, or configured as another program, inherits no subscription (docs/tags.md §8.2).
-  subscriptions?.reconcile(
-    new Map(Object.entries(deps.adapters).map(([name, config]) => [name, adapterFingerprint(config)])),
+  const fingerprints = new Map(
+    Object.entries(deps.adapters).map(([name, config]) => [name, adapterFingerprint(config)]),
   );
+  // A name no longer configured, or configured as another program, inherits no subscription (docs/tags.md §8.2).
+  subscriptions?.reconcile(fingerprints);
 
   for (const [name, config] of Object.entries(deps.adapters)) {
     const repos = config.repos === undefined ? null : new Set(config.repos);
@@ -115,8 +131,10 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
     const shown = (session: AdapterSession): AdapterSession => ({ ...session, tags: tagsFor(name, session.tags) });
     /** Keys this adapter was last told of, since its last snapshot: a `session-gone` goes only for one of them. */
     const told = new Set<string>();
+    counts.set(name, { delivered: 0, messages: 0, restarts: 0 });
     const supervisor = createAdapterSupervisor({
       ...deps,
+      onChange: changed,
       name,
       config,
       dir: join(deps.root, name),
@@ -175,6 +193,7 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
         ...(result.code === undefined ? {} : { code: result.code }),
       });
       line(result.outcome, result.code);
+      if (result.outcome === "delivered" || result.outcome === "sent") count(name, "delivered");
     };
 
     const tag = (frame: TagFrame): void => {
@@ -289,6 +308,7 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
       }
       if (subscribed && m.subscribe && conversation !== null) subscriptions.add(name, conversation);
       line("delivered", subscribed);
+      count(name, "messages");
       return subscribed && conversation !== null
         ? { ok: true, subscribed: true, session: conversation }
         : { ok: true, subscribed: false };
@@ -305,6 +325,25 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
       for (const supervisor of supervisors.values()) supervisor.start();
     },
     state: (name) => supervisors.get(name)?.state(),
+    view: () =>
+      Object.fromEntries(
+        [...supervisors].map(([name, supervisor]) => [
+          name,
+          {
+            ...supervisor.info(),
+            ...(counts.get(name) ?? { delivered: 0, messages: 0, restarts: 0 }),
+            fingerprint: fingerprints.get(name) ?? "",
+          },
+        ]),
+      ),
+    restart: (names) => {
+      const acted = names.filter((name) => supervisors.has(name));
+      for (const name of acted) {
+        supervisors.get(name)?.restart();
+        count(name, "restarts");
+      }
+      return acted;
+    },
     stop: async (): Promise<void> => {
       messages?.setAdapters(null);
       for (const each of unlisten) each();

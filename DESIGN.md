@@ -1245,6 +1245,20 @@ nothing checked it. The last is the gap they leave.
   `basis` it was read at and is refused `prompt_changed` against any other, so a replayed append
   never lands twice. The amended record goes back through the one task sealer, sentinels and all; no
   log or audit line carries prompt text, the amendment's included.
+- **An adapter is the owner's code at the owner's uid, not contained** (built 2026-11-18, Daemon, "Adapters").
+  It can read whatever the owner can, so these bound what Séance grants it, not what it can
+  do, and are no sandbox:
+  - It is declared only in the machine's own `config.json`, written by hand or by the owner's
+    `seance adapter add` from the checkout's manifest, and run only as that argv. Nothing about adapters crosses the
+    relay, and no frame, app op, MCP tool or local-socket op adds, removes or restarts one.
+  - It is reached only over its own stdin and stdout, never a socket a process could dial.
+  - It gets no prompt, attachment, session-to-session message, account id, absolute path or key, and no
+    `CREDENTIALS_DIRECTORY`; message text only when a session addressed it.
+  - It delivers only by the `inbox` mod's local delivery, under its own wrapper, `kinds` and rate buckets, to a task
+    this machine's launch ledger holds, by reply, or to a conversation subscribed to it and verified at the act.
+  - It writes nothing to the queue, the store, the leader or the relay, and nothing it sends or prints is logged.
+  - A re-added or removed adapter inherits no subscription, and `doctor` warns when its checkout moved since it was
+    added: the owner is told new code runs, never stopped.
 - **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
   Attachments and as requirements in `CLAUDE.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
@@ -12142,7 +12156,8 @@ it waited), **in leader memory** (lost on failover or restart, invisible to the 
 become a mailbox) and **at the sender's daemon with retries** (a second queue per machine with its own expiry
 and duplicate rules). A target that is offline is dropped and answered `offline`; a message that landed whose
 reply was lost reads `offline` too, so a retry can duplicate it, and the wrapper names the message id so the
-receiver can tell.
+receiver can tell. Also rejected: **freezing a message at its first target**, with no chain. A pass moves the work
+exactly when one session runs out of usage, which is when a peer most needs to reach whoever carries it on.
 
 #### Replies by handle (built 2026-11-14, docs/messaging.md D3, amended)
 
@@ -12392,7 +12407,7 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   ending the watch would drop it for good.
 - **Rejected: a `watch:` store prefix, daemon memory only.** docs/gh-watch.md W9.
 
-### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`) — 3a and 3b built 2026-11-18, docs/messaging.md §6
+### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`, `adapter-cli.ts`) — built 2026-11-18 (3a, 3b and 3c), docs/messaging.md
 
 An adapter is a program the machine's owner names in that machine's `config.json`, run by the daemon as a supervised
 child that speaks newline-delimited JSON on its stdin and stdout. It is the seam through which a tool (a chat, a hosted
@@ -12400,17 +12415,21 @@ workspace, a notifier) sees this machine's sessions and talks to them. Séance n
 for one lives in its own repository and vendors the protocol's JSON Schema. 3a is the child and state out: the
 supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. 3b is text both ways: `deliver` with its
 `result` and `delivery`, the `message` frame out, replies through the `sent` and `received` tables, the subscription
-and the `tag` frame. `seance adapter add|remove|restart|status` (3c) is docs/messaging.md's still.
+and the `tag` frame. 3c is installing: `seance-adapter.json`, `seance adapter add | remove | restart | status` and
+`doctor`'s checks ("Installing", below). The owner's brief, the seam's rejected shapes and its fit against three kinds
+of tool close the section; docs/messaging.md keeps the spike evidence and the open questions.
 
 - **Declared only in `config.json`** (`adapters`, `parseAdapters` in `daemon/src/config.ts`), at most `ADAPTERS_MAX`
-  (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?}` and nothing else, parsed
+  (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?, dir?, added?}` and nothing else, parsed
   strictly, as `traits` are: any mistake fails the load, naming `adapters.<name>.<key>`. `argv` is an array of at most
   32 non-empty, NUL-free words, never a shell string; `argv[0]` is an absolute path or a bare name resolved through
   `PATH` at each start (`Bun.which`), never a relative path with a slash and never a recorded `process.execPath`.
   `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds deliveries in; `request` is the owner's
-  opt-in. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that 3c's `doctor`
-  will read. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the relay, and no
-  capability advertises them.
+  opt-in. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that `doctor` reads, `dir` the
+  absolute checkout `seance adapter add` read the manifest from (display and `doctor` only: nothing runs from it but
+  what `argv` names), and `added` the ISO instant of that add, which joins the subscription fingerprint. A hand-written
+  entry needs only `argv`. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the
+  relay, and no capability advertises them.
 - **The protocol** (`shared/src/adapter-protocol.ts`, the schema of record, as `types.ts` is for the wire). One UTF-8
   frame per line, at most `ADAPTER_LINE_MAX` (256 KiB). `shared/src/adapter-protocol.schema.json` is generated from it
   (`bun run adapter-schema`, then formatted) and committed beside it; `adapter-protocol.test.ts` holds the two equal.
@@ -12433,7 +12452,7 @@ and the `tag` frame. `seance adapter add|remove|restart|status` (3c) is docs/mes
     discarded: an adapter keeps its own log, and nothing it prints reaches the daemon's log or an audit line.
   - **Restarts.** Each exit is followed by a restart with backoff, 1 s doubling to 60 s. A run of 60 s resets the
     backoff. Five exits within ten minutes put the adapter in the `failed` hold until the next daemon start
-    (`op=failed exits=<n>`); 3c's `seance adapter restart` will lift it.
+    (`op=failed exits=<n>`); `seance adapter restart` lifts it ("Installing").
   - **Malformed lines.** Ten `invalid` lines within a minute restart the adapter (`reason=invalid`).
   - **The unread cap.** The daemon's writes to stdin are queued, and the bytes the adapter has not drained are counted.
     Past `ADAPTER_UNREAD_MAX` (2 MiB) the adapter has stopped reading and is restarted (`reason=unread`), never
@@ -12525,10 +12544,12 @@ and the `tag` frame. `seance adapter add|remove|restart|status` (3c) is docs/mes
   by the session's `leave` (`send_message`'s `leave: true`, no text needed; the frame still goes, with `leave`), by
   the conversation not live for `CONVERSATION_IDLE_MS` (30 days; a verified, unconflicted session the feed reports
   touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and at each
-  host start for a name no longer configured or configured as another program (`reconcile`: the fingerprint is a
-  hash of `argv` and the recorded `commit`), so a replaced program inherits none. `drop(name)` is there for 3c's
-  `seance adapter add`. Not a bearer, unlike a reply handle: usable only by that adapter, over its own stdin, on this
-  machine, to a conversation that messaged it and that the daemon verified at the act.
+  host start for a name no longer configured or configured as another program (`reconcile`: the fingerprint
+  (`adapterFingerprint`) is a hash of `argv`, the recorded `commit` and `added`, the last only when the entry has one,
+  so a hand-written entry keeps the fingerprint it had before 3c), so a replaced program inherits none. `seance adapter
+  add` and `remove` also end a name's subscriptions at once (`drop(name)`). Not a bearer, unlike a reply handle: usable
+  only by that adapter, over its own stdin, on this machine, to a conversation that messaged it and that the daemon
+  verified at the act.
 - **Tags** (`tag`, docs/tags.md §8.4): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
   (one live in a session outside `repos` is `refused`) or on a task this ledger holds within `repos`; else `unknown`.
   Memory only (`Conversations.setAdapterTag`, at most `ADAPTER_TAG_TARGETS_MAX` targets per adapter, the tag caps per
@@ -12556,9 +12577,84 @@ and the `tag` frame. `seance adapter add|remove|restart|status` (3c) is docs/mes
   `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what their own
   constants pass to `AdapterAudit`.
 
-- **Trust.** An adapter runs as the owner's uid, so Séance cannot contain it (docs/messaging.md §6.3). These rules
-  bound what Séance grants and audits, not what the program can do. They are not a sandbox, and the threat model does
-  not count them as one.
+- **Trust: an adapter is third-party code.** It runs as the owner's uid, so Séance cannot contain it: it can read
+  `state.json`, the keychain where it is unlocked and every worktree, and can drive tmux. Installing one trusts its code
+  as much as an MCP server or a Claude Code plugin the owner installs, and the README's setup step and `seance adapter
+  add` say so. These rules bound what Séance grants and audits (no text in a log, no queue write, no relay frame, no key
+  or credential handed over), and a well-behaved adapter's reach is exactly the protocol. They are not a sandbox, and
+  the threat model does not count them as one (its adapter invariant). What follows from that:
+  - **The tool is a new source of prompt text for every session on the machine.** Anyone who can write into the tool
+    (a project member, a bot, a compromised server) can put a note or question in a session and, if allowed, a
+    request. `kinds` bounds it, `["note", "question"]` by default, `request` the owner's opt-in per adapter; `repos`
+    bounds which sessions and tasks it sees and reaches.
+  - **State out is a disclosure to the tool's server**: titles, repos, branches, PR URLs, states, and the text of
+    messages sessions address to it. The owner chooses that by installing it; prompts are never part of it.
+  - **The tool's credentials are the adapter's**, in its own config or keychain entry, never in Séance's `config.json`
+    and never passed by the daemon.
+  - **A subscription outlives the hour a reply handle has.** It is bounded by the channel, not by time: anyone who can
+    write into the tool reaches a subscribed session while the subscription stands, within `kinds` and the rate
+    buckets, and a session that no longer wants it sends `leave`.
+  - **Integrity**: `add` records the checkout's commit, and `doctor` warns when it moved since, a reminder that new
+    code runs, not a refusal. Self-update never pulls or rebuilds an adapter: a daemon update restarts the adapters on
+    the code they have.
+- **Installing** (3c; `daemon/src/adapter-cli.ts`, `adapter-manifest.ts`, `adapter-control.ts`, `adapter-checks.ts`).
+  An adapter's repository carries `seance-adapter.json` at its root, and the owner installs it with four verbs typed at
+  the machine's shell. They are the owner's acts, never a frame, a local-socket op, a broker action, an app op or MCP,
+  and they are in the CLI's one `COMMANDS` table, so the custodian's fence denies `seance adapter` to a round under both
+  names (`custodian-fence.test.ts` names it). Setup is the README's step, with the trust statement below.
+  - **The manifest** (`readAdapterManifest`): exactly `{name, protocol, argv}`, at most 64 KiB, parsed strictly
+    (`parseAdapterManifest`: an unknown key, a bad name, a non-integer protocol or a malformed argv refuses it). A
+    `protocol` outside `ADAPTER_PROTOCOLS` is refused at `add`, before the daemon would refuse its handshake. `argv` is
+    resolved for `config.json`, since the adapter's cwd is its state dir, never the checkout: a bare `argv[0]` stays
+    bare (PATH at each start); a relative one must be an executable file in the checkout and is made absolute; a later
+    word that is a flag stays, one that holds a `/` or names something in the checkout is made absolute and must stay
+    inside it by realpath (a link out is refused), and any other word stays. An absolute word anywhere is refused: a
+    manifest names its own files and programs on PATH, nothing else. The checkout itself is realpath'd and recorded as
+    `dir`.
+  - **`add <dir> [--kinds <k,k>] [--repo <repo>]...`** reads the manifest, then writes `adapters.<name>` into this
+    machine's `config.json` and nothing else of it: `{argv, kinds, repos?, commit?, dir, added}`. The config must load
+    as it stands before the edit, and the new file is written beside it and loaded before it replaces it (`writeDurable`,
+    its mode kept), so a mistake never leaves the daemon a config it refuses. `kinds` defaults to `["note",
+    "question"]`, `request` only by `--kinds`; a re-add keeps the entry's `kinds` and `repos` unless given. A fifth
+    name is refused (`ADAPTERS_MAX`). `commit` is the checkout's `HEAD` through the hardened git (`checkoutCommit`), when
+    it is a git work tree. A `--repo` no scanned repo names is a warning, not a refusal (the scan may not have run).
+    Then it ends that name's subscriptions (`drop`), so a replaced program inherits none even under the same name, and
+    prints what it wrote, the trust statement and that `seance restart` starts it: a running daemon reads `config.json`
+    at its start only.
+  - **`remove <name>`** deletes the entry, ends its subscriptions, and leaves `stateDir()/adapters/<name>` as it is:
+    the adapter's own data, which Séance did not write.
+  - **The race the `added` stamp closes.** A running daemon keeps its subscriptions in memory and may rewrite
+    `conversations.json` after the CLI's `drop`, putting the old ones back. `added` is new at every add and joins the
+    fingerprint, so the next start's `reconcile` drops them anyway; `remove` needs no stamp, since the name is gone.
+  - **`restart [<name>]` and `status`** reach the running daemon through two files in `stateDir()`, never the socket
+    (widening the local op socket is a threat-model change this does not need). The daemon writes
+    `adapter-status.json` (0600, durably, on every supervisor change, coalesced: per adapter the supervisor's state,
+    pid, start time, hello `protocol` and `version`, exits in the window, the last exit's time, code and reason, the
+    entry's fingerprint, and counts of deliveries placed, messages out and owner restarts; never text, argv or a
+    conversation). The CLI believes it only under the pid `runtime.json` shows live. `restart` writes
+    `adapter-restart.json` (names only, honoured within 60 s), which the daemon takes by rename every 2 s
+    (`takeRestartRequest`) and acts on through `supervisor.restart()`: the run is ended (`reason=restarted`, not counted
+    toward the `failed` window), the window and the backoff reset, and the adapter started again; one held `failed` or
+    `refused` starts afresh. The CLI waits up to 10 s for the restart count to rise. A name not in the daemon's view
+    (added since it started) is told `seance restart`. `status` reads `config.json` alone when no daemon runs; the
+    adapter's hello `version` reaches the terminal only through `printable`, as the custodian's summary does, and a
+    fingerprint that differs from the entry's says the daemon runs an older config.
+  - **`doctor`** (`adapterChecks`, its "adapters" section): an absolute `argv[0]` that is missing or not executable
+    fails; a bare one not on the shell's PATH warns (the daemon's PATH may differ); an absolute argv word that is gone
+    warns. For an entry with `dir`: a manifest that is gone, renamed or whose resolved argv changed warns (`add` again);
+    a checkout no longer in git warns; and **a checkout whose `HEAD` moved since `add` warns, naming both commits**
+    ("Trust", Integrity: a reminder that new code runs at the next start, never a refusal). A live
+    adapter held `failed` or `refused` warns, pointing at `seance adapter restart`. An entry with no `dir` was written
+    by hand and has nothing to compare.
+  - **Audit**, origin `cli` (`adapterOwnerAudit`), one line per act, the daemon's own lines staying under `adapter`:
+
+    ```
+    audit adapter origin=cli op=add name=<n> argv=<word count> argv0="<basename>" kinds=<k,k> repos=<n|all> commit=<true|false> replaced=<true|false>
+    audit adapter origin=cli op=remove name=<n>
+    audit adapter origin=cli op=restart name=<n> outcome=<requested|not_running>
+    ```
+
+    No argv word but `argv[0]`'s basename, no path, repo name or sha. A refused `add` writes and audits nothing.
 - **The reference adapter** (`daemon/test/bin/reference-adapter.ts`) is the tests' stub, linked and exec'd once in
   `beforeAll`, and the template a new adapter starts from. It is standalone and imports nothing from Séance.
 - **Tested by** `daemon/test/adapter-supervisor.test.ts`, which covers:
@@ -12593,16 +12689,94 @@ and the `tag` frame. `seance adapter add|remove|restart|status` (3c) is docs/mes
   `daemon/src/adapter-subscriptions.test.ts` covers the file (mode, reopen, `reconcile`, `drop`, the idle prune, the
   cap, an unreadable file, no text at rest).
 
+  3c: `daemon/test/adapter-cli.test.ts` runs the real CLI as a subprocess on a throwaway config and state dir, the test
+  process playing the daemon where one matters:
+  - `add` writing the entry (absolute argv, commit, dir, other keys and the file's mode kept) and its audit line;
+  - `add` under a name already there ending that name's subscriptions and no other's, keeping `kinds` and `repos`,
+    and changing the fingerprint at the same commit;
+  - a refused manifest (an argv word out of the checkout, an unknown protocol, no checkout) writing and auditing
+    nothing; the fifth adapter; usage errors;
+  - `remove`, its subscriptions, and the adapter's own directory left in place;
+  - `status` with no daemon and with one, the hello version scrubbed;
+  - `restart` with no daemon (`not_running`) and through the request file.
+
+  `daemon/test/adapter-supervisor.test.ts` adds the owner's restart (not counted, `reason=restarted`, no backoff) and
+  the restart lifting `failed` and `refused`; `daemon/src/adapter-manifest.test.ts` the manifest's parse and
+  resolution (a link out, `..`, an absolute word, a non-executable `argv[0]`); `daemon/src/adapter-checks.test.ts`
+  `doctor`'s checks.
+
   The parsers and the schema are tested in `shared/src/adapter-protocol.test.ts` and `daemon/src/config.test.ts`, and
   the audit lines in `daemon/src/audit.test.ts`.
 
-- **Rejected** (docs/messaging.md §6.7 has the rest):
-  - **Sending only titled (tasked) panes.** A hand-started session is the common case for a tool that mirrors a
-    machine.
-  - **Reading `closed` from the despawn's audit line.** That is a log, not a signal, and the custodian's and the
-    drain's closes go through the same `despawnSession` anyway.
-  - **Holding `repos` until 3b.** Leaving it for 3b would make a config written for 3b disclose the out-of-scope
-    sessions it means to hide, for as long as 3a runs.
+**The owner's brief (2026-11-14).** Séance owns a generic, tool-agnostic interface and never names a tool, in code,
+specs, names or tests; an adapter for a tool lives in its own repository (`seance-<tool>`), and that tool's code does
+not know Séance either. The seam is two-way: a tool delivers messages into sessions, and sessions, tasks and messages
+flow out. The same pattern is meant to serve work tracking later (docs/orchestrator.md §1), a different seam this one
+does not foreclose. An adapter may not spawn, despawn, enqueue, cancel, amend or pass (decided 2026-11-17: work a tool
+wants started goes through an orchestrator session it delivers to, which may be the tool's own coordinator); send
+cross-machine or reach the relay or the leader; read an inbox, a prompt, a transcript, a screen or a message not
+addressed to it; write a task tag or any tag outside its own namespace; send a key or deliver as the user; or be
+declared from anywhere but `config.json`.
+
+**Checked against three kinds of tool** (2026-11-17):
+
+| Need                                                            | A hosted workspace agents attach to  | A team chat bridge | A work tracker             |
+| --------------------------------------------------------------- | ------------------------------------ | ------------------ | -------------------------- |
+| Turn state of each session (busy, idle, needs input), lifecycle | `session`, `task`                    | `session`          | `task`                     |
+| A stable key per session                                        | `session.id` (conversation), task id | `session.id`       | task id                    |
+| Its own id and state on the session                             | `adapter.<name>.*` tags (`tag`)      | same               | —                          |
+| Text into a session, held while idle or waking it               | `deliver`, note or `wake`            | `deliver`          | —                          |
+| Whether and when it landed                                      | `result`, `delivery`                 | `result`           | —                          |
+| A session talking to the tool, and the tool answering           | `adapter:<name>`, `toSession`        | same               | —                          |
+| Inbox lifecycle (seen, deferred, declined, done, options)       | the tool's own CLI, by `session.id`  | same               | —                          |
+| PR URL and done                                                 | `session.prUrl`, `task` `done`       | —                  | `task`                     |
+| Start or resume a session for an item nobody holds              | **no**                               | —                  | **no**                     |
+| Create, amend or settle tasks                                   | —                                    | —                  | **no**: orchestrator.md §1 |
+| Tasks queued but not yet placed on any machine                  | —                                    | —                  | **no**                     |
+
+The first two fit the seam. A tracker's core needs (create and amend tasks, see the whole queue) are the queue's,
+which this seam is forbidden on purpose; it gets state out here and writes through an orchestrator session. An
+output-only tool (a notifier, a time log) is `wants: ["sessions"]` and nothing else. A tool that designates a
+coordinator session needs no second session on Séance's side: one session holds Séance's MCP and is the tool's
+coordinator, reached by `deliver` like any other, keyed by the `session.id` `send_message` returned it.
+
+**Rejected:**
+
+- **An adapter dialing the local socket and naming itself.** Any process of the same user could claim the name;
+  peer-pid binding names a pane, not a program.
+- **An inherited socketpair on fd 3.** It removes the rendezvous, but so do stdin and stdout, which every runtime has
+  with no fd plumbing, as MCP's stdio transport does. An adapter that prints to its stdout breaks its own stream; that
+  is its bug, answered `invalid` and restarted.
+- **An adapter loaded into the daemon (`import()`).** Third-party code inside the process that holds the PSK and a
+  service-delivered credential.
+- **An adapter as an MCP client of `seance mcp`, or as its own app-role relay client.** Both are fleet-wide and need
+  the PSK: the opposite of a local program trusted with this machine's sessions.
+- **The daemon calling the tool itself** (a webhook, a tool URL in Séance's config). Séance would hold a tool's
+  address and credentials, the coupling the brief forbids.
+- **One adapter for the fleet, on the leader.** Leadership moves, delivery happens on the machine with the pane, and
+  the leader keeps nothing a message carries.
+- **The adapter installing its own Claude mod.** Two mods would deliver into one session with no shared rule for
+  wake, and Séance would lose its say over what reaches a session.
+- **A `boundary` delivery mode, and an opaque `data` field passed through unread.** Kept out until a tool needs one; a
+  `data` field read by the model is prompt text Séance's wrappers would no longer frame. Structured acts go through the
+  tool's own CLI, keyed by the conversation id.
+- **Keeping the reply hour for adapter replies, or lengthening it.** A longer-lived bearer, still useless across
+  `--resume`; replaced by the subscription.
+- **`restart` and `status` as local-socket ops.** The socket's allowlist is a threat-model boundary, and the two need
+  nothing a file under the 0700 state dir cannot carry; the custodian's owner verbs set the pattern.
+- **`remove` deleting the adapter's own directory.** It holds the adapter's data and maybe its credentials, written by
+  the adapter, not Séance; the owner deletes it.
+- **Refusing a moved checkout, or pinning `argv` to the commit.** The owner updates an adapter by pulling it; `doctor`
+  says new code runs, `add` records it again, and an unreviewed pull is the same trust as installing.
+- **Containing the adapter** (the custodian round's masks with a network allowlist for the tool's host). Not in PR 3
+  (docs/messaging.md, open question 10): revisit before an adapter the owner did not write is installed, and drill it
+  as the custodian's was before claiming it.
+- **Sending only titled (tasked) panes.** A hand-started session is the common case for a tool that mirrors a
+  machine.
+- **Reading `closed` from the despawn's audit line.** That is a log, not a signal, and the custodian's and the
+  drain's closes go through the same `despawnSession` anyway.
+- **Holding `repos` until 3b.** Leaving it for 3b would make a config written for 3b disclose the out-of-scope
+  sessions it means to hide, for as long as 3a runs.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 

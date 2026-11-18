@@ -55,7 +55,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — spec, PR 1, PR 2, the reply by handle and the adapter seam's 3a (the child and state out) and 3b (delivery in, messages out, the subscription) built: local delivery (the `inbox` mod, the `inbox`
+- **docs/messaging.md** — built and folded: PR 1, PR 2, the reply by handle and the adapter seam (3a the child and state out, 3b delivery in, messages out and the subscription, 3c installing): local delivery (the `inbox` mod, the `inbox`
   and `message` frames, `send_message`), cross-machine routing through the leader (`session-message`,
   `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`) and replies to a session with no task, by the id of
   the message answered, on one machine or across (`replyTo`, `CAPABILITIES.messageReply`, `wake`; D3 amended), recorded
@@ -63,8 +63,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Adapters" for 3a: `config.json` `adapters`, the supervisor, the handshake, `snapshot`, `session`, `session-gone`,
   `task`, `shared/src/adapter-protocol.ts` and its committed JSON Schema, audit origin `adapter`; for 3b: `deliver`,
   `result`, `delivery`, the `message` frame out, `adapter:<name>` in `send_message`, the subscription in
-  `conversations.json`, the `tag` frame; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
-  the adapter seam's 3c (installing), the open questions and the spike evidence. Read it before adding a leader event op or an adapter.
+  `conversations.json`, the `tag` frame; for 3c, "Installing": `seance-adapter.json`, `seance adapter add | remove |
+  restart | status`, `adapter-status.json` and `adapter-restart.json`, `doctor`'s checks; the owner's brief, the fit
+  against three kinds of tool and the seam's rejected shapes; Claude Code mods; MCP server; Threat model item 6 and its
+  adapter invariant). What is left in the file is the problem, the spike evidence, the owner's decisions D1 to D4 and the
+  open questions. Read it, and DESIGN.md's "Adapters", before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
 - **docs/gh-watch.md** — spec, build steps 1 to 4 built (`askGithub`'s `limited` class, the poll queries' in-query
   `rateLimit` and the reset-time backoff, the leader's side of the watches: its registry, the run query, the reserve
@@ -598,7 +601,7 @@ green:
   from `seance mcp` imports `log.ts` (`watch-frame.ts`, in `message-layering.test.ts`), and nothing of a watch is logged
   but the closed-enum `watch` audit line.
 - **An adapter is declared only in its machine's own `config.json` and speaks only on its stdin and stdout**
-  (DESIGN.md, "Adapters"; docs/messaging.md §6). `adapters` is parsed strictly (`parseAdapters`, at most
+  (DESIGN.md, "Adapters"). `adapters` is parsed strictly (`parseAdapters`, at most
   `ADAPTERS_MAX`, a name by `ADAPTER_NAME_PATTERN`, any mistake failing the load), never from a frame, the PWA, MCP or
   another machine, and nothing about adapters crosses the relay. Its `argv` is an argv array, never a shell string,
   `argv[0]` absolute or a bare name resolved through `PATH` at each start, never `process.execPath`. The supervisor
@@ -630,7 +633,17 @@ green:
   30 days not live, the cap, or the name gone or configured as another program; and a `tag` only under its own
   `adapter.<name>.*` on a conversation subscribed to it or a task this ledger holds, within `repos`, in memory only,
   cleared at each handshake, never shown to another adapter or MCP. Every message either way is audited under origin
-  `adapter`, never `message`. Giving the seam another act (3c's installing) is a threat-model change, made in
+  `adapter`, never `message`. The owner installs one with `seance adapter add | remove | restart | status`
+  (`adapter-cli.ts`, "Installing"): shell verbs in the one `COMMANDS` table (so denied to a custodian round), never a
+  frame, a local-socket op, a broker action, an app op or MCP. `add` reads `seance-adapter.json` (exact keys, a protocol
+  in `ADAPTER_PROTOCOLS`, an argv whose relative words resolve inside the checkout by realpath and no absolute word),
+  writes `adapters.<name>` and nothing else of `config.json`, only after the new file loads, records the checkout's
+  commit and an `added` stamp that joins the subscription fingerprint, and ends that name's subscriptions, as `remove`
+  does; neither deletes the adapter's own directory. `restart` and `status` reach the daemon only through
+  `adapter-status.json` (believed only under the live daemon's pid; the hello's `version` printed only through
+  `printable`) and `adapter-restart.json` (names only, 60 s), never the socket. `doctor` warns when the checkout moved
+  since `add`, never refuses. The verbs audit under origin `cli` with a name, argv word count, `argv[0]`'s basename,
+  kinds, a repo count and booleans, never a path or sha. Giving the seam another act is a threat-model change, made in
   DESIGN.md with it.
 - **The `custodian` frame kind is served only on the round's own socket** (`custodian-socket.ts`,
   `/tmp/seance-cu-s-<mkdtemp>/c.sock`, the directory kept in the seat record's `socketDir` and reused only while `lstat`

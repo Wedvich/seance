@@ -3,7 +3,7 @@
 **Status: draft 2026-11-17, nothing built. The owner decided O1–O4 (below) on 2026-11-17; the rest is proposed.** Three features borrowed from huddle
 (`pengefix/huddle`, `origin/main`): a one-line `self.doing` tag a session declares about itself (§1), status questions
 answered from presence without waking anyone (§2), and coalesced wakes (§3). Each stands on its own and lands on its
-own; each also feeds the adapter seam (docs/messaging.md §6, #486), which none of them depends on. It builds on
+own; each also feeds the adapter seam (DESIGN.md, "Adapters", #486), which none of them depends on. It builds on
 docs/tags.md (#533), whose "What changes in #526" this file has taken (2026-11-17). Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as
 it is built, and its text here goes.
 
@@ -27,7 +27,7 @@ writes `self.*` yet.
 
 **Why a file of its own, not a docs/messaging.md section.** `doing` is not messaging: it is a session event that
 three readers (the PWA, the custodian, the status answer) consume, and it would sit awkwardly in a file about delivery.
-§2 and §3 are messaging, but they were drafted beside #486's rewrite of docs/messaging.md §6, and one file per draft
+§2 and §3 are messaging, but they were drafted beside #486's rewrite of the adapter seam (now DESIGN.md, "Adapters"), and one file per draft
 kept the two from rebasing each other's prose. When §2 and §3 land, their record goes to DESIGN.md, "Session messages", as
 PR 1's and PR 2's did, so the split costs nothing later.
 
@@ -66,7 +66,7 @@ brief, tags are key/value pairs namespaced by writer, and **the namespace is the
 | `agent.*`          | the agent's own mod and hooks only | process, conversation | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`)  |
 | `seance.*`         | the daemon only                    | session               |                                                                          |
 | `self.*`           | the session itself, through MCP    | process               | display-only, never keyed on, bound by peer pid                          |
-| `adapter.<name>.*` | that adapter only, over its stdin  | conversation          | docs/messaging.md §6                                                     |
+| `adapter.<name>.*` | that adapter only, over its stdin  | conversation          | DESIGN.md, "Adapters"                                                    |
 | `owner.*`          | the PWA, sealed `from: "app"`      | task, or conversation | on the task record for a tasked session (docs/tags.md §5)                |
 | `creator.*`        | whoever enqueued the task          | task                  | beyond T1 (docs/tags.md open question 7): `linear` becomes `creator.ref` |
 | `scheduler.*`      | the leader                         | task                  | beyond T1, same question                                                 |
@@ -87,7 +87,7 @@ This spec builds one key of it, `self.doing`, and shapes everything so the rest 
 - **Every wire shape carries the `tags` map keyed by the full namespaced key**, `{ "self.doing": { value, at, scope:
   "process" } }` (docs/tags.md §6.1's entry shape, `SessionEntry.tags` as #543 built it), never a `doing` field:
   `SessionEntry.tags`, the custodian's `CustodianPaneView.tags`, `Presence.tags`, and the adapter `Session` record
-  (docs/messaging.md §6.1). Every parser keeps only the keys it knows (`parseTags`) and drops the rest.
+  (DESIGN.md, "Adapters"). Every parser keeps only the keys it knows (`parseTags`) and drops the rest.
 - **`self.doing` is a line, not a name.** It never enters the name precedence above; the PWA shows it under the
   session's name, never in its place.
 
@@ -171,7 +171,7 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 | `MachineStatus`                         | **no**                                                            | 1.5 KiB of ciphertext (`STATUS_MAX_CT_LENGTH`) for the whole machine; a per-session text field would be the first thing `fitStatus` trims, and the 30 s beat would carry it to every app and the leader for no decision.                                                                                         |
 | Custodian `sessions` verb               | yes, from PR 4 (below), labelled                                  | D1.6 (O1).                                                                                                                                                                                                                                                                                                       |
 | Status answer (§2)                      | yes                                                               | The point of §2.                                                                                                                                                                                                                                                                                                 |
-| Adapter `Session` record                | later, as its `tags` map                                          | docs/messaging.md §6.1 specifies `Session.tags` as this map, joined; built with the adapter seam (its PR 3a). Nothing here waits for it.                                                                                                                                                                         |
+| Adapter `Session` record                | later, as its `tags` map                                          | DESIGN.md, "Adapters" specifies `Session.tags` as this map, joined; built with the adapter seam (its PR 3a). Nothing here waits for it.                                                                                                                                                                          |
 
 **D1.5a The `sessions` op has three readers, and only the PWA gets `doing`.**
 
@@ -283,7 +283,7 @@ knows.
 
 **D2.1 A new message kind, `status`, never a flag on `question`.** `send_message { to, kind: "status" }`, no text.
 It addresses a task only (`to`), never a reply by handle: a session with no task has no presence anyone asks about.
-`to: "adapter:<name>"` (docs/messaging.md §6.2) is refused `invalid`: an adapter has no presence, and it already
+`to: "adapter:<name>"` (DESIGN.md, "Adapters") is refused `invalid`: an adapter has no presence, and it already
 reads every session's from its own snapshot.
 
 - **Wire shape.** `text` is absent on every frame that carries a `status` (`message`, `session-message`,
@@ -467,7 +467,7 @@ limited to questions and `wake` notes, and each request keeps its own submit.
 
 **D3.2 No daemon or wire change.** The daemon cannot see turn boundaries for a session without the session-events
 mod, and batching lines on its side would still reach the mod as lines. The coalescing lives where the turn events
-are. It covers adapter deliveries for free (docs/messaging.md §6.1): an adapter's question, request or `wake: true`
+are. It covers adapter deliveries for free (DESIGN.md, "Adapters"): an adapter's question, request or `wake: true`
 note reaches the mod as the same inbox line and is merged like any other, which matters more there, since an
 adapter's own bucket (60 a minute) allows denser bursts than a session's.
 

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { link, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AdapterSession, RepoEntry } from "@seance/shared";
 import { createAdapterFeed, type AdapterFeed, type FeedFrame } from "../src/adapter-feed.ts";
 import { startAdapterHost, tagsFor, type AdapterHost } from "../src/adapter-host.ts";
@@ -16,15 +16,20 @@ import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { paneInfo } from "../src/sessions.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import {
+  bunNamed,
+  linkReferenceAdapter,
+  pollUntil,
+  underClaude,
+  usePrivateTmux,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 /**
- * State out to adapters (docs/messaging.md §6.1) with real processes: `claude`-named processes in panes of a private
+ * State out to adapters (DESIGN.md, "Adapters") with real processes: `claude`-named processes in panes of a private
  * tmux server, reporting through the session-event ingest as the peer the socket would name, the feed reading them,
  * and the host handing the frames to the reference adapter (`test/bin/reference-adapter.ts`).
  */
-
-const REFERENCE = resolve(import.meta.dir, "bin/reference-adapter.ts");
 
 let base: string;
 let project: string;
@@ -86,11 +91,7 @@ beforeAll(async () => {
   exclaves = [{ id: "default", root: base, configDir: join(base, ".claude"), configFile: join(base, ".claude.json") }];
   repos = [{ name: "proj", path: project, defaultBranch: "main" }];
   claude = await bunNamed("claude");
-  adapter = join(base, "bin", "reference-adapter.ts");
-  await mkdir(join(base, "bin"));
-  await link(REFERENCE, adapter);
-  const warmed = await exec([adapter, "--warm"]);
-  if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);
+  adapter = await linkReferenceAdapter(join(base, "bin"));
   privateTmux = usePrivateTmux(base, "adapters");
   await tmuxOk(["new-session", "-d", "-s", "adapters", "-c", base, "sleep", "600"]);
   ended = new EndedTasks(LaunchLedger.memory());

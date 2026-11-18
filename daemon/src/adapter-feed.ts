@@ -23,7 +23,7 @@ import { CLAUDE_COMMAND, repoNames } from "./sessions.ts";
 import { CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, TASK_FIELD } from "./tmux.ts";
 
 /**
- * State out to adapters (docs/messaging.md §6.1): this machine's live Claude sessions as `Session` records, and each
+ * State out to adapters (DESIGN.md, "Adapters"): this machine's live Claude sessions as `Session` records, and each
  * change to them as a `session` or `session-gone` frame, plus the `task` events of the launch ledger. A session is a
  * live pane with a `claude`-named process in it (the one the conversation table holds for the pane, else the shallowest
  * one under the pane's process), keyed on that process. Its facts are the daemon's own: the conversation table's state
