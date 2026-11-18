@@ -50,7 +50,10 @@ import {
   ACCOUNT_LABEL_DEADLINE_MS,
   type LocalMachine,
   type PassPoll,
+  type WatchClient,
+  watchGate,
 } from "./mcp.ts";
+import type { WatchGate } from "./watch-github.ts";
 
 interface FakeLocal extends LocalMachine {
   requests: { op: RequestOp; payload: unknown }[];
@@ -87,6 +90,7 @@ async function connectedClient(
   passPoll?: PassPoll,
   sendMsg?: typeof sendMessage,
   ownPane: () => string | undefined = () => undefined,
+  watchClient?: WatchClient,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -98,9 +102,11 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane), {
-    transport: serverTransport,
-  });
+  serveStdio(
+    () =>
+      buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane, watchClient),
+    { transport: serverTransport },
+  );
   await client.connect(clientTransport);
   return client;
 }
@@ -3421,6 +3427,151 @@ describe("send_message", () => {
     } finally {
       stop();
     }
+  });
+});
+
+describe("watch_github and unwatch_github", () => {
+  const PR = "https://github.com/acme/widgets/pull/42";
+  const ID = "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11";
+
+  test("are always offered, and the watch's description says to end the turn, not poll, and what replaces it", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    try {
+      const c = await connectedClient(lazy);
+      const { tools } = await c.listTools();
+      const watch = tools.find((t) => t.name === "watch_github");
+      expect(watch?.annotations?.readOnlyHint).toBe(false);
+      expect(watch?.description).toContain("end your turn");
+      expect(watch?.description).toContain("Do not poll the same target");
+      expect(watch?.description).toContain("replaces its watch");
+      expect(watch?.description).toContain("after 24 h");
+      expect(watch?.description).toContain("inbox mod");
+      expect(watch?.inputSchema.required).toEqual(["url"]);
+      expect(tools.find((t) => t.name === "unwatch_github")?.inputSchema.required).toEqual(["id"]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("pass their arguments and a gate to the client; a watch is a plain answer and a refusal a tool error", async () => {
+    const adds: unknown[] = [];
+    const gates: WatchGate[] = [];
+    const removes: string[] = [];
+    const client: WatchClient = {
+      add: (request, gate) => {
+        adds.push(request);
+        gates.push(gate);
+        return Promise.resolve(
+          adds.length === 1 ? { ok: true, id: ID, kind: "pr", text: "watching" } : { ok: false, text: "not watched" },
+        );
+      },
+      remove: (id) => {
+        removes.push(id);
+        return Promise.resolve({ ok: false, text: "no such watch" });
+      },
+    };
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    try {
+      const c = await connectedClient(
+        lazy,
+        null,
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        client,
+      );
+      const made = await c.callTool({ name: "watch_github", arguments: { url: PR, head: "a".repeat(40) } });
+      expect(made.isError).not.toBe(true);
+      expect(toolText(made)).toBe("watching");
+      const refused = await c.callTool({ name: "watch_github", arguments: { url: PR } });
+      expect(refused.isError).toBe(true);
+      expect(toolText(refused)).toBe("not watched");
+      expect(adds).toEqual([{ url: PR, head: "a".repeat(40) }, { url: PR }]);
+      // With no daemon state here the tool's gate refuses before it opens the fleet.
+      const gated = await gates[0]?.();
+      expect(gated?.ok).toBe(false);
+      const removed = await c.callTool({ name: "unwatch_github", arguments: { id: ID } });
+      expect(removed.isError).toBe(true);
+      expect(removes).toEqual([ID]);
+      const extra = await c.callTool({ name: "watch_github", arguments: { url: PR, pane: "%1" } });
+      expect(extra.isError).toBe(true);
+      expect(toolText(extra)).toContain("Unrecognized key");
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  describe("watchGate", () => {
+    async function gate(
+      machines: readonly Machine[],
+      leading: boolean,
+      local: LocalMachine | null = fakeLocal(undefined, { deviceId: "device-2" }),
+    ): Promise<Awaited<ReturnType<WatchGate>>> {
+      const fake = fakeRelay(machines, () => new Error("unexpected op"));
+      if (leading) fake.setState({ scheduler: LEADING });
+      const lazy = new LazyRelay({ create: () => fake });
+      try {
+        return await watchGate(relayFleet(lazy), local)();
+      } finally {
+        lazy.stop();
+      }
+    }
+    /** device-1 leads when `leading`; this machine is device-2. */
+    const fleetOf = (leaderWatches: boolean, ownWatches: boolean): Machine[] => {
+      const [leader, box] = autoMachines();
+      return [
+        machine({ ...leader, capabilities: leaderWatches ? [CAPABILITIES.watches] : [] }),
+        machine({ ...box, capabilities: ownWatches ? [CAPABILITIES.watches] : [] }),
+      ];
+    };
+    const refusedWith = async (result: Promise<Awaited<ReturnType<WatchGate>>>, words: string): Promise<void> => {
+      const answer = await result;
+      expect(answer.ok).toBe(false);
+      if (!answer.ok) expect(answer.text).toContain(words);
+    };
+
+    test("passes only when this machine's daemon and the verified leader both advertise watches", async () => {
+      expect(await gate(fleetOf(true, true), true)).toEqual({ ok: true });
+    });
+
+    test("a leader without the capability is told to update", async () => {
+      await refusedWith(gate(fleetOf(false, true), true), "the scheduler's leader keeps no watches yet");
+    });
+
+    test("no verified leader is its own refusal, whatever the machines advertise", async () => {
+      await refusedWith(gate(fleetOf(true, true), false), "no verified scheduler is leading");
+    });
+
+    test("this machine's daemon must advertise it too, and be in the registry", async () => {
+      await refusedWith(gate(fleetOf(true, false), true), "this machine's daemon keeps no watches yet");
+      await refusedWith(
+        gate(fleetOf(true, true), true, fakeLocal(undefined, { deviceId: "device-9" })),
+        "not in the fleet's registry",
+      );
+    });
+
+    test("no daemon state here refuses without opening the fleet", async () => {
+      const fleet: Fleet = { open: () => Promise.reject(new Error("opened")), stop: () => {} };
+      await refusedWith(watchGate(fleet, null)(), "no daemon state");
+    });
+
+    test("a lease with no scheduler leg (a broker daemon that could not say) cannot confirm a leader", async () => {
+      const fleet: Fleet = {
+        open: () =>
+          Promise.resolve({
+            machines: fleetOf(true, true),
+            request: () => Promise.reject(new Error("unexpected op")),
+            scheduler: null,
+            release: () => {},
+          }),
+        stop: () => {},
+      };
+      await refusedWith(watchGate(fleet, fakeLocal(undefined, { deviceId: "device-2" }))(), "can't confirm");
+    });
   });
 });
 
