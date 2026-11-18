@@ -4294,8 +4294,8 @@ export interface AmendRequest {
   /** Set or move the not-before time; `null` clears it; needs no `basis`. */
   readonly notBefore?: number | null;
   /**
-   * The owner's labels: bare `owner.*` suffixes, `""` clears a key (`writeTags`). Taken in any task state, finished
-   * included, and only when no other field is set. Sent only by the PWA, to a verified leader advertising
+   * The owner's labels: bare `owner.*` suffixes, `""` clears a key (`writeTags`). Alone it is taken in any task state,
+   * finished included; beside another field it meets that field's state rules. Sent only by the PWA, to a verified leader advertising
    * `CAPABILITIES.taskTags`; `parseAmendDraft` refuses it, so the broker, MCP and the CLI never carry it.
    */
   readonly ownerTags?: Readonly<Record<string, string>>;

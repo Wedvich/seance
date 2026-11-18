@@ -127,7 +127,7 @@ grammar, caps and parsers, and this section stays as their rationale.
 | `self.name`       | a name, at most `TASK_REQUEST_LIMITS.title` characters after the scrub                 | third in the name precedence (T2); the standing instruction does not ask for it |
 | `owner.label`     | a name, at most the title's cap                                                        | first in the name precedence (T2)                                               |
 | `creator.ref`     | `<source>:<id>`, `source` held to the suffix pattern, `id` to `[A-Za-z0-9._#/-]{1,64}` | an external tracker's item, display-only; replaces `TaskSpec.linear` (§5.4)     |
-| `creator.ref-url` | an `https:` URL, `httpsUrl`, at most `TAG_VALUE_MAX`                                   | the item's link; the PWA links it, nothing fetches it                           |
+| `creator.ref-url` | an `https:` URL, `httpsUrl`, at most `TAG_VALUE_MAX`, refused past it, never cut       | the item's link; the PWA links it, nothing fetches it                           |
 
 - **Caps.** At session scope, `TAGS_PER_WRITER_MAX` (4) per namespace, and `TAGS_PER_PANE_MAX` (16, #526's) over a
   session's process and conversation tags **outside** `adapter.*` (task tags are not counted: they live in the record).
@@ -135,7 +135,9 @@ grammar, caps and parsers, and this section stays as their rationale.
   about 8 KiB; #526's `sessions` fitter (D1.5a) drops adapter tags first and then the rest, all or nothing per tier,
   saying which with `tagsOmitted: "adapter" | "all"`. This amends #526's "16 across all namespaces". At task scope,
   `TASK_TAGS_MAX` (6) per record, budgeted per writer so one cannot starve another: `creator.*` 3, `owner.*` 2,
-  `scheduler.*` 1, sized against `STORE_MAX_CT_LENGTH` in `parse.test.ts` as `avoid` and `requires` were. Past a cap a
+  `scheduler.*` 1, sized against the store's two caps in `parse.test.ts` at the true worst case, as `avoid` and `requires`
+  were (the create with its three creator keys has 420 bytes spare, and the leader's record fits its five at 1420 once
+  its decision is cut to the winner: DESIGN.md, "Task tags", "The bound"). Past a cap a
   write is refused `full`, never a silent drop of another key.
 - **Parsers.** `parseTags(raw, { scope, known })` is strict in shape and lenient in membership: it drops (never
   refuses the record for) a key it does not know or whose value fails its parser, so a newer writer never breaks an
@@ -592,6 +594,9 @@ second:
    Part of docs/agents.md's spike.
 7. **`creator.*` and `scheduler.*`** (beyond T1's five namespaces). **Decided 2026-11-17: both.** `creator.*` is where `linear`
    and orchestrator.md's `ref` go, and `scheduler.*` reserves a slot so a leader-made display fact needs no new field.
+   **Sized at step 3:** the key count stayed at six (three, two, one): the worst case fits the create cap with 420 bytes
+   spare and the leader's record cap once its decision is cut to the winner, so no value bound was cut either. A later
+   `scheduler.*` key needs its own guard against a leader that drops it (DESIGN.md, "Task tags", "The sentinel").
 
 8. **An older keyless broker daemon drops `tags`** from a brokered enqueue (its `parseTaskSpec`), so a task a session
    queues through `seance mcp` or the CLI behind it lands untagged. Display data only, so no stale-broker check guards

@@ -785,7 +785,8 @@ Séance's noise is cover for a real intruder.
    A task tag (built 2026-11-18, "Task tags") is display text a PSK holder writes beside a prompt and sealed like a title:
    it reaches a session only as `get_queue`'s allowlisted `creator.ref` and `owner.label` and an adapter's `task.ref`,
    never as an instruction, a path or a spawn argument, and nothing binds, routes or places on one. It is held to
-   `parseTagValue` (printable text, bounded) at every write, shown through `displayLine`, linked only when https, and
+   `parseTagValue` (printable text, bounded: a value past `TAG_VALUE_MAX` is cut, and a ref URL is refused, since a cut
+   URL opens another page) at every write, shown through `displayLine`, linked only when https, and
    never in a push, a log line or an audit line. A tagged record carries `TAGS_DEP_SENTINEL`, so an older leader cannot
    rewrite it without the tags, and a client's create seals `creator.*` alone: an app cannot forge an owner's label.
    An attachment (built 2026-10-28) is one more thing a PSK holder hands the
@@ -8725,7 +8726,10 @@ of docs/tags.md's model. They label a task for people and for the adapter feed; 
 or alerts on one.
 
 - **Vocabulary** (`shared/src/tags.ts`). At most `TASK_TAGS_MAX` (6) keys per task, within `TASK_TAG_BUDGET`
-  (`creator` 3, `owner` 2, `scheduler` 1), each value at most `TAG_VALUE_MAX` (256) and held to `parseTagValue`.
+  (`creator` 3, `owner` 2, `scheduler` 1), each value at most `TAG_VALUE_MAX` (256) and held to `parseTagValue`. A
+  `creator.ref-url` is the one key refused past that cap, never cut: it is held to 256 bytes both as typed and as the
+  normalised `href` (non-ASCII and quotes percent-encode and grow), so what is stored is a fixed point of every later
+  parse and a link is never a truncation of another.
   `creator.ref` (`source:id`, `parseRef`) and `creator.ref-url` (https only) are the two keys a surface writes today; any
   other `creator.*` key is opaque to the surfaces and shown only on the verdict's list. `owner.label` is the owner's.
   `scheduler.*` is reserved: it has no known key in v1, so the leader writes none and a client's is refused.
@@ -8739,25 +8743,37 @@ or alerts on one.
   tasks cannot be moved by their session events, their dependents block, and labelled finished records cannot be
   pruned. Its `after` is `tags`, where the attachments, requires and successor sentinels are `merged`, `opened` and
   `done`, so each stays tied to its own field. The parser drops it only beside `tags` and nulls the spec over the
-  sentinel without them.
+  sentinel without them. It guards against leaders that predate tags and no further: a leader of this build drops a key
+  it does not know (`scheduler.*` has none in v1) and re-seals without it, with the sentinel still on the record. A
+  later build that defines a `scheduler.*` key, or any key an older tag-aware leader would drop, needs its own guard (a
+  new sentinel `after`, or a capability gate on its writer) or it is erased by the first leader that takes the term
+  before the update reaches it.
 - **Who writes what.** A client's create seals `creator.*` alone, so the record is version 1 and `bindTaskRecord`
   strips every other key from it (`onlyCreatorTags`): an app cannot create a task wearing an owner's label or a
   scheduler key. `owner.*` is written only by the leader, on an `amend` carrying `ownerTags`, and `AmendRequest.
   ownerTags` is sent only by the PWA: `parseAmendDraft` refuses it, so neither the broker nor MCP's `amend_task` nor the
   CLI carries it ("Amending a waiting task"). Adapters write none.
 - **The gate.** A client writes `tags` or `ownerTags` only to a verified leader advertising `CAPABILITIES.taskTags`
-  (`taskTagsGateError`, `shared/src/tags.ts`): the CLI, MCP and the broker refuse a `--ref` / `ref` create with a
+  (`taskTagsGateError`, `daemon/src/auto.ts`): the CLI, MCP and the broker refuse a `--ref` / `ref` create with a
   message naming the flag, and the PWA hides its inputs. A continuation or successor is the exception: display data must
   not block a resume, so `offeredSpec` drops the copied `creator.*` tags when the leader lacks the capability.
-- **The bound.** Six keys at their bounds do not fit the 28 KiB create cap and the 40 KiB record cap beside a full
-  prompt, a full manifest and the leader's own fields, so the leader's `#update` retries a `too_large` write once with
-  the held decision cut to its winner (`winnerOnly`), and `parse.test.ts` states the measured headroom. The key count
-  was kept at six on that basis rather than cut (docs/tags.md open question 7).
+- **The bound.** Measured at the true worst case (`parse.test.ts`: opaque values of 256 `"`, which JSON-escape to two
+  bytes each, a 256-byte ref URL, a 96-character ref and a 200-character label, beside a full prompt, a full manifest
+  and every other field at its cap): a create with the three creator keys seals to 28252 of the 28672 create cap (420
+  spare; 144 with the legacy `linear` kept beside them, which no writer sets). Six keys do not fit the 40 KiB record
+  cap beside eight candidates, which have 216 bytes spare before any tag, so the leader's `#update` retries a
+  `too_large` write once with the held decision cut to its winner (`winnerOnly`; it does not retry a record that has
+  nothing to cut): the five keys a leader writes then fit with 1420 spare, and 2920 spare with no decision. A store
+  refusal of a label alone answers `tags_full`, never `prompt_too_long`. The key count was kept at six on that basis
+  rather than cut (docs/tags.md open question 7).
 - **Chains.** `continuationSpec` and `successorSpec` copy the predecessor's `creator.*` tags (`chainTags`), never
   `owner.*` and never `scheduler.*`. The leader copies the predecessor's `owner.*` onto the new task at its first move
   out of `queued` (`scheduler/src/chain-tags.ts`: the resumed or passed-from task, by `continues` or `succeeds`), so the
-  label follows the work even though the client's create was version 1; a task already `blocked` moving on takes none,
-  so a label the owner cleared since stays cleared. A successor's preamble carries a `Ref:` line from `creator.ref`
+  label follows the work even though the client's create was version 1. It copies only for a record still at store
+  version 1 (the client's create, which the leader has not written): an amend while it waited, a label set and cleared
+  included, leaves no key to show the owner spoke, so any leader write forgoes the copy and the owner's word stands. A
+  task already `blocked` moving on takes none either. The cost is a successor whose prompt was amended before its first
+  move carries no copied label. A successor's preamble carries a `Ref:` line from `creator.ref`
   where it carried `Linear issue:`.
 - **The reserve compare ignores tags.** `#reserve` declines a reservation whose routed spec differs from the held one
   (`isDeepStrictEqual`); a label set while the decision was in flight must not cost the task its placement, so both
@@ -8795,8 +8811,8 @@ model and effort), and is audited as `fields=notBefore`, never the time ("Not be
 - **Tags-only, in any state** (2026-11-18, "Task tags"). An `amend` carrying `ownerTags` and none of the other fields
   is taken whatever the task's state, finished included, because a label changes nothing the leader routes: it
   needs no `basis`, meets no state rule beyond `not_found` and forgets no decision. `ownerTags` holds bare `owner.*`
-  suffixes (`""` clears one); past `TASK_TAG_BUDGET.owner` the leader answers `tags_full`, which reaches a client
-  as `invalid_request`. Beside another field it meets the rules below. Only the PWA sends it, to a verified leader
+  suffixes (`""` clears one); past `TASK_TAG_BUDGET.owner`, or when the store refuses the record as too large with
+  nothing left to cut, the leader answers `tags_full`, which reaches a client as `invalid_request`. Beside another field it meets the rules below. Only the PWA sends it, to a verified leader
   advertising `taskTags`. Because the record is rewritten through the one sealer, a label on a finished record leaves
   `TAGS_DEP_SENTINEL` on it, which is why the prune age is unchanged but an older leader cannot read it.
 - **Only before dispatch.** Accepted only while the task is `queued`, `blocked` or `ready` with no spawn
