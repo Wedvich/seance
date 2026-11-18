@@ -12,6 +12,8 @@ import type {
   CustodianResponse,
   RescanResponse,
   SessionsResponse,
+  SessionTagErrorCode,
+  SessionTagResponse,
   SpawnClient,
   StoreRefusal,
   Task,
@@ -27,6 +29,7 @@ import {
   METRICS_STEPS,
   parseAvailabilityResponse,
   parseCustodianResponse,
+  parseSessionTagResponse,
   CAPABILITIES,
   queuedTask,
   RequestFailure,
@@ -224,6 +227,25 @@ function enqueueFailureText(failure: RequestFailure): string {
 }
 
 const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that settle on a done report yet.";
+
+const SESSION_TAG_TEXTS: Readonly<Record<SessionTagErrorCode, string>> = {
+  invalid_request: "That name can't be used",
+  refused: "This machine refused the rename",
+  unsupported: "This machine can't rename sessions yet",
+  tasked: "This session now runs a task, which names it",
+  moved: "This pane now holds another conversation",
+  unverified: "This machine can't confirm the session's conversation right now",
+  ambiguous: "More than one session claims this conversation",
+  ended: "This session has ended",
+  internal_error: "This machine couldn't save the name",
+  too_large: "That name is too long",
+};
+
+/** A rename refusal as the dialog says it: fixed text per code, never the daemon's message; unparsed reads as not reached. */
+export function sessionTagRefusalText(reply: SessionTagResponse | null, name: string): string {
+  if (reply === null) return `Couldn't reach ${name}`;
+  return reply.ok ? "" : SESSION_TAG_TEXTS[reply.code];
+}
 
 const CUSTODIAN_ACT_WORDS = {
   round: "ask for a round on",
@@ -608,6 +630,16 @@ export class Store {
     if (!deriveDrainAvailability(this.#state.relay)) return;
     void this.refreshQueue();
     void this.#fetchSessions([deviceId]);
+  }
+
+  /** The Machines screen names each session: read afresh, as it opens, every connected machine that can rename one. */
+  readNamedSessions(): void {
+    const { relay } = this.#state;
+    if (relay.status !== "open") return;
+    const due = relay.machines
+      .filter((machine) => machine.connected && machine.capabilities?.includes(CAPABILITIES.sessionTag) === true)
+      .map((machine) => machine.deviceId);
+    if (due.length > 0) void this.#fetchSessions(due);
   }
 
   async #fetchSessions(deviceIds: readonly string[]): Promise<void> {
@@ -1317,6 +1349,34 @@ export class Store {
         text: `Couldn't ${open ? "reopen" : closedAt(machine) === null ? "close" : "drain"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  /**
+   * Names (blank clears) an untasked session's conversation on its machine (`session-tag`), from the session's Rename.
+   * Offered only for a connected machine advertising `sessionTag`, checked again here. On success the machine's
+   * sessions are read again, which is where the name shows; the reply is null then, else the refusal as fixed text.
+   */
+  async renameSession(deviceId: string, pane: string, session: string, text: string): Promise<string | null> {
+    const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+    if (
+      machine === undefined ||
+      !machine.connected ||
+      machine.capabilities?.includes(CAPABILITIES.sessionTag) !== true
+    ) {
+      return "This machine can't rename sessions right now";
+    }
+    let parsed: SessionTagResponse | null;
+    try {
+      const payload = { pane, session, key: "label", value: text.trim() };
+      parsed = parseSessionTagResponse(
+        await this.#client.request<SessionTagResponse>(deviceId, "session-tag", payload),
+      );
+    } catch {
+      parsed = null;
+    }
+    if (parsed === null || !parsed.ok) return sessionTagRefusalText(parsed, machine.name);
+    await this.#fetchSessions([deviceId]);
+    return null;
   }
 
   /**

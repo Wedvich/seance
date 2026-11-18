@@ -198,6 +198,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onOpenRename={(accountId) => store.openAccountRename(accountId)}
           onCloseRename={() => store.closeAccountRename()}
           onRename={(accountId, text) => store.renameAccount(accountId, text)}
+          onReadSessions={() => store.readNamedSessions()}
+          onRenameSession={(deviceId, pane, session, text) => store.renameSession(deviceId, pane, session, text)}
         />
       ),
     };

@@ -1280,3 +1280,75 @@ describe("the custodian row", () => {
     });
   });
 });
+
+describe("a machine's sessions by name", () => {
+  const conversation = "1a2b3c4d-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+  const tag = (value: string, scope: "conversation" | "process", extra: object = {}) => ({
+    value,
+    at: 1,
+    scope,
+    ...extra,
+  });
+  const verified = { "agent.session": tag(conversation, "conversation", { verified: true }) };
+  const entry = (id: string, fields: Partial<SessionEntry> = {}): SessionEntry => ({
+    id,
+    window: `win-${id}`,
+    repo: "seance",
+    path: "/x",
+    ...fields,
+  });
+  const running: Task = {
+    id: "t1",
+    spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "x", title: "Fix the flake" },
+    state: "running",
+    createdAt: 1,
+    assignment: { deviceId: "dev-1", exclave: "default", clone: "seance" },
+  };
+  const rowsOf = (
+    sessions: readonly SessionEntry[],
+    capabilities: readonly string[] = [CAPABILITIES.sessionTag],
+    relayOpen = true,
+    connected = true,
+  ) =>
+    deriveMachines([machine({ capabilities, connected })], NOW, NO_LEADER, {}, [], undefined, relayOpen, {
+      passes: false,
+      tasks: [running],
+      sessions: { "dev-1": { sessions } },
+    }).cards[0]?.sessions;
+
+  test("each name source: the owner's label, the task's title, the session's own name, the window", () => {
+    const rows = rowsOf([
+      entry("%1", { tags: { ...verified, "owner.label": tag("release notes", "conversation") } }),
+      entry("%2", { taskId: "t1", tags: { "self.name": tag("my own name", "process") } }),
+      entry("%3", { tags: { "self.name": tag("my own name", "process") } }),
+      entry("%4"),
+    ]);
+    expect(rows?.map((row) => [row.name, row.mark])).toEqual([
+      ["release notes", null],
+      ["Fix the flake", null],
+      ["my own name", "(self-named)"],
+      ["win-%4", "(window)"],
+    ]);
+  });
+
+  test("Rename only for an untasked session with a verified conversation, on a sessionTag machine over an open relay", () => {
+    const sessions: readonly SessionEntry[] = [
+      entry("%1", { tags: { ...verified, "owner.label": tag("notes", "conversation") } }),
+      entry("%2", { taskId: "t1", tags: verified }),
+      entry("%3", { tags: { "agent.session": tag(conversation, "conversation") } }),
+      entry("%4"),
+      { window: "old", repo: null, path: "/x", tags: verified },
+    ];
+    expect(rowsOf(sessions)?.map((row) => row.rename)).toEqual([
+      { pane: "%1", session: conversation, label: "notes" },
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(rowsOf(sessions, [])?.every((row) => row.rename === null)).toBe(true);
+    expect(rowsOf(sessions, [CAPABILITIES.sessionTag], false)?.every((row) => row.rename === null)).toBe(true);
+    // Asleep: no rows, since its last read is not what runs there now.
+    expect(rowsOf(sessions, [CAPABILITIES.sessionTag], true, false)).toBeNull();
+  });
+});
