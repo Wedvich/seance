@@ -79,11 +79,11 @@ export interface SessionEventFrame {
   readonly prUrl?: string;
   /**
    * `$CLAUDE_CODE_BRIDGE_SESSION_ID` as the session saw it — kept only as `isRemoteSessionId` passes it. `agent.remote`'s
-   * fallback (docs/tags.md §7), read only when the frame carries no `agent.remote`.
+   * fallback (DESIGN.md, "Tags and session identity"), read only when the frame carries no `agent.remote`.
    */
   readonly remoteSession?: string;
   /**
-   * The agent's own claims about the session it runs in (docs/tags.md §3.1), on every report the mod and the settings
+   * The agent's own claims about the session it runs in (DESIGN.md, "Session identity", "The claims"), on every report the mod and the settings
    * hooks send: its kind, its conversation id and Remote Control's id, as bare suffixes, each kept only as its parser
    * passes it (`parseAgentClaim`). Claims, not facts: the conversation id counts only once the daemon's own sources
    * verify it (`conversations.ts`). May ride alone, with no state.
@@ -1400,7 +1400,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       // An `ended` the leader cannot match to a PR waits for the exit, and settles `done` if the machine goes
       // first: so it carries the PR this pane's own launch noted, in case the event that carried it was lost.
       const sentPr = prUrl ?? (frame.state === "ended" ? (deps.ended.notedPr(pane.taskId) ?? null) : null);
-      // `agent.remote` first, `remoteSession` its fallback (docs/tags.md §7): one rule, `isRemoteSessionId`, for both.
+      // `agent.remote` first, `remoteSession` its fallback (DESIGN.md, "Tags and session identity"): one rule, `isRemoteSessionId`, for both.
       const remoteSession =
         frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null);
       if (frame.agent?.remote === undefined && frame.remoteSession !== undefined && remoteSession === null) {

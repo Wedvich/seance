@@ -15,7 +15,7 @@ export interface PaneRef {
 type TrackedState = Exclude<SessionState, "done">;
 
 /**
- * Session identity and the process and conversation levels of a session's tags (docs/tags.md §1, §3.2, §4): daemon
+ * Session identity and the process and conversation levels of a session's tags (DESIGN.md, "Tags and session identity" and "Session identity"): daemon
  * memory, never written, logged, audited or sent anywhere but an app's `sessions` reply (`SessionEntry.tags`).
  *
  * - **Process level**, keyed on the bound `claude` process (`<pid>:<start time>`, `Bound.session`), never the pane:
@@ -38,7 +38,7 @@ type TrackedState = Exclude<SessionState, "done">;
  * (`atAct`): a file that moved with no report demotes the claim before the act.
  *
  * Nothing here binds a frame to a pane (peer pid does that, `session-events.ts`), and no tag binds, routes or moves
- * anything; the verified id's one use is to name a conversation to the acts docs/tags.md §3.1 and §8 list.
+ * anything; the verified id's one use is to name a conversation to the acts DESIGN.md, "Session identity", lists.
  *
  * The owner's label on an untasked conversation (`label`, the `session-tag` op) is kept at rest against the id
  * (`adapter-subscriptions.ts`) and joins a process's tags as `owner.label` only while that process's claim of the id is
@@ -50,7 +50,7 @@ export const SETTLE_MS = 500;
 const RETRY_MS = 25;
 /** Conversations remembered in memory; the least recently live goes first. */
 export const CONVERSATIONS_MEMORY_MAX = 256;
-/** Conversations and tasks one adapter may hold tags on (docs/tags.md §8.4); past it a new one is `full`. */
+/** Conversations and tasks one adapter may hold tags on (DESIGN.md, "Adapters", "Tags"); past it a new one is `full`. */
 export const ADAPTER_TAG_TARGETS_MAX = 512;
 
 /** The `agent` claims a report carries, each already through its parser (`parseAgentClaim`). */
@@ -140,7 +140,7 @@ export interface ConversationsDeps {
   readonly store?: Pick<ConversationStore, "label" | "setLabel" | "live">;
 }
 
-/** What an adapter's `tag` frame names: a subscribed conversation, or a task launched here (docs/tags.md §8.4). */
+/** What an adapter's `tag` frame names: a subscribed conversation, or a task launched here (DESIGN.md, "Adapters", "Tags"). */
 export type AdapterTagTarget = { readonly conversation: string } | { readonly task: string };
 
 export interface Conversations {
@@ -170,7 +170,7 @@ export interface Conversations {
   readonly atAct: (id: string) => Promise<ActCheck>;
   /**
    * The verified conversation of the bound `claude` process `key` (`Bound.session`), re-read now as `atAct` does: null
-   * unless that process alone claims it, verified. What subscribes a sender to an adapter (docs/tags.md §8.2).
+   * unless that process alone claims it, verified. What subscribes a sender to an adapter (DESIGN.md, "Adapters", "The subscription").
    */
   readonly verifiedFor: (key: SessionKey) => Promise<string | null>;
   /**
@@ -506,7 +506,7 @@ export function createConversations(deps: ConversationsDeps): Conversations {
 
   /**
    * The owner's label for the entry's conversation, only while its claim is verified and no other live process claims
-   * it, and never on a tasked process: its name is its task's (docs/tags.md §3.1; the act refuses `tasked` the same).
+   * it, and never on a tasked process: its name is its task's (DESIGN.md, "Session identity", "The owner's label"; the act refuses `tasked` the same).
    */
   const ownerLabel = (entry: ProcessEntry): SessionTag | null => {
     const claim = entry.claim;
@@ -529,7 +529,7 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       if (entry === null) return undefined;
       const tags: Record<string, SessionTag> = {};
       if (entry.taskId !== null) Object.assign(tags, adapterTagsOf(`t:${entry.taskId}`));
-      // Only a verified, unconflicted claim carries what is kept against its id (docs/tags.md §3.2).
+      // Only a verified, unconflicted claim carries what is kept against its id (DESIGN.md, "The owner's label", "At rest").
       if (!entry.fallback && entry.claim?.verdict === "verified" && claimants(entry.claim.session).length === 1) {
         Object.assign(tags, adapterTagsOf(`c:${entry.claim.session}`));
       }

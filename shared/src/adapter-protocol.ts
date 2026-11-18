@@ -87,7 +87,7 @@ export type SessionGoneReason = (typeof SESSION_GONE_REASONS)[number];
 export const ADAPTER_TASK_EVENTS = ["launched", "done", "handoff", "pass", "ended"] as const;
 export type AdapterTaskEvent = (typeof ADAPTER_TASK_EVENTS)[number];
 
-/** Where a `Session`'s `name` came from (docs/tags.md §6.1, T2). */
+/** Where a `Session`'s `name` came from (DESIGN.md, "Tags and session identity", T2). */
 export const NAME_SOURCES = ["owner", "task", "self", "window"] as const;
 export type NameSource = (typeof NAME_SOURCES)[number];
 
@@ -281,7 +281,7 @@ export type DeliverFrame = {
   readonly from?: string;
 } & DeliverAddress;
 
-/** One `adapter.<name>.<key>` tag on a subscribed conversation or a task's session; `""` clears it (docs/tags.md §8.4). */
+/** One `adapter.<name>.<key>` tag on a subscribed conversation or a task's session; `""` clears it (DESIGN.md, "Adapters", "Tags"). */
 export type TagFrame = {
   readonly kind: "tag";
   readonly ref: string;

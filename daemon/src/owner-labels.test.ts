@@ -1,5 +1,5 @@
 // The owner's label at rest: kept by the one owner of `conversations.json` beside the adapter subscriptions
-// (`adapter-subscriptions.ts`, docs/tags.md §3.2).
+// (`adapter-subscriptions.ts`, DESIGN.md, "The owner's label", "At rest").
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -72,12 +72,15 @@ describe("the owner's label in the conversations file", () => {
     expect(await conversationsOnDisk()).toEqual({
       [id(3)]: { subscriptions: [{ adapter: "tracker", since: 5_001 }], lastLive: 5_001 },
     });
-    // The CLI's own open of the file (`seance adapter remove`) keeps a label it does not touch.
+    // A start's reconcile after `seance adapter remove` ends the subscription and keeps the label it does not touch.
     await store.setLabel(id(3), "again");
-    const cli = openSubscriptions(path, { now: () => now });
-    cli.drop("tracker");
-    await cli.flushed();
+    const restarted = openSubscriptions(path, { now: () => now });
+    restarted.reconcile(new Map());
+    await restarted.flushed();
     expect(openSubscriptions(path, { now: () => now }).label(id(3))?.value).toBe("again");
+    expect(await conversationsOnDisk()).toEqual({
+      [id(3)]: { ownerLabel: { value: "again", at: 5_001 }, subscriptions: [], lastLive: 5_001 },
+    });
   });
 
   test("a missing, unreadable or malformed file loads empty", async () => {

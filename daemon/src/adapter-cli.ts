@@ -3,20 +3,21 @@ import { join } from "node:path";
 import { ADAPTERS_MAX, isAdapterName, isRecord, MESSAGE_KINDS, type MessageKind } from "@seance/shared";
 import { readAdaptersView, requestAdapterRestart, type AdaptersView, type AdapterView } from "./adapter-control.ts";
 import { checkoutCommit, readAdapterManifest } from "./adapter-manifest.ts";
-import { adapterFingerprint, openSubscriptions } from "./adapter-subscriptions.ts";
+import { adapterFingerprint } from "./adapter-subscriptions.ts";
 import { adapterOwnerAudit, cliSink } from "./audit.ts";
 import { usageLine } from "./commands.ts";
 import { ADAPTER_DEFAULT_KINDS, loadConfig, type AdapterConfig } from "./config.ts";
 import { printable } from "./custodian-owner-cli.ts";
 import { writeDurable } from "./durable-write.ts";
-import { adaptersDir, configPath, conversationsPath } from "./paths.ts";
+import { adaptersDir, configPath } from "./paths.ts";
 import { livePid, readState } from "./state.ts";
 
 /**
  * `seance adapter add | remove | restart | status` (DESIGN.md, "Adapters", "Installing"): the
  * owner's, typed at this machine's shell, never a frame, a local-socket op, an app op or MCP. `add` and `remove` edit
- * this machine's `config.json` and nothing else of it, and end the name's subscriptions; `restart` and `status` talk
- * to the running daemon through two files (`adapter-control.ts`). Every act is audited under origin `cli`.
+ * this machine's `config.json` and nothing else of it (the daemon ends the name's subscriptions when it reads the new
+ * config: `reconcileWith`, so `conversations.json` keeps one writer); `restart` and `status` talk to the running daemon
+ * through two files (`adapter-control.ts`). Every act is audited under origin `cli`.
  *
  * Whatever the daemon's status view holds that an adapter wrote (its hello's version) reaches the terminal only through
  * `printable`.
@@ -113,13 +114,6 @@ async function writeAdapters(config: RawConfig, adapters: Record<string, unknown
   await writeDurable(config.path, text, config.mode);
 }
 
-/** Ends every subscription to `name` (docs/tags.md §8.2): a re-added or removed adapter inherits none. */
-async function dropSubscriptions(name: string): Promise<void> {
-  const subscriptions = openSubscriptions(conversationsPath());
-  subscriptions.drop(name);
-  await subscriptions.flushed();
-}
-
 async function daemonRunning(): Promise<number | null> {
   return livePid().catch(() => null);
 }
@@ -162,7 +156,6 @@ async function add(args: readonly string[]): Promise<void> {
     added: new Date().toISOString(),
   };
   await writeAdapters(config, { ...config.adapters, [name]: entry });
-  await dropSubscriptions(name);
   await adapterOwnerAudit(cliSink).add(name, {
     argv: entry.argv,
     kinds,
@@ -178,7 +171,11 @@ async function add(args: readonly string[]): Promise<void> {
     `  repos    ${repos === undefined ? "every session on this machine (--repo limits it)" : repos.join(", ")}`,
   );
   console.log(`  commit   ${commit ?? "none: not a git checkout, so doctor cannot tell when its code changes"}`);
-  if (replaced) console.log(`  its subscriptions are ended: sessions that messaged it must message it again`);
+  if (replaced) {
+    console.log(
+      `  its subscriptions end when the daemon reads this config: sessions that messaged it must message it again`,
+    );
+  }
   const known = new Set(((await readState().catch(() => null))?.repos ?? []).map((repo) => repo.name));
   for (const repo of repos ?? []) {
     if (!known.has(repo)) console.log(`  warn: no scanned repo is named ${repo} (\`seance scan\` lists them)`);
@@ -187,7 +184,7 @@ async function add(args: readonly string[]): Promise<void> {
   console.log(
     (await daemonRunning()) === null
       ? "it starts with the daemon."
-      : "`seance restart` starts it (the daemon reads config.json at its start).",
+      : "the running daemon reloads config.json and starts it within moments.",
   );
 }
 
@@ -201,12 +198,11 @@ async function remove(name: string): Promise<void> {
   }
   const { [name]: _gone, ...rest } = config.adapters;
   await writeAdapters(config, rest);
-  await dropSubscriptions(name);
   await adapterOwnerAudit(cliSink).remove(name);
-  console.log(`removed adapter ${name} from ${config.path}; its subscriptions are ended`);
+  console.log(`removed adapter ${name} from ${config.path}; its subscriptions end when the daemon reads this config`);
   console.log(`its own directory, ${join(adaptersDir(), name)}, is left as it is`);
   if ((await daemonRunning()) !== null)
-    console.log("`seance restart` stops it (the daemon reads config.json at its start)");
+    console.log("the running daemon reloads config.json and stops it within moments");
 }
 
 async function restart(args: readonly string[]): Promise<void> {
@@ -231,7 +227,7 @@ async function restart(args: readonly string[]): Promise<void> {
     console.error(
       (await daemonRunning()) === null
         ? "the daemon is not running: it starts its adapters when it starts"
-        : "the daemon runs no adapters (config.json named none at its start): `seance restart`",
+        : "the daemon runs no adapters yet: it reloads config.json when it changes, so try again in a moment",
     );
     process.exitCode = 1;
     return;
@@ -240,7 +236,9 @@ async function restart(args: readonly string[]): Promise<void> {
   const unloaded = names.filter((each) => !loaded.includes(each));
   await Promise.all(unloaded.map(async (name) => audit.restart(name, "not_running")));
   for (const name of unloaded) {
-    console.log(`${name}: not running in the daemon (added since it started) — \`seance restart\` starts it`);
+    console.log(
+      `${name}: not loaded by the daemon yet (it reloads config.json when it changes): try again in a moment`,
+    );
   }
   if (loaded.length === 0) {
     process.exitCode = 1;
@@ -290,7 +288,7 @@ async function status(): Promise<void> {
     console.log(name);
     if (pid !== null) {
       if (live === undefined) {
-        console.log("  state      not running in the daemon (added since it started: `seance restart`)");
+        console.log("  state      not loaded by the daemon yet (it reloads config.json when it changes)");
       } else {
         console.log(`  state      ${stateLine(live)}`);
         if (live.protocol !== undefined) {
@@ -306,7 +304,9 @@ async function status(): Promise<void> {
           console.log(`  last exit  ${time(at)}: ${reason}${code === null ? "" : `, code ${code}`}`);
         }
         if (live.fingerprint !== adapterFingerprint(config)) {
-          console.log("  note       config.json changed since the daemon started it: `seance restart`");
+          console.log(
+            "  note       config.json changed since the daemon started it (a reload is under way, or failed: see the log)",
+          );
         }
       }
     }

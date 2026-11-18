@@ -357,7 +357,7 @@ describe("the MCP tools, direct and brokered", () => {
     localCalls.length = 0;
     const listed = await brokered("get_sessions", { machine: "MacBook Pro" });
     expect(listed).toContain('"window": "here"');
-    // Another agent's context gets the allowlist (docs/tags.md §6.3): never a conversation or a bridge id.
+    // Another agent's context gets the allowlist (DESIGN.md, "Tags and session identity"): never a conversation or a bridge id.
     expect(listed).toContain('"agent.kind"');
     expect(listed).not.toContain("agent.session");
     expect(listed).not.toContain("session_01LocalBridge");

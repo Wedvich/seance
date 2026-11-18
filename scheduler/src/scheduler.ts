@@ -1369,7 +1369,7 @@ export class Scheduler {
    * checked against the prompt held when the request arrives and again inside the write, so a prompt
    * changed by another amend in between is `prompt_changed`, never overwritten. An amendment that
    * changes nothing answers the task as it stands, writing nothing. An amendment of the owner's tags alone (`ownerTags`,
-   * docs/tags.md §5.2) is taken in any state, finished included: a label changes nothing the leader routes, so it
+   * DESIGN.md, "Task tags") is taken in any state, finished included: a label changes nothing the leader routes, so it
    * needs no `basis`, meets no state rule beyond `not_found` and forgets no decision. Beside another field it meets
    * today's rules.
    */
@@ -2333,7 +2333,7 @@ export class Scheduler {
     now: number,
   ): Promise<Task | null> {
     const reservation: Reservation = { ...chosen, expiresAt: now + this.#config.reservationTtlMs };
-    // Tags never route (docs/tags.md §2.2): a label set while the decision was in flight must not decline the reservation.
+    // Tags never route (DESIGN.md, "Tags and session identity"): a label set while the decision was in flight must not decline the reservation.
     const reserved = await this.#update(id, (current) =>
       current.state === "ready" && isDeepStrictEqual(withoutTaskTags(current.spec), withoutTaskTags(routed))
         ? advance(current, "reserved", { reservation, decision, reservedAt: now })

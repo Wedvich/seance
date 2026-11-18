@@ -212,7 +212,7 @@ function archivedRow(
     canContinue: false,
     canPass: false,
     canLabel: false,
-    // The archive keeps the ref and drops the owner's label (docs/tags.md §5.1).
+    // The archive keeps the ref and drops the owner's label (DESIGN.md, "Task tags").
     label: null,
     ref: taskTagLines(task).ref,
     inlinePrimary: false,

@@ -1,16 +1,16 @@
-// What no writer re-sends, kept at rest per conversation (docs/tags.md §3.2) in the one file
+// What no writer re-sends, kept at rest per conversation (DESIGN.md, "The owner's label", "At rest") in the one file
 // `stateDir()/conversations.json`, owned by this module alone (a second writer of its own format would erase this one's
-// entries, each loading the other's as empty): the adapter subscriptions (docs/tags.md §8, amending docs/messaging.md
-// D3) — a session that messages `adapter:<name>` subscribes its verified conversation to that adapter, which may then
-// deliver to it by `toSession` for the conversation's life — and the owner's label on an untasked conversation (§3.1,
-// the `session-tag` op). The label is the one text the file holds, the owner's own. Nothing in this module logs (an
+// entries, each loading the other's as empty): the adapter subscriptions (DESIGN.md, "Adapters", "The subscription",
+// amending docs/messaging.md D3) — a session that messages `adapter:<name>` subscribes its verified conversation to that
+// adapter, which may then deliver to it by `toSession` for the conversation's life — and the owner's label on an
+// untasked conversation (the `session-tag` op). The label is the one text the file holds, the owner's own. Nothing in this module logs (an
 // adapter module: `daemon/test/adapter-layering.test.ts`; `message-layering.test.ts` holds it off both sinks too).
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAdapterName, isAgentSessionId, isRecord, parseTagValue } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
 
-/** A conversation not live this long is dropped with its subscriptions (docs/tags.md §3.2). */
+/** A conversation not live this long is dropped with its subscriptions (DESIGN.md, "The owner's label", "At rest"). */
 export const CONVERSATION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Conversations kept at rest; past it the least recently live goes first. */
@@ -65,6 +65,20 @@ export function adapterFingerprint(config: {
   return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 }
 
+/**
+ * `reconcile` against the adapters a config names (none: every name's subscriptions end). The daemon calls it at each
+ * start and config reload, which is how `seance adapter add` and `remove` end a name's subscriptions: the CLI writes
+ * only `config.json`, so this file keeps one writer.
+ */
+export function reconcileWith(
+  subscriptions: Subscriptions,
+  adapters: Readonly<Record<string, Parameters<typeof adapterFingerprint>[0]>> | undefined,
+): void {
+  subscriptions.reconcile(
+    new Map(Object.entries(adapters ?? {}).map(([name, config]) => [name, adapterFingerprint(config)])),
+  );
+}
+
 export interface Subscriptions extends ConversationStore {
   has(adapter: string, conversation: string): boolean;
   /** Subscribe, or renew `lastLive` on, a verified conversation. */
@@ -73,8 +87,6 @@ export interface Subscriptions extends ConversationStore {
   leave(adapter: string, conversation: string): void;
   /** The conversation was seen live (a verified, unconflicted process claims it). */
   touch(conversation: string): void;
-  /** Ends every subscription to one adapter (removed, or `seance adapter add` under the same name). */
-  drop(adapter: string): void;
   /**
    * Ends every subscription to an adapter no longer configured, or configured as another program (its fingerprint
    * changed, as a hand edit or a re-add makes it): a replaced program inherits none.
@@ -140,7 +152,10 @@ function parseFile(text: string): Loaded {
   return loaded;
 }
 
-/** Read once, synchronously, at the daemon's start: one small file, before any adapter speaks. */
+/**
+ * Read once, synchronously, at the daemon's start: one small file, before any adapter speaks. One store per file per
+ * process (`subscriptionsFor`, `run-capabilities.ts`): a second one over the same file would write its map over this one's.
+ */
 export function openSubscriptions(path: string, opts: { readonly now?: () => number } = {}): Subscriptions {
   const now = opts.now ?? Date.now;
   let text: string | null;
@@ -269,10 +284,6 @@ export function openSubscriptions(path: string, opts: { readonly now?: () => num
         });
         throw err;
       }
-    },
-    drop(adapter) {
-      const changed = strip(adapter);
-      if (adapters.delete(adapter) || changed) void persist();
     },
     reconcile(configured) {
       let changed = false;

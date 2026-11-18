@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isRecord, MESSAGE_MAX, MESSAGE_RATE, type RepoEntry } from "@seance/shared";
+import { isRecord, MESSAGE_MAX, MESSAGE_RATE, TAGS_PER_WRITER_MAX, type RepoEntry } from "@seance/shared";
 import { createAdapterFeed, type AdapterFeed } from "../src/adapter-feed.ts";
 import { startAdapterHost, type AdapterHost } from "../src/adapter-host.ts";
 import { openSubscriptions, type Subscriptions } from "../src/adapter-subscriptions.ts";
@@ -633,6 +633,45 @@ describe("the subscription", () => {
     ).toMatchObject({ outcome: "unknown" });
     await halt(d);
   });
+
+  test("`ended` with no live claimant, nothing held; `refused` for a session outside `repos`", async () => {
+    let d = await boot();
+    await host(d, { tg: { argv: [adapter, "--no-echo"] } });
+    const gone = await claudePane();
+    await writeSessionFile(gone.pid, conv(24));
+    await claim(d, gone, conv(24));
+    await send(d, gone, { to: "adapter:tg", messageKind: "note", text: "subscribe, then go" });
+    expect(d.subscriptions.has("tg", conv(24))).toBe(true);
+    process.kill(gone.pid, "SIGKILL");
+    await pollUntil(async () => {
+      const act = await d.table.atAct(conv(24));
+      return !act.ok && act.code === "ended";
+    }, "no claimant left");
+    // No message id: nothing was minted, so nothing is held for a later process of the conversation.
+    expect(
+      await fromAdapter("tg", { kind: "deliver", toSession: conv(24), messageKind: "note", text: "anyone?" }),
+    ).toEqual({ kind: "result", ref: expect.any(String), outcome: "ended" });
+
+    // Subscribed while `tg` saw every repo; the owner then narrows it to `proj` (not part of the fingerprint).
+    const away = await claudePane({ cwd: elsewhere });
+    await writeSessionFile(away.pid, conv(25));
+    await claim(d, away, conv(25));
+    await send(d, away, { to: "adapter:tg", messageKind: "note", text: "subscribe from elsewhere" });
+    await halt(d);
+    d = await boot();
+    await host(d, { tg: { argv: [adapter, "--no-echo"], repos: ["proj"] } });
+    await claim(d, away, conv(25));
+    expect(d.subscriptions.has("tg", conv(25))).toBe(true);
+    expect(
+      await fromAdapter("tg", { kind: "deliver", toSession: conv(25), messageKind: "note", text: "outside" }),
+    ).toEqual({ kind: "result", ref: expect.any(String), outcome: "refused", code: "repo" });
+    expect(await fromAdapter("tg", { kind: "tag", session: conv(25), key: "ticket", value: "ENG-9" })).toMatchObject({
+      outcome: "refused",
+      code: "repo",
+    });
+    expect(d.table.tagsFor(away.pane)?.["adapter.tg.ticket"]).toBeUndefined();
+    await halt(d);
+  });
 });
 
 describe("an adapter's tags", () => {
@@ -663,6 +702,68 @@ describe("an adapter's tags", () => {
     const mailSaw = (await frames("mail")).filter((f) => f["kind"] === "session" || f["kind"] === "snapshot");
     expect(mailSaw.length).toBeGreaterThan(0);
     expect(JSON.stringify(mailSaw)).not.toContain("adapter.tg.");
+    await halt(d);
+  });
+
+  test("on a task launched here within `repos`, refused outside it, and `full` past the writer's cap", async () => {
+    const d = await boot();
+    await host(d, { scoped: { argv: [adapter, "--no-echo"], repos: ["proj"] } });
+    const id = await launch(conv(31));
+    const away = await launch(conv(32), "other");
+    expect(await fromAdapter("scoped", { kind: "tag", task: id, key: "ticket", value: "ENG-3" })).toMatchObject({
+      outcome: "ok",
+    });
+    expect(d.table.taskTags(id)?.["adapter.scoped.ticket"]?.value).toBe("ENG-3");
+    expect(await fromAdapter("scoped", { kind: "tag", task: away, key: "ticket", value: "ENG-4" })).toMatchObject({
+      outcome: "refused",
+      code: "repo",
+    });
+    expect(d.table.taskTags(away)).toBeUndefined();
+    for (let n = 1; n < TAGS_PER_WRITER_MAX; n++) {
+      // oxlint-disable-next-line no-await-in-loop -- in order: each key counts toward the cap before the next
+      expect(await fromAdapter("scoped", { kind: "tag", task: id, key: `k${n}`, value: "v" })).toMatchObject({
+        outcome: "ok",
+      });
+    }
+    expect(await fromAdapter("scoped", { kind: "tag", task: id, key: "one-more", value: "v" })).toMatchObject({
+      outcome: "full",
+    });
+    // A refused write drops nothing already held.
+    expect(Object.keys(d.table.taskTags(id) ?? {})).toHaveLength(TAGS_PER_WRITER_MAX);
+    await halt(d);
+  });
+
+  test("cleared at the adapter's handshake, and on the session's `leave`", async () => {
+    const d = await boot();
+    const started = await host(d, { tg: { argv: [adapter, "--no-echo"] } });
+    const s = await claudePane();
+    await writeSessionFile(s.pid, conv(33));
+    await claim(d, s, conv(33));
+    await send(d, s, { to: "adapter:tg", messageKind: "note", text: "subscribe for tags" });
+    const id = await launch(conv(34));
+    expect(await fromAdapter("tg", { kind: "tag", task: id, key: "ticket", value: "ENG-5" })).toMatchObject({
+      outcome: "ok",
+    });
+    expect(await fromAdapter("tg", { kind: "tag", session: conv(33), key: "ticket", value: "ENG-6" })).toMatchObject({
+      outcome: "ok",
+    });
+    expect(d.table.tagsFor(s.pane)?.["adapter.tg.ticket"]?.value).toBe("ENG-6");
+
+    // `leave` ends the subscription and that conversation's tags, never the task's.
+    await send(d, s, { to: "adapter:tg", messageKind: "note", text: "", leave: true });
+    expect(d.table.tagsFor(s.pane)?.["adapter.tg.ticket"]).toBeUndefined();
+    expect(d.table.taskTags(id)?.["adapter.tg.ticket"]?.value).toBe("ENG-5");
+
+    // A fresh run replays its own tags after its snapshot: the reference adapter would resend its whole outbox, so
+    // it starts from an empty one, and what the last run set is gone.
+    const snapshots = (await frames("tg")).filter((f) => f["kind"] === "snapshot").length;
+    await writeFile(join(dirOf("tg"), "outbox.jsonl"), "");
+    expect(started.restart(["tg"])).toEqual(["tg"]);
+    await pollUntil(
+      async () => (await frames("tg")).filter((f) => f["kind"] === "snapshot").length > snapshots,
+      "the new run's snapshot",
+    );
+    await pollUntil(() => d.table.taskTags(id) === undefined, "the task's tags cleared");
     await halt(d);
   });
 });

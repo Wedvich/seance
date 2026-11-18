@@ -5,7 +5,7 @@ import { isAgentSessionId, isRecord, isRemoteSessionId } from "@seance/shared";
 
 /**
  * `<configDir>/sessions/<pid>.json`, the file Claude Code writes for each running process past the trust dialog
- * (docs/tags.md §4.1, spikes S1–S3): `pid`, `sessionId`, `procStart` and, while Remote Control is on,
+ * (DESIGN.md, "Session identity", "Verification"; docs/tags.md, spikes S1–S3): `pid`, `sessionId`, `procStart` and, while Remote Control is on,
  * `bridgeSessionId`. It is the daemon's own witness of which conversation a `claude` process is in, read to verify an
  * `agent.session` claim and never taken as a claim itself. Undocumented behaviour, observed on Claude Code 2.1.326:
  * re-verified on upgrades, and a missing or changed file only means "claimed", never a failure. Nothing read here is

@@ -926,7 +926,7 @@ const SESSION_TAG_MESSAGES = {
 } as const;
 
 /**
- * `session-tag`: the owner names (or, with `""`, unnames) an untasked conversation (docs/tags.md §3.1). The owner's
+ * `session-tag`: the owner names (or, with `""`, unnames) an untasked conversation (DESIGN.md, "Session identity", "The owner's label"). The owner's
  * act, as `availability` is: only an app, on the relay leg, never the scheduler, the local socket or MCP. The act
  * re-checks the pane and the conversation's one verified claimant (`Conversations.label`).
  */

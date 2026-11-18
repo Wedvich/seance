@@ -54,6 +54,7 @@ import {
   adaptersSettled,
   paneActivitySettled,
   startCapabilities,
+  subscriptionsSettled,
   watchesSettled,
   type CustodianHost,
 } from "./run-capabilities.ts";
@@ -981,6 +982,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       await adaptersSettled();
       // A restart's reload reads `watches.json`: this process's last writes land first.
       await watchesSettled();
+      // After the adapters and watches, whose last acts can still change a subscription.
+      await subscriptionsSettled();
       await runtime;
     },
     updater,

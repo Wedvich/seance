@@ -3,7 +3,7 @@ import type { CustodianEvent, CustodianStatus, QuotaReading, RepoEntry } from "@
 import { takeRestartRequest, writeAdaptersView } from "./adapter-control.ts";
 import { createAdapterFeed } from "./adapter-feed.ts";
 import { startAdapterHost } from "./adapter-host.ts";
-import { openSubscriptions, type Subscriptions } from "./adapter-subscriptions.ts";
+import { openSubscriptions, reconcileWith, type Subscriptions } from "./adapter-subscriptions.ts";
 import { attachmentsRoot } from "./attachments.ts";
 import {
   adapterAudit,
@@ -280,6 +280,20 @@ const watchesOf = new WeakMap<WiringCtx, Watches>();
 /** The session-events capability's conversation table, which the adapters' state feed reads. */
 const conversationsOf = new WeakMap<WiringCtx, Conversations>();
 const subscriptionsOf = new WeakMap<WiringCtx, Subscriptions>();
+/**
+ * One `conversations.json` store per file, per process, for `heldFlags`' reason: a store caches the file, and a config
+ * reload starts session events again while the outgoing store's write may still be pending, so a second store would
+ * read the file before that write lands and later write its stale map over it.
+ */
+const subscriptionStores = new Map<string, Subscriptions>();
+export function subscriptionsFor(path: string): Subscriptions {
+  let store = subscriptionStores.get(path);
+  if (store === undefined) {
+    store = openSubscriptions(path);
+    subscriptionStores.set(path, store);
+  }
+  return store;
+}
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -317,7 +331,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   // Beside session events because that capability owns pane binding, the peer warnings above and the `ended` frame
   // that clears a pane's held messages: a second capability would need a late-bound hook into it.
   // The one owner of `conversations.json`: the owner's labels here, the adapters' subscriptions (`adapters` below).
-  const store = openSubscriptions(conversationsPath());
+  const store = subscriptionsFor(conversationsPath());
   const conversations = createConversations({
     configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
     launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
@@ -465,6 +479,18 @@ export async function watchesSettled(): Promise<void> {
   await Promise.all(watchStops);
 }
 
+/**
+ * Resolves once every `conversations.json` write queued so far reached the disk, looping until no store queued another
+ * meanwhile. `add`, `leave`, `touch` and `reconcile` persist without being awaited, and `main.ts` exits once the
+ * daemon's stop resolves, which would cut a write in flight and bring back a subscription a session had ended.
+ */
+export async function subscriptionsSettled(): Promise<void> {
+  const tails = [...subscriptionStores.values()].map((store) => store.flushed());
+  await Promise.all(tails);
+  const moved = [...subscriptionStores.values()].some((store, i) => store.flushed() !== tails[i]);
+  if (moved) await subscriptionsSettled();
+}
+
 /** How often the daemon looks for `seance adapter restart`'s request file. */
 const ADAPTER_RESTART_POLL_MS = 2_000;
 
@@ -493,6 +519,8 @@ const adapters: DaemonCapability = (ctx) => {
     conversations === undefined ||
     subscriptions === undefined
   ) {
+    // No adapter left: every name's subscriptions end here too, as the host's own `reconcile` ends a removed one's.
+    if (subscriptions !== undefined) reconcileWith(subscriptions, configured);
     return { stop: (): void => {} };
   }
   const feed = createAdapterFeed({

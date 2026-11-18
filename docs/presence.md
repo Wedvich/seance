@@ -4,7 +4,7 @@
 (`pengefix/huddle`, `origin/main`): a one-line `self.doing` tag a session declares about itself (§1), status questions
 answered from presence without waking anyone (§2), and coalesced wakes (§3). Each stands on its own and lands on its
 own; each also feeds the adapter seam (DESIGN.md, "Adapters", #486), which none of them depends on. It builds on
-docs/tags.md (#533), whose "What changes in #526" this file has taken (2026-11-17). Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as
+the tags model (docs/tags.md, #533, built and folded into DESIGN.md, "Tags and session identity"), whose edits for this file are applied here. Like docs/messaging.md, this file is the working record until the code lands; each part folds into DESIGN.md as
 it is built, and its text here goes.
 
 **Decided by the owner (2026-11-17):**
@@ -12,12 +12,12 @@ it is built, and its text here goes.
 - **O1. The custodian's `sessions` verb carries `doing`** (§1, D1.6), as its own PR (PR 4).
 - **O2. The standing instruction tells sessions to keep `doing` current** (§1, D1.7), in PR 1.
 - **O3. `doing` is the first tag of the session-tags model, `self.doing`, not a standalone field** (§1, D1.0),
-  recorded as T1 in docs/tags.md (#533). The tags model is that file's, not this one's.
+  recorded as T1 in DESIGN.md, "Tags and session identity". The tags model is that section's, not this file's.
 - **O4. Hand-started sessions get `self.doing` and retention too** (§1, D1.1, D1.3): the gate is a bound `claude`
-  process, not `ours` (docs/tags.md T4, §3.3), which #543 already builds for state and `agent.*`. The owner's
+  process, not `ours` (T4; DESIGN.md, "Tags and session identity", "Retention for hand-started sessions"), which #543 already builds for state and `agent.*`. The owner's
   direction is that Séance picks up every session in its tmux server, not only task-backed ones.
 
-**Builds on docs/tags.md's build step 1 (#543).** That step builds the vocabulary (`shared/src/tags.ts`: the key
+**Builds on the tags model's build step 1 (#543; DESIGN.md, "Session identity").** That step builds the vocabulary (`shared/src/tags.ts`: the key
 grammar, namespaces, `TAG_VALUE_MAX`, `TAGS_PER_WRITER_MAX`, `TAGS_PER_PANE_MAX`, `displayLine`, `parseTags`), the
 per-process retention (`daemon/src/conversations.ts`: keyed `<pid>:<start>` on the bound `claude` process, for every
 pane whose peer resolves to one, `ours` or not, with each process's state and `reason`), `SessionEntry.tags` on an
@@ -58,23 +58,23 @@ What Séance has today, and the gap each section closes:
 
 ### Decisions
 
-**D1.0 `doing` is the tag `self.doing` (O3).** The session-tags model is docs/tags.md (§2.1 there is the record); in
+**D1.0 `doing` is the tag `self.doing` (O3).** The session-tags model is DESIGN.md's "Tags and session identity" (`shared/src/tags.ts` is the record of the vocabulary); in
 brief, tags are key/value pairs namespaced by writer, and **the namespace is the access rule**:
 
-| Namespace          | Written by                         | Scope                 | Notes                                                                    |
-| ------------------ | ---------------------------------- | --------------------- | ------------------------------------------------------------------------ |
-| `agent.*`          | the agent's own mod and hooks only | process, conversation | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`)  |
-| `seance.*`         | the daemon only                    | session               |                                                                          |
-| `self.*`           | the session itself, through MCP    | process               | display-only, never keyed on, bound by peer pid                          |
-| `adapter.<name>.*` | that adapter only, over its stdin  | conversation          | DESIGN.md, "Adapters"                                                    |
-| `owner.*`          | the PWA, sealed `from: "app"`      | task, or conversation | on the task record for a tasked session (docs/tags.md §5)                |
-| `creator.*`        | whoever enqueued the task          | task                  | beyond T1 (docs/tags.md open question 7): `linear` becomes `creator.ref` |
-| `scheduler.*`      | the leader                         | task                  | beyond T1, same question                                                 |
+| Namespace          | Written by                         | Scope                 | Notes                                                                   |
+| ------------------ | ---------------------------------- | --------------------- | ----------------------------------------------------------------------- |
+| `agent.*`          | the agent's own mod and hooks only | process, conversation | `agent.kind`, `agent.session`, `agent.remote` (today's `remoteSession`) |
+| `seance.*`         | the daemon only                    | session               |                                                                         |
+| `self.*`           | the session itself, through MCP    | process               | display-only, never keyed on, bound by peer pid                         |
+| `adapter.<name>.*` | that adapter only, over its stdin  | conversation          | DESIGN.md, "Adapters"                                                   |
+| `owner.*`          | the PWA, sealed `from: "app"`      | task, or conversation | on the task record for a tasked session (DESIGN.md, "Task tags")        |
+| `creator.*`        | whoever enqueued the task          | task                  | beyond T1, decided: `linear` became `creator.ref`                       |
+| `scheduler.*`      | the leader                         | task                  | beyond T1, decided; no keys in v1                                       |
 
 No tag ever binds, routes or authorizes anything. Display precedence for a session's name is owner label > task
-title > `self.name` > window, the source marked, on the owner's surfaces only (docs/tags.md §6.1). Session tags live
+title > `self.name` > window, the source marked, on the owner's surfaces only (DESIGN.md, "Tags and session identity", "The join and the name"). Session tags live
 in daemon memory, short keys, values at most 256 bytes under the printable-text rule, never logged or audited as text,
-never in `MachineStatus`; task tags live in the task record (docs/tags.md §5), and no session tag ever does.
+never in `MachineStatus`; task tags live in the task record (DESIGN.md, "Task tags"), and no session tag ever does.
 
 This spec builds one key of it, `self.doing`, and shapes everything so the rest is additive:
 
@@ -85,7 +85,7 @@ This spec builds one key of it, `self.doing`, and shapes everything so the rest 
   UTF-8 bytes) after `displayLine`; keys `[a-z][a-z0-9-]{0,31}`; `TAGS_PER_WRITER_MAX` (4) per namespace and
   `TAGS_PER_PANE_MAX` (16) over a session's non-adapter tags (D1.2).
 - **Every wire shape carries the `tags` map keyed by the full namespaced key**, `{ "self.doing": { value, at, scope:
-  "process" } }` (docs/tags.md §6.1's entry shape, `SessionEntry.tags` as #543 built it), never a `doing` field:
+  "process" } }` (`joinTags`' entry shape, `SessionEntry.tags` as #543 built it), never a `doing` field:
   `SessionEntry.tags`, the custodian's `CustodianPaneView.tags`, `Presence.tags`, and the adapter `Session` record
   (DESIGN.md, "Adapters"). Every parser keeps only the keys it knows (`parseTags`) and drops the rest.
 - **`self.doing` is a line, not a name.** It never enters the name precedence above; the PWA shows it under the
@@ -98,7 +98,7 @@ pane?}`), the shape `handoff` and `pass` already take, over the local socket. A 
 `state`, `handoff`, `pass`, `prUrl` or `done`; one that does is refused `invalid`. The key is the bare `self.*` suffix:
 the namespace is never on the frame, since the frame's path (an MCP call from the session, bound by peer pid) is what
 makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carrying `self` unsent, as it drops `done`,
-`handoff` and `pass`: the mod's hooks never write `self.*` (they will write `agent.*`, docs/tags.md §3.1).
+`handoff` and `pass`: the mod's hooks never write `self.*` (they write `agent.*`: DESIGN.md, "Session identity", "The claims").
 
 - **Bound by the kernel-reported peer pid only, never by a field**: the peer is the `seance mcp` process, whose
   ancestor chain names the pane. Unlike a state report, the frame's `pane` never decides: on a host that names no peer
@@ -107,10 +107,10 @@ makes it `self`. `seance session-event` (the mod's CLI path) drops a frame carry
   display is not, so it gets the stricter rule.
 - **Any pane whose peer resolves to a `claude` process, `ours` or hand-started, tasked or not (O4).** The gate is
   the one #543's retention already uses (`claudeProcessOf`, `daemon/src/claude-process.ts`: the innermost process on
-  the peer's chain called `claude`), as docs/tags.md §3.3 decided. A peer with no `claude` on its chain (a shell's
+  the peer's chain called `claude`), as T4 decided. A peer with no `claude` on its chain (a shell's
   child running `seance mcp` by hand) is refused `unbound`, since there is no process to hold the line against.
-  Sessions outside the daemon's tmux server stay out: no pane binds them (docs/tags.md §3.3).
-- **Kept against that `claude` process** (`<pid>:<start>`, docs/tags.md §3.2), never the pane pid: in a hand-started
+  Sessions outside the daemon's tmux server stay out: no pane binds them (DESIGN.md, "Tags and session identity", "Retention for hand-started sessions").
+- **Kept against that `claude` process** (`<pid>:<start>`; DESIGN.md, "Session identity", "Retention"), never the pane pid: in a hand-started
   pane the pane process is the shell, which outlives a restarted `claude`, and the pane pid would carry one `claude`'s
   line onto the next.
 
@@ -161,17 +161,17 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
 
 **D1.5 Where it surfaces.**
 
-| Surface                                 | Carries `doing`?                                                  | Why                                                                                                                                                                                                                                                                                                              |
-| --------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sessions` op (`SessionEntry.tags`)     | yes, to an app only                                               | D1.5a.                                                                                                                                                                                                                                                                                                           |
-| PWA Machines session list               | yes, with its age                                                 | Rendered as text (Preact escapes), on its own line, prefixed "doing:".                                                                                                                                                                                                                                           |
-| PWA Queue screen, a running task's card | yes, read from its machine's `sessions` reply, joined on `taskId` | Fetched when the card's details open, not on every queue push. No store field (rejected below).                                                                                                                                                                                                                  |
-| MCP `get_sessions`                      | **no**, projected out by `seance mcp`                             | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper. D1.5a. docs/tags.md §6.3 widens the allowlist by writer and keeps `self.*` out of it for every caller. |
-| MCP `get_queue`                         | **no**                                                            | Same reason, and the queue has no field for it.                                                                                                                                                                                                                                                                  |
-| `MachineStatus`                         | **no**                                                            | 1.5 KiB of ciphertext (`STATUS_MAX_CT_LENGTH`) for the whole machine; a per-session text field would be the first thing `fitStatus` trims, and the 30 s beat would carry it to every app and the leader for no decision.                                                                                         |
-| Custodian `sessions` verb               | yes, from PR 4 (below), labelled                                  | D1.6 (O1).                                                                                                                                                                                                                                                                                                       |
-| Status answer (§2)                      | yes                                                               | The point of §2.                                                                                                                                                                                                                                                                                                 |
-| Adapter `Session` record                | later, as its `tags` map                                          | DESIGN.md, "Adapters" specifies `Session.tags` as this map, joined; built with the adapter seam (its PR 3a). Nothing here waits for it.                                                                                                                                                                          |
+| Surface                                 | Carries `doing`?                                                  | Why                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessions` op (`SessionEntry.tags`)     | yes, to an app only                                               | D1.5a.                                                                                                                                                                                                                                                                                                                                                            |
+| PWA Machines session list               | yes, with its age                                                 | Rendered as text (Preact escapes), on its own line, prefixed "doing:".                                                                                                                                                                                                                                                                                            |
+| PWA Queue screen, a running task's card | yes, read from its machine's `sessions` reply, joined on `taskId` | Fetched when the card's details open, not on every queue push. No store field (rejected below).                                                                                                                                                                                                                                                                   |
+| MCP `get_sessions`                      | **no**, projected out by `seance mcp`                             | A session-chosen string in another agent's context, the reason `get_queue` never carries `inputTool`. The sanctioned way for one session to read another's line is §2, inside Séance's own fixed wrapper. D1.5a. DESIGN.md, "Tags and session identity", "Another agent's context", widens the allowlist by writer and keeps `self.*` out of it for every caller. |
+| MCP `get_queue`                         | **no**                                                            | Same reason, and the queue has no field for it.                                                                                                                                                                                                                                                                                                                   |
+| `MachineStatus`                         | **no**                                                            | 1.5 KiB of ciphertext (`STATUS_MAX_CT_LENGTH`) for the whole machine; a per-session text field would be the first thing `fitStatus` trims, and the 30 s beat would carry it to every app and the leader for no decision.                                                                                                                                          |
+| Custodian `sessions` verb               | yes, from PR 4 (below), labelled                                  | D1.6 (O1).                                                                                                                                                                                                                                                                                                                                                        |
+| Status answer (§2)                      | yes                                                               | The point of §2.                                                                                                                                                                                                                                                                                                                                                  |
+| Adapter `Session` record                | later, as its `tags` map                                          | DESIGN.md, "Adapters" specifies `Session.tags` as this map, joined; built with the adapter seam (its PR 3a). Nothing here waits for it.                                                                                                                                                                                                                           |
 
 **D1.5a The `sessions` op has three readers, and only the PWA gets `doing`.**
 
@@ -180,14 +180,14 @@ idle-status answer wants); a TTL (an age shown beside the line does the same job
   `listSessions` returns before attaching them. The leader never holds session text (§2 rejects it for the same
   reason).
 - **`seance mcp`'s `get_sessions`.** The daemon cannot tell it from the PWA (both seal `from: "app"`), so the strip is
-  the client's: #543 filters tags to `AGENT_VISIBLE_TAG_KEYS`, which never holds a `self.*` key (docs/tags.md §6.3).
+  the client's: #543 filters tags to `AGENT_VISIBLE_TAG_KEYS`, which never holds a `self.*` key (DESIGN.md, "Tags and session identity", "Another agent's context").
   PR 1 adds a test that `self.doing` stays out.
 - **The PWA**, which renders it.
 - **Budget.** No fitter exists for `sessions` today (only `progress` is trimmed, in `handlers.ts`; #543 added none, since
   `agent.*` values are short ids). `self.doing` is the first tag of up to 256 bytes per session, so PR 1 adds one: when
   the reply's JSON would pass `REPLY_JSON_BUDGET`, every entry's `tags` are dropped (all, not some, so
   the PWA reads "lines omitted" once rather than guessing which ones are missing), and the reply says so with
-  `tagsOmitted: "all"`. The value is docs/tags.md §2.1's tiered one (`"adapter" | "all"`): once adapter tags exist
+  `tagsOmitted: "all"`. The value is the tags model's tiered one (`"adapter" | "all"`): once adapter tags exist
   the fitter drops those first, all or nothing per tier; PR 1 has only the second tier.
 
 **D1.6 The custodian's `sessions` verb carries it (O1).** The verb's reply is JSON (`CustodianPaneView`,
@@ -260,7 +260,7 @@ Wording this changes, in the same PR as the code:
 - CLAUDE.md, same bullet, #543's sentence "Keeping, for each pane whose peer resolves to a `claude` process …, that
   process's last state, `reason` and `agent` claims": add `self.*`, and that it too reaches only an app's `sessions`
   (never a scheduler-sealed one, never MCP's `get_sessions`).
-- docs/tags.md's Threat model widens `self` to the keys it accepts later; until then the wording names `self.doing`
+- DESIGN.md, "Tags and session identity", Threat model, widens `self` to the keys it accepts later; until then the wording names `self.doing`
   alone.
 - DESIGN.md, "Session events": the frame shape, the `self` bullet, "Session identity" (the process entry, as #543 records it); MCP server: `set_self_tag`; the
   `sessions` op's `SessionEntry`; "Session messages" (the standing instruction's added sentence); Threat model item 6
@@ -335,8 +335,8 @@ other machine's scrub). A new fixed renderer, `presenceNote(presence, machine)` 
 > not woken. To ask the session itself, send a question.
 
 The `doing` sits inside double quotes `displayLine` keeps out of it, after Séance's own sentence, so it cannot read as
-Séance's words. The note names the session by its task's title, never by `self.name` or an owner label: docs/tags.md
-§6.1 keeps the joined name to the owner's own surfaces and an adapter's `Session`.
+Séance's words. The note names the session by its task's title, never by `self.name` or an owner label: DESIGN.md, "Tags and session identity",
+"The join and the name", keeps the joined name to the owner's own surfaces and an adapter's `Session`.
 
 **D2.4 Local: answered in the `send_message` result.** A `message` frame of kind `status` whose target the sender's
 daemon holds a live pane for is answered synchronously, `{ok: true, id, outcome: "answered", presence}`, and
@@ -503,7 +503,7 @@ text is still the daemon's own rendering, and nothing new crosses a boundary. DE
 ## Build order
 
 Small PRs, each landing on its own; PR 1 and PR 3 are independent of each other, PR 2 and PR 4 need PR 1, and PR 1
-needs docs/tags.md's step 1 (#543).
+needs the tags model's step 1 (#543, built).
 
 1. **`self.doing`** (§1), on top of #543. `set_self_tag` on `seance mcp` (key `doing` only); the frame's `self`
    (`session-event-frame.ts`, `parseSessionEventFrame`), dropped unsent by `seance session-event`; `self.doing`'s

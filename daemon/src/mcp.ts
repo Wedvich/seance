@@ -512,7 +512,7 @@ function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
   return textResult(JSON.stringify(reply.sessions.map(agentVisibleSession), null, 2));
 }
 
-/** A session as another agent's context may see it: its tags cut to the allowlist (docs/tags.md §6.3). */
+/** A session as another agent's context may see it: its tags cut to the allowlist (DESIGN.md, "Tags and session identity"). */
 function agentVisibleSession(entry: SessionEntry): SessionEntry {
   const { tags, ...rest } = entry;
   const visible = agentVisibleTags(tags);

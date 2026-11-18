@@ -16,7 +16,7 @@ import { tmuxOk } from "../src/tmux.ts";
 import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
- * Session identity with real processes (docs/tags.md §4): `claude`-named processes in panes of a private tmux server,
+ * Session identity with real processes (DESIGN.md, "Session identity"): `claude`-named processes in panes of a private tmux server,
  * reporting as the peer the socket would name, and `sessions/<pid>.json` files written as Claude Code writes them. The
  * socket's own peer lookup is `session-events.test.ts`'s; here `handle` is called with the process's pid.
  */

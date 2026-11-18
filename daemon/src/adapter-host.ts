@@ -30,12 +30,12 @@ import type { AdapterDeliveryContext, AdapterOutlet, AdapterOutletAnswer, Messag
  * The adapters `config.json` names (DESIGN.md, "Adapters"): one supervised child each, fed the
  * one state feed. An adapter is declared only in this machine's own `config.json`, never from a frame, the PWA, MCP or
  * another machine, and nothing about it crosses the relay. With `repos` set, an adapter sees only the sessions whose
- * `repo` it lists and the tasks launched in them (§6.2); an untasked session outside every known repo has no `repo`
+ * `repo` it lists and the tasks launched in them ("Adapters", the state feed); an untasked session outside every known repo has no `repo`
  * and is out of scope too. Every session's `tags` reach it less any other adapter's `adapter.*` namespace.
  *
  * Text in and out (3b): an adapter's `deliver` goes through messages' local delivery, bounded by its `kinds` and
  * `repos`, and a session's message to `adapter:<name>` comes out as a `message` frame, subscribing the sender's verified
- * conversation (docs/tags.md §8). Its `tag` writes `adapter.<name>.*` and nothing else. The audit lines carry ids, kind,
+ * conversation (DESIGN.md, "Adapters", "The subscription"). Its `tag` writes `adapter.<name>.*` and nothing else. The audit lines carry ids, kind,
  * a byte count and an outcome: never text, a label, a message id or a conversation id.
  */
 
@@ -111,7 +111,8 @@ export function startAdapterHost(deps: AdapterHostDeps): AdapterHost {
   const fingerprints = new Map(
     Object.entries(deps.adapters).map(([name, config]) => [name, adapterFingerprint(config)]),
   );
-  // A name no longer configured, or configured as another program, inherits no subscription (docs/tags.md §8.2).
+  // A name no longer configured, or configured as another program, inherits no subscription (DESIGN.md, "Adapters",
+  // "The subscription").
   subscriptions?.reconcile(fingerprints);
 
   for (const [name, config] of Object.entries(deps.adapters)) {

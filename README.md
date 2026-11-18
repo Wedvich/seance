@@ -669,8 +669,7 @@ record). Each machine runs its own, set up on its own:
 git clone <adapter repo> ~/src/seance-<tool>   # anywhere you keep code
 (cd ~/src/seance-<tool> && bun install)         # plus the tool's own login or key, as its README says
 seance adapter add ~/src/seance-<tool>          # reads its seance-adapter.json, writes adapters.<name> in config.json
-seance restart                                  # the daemon starts it
-seance adapter status                           # running, protocol, counts, last exit
+seance adapter status                           # a running daemon reloads config.json and starts it; shows protocol, counts, last exit
 ```
 
 **An adapter runs as you, with everything you can reach.** Séance cannot contain it: it
