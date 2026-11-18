@@ -1943,7 +1943,14 @@ describe("a closed machine", () => {
           return Promise.resolve({ ok: false, code: "tasked" });
         },
       });
-      for (const bad of [{ key: "title" }, { pane: "3" }, { session: "nope" }, { extra: 1 }, { value: 5 }]) {
+      for (const bad of [
+        { key: "title" },
+        { pane: "3" },
+        { session: "nope" },
+        { extra: 1 },
+        { value: 5 },
+        { value: "日".repeat(120) },
+      ]) {
         expect((await handle(ask(bad), APP_ID))?.payload).toMatchObject({ ok: false, code: "invalid_request" });
       }
       expect(acts).toEqual([]);
@@ -1952,7 +1959,7 @@ describe("a closed machine", () => {
       const broken = createHandler({ ...ctx, sessionTag: () => Promise.reject(new Error("disk full")) });
       expect((await broken(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "internal_error" });
       expect(trail()).toEqual([
-        ...Array.from({ length: 5 }, () => "audit session-tag origin=relay key-count=0 outcome=invalid_request"),
+        ...Array.from({ length: 6 }, () => "audit session-tag origin=relay key-count=0 outcome=invalid_request"),
         "audit session-tag origin=relay key-count=1 outcome=tasked",
         "audit session-tag origin=relay key-count=1 outcome=unsupported",
         "audit session-tag origin=relay key-count=1 outcome=internal_error",

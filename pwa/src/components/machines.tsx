@@ -22,7 +22,14 @@ import {
   type HistoryTarget,
   type HistoryView,
 } from "../state.ts";
-import { ACCOUNT_ALIAS_MAX_LENGTH, TASK_REQUEST_LIMITS, type CustodianRequest, type Machine } from "@seance/shared";
+import {
+  ACCOUNT_ALIAS_MAX_LENGTH,
+  displayLine,
+  TAG_VALUE_MAX,
+  TASK_REQUEST_LIMITS,
+  type CustodianRequest,
+  type Machine,
+} from "@seance/shared";
 import type { Timed } from "../timed.ts";
 import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
@@ -479,6 +486,8 @@ function SessionRenameDialog(props: {
   const input = useRef<HTMLInputElement>(null);
   const noticeId = useId();
   const inputId = useId();
+  // The daemon refuses what its byte cap would cut (multibyte text reaches it well before the character cap).
+  const tooLong = new TextEncoder().encode(displayLine(draft, Infinity)).length > TAG_VALUE_MAX;
   // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
   useEffect(() => {
     if (!saving) input.current?.focus();
@@ -522,9 +531,13 @@ function SessionRenameDialog(props: {
         />
         {notice === null ? (
           <p className="rename-hint">
-            <span>Kept for this conversation on its machine. Leave it empty to go back to the session's own name.</span>
+            <span>
+              {tooLong
+                ? `Too long: at most ${TAG_VALUE_MAX} bytes, which non-ASCII characters use up faster.`
+                : "Kept for this conversation on its machine. Leave it empty to go back to the session's own name."}
+            </span>
             <span className="rename-count">
-              {draft.length}/{TASK_REQUEST_LIMITS.title}
+              {Array.from(draft).length}/{TASK_REQUEST_LIMITS.title}
             </span>
           </p>
         ) : (
@@ -536,7 +549,7 @@ function SessionRenameDialog(props: {
           <button type="button" className="quiet" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={saving}>
+          <button type="submit" className="primary" disabled={saving || tooLong}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

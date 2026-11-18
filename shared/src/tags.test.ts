@@ -230,6 +230,15 @@ describe("session-tag", () => {
     );
   });
 
+  test("a multibyte label past the byte cap is refused, not shortened", () => {
+    const fits = "日".repeat(Math.floor(TAG_VALUE_MAX / 3));
+    expect(parseSessionTagRequest(ask({ value: fits }))?.value).toBe(fits);
+    // 120 characters, well under the character cap, 360 bytes.
+    expect(parseSessionTagRequest(ask({ value: "日".repeat(120) }))).toBeNull();
+    // Whitespace the scrub collapses does not count against it.
+    expect(parseSessionTagRequest(ask({ value: `a${" ".repeat(500)}b` }))?.value).toBe("a b");
+  });
+
   test("a full key, another suffix, a bad pane or id, a long label or an extra field refuses the request", () => {
     for (const bad of [
       ask({ key: "owner.label" }),

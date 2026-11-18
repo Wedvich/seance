@@ -338,7 +338,7 @@ const SESSION_TAG_FIELDS: ReadonlySet<string> = new Set(["pane", "session", "key
 /**
  * `session-tag`, at the daemon (docs/tags.md §3.1): the pane, a conversation id, the bare suffix `label` (a full key,
  * or any other suffix, refuses the request: never re-homed) and a value through `owner.label`'s parser, `""` clearing
- * it. Null for anything else, an extra field included.
+ * it. Null for anything else, an extra field included, and for a value too long to keep whole (never shortened).
  */
 export function parseSessionTagRequest(value: unknown): SessionTagRequest | null {
   if (!isRecord(value)) return null;
@@ -346,7 +346,10 @@ export function parseSessionTagRequest(value: unknown): SessionTagRequest | null
   const { pane, session, key, value: raw } = value;
   if (typeof pane !== "string" || !PANE_ID.test(pane) || !isAgentSessionId(session) || key !== "label") return null;
   const label = parseTagValue("owner.label", raw, "conversation");
-  return label === null ? null : { pane, session, key, value: label };
+  if (label === null) return null;
+  // `displayLine` cuts at TAG_VALUE_MAX bytes, which would shorten a long multibyte name silently: refuse it instead.
+  if (typeof raw === "string" && utf8.encode(displayLine(raw, Infinity)).length > TAG_VALUE_MAX) return null;
+  return { pane, session, key, value: label };
 }
 
 /** A `session-tag` answer at a client: a code it does not know reads as a failure. */
