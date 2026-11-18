@@ -161,6 +161,14 @@ export function modChecksFrom(market: Marketplace, root: string, listed: unknown
         message: `Claude mod ${plugin.name} not installed in ${label} — run \`seance mod install\``,
       };
     }
+    const errors = entry["errors"];
+    if (Array.isArray(errors) && errors.length > 0) {
+      // Enabled yet never loaded: the marketplace was repointed at a clone without this mod.
+      return {
+        level: "warn",
+        message: `Claude mod ${plugin.name} in ${label} cannot load (${errors.map(String).join("; ")}) — \`seance mod install\` repoints it`,
+      };
+    }
     const expected = join(root, plugin.source);
     const folder = entry["readFromFolder"];
     if (folder !== expected) {

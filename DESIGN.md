@@ -11561,7 +11561,13 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   or the daemon's own start (a restart treats every pane as just disconnected, so a mod that is reconnecting is
   not told it has no listener). It separates a session still starting, or its mod reconnecting, from an exclave
   with no mod. Too short loses messages to a slow start; too long makes a missing-mod exclave answer `sent` for
-  messages then dropped `nolistener`.
+  messages then dropped `nolistener`. Rejected (2026-11-17, after a session that never loaded the mod lost a
+  message so): holding a live tasked pane's messages past the grace until some listener binds. A session whose mod
+  never loaded binds none, so they would sit to the cap or `ended`, and one that binds late (`/reload-plugins`, a
+  hand-run `seance inbox`) would get text whose sender was already answered `nolistener`. Also rejected: the mod's
+  `turn.start` beginning a listener when `session.start` never ran, which cannot help a mod that never loaded, the
+  cause found. That cause is guarded where it lived (Claude Code mods, `mod install`'s refusal and doctor's
+  `errors` line).
 - **Caps** count UTF-8 bytes of the sender's text. `MESSAGE_PUSH_MAX` (8 KiB): a request over it is refused
   `too_long` at the sender, and a note or question over it is pushed as a stub whose body is pulled by
   `read_messages`. `MESSAGE_MAX` (64 KiB) is the hard cap. The spike found no cap on Claude's side (300 KB
@@ -13684,8 +13690,17 @@ The bullets below are tmux-rename's, except where they say mods.
   removal, deliberately. The marketplace is named `seance`, not `Séance`: plugin ids
   (`<mod>@<marketplace>`) are ASCII-only, and Claude refuses to install from a
   marketplace whose name breaks that; lowercase matches the repo, the CLI and
-  the MCP server name. `doctor` warns when a mod is missing, disabled, or read
-  from a different checkout. Rejected: `CLAUDE_CODE_PLUGIN_DIRS` in
+  the MCP server name. `doctor` warns when a mod is missing, disabled, read
+  from a different checkout, or enabled but unloadable (`list`'s `errors`, e.g. "not found in
+  marketplace"). Since the marketplace is one per exclave, an install repoints every exclave at the
+  clone it ran from, so `mod install` refuses, before touching any, while a live daemon runs from
+  another clone (runtime.json's `root`, realpath'd as doctor compares it): on 2026-11-17 a `--here`
+  task in a months-old second clone ran that clone's `mod install`, which listed no `inbox`, and
+  `inbox@seance` stayed enabled in each exclave yet loaded in no session started after it (no listener, so
+  every message to those tasks ended `nolistener`), with nothing anywhere saying so. The refusal guards
+  only from clones that carry it; doctor's `errors` line catches the rest. Rejected: refusing an
+  install that would drop an installed mod (one more `plugin list` per exclave, and it blocks a mod's
+  deliberate removal; the daemon's clone is the stated invariant, `daemonMain` above). Rejected: `CLAUDE_CODE_PLUGIN_DIRS` in
   `~/.claude/settings.json` (Claude's development path — hot-reloads on every
   save), installing from GitHub (`<owner>/<repo>`; a copy that only `claude plugin
   update` refreshes, and the checkout already on the machine is the version the

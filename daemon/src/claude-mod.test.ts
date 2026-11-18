@@ -37,6 +37,19 @@ describe("modChecksFrom", () => {
     expect(check?.message).toContain("repoints it");
   });
 
+  test("warns, naming Claude's error, when enabled but not loadable — a marketplace repointed at a clone without it", () => {
+    // `claude plugin list --json`'s row for such a mod (2.1.326): no folder, an error per cause.
+    const [check] = modChecksFrom(
+      MARKET,
+      ROOT,
+      [{ id: "tmux-rename@seance", enabled: true, errors: ["Plugin tmux-rename not found in marketplace seance"] }],
+      LABEL,
+    );
+    expect(check?.level).toBe("warn");
+    expect(check?.message).toContain("cannot load (Plugin tmux-rename not found in marketplace seance)");
+    expect(check?.message).toContain("repoints it");
+  });
+
   test("warns when disabled in Claude Code", () => {
     const [check] = modChecksFrom(MARKET, ROOT, listed({ enabled: false }), LABEL);
     expect(check?.level).toBe("warn");
