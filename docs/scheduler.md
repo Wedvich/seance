@@ -1900,13 +1900,14 @@ same PR, with the reason.
   and `#decryptLeadProof` the same for the lead proof, whose slow open could leave a new term's
   leader `unverified` until the next push. `pwa/test/client.test.ts` holds each open at WebCrypto
   to pin both orders. The mcp occurrence's log is gone, so it is matched by signature only.
-- **Open: a second `replaced`** (2026-11-18, not reproduced). Twice on the Ubuntu CI runner (runs 44321272872 and
-  44325388961), the adapter feed's re-tag test (`daemon/test/adapters.test.ts`) saw two `session-gone replaced` for one
-  claude process. The frames from the re-tag on still held the expected order: the old task's record, one `replaced`,
-  then the new task's record. So the extra one stood outside that window, and the feed once held this key under a task
-  other than the one it started under or was re-tagged to. 40 local runs under CPU load did not show it. The test now
-  counts within the window and prints the whole history on failure; read that history before changing `apply` in
-  `daemon/src/adapter-feed.ts`.
+- **A second `replaced`** (2026-11-18, found and fixed). Twice on the Ubuntu CI runner (runs 44321272872 and
+  44325388961), and twice in local full runs on macOS, the adapter feed's re-tag test (`daemon/test/adapters.test.ts`)
+  saw a `session-gone replaced` it should not have. The feed's read joined the pane list with facts read after it (the
+  conversation table's sweep lists panes again; the claude descent is a later `ps`), so a pane tagged or re-tagged in
+  between paired one listing's task with a process found under another: a record of a session that never existed, then
+  `replaced`. Forced by holding a tag write until a feed listing had passed it and delaying `ps` (10/10 before, 20/20
+  after). A read now lists the panes again after its last fact and is thrown away as torn when a pane both lists hold
+  moved (`read` in `daemon/src/adapter-feed.ts`); `daemon/src/adapter-feed.test.ts` stands in at tmux and `ps` to hold it.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
   box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces

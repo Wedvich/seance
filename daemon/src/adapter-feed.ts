@@ -37,6 +37,8 @@ import { CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, TASK_FIELD } from "./tmux.ts"
 const INTERVAL_MS = 5_000;
 const DEBOUNCE_MS = 50;
 const BRANCH_TTL_MS = 30_000;
+/** Reads in a row thrown away as torn (`read`) before a cycle gives up until the next timer or nudge. */
+const TORN_RETRIES = 5;
 /** How deep under a pane's process a `claude` is looked for: a wrapper or two (`caffeinate`, a shell), never a tree. */
 const DESCENT_MAX = 4;
 
@@ -201,7 +203,14 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
     return branch;
   };
 
-  const read = async (): Promise<Map<SessionKey, Held> | null> => {
+  /**
+   * A read joins the pane list with facts read after it (the table's sweep lists panes again; the descent is a later
+   * `ps`), so a pane re-tagged in between would pair one task with a process found under another: a record of a
+   * session that never existed, then `replaced`. A second list after the last of those facts must show every pane both
+   * lists hold under the same pid and task, or the read is `torn` and done again. A pane gone by the second list pairs
+   * nothing wrongly (the next read sees it gone), so it tears nothing: churn elsewhere would starve the read.
+   */
+  const read = async (): Promise<Map<SessionKey, Held> | null | "torn"> => {
     let live: readonly FeedPane[];
     try {
       live = await panes();
@@ -220,6 +229,14 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
       live.map((pane) => pane.path),
       deps.repos(),
     ).catch(() => new Map<string, string>());
+    const after = await panes().catch(() => null);
+    if (after === null) return null;
+    const relisted = new Map(after.map((pane) => [pane.id, pane]));
+    const moved = live.some((pane) => {
+      const later = relisted.get(pane.id);
+      return later !== undefined && (later.pid !== pane.pid || later.taskId !== pane.taskId);
+    });
+    if (moved) return "torn";
     for (const path of branches.keys()) if (!live.some((pane) => pane.path === path)) branches.delete(path);
     const next = new Map<SessionKey, Held>();
     for (const pane of live) {
@@ -289,13 +306,22 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
   };
 
   const cycle = async (): Promise<void> => {
+    let torn = 0;
     for (;;) {
       again = false;
       const done = waiters;
       waiters = [];
       // oxlint-disable-next-line no-await-in-loop -- one read at a time; a nudge during one runs one more
       const next = await read();
-      if (next !== null && !stopped) apply(next);
+      if (next === "torn" && !stopped && ++torn <= TORN_RETRIES) {
+        // A refresh resolves on a read that was applied, never on one thrown away.
+        waiters = [...done, ...waiters];
+        again = true;
+        continue;
+      }
+      // Panes that keep moving: apply nothing this cycle rather than a record no instant held; the timer reads again.
+      if (next !== null && next !== "torn" && !stopped) apply(next);
+      torn = 0;
       for (const resolve of done) resolve();
       if (!again || stopped) break;
     }
