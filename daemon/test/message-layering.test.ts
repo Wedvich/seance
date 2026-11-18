@@ -121,6 +121,20 @@ describe("who may send session-tag", () => {
     expect(naming).toEqual(["handlers.ts"]);
     expect(BROKER_OPS).not.toContain("session-tag");
   });
+
+  // The module graph is the whole of what a tool or a broker call can reach: a tool that sent the op would have to name it.
+  for (const entry of ["mcp.ts", "broker-client.ts"]) {
+    test(`${entry}'s run-time closure names neither the op nor its parser, handler or table`, async () => {
+      const reached = await valueClosure(entry);
+      expect(reached.has(entry)).toBe(true);
+      expect(reached.has("conversations.ts")).toBe(false);
+      // `audit.ts` is every origin's line formatters, `sessionTagAudit` among them: it sends nothing.
+      const sources = await Promise.all(
+        [...reached].filter((file) => file !== "audit.ts").map((file) => readFile(join(SRC, file), "utf8")),
+      );
+      for (const source of sources) expect(source).not.toMatch(/session-tag|SessionTag|sessionTag/u);
+    });
+  }
 });
 
 /**
