@@ -7,7 +7,8 @@
  * silent pushes. The text is fixed per kind, a spill's or a quota-exhausted's window label shown only as one of
  * the known `5h`/`7d`, a quota-exhausted's reason and a login alert's state only as one of a few fixed texts, and the
  * archivist's silence as one fixed text with nothing of its payload, a custodian flag's reason only as one of four fixed
- * texts (its note is not in the payload) and a failing custodian as one fixed text; the payload carries ids and state,
+ * texts (its note is not in the payload), a failing custodian as one fixed text and a GitHub budget as one of two
+ * fixed texts by its resource; the payload carries ids and state,
  * never a title or a prompt, and this worker holds no PSK to open anything more.
  */
 
@@ -56,6 +57,14 @@
     }),
   );
 
+  /** What a GitHub budget alert says per budget: fixed, null-prototype for the same reason. */
+  const GITHUB_TEXT = Object.freeze(
+    Object.assign(Object.create(null), {
+      core: "GitHub's REST API budget is nearly used up.",
+      graphql: "GitHub's GraphQL API budget is nearly used up.",
+    }),
+  );
+
   /**
    * The quota windows the scheduler labels a spill with (`windowsOf`, scheduler/src/route.ts): `5h`, `7d`,
    * and a per-model weekly `7d <model>`. Only these are shown, as the fixed `5h` or `7d`: a label is the
@@ -98,6 +107,12 @@
         tag: `custodian:${alert.deviceId}`,
         url: MACHINES_URL,
       };
+    }
+    // One fleet's budget, the same on every machine: no id, and the resource only picks one of two fixed texts.
+    if (alert.kind === "github") {
+      const body = GITHUB_TEXT[alert.resource];
+      if (body === undefined) return null;
+      return { body, tag: `github:${alert.resource}`, url: MACHINES_URL };
     }
     if (typeof alert.taskId !== "string" || !TASK_ID.test(alert.taskId)) return null;
     const url = `/?task=${encodeURIComponent(alert.taskId)}`;

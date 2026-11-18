@@ -730,8 +730,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     parked.push(push);
     return true;
   };
-  // Disk, login and archivist alerts ride the registry, not the scheduler: the record's `diskAlerts`, `authAlerts`
-  // and `archivistSilence` are what keep a new term from repeating one, and an alert is raised only once that
+  // Disk, login, GitHub budget and archivist alerts ride the registry, not the scheduler: the record's `diskAlerts`,
+  // `authAlerts`, `githubAlerts` and `archivistSilence` are what keep a new term from repeating one, and an alert is raised only once that
   // write has landed. Nothing the scheduler reads learns of the archivist (A4).
   const machineAlerts = createMachineAlertWatch({
     settings: () => settings,
@@ -743,6 +743,11 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       if (alert.kind === "disk") log.warn(`scheduler: disk nearly full: device=${quote(alert.deviceId)}`);
       if (alert.kind === "auth") {
         log.warn(`scheduler: login ${alert.state}: device=${quote(alert.deviceId)} exclave=${quote(alert.exclave)}`);
+      }
+      if (alert.kind === "github") {
+        log.warn(
+          `scheduler: GitHub budget nearly used: resource=${alert.resource} reset=${new Date(alert.reset * 1000).toISOString()}`,
+        );
       }
       if (alert.kind === "archivist")
         log.warn(`scheduler: archivist silent: since=${new Date(alert.since).toISOString()}`);

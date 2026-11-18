@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { METRIC_NAMES, type CustodianStatus } from "@seance/shared";
+import { METRIC_NAMES, type CustodianStatus, type GithubRate } from "@seance/shared";
 import type { AuthView } from "./auth-health.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import {
@@ -137,6 +137,23 @@ describe("the collector registry", () => {
     expect(await telemetry.tick(T0 + 60_000)).not.toHaveProperty("cu");
     const metrics = new Set(store.query({ from: 0, to: T0 / 1000 + 60, step: 30 }).map((s) => s.metric));
     expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
+  });
+
+  test("the gh budget reader's view becomes `gh`, and each budget a `github_used_pct` sample by resource", async () => {
+    let view: GithubRate | null = null;
+    const store = MetricsStore.memory();
+    const telemetry = createTelemetry(store, { ...sources, github: () => view });
+
+    expect(await telemetry.tick(T0)).not.toHaveProperty("gh");
+    view = { u: 7, c: [5000, 4000, 1_763_000_000], g: [5000, 5000, 1_763_000_100] };
+    expect((await telemetry.tick(T0 + 30_000)).gh).toEqual(view);
+    view = null;
+    expect(await telemetry.tick(T0 + 60_000)).not.toHaveProperty("gh");
+    const series = store.query({ from: 0, to: T0 / 1000 + 60, step: 30, names: [METRIC_NAMES.gh] });
+    expect(series).toEqual([
+      { metric: METRIC_NAMES.gh, labels: { resource: "core" }, points: [[T0 / 1000 + 30, 20]] },
+      { metric: METRIC_NAMES.gh, labels: { resource: "graphql" }, points: [[T0 / 1000 + 30, 0]] },
+    ]);
   });
 
   test("auth health's view becomes ax, ae and au through the registered list; empty lists and unknown ids say nothing", async () => {
@@ -325,6 +342,7 @@ describe("the collector registry", () => {
       probe: full,
       traits: () => ({ tf: [[0, 0]], tu: [[0, 1]] }),
       custodian: () => ({ s: "idle" }),
+      github: () => ({ u: 7, c: [5000, 4000, 1_763_000_000] }),
     };
     let fieldSets: string[][];
     try {
@@ -344,7 +362,7 @@ describe("the collector registry", () => {
     const all = fieldSets.flat();
 
     expect(new Set(all)).toEqual(
-      new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota", "tf", "tu", "cu"]),
+      new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota", "tf", "tu", "cu", "gh"]),
     );
     // Each entry's keys are unique to it: no key appears in two entries' sets.
     expect(all).toHaveLength(new Set(all).size);

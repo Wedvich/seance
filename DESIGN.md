@@ -1049,7 +1049,7 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
-- **A daemon reads a forge only for reap's nothing-lost rule** (2026-11-13, Reap, "Nothing lost";
+- **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
   query whose owner, name and head branch reach it only as GraphQL variables (`-f`, never `-F`, which
@@ -1060,6 +1060,16 @@ nothing checked it. The last is the gap they leave.
   head's object fetched from that origin's `refs/pull/<n>/head`. The residual: a session that rewrites
   `remote.origin.url` can bind the read to another repo, but a pass still needs a commit containing the
   tip to exist there, and a session that can rewrite its clone's config can already lose its own work.
+  Since 2026-11-17 a daemon also reads **its own GitHub budget** (Daemon, "GitHub rate limits"), and nothing else
+  of GitHub, by two constant REST reads beside `askGithub`: `gh api --hostname github.com rate_limit`
+  (`readRateLimit`, free of any limit) on a timer, and `gh api --hostname github.com user --jq .id`
+  (`readGithubUserId`, one request, cached a day) for the user id that tells budgets apart. Argv arrays, constant
+  paths, no variable, nothing from a frame, a session or a config field, a timeout with the group killed, read-only.
+  Only the two budgets' four counts (each checked to its shape) and a 1–16 digit id are kept; stdout and stderr are
+  never logged, a failure is silent, and nothing but `MachineStatus.gh` (counts, reset times, the numeric id: sealed
+  like the rest of the status) leaves the process. The leader's `github` push carries the budget's name and reset
+  time, never the id. The residual: every PSK holder learns the fleet's GitHub user id, which GitHub's own API
+  publishes to anyone who knows the login.
 - **Closing is the owner's act, sealed, and never reachable without the app role** (2026-11-13, Daemon,
   "Closing a machine"). The daemon answers `availability` only when sealed `from: "app"` on the relay leg,
   parsed by `parseAvailabilityRequest`, audited without a payload; neither `LOCAL_OPS` nor `BROKER_OPS`
@@ -1432,7 +1442,8 @@ The Durable Object persists a machine registry:
   disconnected status, `null` where the exclave does not carry the trait, so routing, MCP and the PWA
   cannot disagree. `drn: true` says the daemon's task-launch
   gate is closed ("Restart waits for task launches"), absent otherwise; never trimmed either, and the
-  parser takes `true` alone. Sent every 30s whether or not an app is watching:
+  parser takes `true` alone. `gh` is this machine's own `gh`'s GitHub budget (Daemon, "GitHub rate limits"),
+  never trimmed and dropped alone when malformed. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
   60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
@@ -2177,6 +2188,11 @@ an old peer's frames parse as before. Mixed versions:
   alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts` and `authAlerts`
   (Scheduler, "Web Push", "Disk alerts", "Auth alerts"): an older leader's parser drops each at its next write
   of that record, which costs one repeated alert, never a missed one.
+- `SettingsRecord.githubAlerts` and `MachineStatus.gh` (2026-11-17; Daemon, "GitHub rate limits"; Scheduler, "Web
+  Push", "GitHub budget alerts"): an older leader's parser drops `githubAlerts` at its next write, which costs one
+  repeated alert in a window still running, never a missed one; an older reader ignores `gh`, and an older daemon
+  sends none, which alerts nothing. An older service worker shows its generic notification for the `github` kind.
+  No rollout order.
 - `SettingsRecord.archivistSilence` (2026-11-13; Scheduler, "Web Push", "Silence alert"): dropped the
   same way. A later leader re-reads a still-down archivist's kept entry as absent since its `lastSeen`
   and pushes once more; an archivist whose entry has also left the registry reads as never held, so
@@ -3026,9 +3042,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked"), a running task whose account ran
   out of usage (`quota-exhausted`, _Successor_, "The automatic trigger"), a session's own pass the leader
   refused (`pass-refused`) and, from the leader's own
-  watch, a nearly full disk, an exclave whose login lapsed or is about to, or an archivist absent
-  24 h (_The library_, "Credits spill" and "Needs input"; _Disk alerts_, _Auth alerts_ and
-  _Silence alert_, below). The line names task, account and device ids, never a prompt, title or
+  watch, a nearly full disk, an exclave whose login lapsed or is about to, a GitHub budget nearly spent, or an
+  archivist absent 24 h (_The library_, "Credits spill" and "Needs input"; _Disk alerts_, _Auth alerts_, _GitHub
+  budget alerts_ and _Silence alert_, below). The line names task, account and device ids, never a prompt, title or
   URL; the push payload names a task or device id and state (a login alert, a device and exclave
   id and its state; the silence alert, only when the absence began), and no account. A login's
   lines are `scheduler: login expired:` or `login expiring: device=<id> exclave=<id>`, and, when
@@ -3280,6 +3296,28 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     next write; a later leader then reads a still-down archivist's kept entry as held and absent since its
     `lastSeen`, so it pushes once more (as for `authAlerts`), and one whose entry has left the registry
     altogether reads as never held and is not alerted for that absence. Accepted.
+  - **GitHub budget alerts** (`daemon/src/github-alerts.ts`, scheduler-free like the disk step; built 2026-11-17).
+    The same watch, in the same single write, runs `githubAlertStep` over each fresh, connected status's `gh`
+    (Daemon, "GitHub rate limits"). A budget is a GitHub user's REST (`core`) or GraphQL allowance, keyed by the
+    status's `u`: every machine signed in as one user reports the same budget, so readings are grouped by user and
+    a budget alerts once, not once per machine; a reading without `u` says nothing. Per user and budget the step
+    takes the newest window's (highest `reset` still ahead) lowest `remaining`, and alerts when it is under
+    `GITHUB_ALERT_SHARE` (20%) of `limit`: 1,000 of 5,000, ~3.5 minutes at the 2026-11-17 burn. Once per reset
+    window: the record's `githubAlerts` holds `{u, r, reset, at}` (at most `GITHUB_ALERTS_MAX` = 4, two users'
+    two budgets), a budget with an entry whose `reset` is still ahead is not alerted again whatever its readings
+    do, and an entry goes once its `reset` has passed, which re-arms the next window. Held in the record, not
+    memory, so a new leader does not repeat it inside the window. The cap never evicts (an entry lapses within the
+    hour); a fifth budget waits for a slot. The record's headroom is why the cap is small: at every field's bound
+    it seals to ~40.6 KB of the store's 40 KiB cap (parse.test.ts). A lost write is settled as the disk alert's
+    is, the re-read record holding the entry at the alert's own `at`. One log line, `scheduler: GitHub budget
+    nearly used: resource=<core|graphql> reset=<ISO time>`. The push payload is `{v: 1, kind: "github", at,
+    resource, reset}`: no GitHub user id and no device id (it is one budget, whichever machine read it). The service
+    worker shows one of two fixed texts by `resource` ("GitHub's REST API budget is nearly used up." or "GitHub's
+    GraphQL API budget is nearly used up."), looked up in a null-prototype table, under the tag `github:<resource>`,
+    and a click opens the Machines screen; any other `resource` is the generic notification. No "recovered" push
+    (the window's reset is the recovery). Rejected: alerting from each daemon (no push keys outside the leader, and
+    N machines would push N times) and a threshold on `used` (the same line, one more field to trust). Not built:
+    a PWA surface for the readings or the series.
   - **Not built:** removing another browser's subscription from the PWA (a retired device's
     slot still goes only when its push service answers 404/410), and a recovery path for an
     unreadable record (above).
@@ -7043,6 +7081,46 @@ of this section built.
     `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`) stores nothing and reads `unknown`, and a
     session that dies on auth mid-run, which no hook reports. On only through `RunOpts.authHealth`, which
     `main.ts` always passes, like `usageRefresh`.
+- **GitHub rate limits** (`daemon/src/github-rate.ts`, `gh.ts`; added 2026-11-17): this machine's own `gh`'s GitHub
+  API budget, in the status's `gh`. Every Claude session on every machine signs in as one GitHub user, so all of them
+  share one 5,000-an-hour REST budget and one 5,000-point GraphQL one. On 2026-11-17 sessions' own `gh` polling spent
+  the REST budget between 10:23:47 and 10:42:07 UTC with no warning; sessions then failed, and some retried in loops.
+  - **The read** is `gh api --hostname github.com rate_limit` (`readRateLimit`): argv array, a constant path, no
+    variable of any kind, a 15 s timeout with the process group killed past it, `GH_PROMPT_DISABLED`. GitHub counts
+    no `rate_limit` call against any limit ("Rate limits for the REST API"), so the read is free. Only
+    `resources.core` and `resources.graphql` are kept, each checked down to `limit`, `used`, `remaining` and `reset`
+    (non-negative safe integers, `limit` above 0, `remaining` at most `limit`); any other shape, a non-zero exit, a
+    timeout, no `gh` (ENOENT) or no login (exit 4, or a `Bad credentials` body) is no reading, never an error and
+    never a log line (a machine with no `gh` would repeat it forever). A budget past its `reset` drops out of the
+    view, so a reading never outlives its window.
+  - **Telling budgets apart.** Machines signed in as one user report one budget, so the leader must not alert per
+    machine. The status carries `u`, the numeric user id, from `gh api --hostname github.com user --jq .id`
+    (`readGithubUserId`): `gh`'s own jq keeps the profile (name, email) out of this process, and only a 1–16 digit
+    id is taken. Unlike `rate_limit` it costs one REST request, so it is read after the first good budget read,
+    kept, and re-read daily (`GITHUB_USER_TTL_MS`) and after `gh` reports no login, so a re-login as another user
+    is caught; one that fails keeps the id in hand. Rejected: matching readings by their numbers (two machines'
+    reads of one budget differ by every request spent between them, and two users can coincide), and the login
+    name (mutable, and a name is more identifying than an id in a sealed blob for no gain).
+  - **Cadence**: every 5 minutes (`GITHUB_RATE_INTERVAL_MS`) while both budgets have half or more left, every minute
+    (`GITHUB_RATE_LOW_INTERVAL_MS`) once either is under half. The read is free, so the only cost is a process
+    spawn. At the 2026-11-17 burn (~280 requests a minute) half a budget lasts ~9 minutes, so a minute's pace
+    crosses the leader's 20% line with ~3 minutes to spare, where five could step past it; and every machine signed
+    in as the user reads the same budget on its own phase, which only tightens the fleet's pace. The first read is
+    at start. Rejected: a fixed 1-minute pace (twelve spawns an hour per machine for nothing while the budget is
+    full) and reading on each 30 s status beat.
+  - **On the wire**, `MachineStatus.gh` is `{u?, c?, g?}`, `c` and `g` each `[limit, remaining, reset]` (reset in unix
+    seconds), at least one present. Display-only but for the leader's alert (Scheduler, "Web Push", "GitHub budget
+    alerts"), never trimmed by `fitStatus`: it is at most ~150 bytes at every field's widest and ~70 in practice,
+    and a trimmed one would silence the alert; `status.test.ts` holds the worst case beside every other kept field.
+    A reader drops a bad `gh` alone (`parseGithubRate`, strict down to an unknown key), never the status, as it
+    does `cu`. Absent from older daemons, and an older reader ignores it. No capability: absence already means no
+    reading.
+  - **History**: each budget is a `github_used_pct` gauge (label `resource`, `core` or `graphql`) in the metrics
+    tiers, so the Machines charts can show it later; `githubSamples` (`metrics-tiers.ts`) builds it for the daemon's
+    store and the archivist's live import alike. Every machine signed in as the user stores the same series under
+    its own `machine` label; the user id is never a label. No PWA surface yet.
+  - On only through `RunOpts.githubRate`, which `main.ts` always passes, like `authHealth`: a test daemon must not
+    run the developer's `gh`. The test runner's `SEANCE_GH_BIN` (a path that never exists) backs that up.
 - **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s
   `traits` map declares what this box's exclaves carry (Scheduler, "Traits filter"). `parseTraits` is
   strict: names pass `isTraitName` (`TRAIT_LIMITS`), values are objects holding only `exclaves` (a
