@@ -45,7 +45,7 @@ import { peerPidSupported } from "./peer.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
-import { startGithubRate, type GithubRateOpts } from "./github-rate.ts";
+import { graphqlResetOf, startGithubRate, type GithubRateOpts } from "./github-rate.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
@@ -712,7 +712,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     httpFetch,
     // The relay's own origin: a contact the push services can show, and no person's address.
     pushSubject: `https://${new URL(config.relayUrl).host}`,
-    prStatus: opts.leader?.prStatus ?? {},
+    prStatus: {
+      // The machine's own budget reading, never a second one: a limited poll's reset when no in-query one is ahead.
+      ...(githubRate === null ? {} : { graphqlReset: () => graphqlResetOf(githubRate.view()) }),
+      ...opts.leader?.prStatus,
+    },
   });
 
   // Over this daemon's own socket, which `quota:` needs registered, not fenced.

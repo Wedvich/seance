@@ -1049,6 +1049,10 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
+  Every poll query also selects the constant `rateLimit{ cost remaining resetAt }`; a rate-limited answer
+  (`askGithub`'s `limited`, 2026-11-18) is never a reading: the run it answered writes nothing (the poll's earlier
+  readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
+  poller parsed itself, never `gh`'s words.
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
@@ -5072,10 +5076,40 @@ for the lot with its own `gh`.
   stdout that is no GraphQL answer (`failed`), and otherwise ok — including a non-zero exit: one alias GitHub
   cannot resolve (deleted repo, no access) makes `gh` exit 1 with the whole answer on stdout
   and `null` at that alias, so the others still land and the bad one warns once per URL per
-  term with its GraphQL error `type` (`NOT_FOUND`, `FORBIDDEN`). A failing class writes
+  term with its GraphQL error `type` (`NOT_FOUND`, `FORBIDDEN`). A body with no `data` that is GitHub's
+  rate limit is `limited` (below). A failing class writes
   nothing, warns once on entering it with the remedy (never `gh`'s stderr, which can carry a
   token fragment or a URL), backs the next poll off from a minute toward 15 minutes, and says
   so once when it recovers. Nothing to poll means `gh` never runs.
+- **A spent budget is waited out** (2026-11-18, docs/gh-watch.md W8, its build step 1). `askGithub`'s `limited`
+  class is a body with no `data` object whose `errors[]` carries `type: "RATE_LIMITED"`, or whose `message` (top
+  level or in `errors[]`) says "rate limit" or "rate-limit" (also "rate limited") or "abuse detection mechanism"
+  (GitHub's older secondary-limit wording) — after the `Bad credentials` check, so a revoked token stays
+  `unauthenticated` — or an answer whose `errors[]` carries the typed `RATE_LIMITED` beside a `data` object (the
+  wording alone does not count there, so a `NOT_FOUND` alias stays ok). What it matches (spike S3) comes from `gh`'s source (`pkg/cmd/api/api.go`) and GitHub's rate-limit
+  docs, **not from a live spent budget**, which every session on the fleet shares: the primary GraphQL limit answers
+  HTTP 200 with the `RATE_LIMITED` error and no data; the secondary limit (and REST's primary) a 403 or 429 whose
+  message says rate limit; `gh api` prints either body to stdout and exits 1 (its `SilentError`), and prints no
+  header without `-i`, so `Retry-After` and `x-ratelimit-reset` never reach the daemon. A `NOT_FOUND` or `FORBIDDEN`
+  alias beside `data` stays ok, a no-data body of any other kind stays `failed`. Every poll query (`p<i>`, `c<i>`,
+  `b<i>`) also selects `rateLimit{ cost remaining resetAt }`, constant text beside the aliases, and the poller keeps
+  the term's newest `remaining` and `resetAt` (W8's reserve for tasks reads it once watched targets exist, gh-watch
+  step 2). A `limited` answer in any run ends the poll: nothing more is asked, readings already written stay, owed
+  open PRs go out with their base reading. The next poll waits until the reset plus up to a minute's jitter
+  (`limitedDelay`, `LIMIT_JITTER_MS`), the reset being the term's newest in-query `resetAt` while it is ahead, else
+  the machine's own rate reader's GraphQL reset (Daemon, "GitHub rate limits": no second reading of the budget),
+  and the ladder only when neither is ahead. The first one ahead and inside an hour's window (61 minutes) wins; one
+  past it is clamped to the window's end, since a local clock behind GitHub's reads a fresh window's reset as
+  further off than it is. A wait for a reset resets the ladder's count. It warns on entering, naming the reset
+  (its own value, never `gh`'s words) and once more if a stay entered with no reset gains one, and says once when
+  a poll answers again. A limit seen before a rejected write still ends the poll `limited`. A
+  secondary limit with budget left also waits for the hourly reset when one is known: conservative, since `gh`
+  hides `Retry-After` and GitHub warns that requests made under a secondary limit can get the integration banned.
+  Rejected: the ladder for a limit, which would ask an empty budget again at minute 2, 4 and 8.
+- **One clock** (2026-11-18, decided with docs/gh-watch.md open question 2): the poller keeps its single 60 s pace,
+  watched targets included once they exist. A faster pace for them doubles the cost of every task's PR too, or
+  needs a second clock in the poller; a minute's latency on a CI wait of ten is accepted. Nor does a watch get a
+  `quiet` option (open question 1): one note per head is cheap, and a pass is often when /ship merges.
 - **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
   so the write has the per-task serial chain, the term fence and the version floor of every other,
   and apps are nudged. A reading for a URL that is none of the task's PRs writes nothing, one
@@ -7119,6 +7153,13 @@ of this section built.
     tiers, so the Machines charts can show it later; `githubSamples` (`metrics-tiers.ts`) builds it for the daemon's
     store and the archivist's live import alike. Every machine signed in as the user stores the same series under
     its own `machine` label; the user id is never a label. No PWA surface yet.
+  - **Beside the PR poller's `limited`** (2026-11-18, Scheduler, "PR status"): the leader's `github` alert is the
+    owner's warning while budget is left (at 20%); `limited` is the poller's own reaction once GitHub refuses it. The
+    poller's reset comes first from its queries' own `rateLimit`, since this reader may still be on its 5-minute pace
+    when the budget empties; it falls back to this reader's GraphQL reset (`graphqlResetOf`, handed to the leader's
+    poller by `run.ts`), never a reading of its own. The budget gauge docs/gh-watch.md's open question 3 asked for
+    is this section; a count of live watches on the Machines row is not built (decided 2026-11-18: not
+    recommended).
   - On only through `RunOpts.githubRate`, which `main.ts` always passes, like `authHealth`: a test daemon must not
     run the developer's `gh`. The test runner's `SEANCE_GH_BIN` (a path that never exists) backs that up.
 - **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s

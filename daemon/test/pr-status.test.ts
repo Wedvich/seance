@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quote, type PrStatus } from "@seance/shared";
 import type { Task } from "../src/leader.ts";
-import { parseGithubPr, readPrHead, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
+import {
+  LIMIT_JITTER_MS,
+  limitedDelay,
+  parseGithubPr,
+  readPrHead,
+  startPrPoller,
+  type PrPollerOpts,
+} from "../src/pr-status.ts";
 import { makeGhStub, pollUntil, type GhRun, type GhStub } from "./fixtures.ts";
 
 let base: string;
@@ -150,7 +157,11 @@ interface Seen {
 }
 
 /** `rejects` names the tasks whose write the caller's `onStatus` refuses. */
-function start(tasks: readonly Task[], opts: PrPollerOpts = {}, rejects: ReadonlySet<string> = new Set()) {
+function start(
+  tasks: readonly Task[],
+  opts: PrPollerOpts & { readonly now?: () => number } = {},
+  rejects: ReadonlySet<string> = new Set(),
+) {
   const logs = { info: [] as string[], warn: [] as string[] };
   const seen: Seen[] = [];
   const poller = startPrPoller({
@@ -165,7 +176,7 @@ function start(tasks: readonly Task[], opts: PrPollerOpts = {}, rejects: Readonl
       seen.push({ id, url, status });
       return Promise.resolve();
     },
-    now: () => 1234,
+    now: opts.now ?? (() => 1234),
     log: { info: (line) => logs.info.push(line), warn: (line) => logs.warn.push(line) },
   });
   stops.push(poller.stop);
@@ -615,6 +626,256 @@ describe("when gh does not answer", () => {
     const { logs } = start([pr(4)]);
     await pollUntil(() => logs.warn.length === 1, "the warning");
     expect(logs.warn[0]).toContain("failed");
+  });
+});
+
+describe("when GitHub's budget is spent", () => {
+  // S3's two shapes, from gh's source and GitHub's docs: the primary GraphQL limit is HTTP 200 with
+  // `errors[].type` RATE_LIMITED; the secondary a 403 (or 429) whose message says so. gh exits 1 on both.
+  const PRIMARY = JSON.stringify({
+    errors: [
+      { type: "RATE_LIMITED", code: "graphql_rate_limit", message: "API rate limit already exceeded for user ID 77." },
+    ],
+  });
+  const SECONDARY = JSON.stringify({
+    message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again. ID F00D.",
+    documentation_url: "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+    status: "403",
+  });
+  const SELECTION = "rateLimit{ cost remaining resetAt }";
+  const withBudget = (body: string, resetAt: number, remaining = 4000): string => {
+    const parsed = JSON.parse(body);
+    parsed.data.rateLimit = { cost: 1, remaining, resetAt: new Date(resetAt).toISOString() };
+    return JSON.stringify(parsed);
+  };
+
+  test("either shape is `limited`: one warning naming the reset, never gh's words, and no poll before the reset", async () => {
+    for (const body of [PRIMARY, SECONDARY]) {
+      const now = Date.now();
+      const reset = now + 3_600_000;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await gh.setReply(body, 1);
+      const { logs, seen, stop } = start([pr(1)], { now: () => now, graphqlReset: () => reset, random: () => 0 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      // A non-event: an unlimited poller at 20 ms would have run several times by now.
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await Bun.sleep(200);
+      stop();
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      expect(await gh.calls()).toBe(1);
+      expect(logs.warn).toHaveLength(1);
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).toContain(`until ${new Date(reset).toISOString()}`);
+      expect(logs.warn[0]).not.toMatch(/user ID|secondary|F00D/u);
+      expect(seen).toEqual([]);
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next shape
+      gh = await stub.fresh();
+    }
+  });
+
+  test("with no reset known, or one already past, it backs off on the ladder and says no time", async () => {
+    for (const reset of [null, 1000]) {
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(PRIMARY, 1);
+      const { logs, stop } = start([pr(1)], { intervalMs: 10, graphqlReset: () => reset });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(async () => (await current.calls()) >= 2, "a second poll on the ladder");
+      stop();
+      expect(logs.warn).toHaveLength(1);
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).not.toContain("until");
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next case
+      gh = await stub.fresh();
+    }
+  });
+
+  test("other refusals with no data are not `limited`: a NOT_FOUND body is `failed`", async () => {
+    await gh.setReply(
+      JSON.stringify({ errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }] }),
+      1,
+    );
+    const { logs } = start([pr(1)]);
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("(failed)");
+  });
+
+  test("the in-query resetAt sets the wait, ahead of the rate reader's; the first good poll after it says so once", async () => {
+    const begun = Date.now();
+    const reset = begun + 400;
+    await gh.setReply(withBudget(reply({ state: "OPEN" }), reset), 0);
+    await gh.setCallReply(2, PRIMARY, 1);
+    // A clock that stands still: the reset stays 400 ms ahead however long a stub exec takes; the wait itself is real.
+    const { logs } = start([pr(1)], {
+      now: () => begun,
+      random: () => 0,
+      // Later than the in-query reset: were it read, the third poll would not come within the wait below.
+      graphqlReset: () => begun + 3_600_000,
+    });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain(`until ${new Date(reset).toISOString()}`);
+    await pollUntil(() => logs.info.length === 1, "the resumption");
+    expect(await gh.calls()).toBeGreaterThanOrEqual(3);
+    expect(logs.info[0]).toContain("resumed");
+    expect(logs.warn).toHaveLength(1);
+  });
+
+  test("a limited blocked-state run ends the poll limited: the merge readings land, no blocked warning, nothing more asked", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "MERGED" }), 0);
+    await gh.setBlockedReply(PRIMARY, 1);
+    const tasks = [pr(1, { state: "awaiting-merge" }), pr(2, { state: "awaiting-merge" })];
+    const { logs, seen } = start(tasks, { now: () => now, graphqlReset: () => now + 3_600_000, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1 && seen.length === 2, "the warning and both readings");
+    // A non-event: no third run comes before the reset.
+    await Bun.sleep(150);
+    expect(await gh.calls()).toBe(2);
+    expect(logs.warn).toHaveLength(1);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(seen.map((s) => [s.id, s.status.state])).toEqual([
+      ["t2", "merged"],
+      ["t1", "open"],
+    ]);
+  });
+
+  test("a reset beyond the window waits for the window's end rather than the ladder (a clock running behind GitHub's)", async () => {
+    await gh.setReply(PRIMARY, 1);
+    const { logs } = start([pr(1)], { now: () => 1234, graphqlReset: () => 1234 + 2 * 3_600_000, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain(`until ${new Date(1234 + 61 * 60_000).toISOString()}`);
+    await Bun.sleep(100);
+    expect(await gh.calls()).toBe(1);
+  });
+
+  test("a limit seen before a rejected write still ends the poll limited", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }), 0);
+    await gh.setBlockedReply(PRIMARY, 1);
+    const { logs } = start(
+      [pr(1, { state: "awaiting-merge" })],
+      { now: () => now, graphqlReset: () => now + 3_600_000, random: () => 0 },
+      new Set(["t1"]),
+    );
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    await Bun.sleep(150);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(await gh.calls()).toBe(2);
+  });
+
+  test("a limited landed check ends the poll limited: nothing more is asked before the reset", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "MERGED", base: "feature", mergeOid: HEAD, landed: "BEHIND" }), 0);
+    await gh.setCallReply(2, PRIMARY, 1);
+    const { logs } = start([pr(1, { state: "awaiting-merge" })], {
+      now: () => now,
+      graphqlReset: () => now + 3_600_000,
+      random: () => 0,
+    });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    await Bun.sleep(150);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(await gh.calls()).toBe(2);
+  });
+
+  test("a revoked token whose body also mentions the limit stays `unauthenticated`", async () => {
+    await gh.setReply('{"message":"API rate limit exceeded for user ID 1","status":"401"}', 1);
+    const { logs } = start([pr(1)]);
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("gh auth login");
+  });
+
+  test("the limit by wording alone, by `errors[].message`, or typed beside data, is `limited`; an unrelated error is not", async () => {
+    const bodies = [
+      JSON.stringify({ errors: [{ message: "You have exceeded a secondary rate limit." }] }),
+      JSON.stringify({ message: "You have been rate limited. Try later." }),
+      JSON.stringify({ message: "You have triggered an abuse detection mechanism. Please wait." }),
+      JSON.stringify({ data: { p0: null, rateLimit: null }, errors: [{ type: "RATE_LIMITED", message: "slow down" }] }),
+    ];
+    for (const body of bodies) {
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(body, 1);
+      const { logs, stop } = start([pr(1)], { intervalMs: 10_000 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      stop();
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).not.toContain("not readable");
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next body
+      gh = await stub.fresh();
+    }
+    await gh.setReply(JSON.stringify({ errors: [{ message: "Something went wrong while executing your query." }] }), 1);
+    const { logs } = start([pr(1)], { intervalMs: 10_000 });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("(failed)");
+  });
+
+  test("limited, failed, then ok: one warning per class and one resumption", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    await gh.setCallReply(1, PRIMARY, 1);
+    await gh.setCallReply(2, "not json", 0);
+    const { logs, seen } = start([pr(1)], { intervalMs: 10 });
+    await pollUntil(() => seen.length > 0, "the first good reading");
+    expect(logs.warn).toHaveLength(2);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(logs.warn[1]).toContain("(failed)");
+    expect(logs.info).toHaveLength(1);
+  });
+
+  test("a limited stay that gains a known reset warns again, naming it", async () => {
+    await gh.setReply(PRIMARY, 1);
+    let reset: number | null = null;
+    const { logs } = start([pr(1)], { intervalMs: 200, now: () => 1234, graphqlReset: () => reset, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1, "the first warning");
+    expect(logs.warn[0]).not.toContain("until");
+    reset = 1234 + 300;
+    await pollUntil(() => logs.warn.length === 2, "the warning with a time");
+    expect(logs.warn[1]).toContain(`until ${new Date(reset).toISOString()}`);
+  });
+
+  test("a rateLimit that is no budget is not kept: the rate reader's reset sets the wait", async () => {
+    for (const remaining of [1.5, -1, "x"]) {
+      const parsed = JSON.parse(reply({ state: "OPEN" }));
+      parsed.data.rateLimit = { cost: 1, remaining, resetAt: new Date(1234 + 500).toISOString() };
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(JSON.stringify(parsed), 0);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await current.setCallReply(2, PRIMARY, 1);
+      const { logs, stop } = start([pr(1)], { now: () => 1234, graphqlReset: () => 1234 + 1000, random: () => 0 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      stop();
+      expect(logs.warn[0]).toContain(`until ${new Date(1234 + 1000).toISOString()}`);
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next case
+      gh = await stub.fresh();
+    }
+  });
+
+  test("every query the poller sends selects the rate limit, as constant text", async () => {
+    await gh.setReply(
+      reply({ state: "OPEN", oid: HEAD }, { state: "MERGED", base: "feature", mergeOid: HEAD, landed: "BEHIND" }),
+      0,
+    );
+    const tasks = [pr(1, { state: "awaiting-merge" }), pr(2, { state: "awaiting-merge" })];
+    const { seen, stop } = start(tasks, { intervalMs: 60_000 });
+    await pollUntil(() => seen.length === 2, "both readings");
+    stop();
+    const queries = (await gh.argvs()).map((argv) => argv.find((arg) => arg.startsWith("query=")) ?? "");
+    expect(queries).toHaveLength(3);
+    for (const query of queries) expect(query.endsWith(` ${SELECTION} }`)).toBe(true);
+  });
+
+  test("limitedDelay waits until the reset plus under a minute's jitter, and gives no wait it cannot ground", () => {
+    expect(limitedDelay(10_000, 4_000, 0)).toBe(6_000);
+    expect(limitedDelay(10_000, 4_000, 0.999_999)).toBeLessThan(6_000 + LIMIT_JITTER_MS);
+    expect(limitedDelay(10_000, 4_000, 7)).toBeLessThan(6_000 + LIMIT_JITTER_MS);
+    expect(limitedDelay(10_000, 4_000, -1)).toBe(6_000);
+    expect(limitedDelay(null, 4_000, 0)).toBeNull();
+    expect(limitedDelay(4_000, 4_000, 0)).toBeNull();
+    expect(limitedDelay(4_000 + 61 * 60_000 + 1, 4_000, 0)).toBeNull();
+    expect(limitedDelay(4_000 + 61 * 60_000, 4_000, 0)).toBe(61 * 60_000);
   });
 });
 

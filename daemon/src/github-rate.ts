@@ -48,6 +48,12 @@ export interface GithubRateReader {
 
 const budget = (b: RateBudget): GithubBudget => [b.limit, b.remaining, b.reset];
 
+/** The GraphQL budget's reset in unix ms, from a `view()`: the PR poller's fallback when GitHub limits it. */
+export function graphqlResetOf(view: GithubRate | null): number | null {
+  const g = view?.g;
+  return g === undefined ? null : g[2] * 1000;
+}
+
 function isLow(b: RateBudget): boolean {
   return b.remaining < b.limit * GITHUB_RATE_LOW_SHARE;
 }
