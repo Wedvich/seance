@@ -158,6 +158,16 @@ describe("the conversations file", () => {
     );
   });
 
+  test("clearing a label that is not there writes nothing, not even the file", async () => {
+    const store = loadConversationStore(path);
+    await store.setLabel(id(40), "");
+    expect(await readdir(dir)).toEqual([]);
+    await store.setLabel(id(41), "x");
+    const before = await readFile(path, "utf8");
+    await store.setLabel(id(40), "");
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
   test("a write that fails leaves the label as it was", async () => {
     const store = loadConversationStore(path);
     await store.setLabel(id(30), "before");

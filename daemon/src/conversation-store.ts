@@ -8,7 +8,9 @@ import { writeDurable } from "./durable-write.ts";
  * written whole through `writeDurable` (temp, fsync, rename), keyed by conversation id:
  * `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }], lastLive }`. The label is the one text it holds,
  * the owner's own. Nothing here is logged (`message-layering.test.ts` holds this module off both sinks): a file it
- * cannot read loads empty, so labels are lost, never invented.
+ * cannot read loads empty, so labels are lost, never invented. A write that fails after its rename (the directory's
+ * sync) leaves the new file on disk while the caller is told it was not saved and memory keeps the old value: the next
+ * write overwrites it, a restart before then shows it. Accepted: the owner's retry settles it.
  *
  * `subscriptions` is step 4's; nothing writes it yet. It is read and written back so that a daemon downgraded from a
  * build that does write it keeps them on its next label write rather than erasing them.
@@ -106,15 +108,19 @@ export function loadConversationStore(path: string, now: () => number = Date.now
   /** The `lastLive` each entry last reached the disk with. */
   const written = new Map([...entries].map(([id, entry]) => [id, entry.lastLive]));
   let chain: Promise<unknown> = Promise.resolve();
+  let liveQueued = false;
 
   const write = async (): Promise<void> => {
-    const body = Object.fromEntries(entries);
-    await writeDurable(path, `${JSON.stringify(body)}\n`, FILE_MODE);
-    for (const [id, entry] of entries) written.set(id, entry.lastLive);
-    for (const id of written.keys()) if (!entries.has(id)) written.delete(id);
+    // What went to the disk is this snapshot: a touch during the write is not on it, so it is not marked written.
+    const snapshot = new Map(entries);
+    await writeDurable(path, `${JSON.stringify(Object.fromEntries(snapshot))}\n`, FILE_MODE);
+    for (const [id, entry] of snapshot) written.set(id, entry.lastLive);
+    for (const id of written.keys()) if (!snapshot.has(id)) written.delete(id);
   };
 
   const relabel = async (id: string, value: string): Promise<void> => {
+    // Nothing to clear: no write, and no file made for it.
+    if (value === "" && entries.get(id)?.ownerLabel === undefined) return;
     const before = entries;
     const after = new Map(entries);
     const held = after.get(id);
@@ -149,9 +155,16 @@ export function loadConversationStore(path: string, now: () => number = Date.now
       const at = now();
       entries.delete(id);
       entries.set(id, { ...held, lastLive: at });
-      if (at - (written.get(id) ?? 0) < LAST_LIVE_WRITE_MS) return;
-      // Only the prune reads it: a failed write is retried at the next touch past the spacing.
-      chain = chain.then(write).catch(() => {});
+      if (at - (written.get(id) ?? 0) < LAST_LIVE_WRITE_MS || liveQueued) return;
+      // One queued write covers every touch before it runs; only the prune reads it, so a failed write is retried at
+      // the next touch past the spacing.
+      liveQueued = true;
+      chain = chain
+        .then(() => {
+          liveQueued = false;
+          return write();
+        })
+        .catch(() => {});
     },
   };
 }
