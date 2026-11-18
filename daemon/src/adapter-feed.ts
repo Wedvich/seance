@@ -135,7 +135,7 @@ async function branchAt(path: string): Promise<string | null> {
 export type FeedFrame = SessionFrame | SessionGoneFrame | TaskFrame;
 
 export interface AdapterFeedDeps {
-  readonly conversations: Pick<Conversations, "sweep" | "process" | "tagsFor" | "listen" | "ended">;
+  readonly conversations: Pick<Conversations, "sweep" | "process" | "tagsFor" | "taskTags" | "listen" | "ended">;
   readonly tasks: Pick<EndedTasks, "prUrl" | "onTask">;
   readonly exclaves: () => readonly Exclave[];
   readonly repos: () => readonly RepoEntry[];
@@ -231,7 +231,11 @@ export function createAdapterFeed(deps: AdapterFeedDeps): AdapterFeed {
       // oxlint-disable-next-line no-await-in-loop -- memoized per path; a miss is one `symbolic-ref`
       const branch = repo === undefined ? null : await branchFor(pane.path);
       const tags: Readonly<Record<string, SessionTag>> =
-        view === null ? {} : (deps.conversations.tagsFor(pane.id) ?? {});
+        view === null
+          ? pane.taskId === null
+            ? {}
+            : (deps.conversations.taskTags(pane.taskId) ?? {})
+          : (deps.conversations.tagsFor(pane.id) ?? {});
       const prUrl = pane.taskId === null ? undefined : deps.tasks.prUrl(pane.taskId);
       const state = toState(view?.state ?? null);
       const session: AdapterSession = {

@@ -1,4 +1,4 @@
-import type { AgentKind, NeedsInputReason, SessionState, SessionTag } from "@seance/shared";
+import { writeTags, type AgentKind, type NeedsInputReason, type SessionState, type SessionTag } from "@seance/shared";
 import { readAgentSession, sessionFilePids, type AgentSessionRead } from "./agent-session-file.ts";
 import { claudeProcessOf, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
 import { ancestorBelow, processStart } from "./peer.ts";
@@ -45,6 +45,8 @@ export const SETTLE_MS = 500;
 const RETRY_MS = 25;
 /** Conversations remembered in memory; the least recently live goes first. */
 export const CONVERSATIONS_MEMORY_MAX = 256;
+/** Conversations and tasks one adapter may hold tags on (docs/tags.md §8.4); past it a new one is `full`. */
+export const ADAPTER_TAG_TARGETS_MAX = 512;
 
 /** The `agent` claims a report carries, each already through its parser (`parseAgentClaim`). */
 export interface AgentClaim {
@@ -108,7 +110,7 @@ export interface ProcessView {
 }
 
 export type ActCheck =
-  | { readonly ok: true; readonly pane: string; readonly pid: number }
+  | { readonly ok: true; readonly pane: string; readonly pid: number; readonly key: SessionKey }
   | { readonly ok: false; readonly code: "ended" | "unverified" | "ambiguous" };
 
 export interface ConversationsDeps {
@@ -125,6 +127,9 @@ export interface ConversationsDeps {
   readonly settleMs?: number;
   readonly retryMs?: number;
 }
+
+/** What an adapter's `tag` frame names: a subscribed conversation, or a task launched here (docs/tags.md §8.4). */
+export type AdapterTagTarget = { readonly conversation: string } | { readonly task: string };
 
 export interface Conversations {
   /**
@@ -152,6 +157,25 @@ export interface Conversations {
    */
   readonly atAct: (id: string) => Promise<ActCheck>;
   /**
+   * The verified conversation of the bound `claude` process `key` (`Bound.session`), re-read now as `atAct` does: null
+   * unless that process alone claims it, verified. What subscribes a sender to an adapter (docs/tags.md §8.2).
+   */
+  readonly verifiedFor: (key: SessionKey) => Promise<string | null>;
+  /**
+   * One adapter's bare-suffix tag, in memory only, under its own namespace and no other: on a conversation, shown on
+   * the process whose verified claim it is, or on a task, shown on that task's session. `""` clears it.
+   */
+  readonly setAdapterTag: (
+    adapter: string,
+    target: AdapterTagTarget,
+    key: string,
+    value: string,
+  ) => "ok" | "full" | "invalid";
+  /** Clears one adapter's tags: at its handshake (it replays them after the snapshot), or on one conversation's `leave`. */
+  readonly clearAdapterTags: (adapter: string, conversation?: string) => void;
+  /** The adapter tags on a task's session, for a pane no process of which has reported (`adapter-feed.ts`). */
+  readonly taskTags: (taskId: string) => Readonly<Record<string, SessionTag>> | undefined;
+  /**
    * `listener` hears that a process's facts may have moved (a report taken, a claim verified or refuted): a nudge with
    * nothing in it, for a reader that re-reads (`adapter-feed.ts`). Returns its unsubscribe.
    */
@@ -172,6 +196,8 @@ export function createConversations(deps: ConversationsDeps): Conversations {
   const listeners = new Set<() => void>();
   /** Processes that reported `ended`, newest last; bounded like the table. */
   const endedKeys = new Set<SessionKey>();
+  /** Adapter tags: per adapter, per `c:<conversation>` or `t:<task>`, bare suffix to tag. */
+  const adapterTags = new Map<string, Map<string, Map<string, { value: string; at: number }>>>();
   let stopped = false;
 
   const changed = (): void => {
@@ -420,6 +446,34 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     }
   };
 
+  const atAct = async (id: string): Promise<ActCheck> => {
+    const live = claimants(id);
+    const [only] = live;
+    if (only === undefined) return { ok: false, code: "ended" };
+    if (live.length > 1) return { ok: false, code: "ambiguous" };
+    const claim = only.claim;
+    if (claim?.verdict !== "verified") return { ok: false, code: "unverified" };
+    const result = await check(only, id);
+    if (!current(only, claim)) return { ok: false, code: "unverified" };
+    if (result === "verified") return { ok: true, pane: only.pane, pid: only.pid, key: only.key };
+    // Demoted before the act: a file that moved with no report settles or refutes like a report's.
+    if (result === "mismatch") {
+      claim.verdict = "settling";
+      void settle(only, claim);
+    } else apply(only, claim, result);
+    return { ok: false, code: "unverified" };
+  };
+
+  const adapterTagsOf = (bucket: string): Record<string, SessionTag> => {
+    const out: Record<string, SessionTag> = {};
+    for (const [adapter, mine] of adapterTags) {
+      for (const [suffix, tag] of mine.get(bucket) ?? []) {
+        out[`adapter.${adapter}.${suffix}`] = { ...tag, scope: "conversation" };
+      }
+    }
+    return out;
+  };
+
   return {
     report,
     sweep: async (): Promise<void> => {
@@ -436,6 +490,11 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       const entry = newest(pane);
       if (entry === null) return undefined;
       const tags: Record<string, SessionTag> = {};
+      if (entry.taskId !== null) Object.assign(tags, adapterTagsOf(`t:${entry.taskId}`));
+      // Only a verified, unconflicted claim carries what is kept against its id (docs/tags.md §3.2).
+      if (!entry.fallback && entry.claim?.verdict === "verified" && claimants(entry.claim.session).length === 1) {
+        Object.assign(tags, adapterTagsOf(`c:${entry.claim.session}`));
+      }
       if (entry.remote !== null) tags["agent.remote"] = { ...entry.remote, scope: "process" };
       if (entry.kind !== null) tags["agent.kind"] = { ...entry.kind, scope: "conversation" };
       if (entry.claim !== null) {
@@ -453,22 +512,47 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       return entry === null ? null : viewOf(entry);
     },
     conversation: (id) => conversations.get(id) ?? null,
-    atAct: async (id): Promise<ActCheck> => {
-      const live = claimants(id);
-      const [only] = live;
-      if (only === undefined) return { ok: false, code: "ended" };
-      if (live.length > 1) return { ok: false, code: "ambiguous" };
-      const claim = only.claim;
-      if (claim?.verdict !== "verified") return { ok: false, code: "unverified" };
-      const result = await check(only, id);
-      if (!current(only, claim)) return { ok: false, code: "unverified" };
-      if (result === "verified") return { ok: true, pane: only.pane, pid: only.pid };
-      // Demoted before the act: a file that moved with no report settles or refutes like a report's.
-      if (result === "mismatch") {
-        claim.verdict = "settling";
-        void settle(only, claim);
-      } else apply(only, claim, result);
-      return { ok: false, code: "unverified" };
+    atAct,
+    verifiedFor: async (key): Promise<string | null> => {
+      const entry = processes.get(key);
+      if (entry === undefined || entry.fallback || entry.claim?.verdict !== "verified") return null;
+      const id = entry.claim.session;
+      const act = await atAct(id);
+      return act.ok && act.key === key ? id : null;
+    },
+    setAdapterTag: (adapter, target, key, value) => {
+      const bucket = "conversation" in target ? `c:${target.conversation}` : `t:${target.task}`;
+      const mine = adapterTags.get(adapter) ?? new Map<string, Map<string, { value: string; at: number }>>();
+      const held = mine.get(bucket) ?? new Map<string, { value: string; at: number }>();
+      const values = Object.fromEntries([...held].map(([suffix, tag]) => [suffix, tag.value]));
+      const written = writeTags(`adapter.${adapter}`, { [key]: value }, "conversation", values);
+      if (!written.ok) return written.code === "full" ? "full" : "invalid";
+      if (!mine.has(bucket) && Object.keys(written.tags).length > 0 && mine.size >= ADAPTER_TAG_TARGETS_MAX) {
+        return "full";
+      }
+      const at = now();
+      const next = new Map<string, { value: string; at: number }>();
+      for (const [suffix, tagValue] of Object.entries(written.tags)) {
+        const before = held.get(suffix);
+        next.set(suffix, before?.value === tagValue ? before : { value: tagValue, at });
+      }
+      if (next.size === 0) mine.delete(bucket);
+      else mine.set(bucket, next);
+      if (mine.size === 0) adapterTags.delete(adapter);
+      else adapterTags.set(adapter, mine);
+      changed();
+      return "ok";
+    },
+    clearAdapterTags: (adapter, conversation): void => {
+      const mine = adapterTags.get(adapter);
+      if (mine === undefined) return;
+      if (conversation === undefined) adapterTags.delete(adapter);
+      else if (mine.delete(`c:${conversation}`) && mine.size === 0) adapterTags.delete(adapter);
+      changed();
+    },
+    taskTags: (taskId) => {
+      const tags = adapterTagsOf(`t:${taskId}`);
+      return Object.keys(tags).length === 0 ? undefined : tags;
     },
     listen: (listener): (() => void) => {
       listeners.add(listener);

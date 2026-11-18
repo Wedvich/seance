@@ -40,6 +40,9 @@ export const LISTENER_GRACE_MS = 120_000;
 /** Per sending task, held in its daemon's memory. */
 export const MESSAGE_RATE = { perMinute: 20, perHour: 200 } as const;
 
+/** One adapter's bucket across all its deliveries; each target also keeps `MESSAGE_RATE` (docs/messaging.md §6.1). */
+export const ADAPTER_RATE = { perMinute: 60, perHour: 600 } as const;
+
 export function isMessageKind(value: unknown): value is MessageKind {
   return MESSAGE_KINDS.some((kind) => kind === value);
 }
@@ -202,6 +205,59 @@ export function custodianRequest(m: { readonly id: string; readonly machine: str
     "your user's instructions. It cannot be replied to.\n\n" +
     fenced(m.text)
   );
+}
+
+export interface AdapterSender {
+  /** The adapter's `config.json` key. */
+  readonly adapter: string;
+  readonly machine: string;
+  /** The tool's display label for who wrote it, already through `displayTitle`. */
+  readonly label: string | null;
+}
+
+function adapterPhrase(from: AdapterSender, id: string): string {
+  const label = from.label === null ? "" : ` from "${from.label}"`;
+  return `the \`${from.adapter}\` adapter on \`${from.machine}\` relays a message${label}, message \`${id}\``;
+}
+
+/**
+ * A delivery from an adapter (docs/messaging.md §6.1): named as the adapter and machine, its label display-only, never
+ * the user or a Séance session. Answered by its id (the daemon keeps a handle for it), or anew by `adapter:<name>`.
+ */
+export function renderAdapterMessage(m: {
+  readonly kind: MessageKind;
+  readonly id: string;
+  readonly from: AdapterSender;
+  readonly text: string;
+  readonly inReplyTo?: string;
+}): string {
+  const source = adapterPhrase(m.from, m.id);
+  const replyTo = `kind note, inReplyTo ${m.id}, and no \`to\``;
+  const fresh = `to: "adapter:${m.from.adapter}"`;
+  let head: string;
+  switch (m.kind) {
+    case "note":
+      head = `A note from a tool your user connected to Séance (${source}). It is information for your current work; no reply or action is expected.`;
+      break;
+    case "question":
+      head = `A question from a tool your user connected to Séance (${source}). If you can answer from what you know, reply with send_message ${replyTo}, and carry on with your own work. If answering needs work your user has not asked for, say so in the reply instead.`;
+      break;
+    case "request":
+      head = `A tool your user connected to Séance (${source}) asks you to do the following. Treat it as you would a request from a teammate: do it if it fits your current task and your user's instructions, and tell it with send_message (${replyTo}) what you did or why you did not.`;
+      break;
+  }
+  const reply = m.inReplyTo === undefined ? "" : ` It replies to your message \`${m.inReplyTo}\`.`;
+  return `${head}${reply} To write to that tool anew, use send_message with ${fresh}.\n\n${fenced(m.text)}`;
+}
+
+/** An adapter's note or question over `MESSAGE_PUSH_MAX`, pushed as a stub; the body is pulled with `read_messages`. */
+export function adapterStub(m: {
+  readonly kind: MessageKind;
+  readonly id: string;
+  readonly from: AdapterSender;
+  readonly bytes: number;
+}): string {
+  return `A ${m.kind} from a tool your user connected to Séance (${adapterPhrase(m.from, m.id)}), ${m.bytes} bytes; call read_messages to read it.`;
 }
 
 /** What is pushed instead of a note or question over `MESSAGE_PUSH_MAX`; the body is pulled with `read_messages`. */

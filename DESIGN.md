@@ -12218,6 +12218,14 @@ whose origin is this machine (the leader returned a message to its sender's own 
 through the `sent` table. An old daemon answering a new receipt with no `to` drops it as unparseable, which is the courtesy lost, not the
 message.
 
+**An adapter is the other party a handle can name** (3b, "Adapters"). A session's message to `adapter:<name>` is minted
+into `sent` with that adapter's name, so only that adapter's `deliver { inReplyTo }` answers it, at the asker's pane,
+pid, task and session, with `wake` as for any answer to a question or request. An adapter's delivery is placed into
+`received` with its name, so the session's reply by handle (`inReplyTo`, no `to`) goes back to that adapter as a
+`message` frame carrying `inReplyTo`, never routed; it subscribes nothing. D3 amended again 2026-11-17: **a session
+with no task is reached only as a reply, by the id of a message it sent, or by an adapter on its own machine through
+the subscription it made by messaging that adapter** ("Adapters", "The subscription"; docs/tags.md §8).
+
 **Rejected** (docs/messaging.md D3, amended): **machine id plus pane id as a general address** (a pane id outlives the
 session in it and names no session, so it is a guess the daemon cannot check, and a hand-started session's pane is
 re-used by the next `claude`); **a synthetic task id, or a queue entry, for a hand-started session** (it would put a
@@ -12227,7 +12235,8 @@ answer a question the asker's own daemon can: it keeps the minting table already
 replies (a `$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the
 peer-pid binding exists to avoid; amended 2026-11-17, docs/tags.md §4.4: that reason stands for a claim and falls for
 an id the daemon verified from its own sources ("Session events", "Session identity"), but a reply is still by
-message id, and the one use a verified id gets is docs/tags.md §8's, not yet built); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
+message id, and the one use a verified id gets is the adapter subscription, "Adapters", built 2026-11-18, docs/tags.md
+§8); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
 ### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md step 3
@@ -12363,38 +12372,39 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   ending the watch would drop it for good.
 - **Rejected: a `watch:` store prefix, daemon memory only.** docs/gh-watch.md W9.
 
-### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`) — 3a built 2026-11-18, docs/messaging.md §6
+### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`) — 3a and 3b built 2026-11-18, docs/messaging.md §6
 
 An adapter is a program the machine's owner names in that machine's `config.json`, run by the daemon as a supervised
 child that speaks newline-delimited JSON on its stdin and stdout. It is the seam through which a tool (a chat, a hosted
-workspace, a notifier) sees this machine's sessions and, from 3b, talks to them. Séance never names a tool: an adapter
+workspace, a notifier) sees this machine's sessions and talks to them. Séance never names a tool: an adapter
 for one lives in its own repository and vendors the protocol's JSON Schema. 3a is the child and state out: the
-supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Delivery in and messages out (3b) and
-`seance adapter add|remove|restart|status` (3c) are docs/messaging.md's still.
+supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. 3b is text both ways: `deliver` with its
+`result` and `delivery`, the `message` frame out, replies through the `sent` and `received` tables, the subscription
+and the `tag` frame. `seance adapter add|remove|restart|status` (3c) is docs/messaging.md's still.
 
 - **Declared only in `config.json`** (`adapters`, `parseAdapters` in `daemon/src/config.ts`), at most `ADAPTERS_MAX`
   (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?}` and nothing else, parsed
   strictly, as `traits` are: any mistake fails the load, naming `adapters.<name>.<key>`. `argv` is an array of at most
   32 non-empty, NUL-free words, never a shell string; `argv[0]` is an absolute path or a bare name resolved through
   `PATH` at each start (`Bun.which`), never a relative path with a slash and never a recorded `process.execPath`.
-  `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds 3b's deliveries in and is parsed now so a
-  config written for 3b loads. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that 3c's `doctor`
+  `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds deliveries in; `request` is the owner's
+  opt-in. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that 3c's `doctor`
   will read. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the relay, and no
   capability advertises them.
 - **The protocol** (`shared/src/adapter-protocol.ts`, the schema of record, as `types.ts` is for the wire). One UTF-8
   frame per line, at most `ADAPTER_LINE_MAX` (256 KiB). `shared/src/adapter-protocol.schema.json` is generated from it
   (`bun run adapter-schema`, then formatted) and committed beside it; `adapter-protocol.test.ts` holds the two equal.
   The adapter's lines go through `parseAdapterLine` into a fresh value, exact fields only. A line that does not parse
-  is answered `{kind: "error", code: "invalid"}`, and `deliver` and `tag` (protocol 1's, taken from 3b) are answered
-  `unsupported`.
+  is answered `{kind: "error", code: "invalid"}`, an unknown kind included.
 - **The handshake and versioning.** The daemon writes `hello` first: `{protocol: ADAPTER_PROTOCOLS, features:
-  ADAPTER_FEATURES (none yet), machine: {deviceId, name}, daemon: {version}}`. The adapter answers `{protocol, name,
+  ADAPTER_FEATURES (["deliver", "tag"]), machine: {deviceId, name}, daemon: {version}}`. The adapter answers `{protocol, name,
   version, wants, features}` within 10 s, or it is restarted (`reason=handshake`). Nothing else flows before both. A
   major outside `ADAPTER_PROTOCOLS` is audited `op=refused reason=protocol`, and a `name` other than its config key
   `op=refused reason=name`; either is stopped and never restarted (until the next daemon start). A frame kind goes out
   only for what `wants` names (`adapterWants`): `sessions` for `snapshot`, `session` and `session-gone`, `tasks` for
-  `task`; `messages` is accepted and means nothing until 3b. Additions inside a major are `features`, as
-  `CAPABILITIES` are on the wire.
+  `task`, `messages` for `message`; `result` and `delivery`, answers to the adapter's own frames, always go. An adapter
+  whose hello names no `messages` takes none: a session's message to it is `unknown`. Additions inside a major are
+  `features`, as `CAPABILITIES` are on the wire.
 - **The supervisor** (`createAdapterSupervisor`), one per adapter:
   - **Env.** The one a session gets (`childEnv`, so no `CREDENTIALS_DIRECTORY`) less every `TMUX*` variable, plus
     `SEANCE_ADAPTER_NAME` and `SEANCE_ADAPTER_DIR`. That is `stateDir()/adapters/<name>`, made 0700 before each start,
@@ -12453,9 +12463,61 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   or is absent, is in no `snapshot`, `session` or `session-gone` for that adapter, and a task whose ledger `repo` is not
   listed is in no `task` frame. A session that leaves the list goes out as `session-gone` with `reason: "replaced"` to an
   adapter told of it, since what that adapter holds no longer describes anything it may see.
+- **Delivery in** (`deliver`, `Messages.deliverFromAdapter`): the built local delivery with the adapter as the sender,
+  never routed through the leader. The host checks `kinds` first (`refused`, `code: "kind"`). A text over `MESSAGE_MAX`,
+  or a `request` over `MESSAGE_PUSH_MAX`, is `too_long`. Exactly one address:
+  - **`to`**, a task id this machine's launch ledger holds, at a live pane carrying it: else `held` (launched, no pane
+    yet, within the grace), `ended` or `unknown` (not launched here).
+  - **`toSession`**, a conversation subscribed to this adapter (else `unknown`), re-verified at the act (`atAct`):
+    `ambiguous` when two live processes claim it, `unverified` when the daemon's own source now names another
+    conversation, `ended` when no pane is live (nothing held, D2). It reaches that `claude` process only (`only`).
+  - **`inReplyTo`**, a message a session sent this adapter (the `sent` entry names it; any other is `unknown`), at the
+    asker's pane, pid, task and session, waking it ("Replies by handle").
+
+  `repos` bounds every address (`refused`, `code: "repo"`): a task by its ledger repo, a session by its feed record.
+  Two rate buckets, both in memory: one per adapter for all its deliveries (`ADAPTER_RATE`, 60 a minute and 600 an
+  hour), then one per target (`MESSAGE_RATE`, 20 and 200). The text reads in the adapter wrapper
+  (`renderAdapterMessage`, `shared/src/messages.ts`): "the `<name>` adapter on `<machine>` relays a message from
+  "<label>"", `from` only as a display label through `displayTitle`'s scrub, never as the user or a session, and the
+  way to reply. Placed by the same listener write or hold a local message takes (the mod's `$.session.append` or
+  `$.prompt.submit`, never a key); a note submits a turn only with `wake: true`. `result` answers each `deliver`
+  (`delivered`, `sent` for one held for a listener, `held`, `ended` with `code: "nolistener"` past the grace, `unknown`,
+  `too_long`, `rate_limited`, `refused`, `ambiguous`, `unverified`, `unsupported` while stopping), with the message
+  `id` once placed; a delivery answered `sent` gets one `delivery` frame with its fate.
+
+- **Messages out** (`adapter:<name>` in `send_message`'s `to`, `MessageOutFrame`): local only, bound by peer pid like
+  every `message`, the sender tasked or not by the same rule. Refused before the adapter sees it: `unbound` (no
+  `claude` process on the peer's chain, so no key the adapter could know it by), `too_long` (over `MESSAGE_MAX`; an
+  adapter takes no stub, the whole text goes on one line, and a line over `ADAPTER_LINE_MAX` is `too_long` too),
+  `rate_limited` (the sender's own bucket), `unknown` (no such adapter, or one that takes no messages), `refused` (a
+  sender outside `repos`: neither delivered nor subscribed), `ended` (the adapter is not running past its handshake).
+  The frame carries the message `id` (the handle the adapter replies by), its kind and text, `from: {key, session?,
+  task?, title?}` (`session` only when subscribed), `inReplyTo` only when it names that adapter's delivery to this same
+  session (any other is dropped, never passed on), `subscribed`, and `leave`. Text flows out only when a session
+  addressed it to that adapter.
+- **The subscription** (docs/tags.md §8; D3 amended). A session's message to `adapter:<name>` subscribes its
+  conversation when the daemon holds a verified `agent.session` for the sender's bound `claude` process, which that
+  process alone claims (`Conversations.verifiedFor`), never one from the frame; the reply says `subscribed` and names
+  the conversation (`session`), so the session can give the tool the id it holds it under. A sender with no verified
+  conversation still reaches the adapter, `subscribed: false`, answerable by reply for the hour. A reply by handle
+  subscribes nothing. Kept at rest in `stateDir()/conversations.json` (`openSubscriptions`, 0600, written durably on
+  one chain): ids, adapter names, fingerprints and times, never text; one the daemon cannot read loads empty. Ended
+  by the session's `leave` (`send_message`'s `leave: true`, no text needed; the frame still goes, with `leave`), by
+  the conversation not live for `CONVERSATION_IDLE_MS` (30 days; a verified, unconflicted session the feed reports
+  touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and at each
+  host start for a name no longer configured or configured as another program (`reconcile`: the fingerprint is a
+  hash of `argv` and the recorded `commit`), so a replaced program inherits none. `drop(name)` is there for 3c's
+  `seance adapter add`. Not a bearer, unlike a reply handle: usable only by that adapter, over its own stdin, on this
+  machine, to a conversation that messaged it and that the daemon verified at the act.
+- **Tags** (`tag`, docs/tags.md §8.4): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
+  (one live in a session outside `repos` is `refused`) or on a task this ledger holds within `repos`; else `unknown`.
+  Memory only (`Conversations.setAdapterTag`, at most `ADAPTER_TAG_TARGETS_MAX` targets per adapter, the tag caps per
+  target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
+  conversation's tags show on the process whose verified, unconflicted claim it is. They reach the PWA's `sessions`
+  and that adapter's own records, never another adapter's (`tagsFor`) or MCP (`AGENT_VISIBLE_TAG_KEYS`).
 - **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
   account id, an absolute path, the PSK or anything derived from it.
-- **Audit**, origin `adapter` (`adapterAudit`), lifecycle lines only:
+- **Audit**, origin `adapter` (`adapterAudit`), the lifecycle lines and one line per message each way:
 
   ```
   audit adapter origin=adapter op=start name=<n> argv=<word count> argv0="<basename>" pid=<pid>
@@ -12464,11 +12526,15 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   audit adapter origin=adapter op=refused name=<n> reason=<protocol|name>
   audit adapter origin=adapter op=failed name=<n> exits=<n>
   audit adapter origin=adapter op=stop name=<n>
+  audit adapter origin=adapter op=deliver name=<n> dir=in to="<task id>|session|reply" kind=<kind> bytes=<n> outcome=<outcome> [code=<kind|repo|nolistener>]
+  audit adapter origin=adapter op=message name=<n> dir=out from=<"<task id>"|untasked|-> kind=<kind> bytes=<n> outcome=<outcome> subscribed=<true|false>
   ```
 
-  Never an argv word but `argv[0]`'s basename, and nothing the adapter wrote. The adapter modules load neither
-  `log.ts` nor `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what
-  the supervisor's own constants pass to `AdapterAudit`. 3b adds `op=deliver` and `op=message`.
+  Never an argv word but `argv[0]`'s basename, and nothing the adapter wrote: no text, `from` label, message id or
+  conversation id (both are handles), never a `ref`. A delivery's later fate is a second `op=deliver` line. Adapter
+  traffic is audited under origin `adapter` alone, never `message`. The adapter modules load neither `log.ts` nor
+  `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what their own
+  constants pass to `AdapterAudit`.
 
 - **Trust.** An adapter runs as the owner's uid, so Séance cannot contain it (docs/messaging.md §6.3). These rules
   bound what Séance grants and audits, not what the program can do. They are not a sandbox, and the threat model does
@@ -12491,6 +12557,21 @@ supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. Del
   - `task` events;
   - the host's snapshot and its `repos` filter;
   - `tagsFor`.
+
+  `daemon/test/adapter-messages.test.ts` drives 3b through the reference adapter's outbox, with real panes, verified
+  conversations and inbox listeners:
+  - delivery by task with the wrapper and `wake`, a kind outside `kinds`, a held delivery and its `delivery` frame;
+  - `unknown`, `too_long`, a task outside `repos`, and the per-target rate;
+  - a question answered by the adapter's reply (waking the asker), and the adapter's question answered by the
+    session's reply by handle; a stray `inReplyTo` dropped;
+  - an unverified sender (`subscribed: false`, its reply still back), an unknown adapter, one that takes no
+    messages, a sender outside `repos`;
+  - a subscription across a `--resume` in another process and a daemon restart, `ambiguous`, `unverified` after a
+    `/clear`, ended by `leave` and by the name configured as another program;
+  - a tag refused on an unsubscribed conversation, and never seen by another adapter.
+
+  `daemon/src/adapter-subscriptions.test.ts` covers the file (mode, reopen, `reconcile`, `drop`, the idle prune, the
+  cap, an unreadable file, no text at rest).
 
   The parsers and the schema are tested in `shared/src/adapter-protocol.test.ts` and `daemon/src/config.test.ts`, and
   the audit lines in `daemon/src/audit.test.ts`.

@@ -10,7 +10,13 @@ import { describe, expect, test } from "bun:test";
  */
 const SRC = resolve(import.meta.dir, "../src");
 
-const ENTRIES = ["adapter-supervisor.ts", "adapter-feed.ts", "adapter-host.ts", "closing-panes.ts"] as const;
+const ENTRIES = [
+  "adapter-supervisor.ts",
+  "adapter-feed.ts",
+  "adapter-host.ts",
+  "adapter-subscriptions.ts",
+  "closing-panes.ts",
+] as const;
 
 /** A static or dynamic import, with whether the whole statement is type-only. */
 const IMPORT = /(?:^|\n)\s*(import|export)(\s+type)?\b[^;]*?["'](\.\/[^"']+)["']|import\(\s*["'](\.\/[^"']+)["']/gu;

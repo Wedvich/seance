@@ -341,7 +341,7 @@ describe("the host and the reference adapter", () => {
     expect(hello).toEqual({
       kind: "hello",
       protocol: [1],
-      features: [],
+      features: ["deliver", "tag"],
       machine: { deviceId: "dev-1", name: "box" },
       daemon: { version: "test" },
     });
