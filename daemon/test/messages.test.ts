@@ -13,6 +13,7 @@ import {
   type SessionMessage,
 } from "@seance/shared";
 import { messageAudit, type MessageAudit } from "../src/audit.ts";
+import { claudeProcessOf, type SessionKey } from "../src/claude-process.ts";
 import { exec } from "../src/exec.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import type { InboxLine, MessageReply } from "../src/message-frame.ts";
@@ -2414,5 +2415,155 @@ describe("a reply or a message routed here from another machine, by handle", () 
       ok: true,
       outcome: "dropped",
     });
+  });
+});
+
+/** The `claude` process a pane runs: pane() starts one as the pane's own process. */
+async function sessionKeyOf(target: Pane): Promise<SessionKey> {
+  const found = await claudeProcessOf([target.pid]);
+  if (found === null) throw new Error(`no claude process in ${target.id}`);
+  return found.key;
+}
+
+describe("canListen", () => {
+  test("is true for the pane's own listener, and false for another session's or another task's", async () => {
+    const messages = setup({ graceMs: 1_000 });
+    clock.now += 10_000;
+    const target = await pane("cl-own");
+    const other = await pane("cl-other");
+    const session = await sessionKeyOf(target);
+    const expectation = { pid: target.pid, task: null, session };
+    expect(messages.canListen(target.id, expectation)).toBe(false);
+    await messages.listen(INBOX, target.pid, sinkDouble().sink);
+    expect(messages.canListen(target.id, expectation)).toBe(true);
+    expect(messages.canListen(target.id, { ...expectation, session: await sessionKeyOf(other) })).toBe(false);
+    expect(messages.canListen(target.id, { ...expectation, task: "t-x" })).toBe(false);
+    expect(messages.canListen(target.id, { ...expectation, pid: target.pid + 1 })).toBe(false);
+    messages.stop();
+    expect(messages.canListen(target.id, expectation)).toBe(false);
+  });
+
+  test("a reconnect within the grace counts, and not past it", async () => {
+    const messages = setup({ graceMs: 1_000 });
+    clock.now += 10_000;
+    const target = await pane("cl-reconnect");
+    const expectation = { pid: target.pid, task: null, session: await sessionKeyOf(target) };
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    listener.drop();
+    expect(messages.canListen(target.id, expectation)).toBe(true);
+    clock.now += 2_000;
+    expect(messages.canListen(target.id, expectation)).toBe(false);
+  });
+
+  test("the daemon's own start and a task's launch each open a grace", async () => {
+    const messages = setup({ graceMs: 1_000 });
+    const target = await pane("cl-grace");
+    const expectation = { pid: target.pid, task: null, session: await sessionKeyOf(target) };
+    expect(messages.canListen(target.id, expectation)).toBe(true);
+    clock.now += 5_000;
+    expect(messages.canListen(target.id, expectation)).toBe(false);
+    const task = await launched("cl-launch");
+    expect(messages.canListen(target.id, { ...expectation, task })).toBe(true);
+    clock.now += 5_000;
+    expect(messages.canListen(target.id, { ...expectation, task })).toBe(false);
+  });
+});
+
+describe("a watch's note", () => {
+  const noted = (): ((outcome: string) => void) & { readonly fates: string[] } => {
+    const fates: string[] = [];
+    return Object.assign((outcome: string): void => void fates.push(outcome), { fates });
+  };
+
+  test("is written only to the table's session, as a wake line or a plain one, and writes no message audit line", async () => {
+    const messages = setup();
+    const target = await pane("wn-target");
+    const other = await pane("wn-other");
+    const session = await sessionKeyOf(target);
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    const at = { pane: target.id, pid: target.pid, task: null, session };
+
+    const fate = noted();
+    expect(await messages.deliverWatchNote(at, { text: "wake me", wake: true }, fate)).toBe("delivered");
+    expect(await messages.deliverWatchNote(at, { text: "just so", wake: false }, fate)).toBe("delivered");
+    expect(fate.fates).toEqual(["delivered", "delivered"]);
+    expect(lineOf(listener.lines[1])).toEqual({
+      v: 1,
+      id: expect.stringMatching(MESSAGE_ID),
+      messageKind: "note",
+      push: "wake me",
+      wake: true,
+    });
+    expect(lineOf(listener.lines[2])).toEqual({
+      v: 1,
+      id: expect.stringMatching(MESSAGE_ID),
+      messageKind: "note",
+      push: "just so",
+    });
+    expect(audits).toEqual([]);
+
+    // A note for a session this listener is not goes nowhere: the other `claude` is no addressee.
+    const stranger = { ...at, session: await sessionKeyOf(other) };
+    expect(await messages.deliverWatchNote(stranger, { text: "not yours", wake: true }, noted())).toBe("nolistener");
+    expect(listener.lines).toHaveLength(3);
+  });
+
+  test("is gone for a session that no longer runs, a pane that moved on and a stopped daemon, and unreadable for an empty pane list", async () => {
+    const messages = setup();
+    const target = await pane("wn-gone");
+    const session = await sessionKeyOf(target);
+    const at = { pane: target.id, pid: target.pid, task: null, session };
+    const note = { text: "x", wake: true };
+    expect(await messages.deliverWatchNote({ ...at, session: "2147483000:never" }, note, noted())).toBe("gone");
+    expect(await messages.deliverWatchNote({ ...at, pid: target.pid + 1 }, note, noted())).toBe("gone");
+    expect(await messages.deliverWatchNote({ ...at, pane: "%99999" }, note, noted())).toBe("gone");
+    const blind = setup({ panes: () => Promise.resolve([]) });
+    expect(await blind.deliverWatchNote(at, note, noted())).toBe("unreadable");
+    messages.stop();
+    expect(await messages.deliverWatchNote(at, note, noted())).toBe("gone");
+  });
+
+  test("held within the grace, its fate is told: nolistener when the grace ends, delivered when its listener connects", async () => {
+    const messages = setup({ graceMs: 50 });
+    const target = await pane("wn-held");
+    const session = await sessionKeyOf(target);
+    const at = { pane: target.id, pid: target.pid, task: null, session };
+    const timedOut = noted();
+    expect(await messages.deliverWatchNote(at, { text: "held", wake: true }, timedOut)).toBe("sent");
+    await pollUntil(() => timedOut.fates.length > 0, "the hold's grace to end");
+    expect(timedOut.fates).toEqual(["nolistener"]);
+
+    const connected = noted();
+    expect(await messages.deliverWatchNote(at, { text: "held again", wake: true }, connected)).toBe("sent");
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(connected.fates).toEqual(["delivered"]);
+    expect(lineOf(listener.lines[1])).toMatchObject({ push: "held again", wake: true });
+    expect(audits).toEqual([]);
+  });
+
+  test("past every grace with no listener, it is refused nolistener and no fate is told", async () => {
+    const messages = setup({ graceMs: 1_000 });
+    clock.now += 10_000;
+    const target = await pane("wn-nolistener");
+    const fate = noted();
+    const at = { pane: target.id, pid: target.pid, task: null, session: await sessionKeyOf(target) };
+    expect(await messages.deliverWatchNote(at, { text: "x", wake: true }, fate)).toBe("nolistener");
+    expect(fate.fates).toEqual([]);
+  });
+
+  test("a held note is dropped ended when another session's listener connects in the same pane", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const target = await pane("wn-ended");
+    const other = await pane("wn-ended-other");
+    const at = { pane: target.id, pid: target.pid, task: null, session: await sessionKeyOf(other) };
+    const fate = noted();
+    expect(await messages.deliverWatchNote(at, { text: "for the other", wake: true }, fate)).toBe("sent");
+    const listener = sinkDouble();
+    await messages.listen(INBOX, target.pid, listener.sink);
+    expect(fate.fates).toEqual(["ended"]);
+    expect(listener.lines).toHaveLength(1);
   });
 });

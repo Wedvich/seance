@@ -131,6 +131,14 @@ export function custodianActivityPath(): string {
   return join(custodianDir(), "activity.json");
 }
 
+/**
+ * The daemon's watch table (`watches-store.ts`; DESIGN.md, "Watches"): under `stateDir()`, not `custodian/`, since it is
+ * the session-facing watches' and not the custodian's; the round masks `stateDir()` anyway.
+ */
+export function watchesPath(): string {
+  return join(stateDir(), "watches.json");
+}
+
 /** `seance custodian round` writes it, the seat reads and drops it. */
 export function custodianRoundRequestPath(): string {
   return join(custodianDir(), "round-request");

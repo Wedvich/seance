@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MESSAGE_PUSH_MAX } from "./messages.ts";
 import {
   isTerminalKey,
   isWatchKey,
@@ -10,8 +11,10 @@ import {
   runUrlOf,
   watchJsonBytes,
   watchKeyOf,
+  watchNote,
   watchTargetKey,
   WATCH_EVENT_JSON_MAX,
+  type WatchTarget,
 } from "./watch.ts";
 
 const A = "11111111-1111-4111-8111-111111111111";
@@ -356,5 +359,121 @@ describe("parseWatchEventResponse", () => {
     expect(parseWatchEventResponse({ ok: false, code: "nope", message: "m" })).toBeNull();
     expect(parseWatchEventResponse({ ok: false, code: "unsupported" })).toBeNull();
     expect(parseWatchEventResponse(null)).toBeNull();
+  });
+});
+
+describe("watchNote", () => {
+  const pr: WatchTarget = { kind: "pr", pr: { owner: "octo-org", repo: "widgets", number: 42 } };
+  const run: WatchTarget = { kind: "run", run: { owner: "octo-org", repo: "widgets", id: "123" } };
+  const note = (
+    events: Parameters<typeof watchNote>[0]["events"],
+    target: WatchTarget = pr,
+  ): ReturnType<typeof watchNote> => watchNote({ id: A, target, events });
+  const OPENING = `Automated note from séance, not written by the user: watch ${A} on `;
+
+  test("opens with the fixed line naming the id and the rebuilt url", () => {
+    expect(note([{ kind: "closed" }]).text.startsWith(`${OPENING}https://github.com/octo-org/widgets/pull/42.\n`)).toBe(
+      true,
+    );
+    expect(
+      note([{ kind: "unreadable" }], run).text.startsWith(
+        `${OPENING}https://github.com/octo-org/widgets/actions/runs/123.\n`,
+      ),
+    ).toBe(true);
+  });
+
+  test("each event kind has its fixed paragraph", () => {
+    expect(note([{ kind: "checks", outcome: "pass", head: HEAD40 }]).text).toContain(
+      `Checks passed on head \`${HEAD40}\`.`,
+    );
+    expect(note([{ kind: "checks", outcome: "fail", head: HEAD40, headMoved: true }]).text).toContain(
+      `A check failed on head \`${HEAD40}\`. The PR's head moved from the one you watched: someone else pushed.`,
+    );
+    expect(note([{ kind: "conflict", head: HEAD64, headMoved: true }]).text).toContain("someone else pushed.");
+    expect(note([{ kind: "merged" }]).text).toContain("The PR was merged. This watch has ended.");
+    expect(note([{ kind: "merged", stacked: true }]).text).toContain("(a stacked PR)");
+    expect(note([{ kind: "closed" }]).text).toContain("closed without merging. This watch has ended.");
+    expect(note([{ kind: "completed", attempt: 2, conclusion: "success" }], run).text).toContain(
+      "The run completed: success (attempt 2).\nThis watch has ended.",
+    );
+    expect(note([{ kind: "unreadable" }]).text).toContain("two polls in a row");
+    expect(note([{ kind: "suspended", reason: "failed", since: 1 }]).text).toContain(
+      "Poll the target yourself at 30 s or slower",
+    );
+    expect(note([{ kind: "no_leader" }]).text).toContain("for 10 minutes");
+    expect(note([{ kind: "expired" }]).text).toContain("expired 24 h");
+    expect(note([{ kind: "invalid" }]).text).toContain("refused this watch as invalid");
+    expect(note([{ kind: "fleet_full" }]).text).toContain("capacity for GitHub watches is full");
+  });
+
+  test("a spent budget and the reserve name the reset as HH:MM UTC, or say it is unknown", () => {
+    const resetAt = Date.UTC(2026, 10, 18, 13, 5, 30);
+    expect(note([{ kind: "suspended", reason: "limited", since: 1, resetAt }]).text).toContain(
+      "is spent until 13:05 UTC; this watch resumes then; do not poll GitHub yourself meanwhile.",
+    );
+    expect(note([{ kind: "suspended", reason: "reserve", since: 1, resetAt }]).text).toContain(
+      "is held back for tasks' reads until 13:05 UTC",
+    );
+    expect(note([{ kind: "suspended", reason: "limited", since: 1 }]).text).toContain(
+      "is spent until GitHub resets it;",
+    );
+  });
+
+  test("wakes unless every event is a limited or reserve suspension", () => {
+    const limited = { kind: "suspended", reason: "limited", since: 1 } as const;
+    const reserve = { kind: "suspended", reason: "reserve", since: 1 } as const;
+    expect(note([limited]).wake).toBe(false);
+    expect(note([limited, reserve]).wake).toBe(false);
+    expect(note([limited, { kind: "merged" }]).wake).toBe(true);
+    expect(note([{ kind: "suspended", reason: "failed", since: 1 }]).wake).toBe(true);
+    expect(note([{ kind: "suspended", reason: "unauthenticated", since: 1 }]).wake).toBe(true);
+    for (const kind of ["no_leader", "expired", "invalid", "fleet_full"] as const) {
+      expect(note([{ kind }]).wake).toBe(true);
+    }
+  });
+
+  test("the failing block fences names, marks required, rebuilds the job link and says how to read the log", () => {
+    const text = note([
+      {
+        kind: "checks",
+        outcome: "fail",
+        head: HEAD40,
+        failing: [{ name: "build", required: true, job: { run: "9", job: "77" } }, { name: "lint" }],
+      },
+    ]).text;
+    expect(text).toContain(
+      "```\nbuild (required)  job: https://github.com/octo-org/widgets/actions/runs/9/job/77\nlint\n```",
+    );
+    expect(text).toContain("`gh api repos/octo-org/widgets/actions/jobs/<job id>/logs`");
+  });
+
+  test("no log line when no entry has a job", () => {
+    const text = note([{ kind: "completed", attempt: 1, conclusion: "failure", failing: [{ name: "x" }] }], run).text;
+    expect(text).not.toContain("gh api");
+  });
+
+  test("a name with backticks is fenced by a longer fence", () => {
+    const text = note([{ kind: "checks", outcome: "fail", head: HEAD40, failing: [{ name: "a ```` b" }] }]).text;
+    expect(text).toContain("`````\na ```` b\n`````");
+  });
+
+  test("the largest failing list stays under the push bound", () => {
+    const failing = Array.from({ length: 10 }, (_, i) => ({
+      name: `${i}`.repeat(100),
+      required: true as const,
+      job: { run: "9".repeat(20), job: "8".repeat(20) },
+    }));
+    const forPr = note([{ kind: "checks", outcome: "fail", head: HEAD64, headMoved: true, failing }]).text;
+    const forRun = note([{ kind: "completed", attempt: 1, conclusion: "failure", failing }], run).text;
+    expect(Buffer.byteLength(forPr)).toBeLessThan(MESSAGE_PUSH_MAX);
+    expect(Buffer.byteLength(forRun)).toBeLessThan(MESSAGE_PUSH_MAX);
+  });
+
+  test("several events for one watch are one note", () => {
+    const text = note([
+      { kind: "checks", outcome: "pass", head: HEAD40 },
+      { kind: "conflict", head: HEAD40 },
+    ]).text;
+    expect(text.split("\n")).toHaveLength(3);
   });
 });

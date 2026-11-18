@@ -33,7 +33,7 @@ import {
   type MessageFrameRoute,
   type MessageReply,
 } from "./message-frame.ts";
-import { claudeProcessOf, sessionAlive, type SessionKey } from "./claude-process.ts";
+import { claudeProcessOf, sessionAlive, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
 import { ancestorBelow, peerPidSupported } from "./peer.ts";
 import type { BoundPane } from "./session-events.ts";
 
@@ -148,6 +148,33 @@ export interface Messages {
    * task's pane, never message text. `dropped`: no live pane carries the task, or it can no longer take one.
    */
   readonly receipt: (request: MessageReceiptRequest) => Promise<MessageReceiptResponse>;
+  /**
+   * Whether a note for this pane's session would not be refused `nolistener` now: its own listener, a reconnect or
+   * launch within the grace, or this daemon's own start. Synchronous and places nothing: a watch asks before it exists
+   * (docs/gh-watch.md W1), including for an untasked pane, which `canDeliver` answers false for.
+   */
+  readonly canListen: (
+    pane: string,
+    expect: { readonly pid: number; readonly task: string | null; readonly session: SessionKey },
+  ) => boolean;
+  /**
+   * A watch's note (`watches.ts`; DESIGN.md, "Watches"): only to the listener of the `claude` process the table names,
+   * by the same write or hold a message takes, as a reply by handle reaches its asker, and not repliable by handle. A
+   * plain note unless `wake`, which the mod submits. `onFate` is told what became of a note that was held; no
+   * `message` audit line is written (the watch's own lines are its record). `gone`: no such live pane, or that session
+   * no longer runs. `unreadable`: the pane list came back empty, which is a failed tmux read as often as no panes, so
+   * nothing is concluded from it.
+   */
+  readonly deliverWatchNote: (
+    target: {
+      readonly pane: string;
+      readonly pid: number;
+      readonly task: string | null;
+      readonly session: SessionKey;
+    },
+    note: { readonly text: string; readonly wake: boolean },
+    onFate: WatchNoteFate,
+  ) => Promise<"delivered" | "sent" | "nolistener" | "gone" | "unreadable">;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
@@ -159,6 +186,31 @@ interface Listener {
   /** The `claude` process this listener belongs to (`Bound.session`), null when none stands above it. */
   readonly session: SessionKey | null;
   readonly sink: ListenerSink;
+}
+
+/** What became of a held item: the outcomes `auditHeld` records. */
+export type WatchNoteFate = (outcome: "delivered" | "ended" | "nolistener" | "dropped") => void;
+
+/**
+ * The live pane a peer's pid sits in and the `claude` process above it: replies by handle and watches bind the same
+ * way (DESIGN.md, "Replies by handle"; "Watches"), by the kernel-reported pid and never a field. Null when the host
+ * names no peer, the pid came back null or it is in no live pane; `session` is null when no `claude` stands on the
+ * chain between the peer and the pane process.
+ */
+export async function bindPeer(
+  peer: number | null,
+  panes: readonly BoundPane[],
+  hostNamesPeers: () => boolean = peerPidSupported,
+): Promise<{
+  readonly pane: BoundPane;
+  readonly below: readonly number[];
+  readonly session: ClaudeProcess | null;
+} | null> {
+  if (peer === null || !hostNamesPeers()) return null;
+  const live = panes.filter((pane) => !pane.dead);
+  const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
+  if (found === null) return null;
+  return { pane: found.hit, below: found.below, session: await claudeProcessOf([...found.below, found.hit.pid]) };
 }
 
 /** A peer bound to its pane, and to the session process inside it. */
@@ -210,6 +262,8 @@ interface Held {
   readonly bytes: number;
   /** A leader's receipt note: it has no outcome of its own to audit, the `receipt` line is its record. */
   readonly receipt?: true;
+  /** A watch's note: told its fate instead of a `message` audit line, and it may be held through the restart grace. */
+  readonly onFate?: WatchNoteFate;
   /** Its own grace, from the moment it was held: one timer per inbox would age a later message by an earlier one's clock. */
   timer: ReturnType<typeof setTimeout> | null;
 }
@@ -331,19 +385,16 @@ export function createMessages(deps: MessagesDeps): Messages {
   };
   const auditHeld = (item: Held, outcome: "delivered" | "ended" | "nolistener" | "dropped"): void => {
     if (item.receipt === true) return;
+    if (item.onFate !== undefined) {
+      item.onFate(outcome);
+      return;
+    }
     audit({ dir: "in", from: item.from, to: item.to, kind: item.messageKind, bytes: item.bytes, outcome });
   };
 
-  /** What a reply handle is bound to: the peer's `claude` process (`claudeProcessOf`). */
-  const sessionOf = async (pane: BoundPane, below: readonly number[]): Promise<SessionKey | null> =>
-    (await claudeProcessOf([...below, pane.pid]))?.key ?? null;
-
   const bind = async (peer: number | null, panes: readonly BoundPane[]): Promise<Bound | null> => {
-    if (peer === null || !hostNamesPeers()) return null;
-    const live = panes.filter((pane) => !pane.dead);
-    const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
-    if (found === null) return null;
-    return { pane: found.hit, session: await sessionOf(found.hit, found.below) };
+    const bound = await bindPeer(peer, panes, hostNamesPeers);
+    return bound === null ? null : { pane: bound.pane, session: bound.session?.key ?? null };
   };
 
   /** A message written to a listener can be answered by handle, from the session that read it. */
@@ -506,7 +557,10 @@ export function createMessages(deps: MessagesDeps): Messages {
    * the ledger holds), from the listener's disconnect, or from this daemon's own start. `nolistener` past all of them,
    * with nothing kept. A message that is `only` for one session (a reply) meets only that session's listener or
    * reconnect: the next `claude` in the same pane is not its addressee, and the launch and restart graces, which a
-   * stranger's listener could meet, do not apply. The caller writes the audit lines.
+   * stranger's listener could meet, do not apply, with one exception: a watch's note (`onFate`) also holds through the
+   * restart grace, because after a restart a reloaded watch's first event can land before the session's `inbox` child
+   * has listened again, and `flush` still drops the note for any other session, so no stranger can read it. The caller
+   * writes the audit lines.
    */
   const place = (
     target: BoundPane,
@@ -541,7 +595,8 @@ export function createMessages(deps: MessagesDeps): Messages {
       (item.only === undefined &&
         ((launched !== undefined && t - launched <= graceMs) ||
           // A restart closed every listener and forgot every disconnect: each live pane is treated as just dropped.
-          t - startedAt <= graceMs));
+          t - startedAt <= graceMs)) ||
+      (item.onFate !== undefined && t - startedAt <= graceMs);
     if (!holds) return "nolistener";
     hold(target.id, to, item);
     return "sent";
@@ -967,6 +1022,57 @@ export function createMessages(deps: MessagesDeps): Messages {
     return wouldPlace(target, target.taskId, launched);
   };
 
+  const canListen: Messages["canListen"] = (paneId, expect) => {
+    if (stopped) return false;
+    const listener = listeners.get(paneId);
+    if (
+      listener !== undefined &&
+      listener.panePid === expect.pid &&
+      listener.taskId === expect.task &&
+      listener.session === expect.session
+    ) {
+      return true;
+    }
+    const t = now();
+    const dropped = disconnects.get(paneId);
+    if (
+      dropped !== undefined &&
+      dropped.taskId === expect.task &&
+      dropped.session === expect.session &&
+      t - dropped.at <= graceMs
+    ) {
+      return true;
+    }
+    if (t - startedAt <= graceMs) return true;
+    const launched = expect.task === null ? undefined : deps.launchedAt(expect.task);
+    return launched !== undefined && t - launched <= graceMs;
+  };
+
+  const deliverWatchNote: Messages["deliverWatchNote"] = async (target, note, onFate) => {
+    if (stopped) return "gone";
+    const panes = await deps.panes();
+    // A failed tmux read and no tmux server look alike: concluding "gone" from either would end every watch on a hiccup.
+    if (panes.length === 0) return "unreadable";
+    sweep(panes);
+    const pane = paneOf(panes, { pane: target.pane, pid: target.pid, task: target.task });
+    if (pane === undefined || !sessionAlive(target.session)) return "gone";
+    const item: Held = {
+      id: mintId(),
+      to: target.task ?? "watch",
+      messageKind: "note",
+      push: note.text,
+      only: target.session,
+      ...(note.wake ? { wakeSession: target.session } : {}),
+      from: null,
+      bytes: Buffer.byteLength(note.text, "utf8"),
+      timer: null,
+      onFate,
+    };
+    const placed = place(pane, target.task, target.task === null ? undefined : deps.launchedAt(target.task), item);
+    if (placed === "delivered") onFate("delivered");
+    return placed;
+  };
+
   /** Replies to forwards by message id, held as promises so a replay racing the first is answered by it. */
   const forwards = new Map<string, { readonly reply: Promise<DeliverMessageResponse>; readonly at: number }>();
   /** Receipts placed, by message id and outcome: a second leader sent the same message answers it again. */
@@ -1150,6 +1256,8 @@ export function createMessages(deps: MessagesDeps): Messages {
     send,
     deliverAsCustodian,
     canDeliver,
+    canListen,
+    deliverWatchNote,
     deliverRouted,
     receipt,
     onEnded: (pane, taskId) => {
