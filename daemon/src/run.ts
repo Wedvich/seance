@@ -50,7 +50,13 @@ import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probe
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
 import { createLeadFallback } from "./lead-fallback.ts";
-import { adaptersSettled, paneActivitySettled, startCapabilities, type CustodianHost } from "./run-capabilities.ts";
+import {
+  adaptersSettled,
+  paneActivitySettled,
+  startCapabilities,
+  watchesSettled,
+  type CustodianHost,
+} from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { checkoutRoot, readSource } from "./selfsource.ts";
@@ -394,8 +400,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.softClose,
         // Unconditional: any daemon may lead, and receiving a forward binds no peer (the leader checks `messages` too).
         CAPABILITIES.messageRoute,
-        // Unconditional: any daemon may lead and poll watches, and the daemon side of `watch-event` binds nothing until
-        // step 3's table.
+        // Unconditional: any daemon may lead and poll watches, and keeps the table of its own sessions' watches
+        // (`watches.ts`: the `watch` frame, the set it states to the leader, the notes it places for a `watch-event`).
+        // It was advertised from step 2, before the frame existed: a daemon of that build closes a `watch` frame as
+        // malformed, which a client reads as `unsupported` (DESIGN.md, "Watches").
         CAPABILITIES.watches,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
         // so it could not receive.
@@ -522,6 +530,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
   // And the leader's forwarded messages and receipts: the messaging that serves them starts with session events.
   const routedMessages: { current?: NonNullable<HandlerContext["messages"]> } = {};
+  // And the leader's `watch-event`: the watch table that places its notes starts with session events as well.
+  const routedWatches: { current?: NonNullable<HandlerContext["watches"]> } = {};
   // And the session tags an app's `sessions` carries: the table that holds them starts with session events too.
   const sessionTags: { current?: NonNullable<HandlerContext["conversations"]> } = {};
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
@@ -642,6 +652,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       receipt: (request) =>
         routedMessages.current?.receipt(request) ??
         Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no messaging" }),
+    },
+    watches: {
+      onEvent: (request) =>
+        routedWatches.current?.onEvent(request) ??
+        Promise.resolve({ ok: false, code: "unsupported", message: "this daemon keeps no watches" }),
     },
     conversations: {
       sweep: () => sessionTags.current?.sweep() ?? Promise.resolve(),
@@ -857,6 +872,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     resolved,
     key,
     deviceId: state.deviceId,
+    instance,
     client,
     leader,
     backend: handlerCtx.backend,
@@ -904,6 +920,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   passClose.arm = capabilities.armPassClose;
   routedMessages.current = capabilities.messages;
+  routedWatches.current = capabilities.watches;
   sessionTags.current = capabilities.conversations;
   if (capabilities.custodianPoke !== undefined) custodianSeat.poke = capabilities.custodianPoke;
   if (capabilities.custodianHost !== undefined) custodianSeat.host = capabilities.custodianHost;
@@ -950,6 +967,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // The custodian's seat released the tracker above, which wrote at once whatever was waiting out its delay.
       await paneActivitySettled();
       await adaptersSettled();
+      // A restart's reload reads `watches.json`: this process's last writes land first.
+      await watchesSettled();
       await runtime;
     },
     updater,

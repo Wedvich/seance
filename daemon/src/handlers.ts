@@ -75,6 +75,7 @@ import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import type { Messages } from "./messages.ts";
+import type { Watches } from "./watches.ts";
 import type { SessionTagsSource } from "./conversations.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
@@ -117,6 +118,8 @@ export interface HandlerContext {
    * `unsupported`.
    */
   readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
+  /** The watch table's intake for the leader's `watch-event` (`Watches.onEvent`). Absent, answered `unsupported`. */
+  readonly watches?: Pick<Watches, "onEvent">;
   /** Session identity and tags (`conversations.ts`), for an app's `sessions` only; absent, no entry carries `tags`. */
   readonly conversations?: SessionTagsSource;
   /** Closed-to-new-work state (docs/drain.md); absent, `availability` answers `unsupported` and no spawn is gated. */
@@ -797,16 +800,21 @@ async function handleMessageReceipt(
 }
 
 /**
- * `watch-event`: only the scheduler tells a daemon what became of a GitHub target one of its sessions watches. Step 2's
- * stub: it checks the sender and the shape, delivers nothing and binds nothing, so the leader's events are answered and
- * dropped until the daemon's own watch table (step 3) replaces the last line.
+ * `watch-event`: only the scheduler tells a daemon what became of a GitHub target one of its sessions watches. The
+ * sender and the shape are checked here; the watch table (`watches.ts`) binds each event to a pane by the watch id it
+ * minted, places the note and answers which ids it delivered. A daemon with no table answers `unsupported`, so the
+ * leader keeps every event unacknowledged.
  */
-async function handleWatchEvent(payload: unknown, scheduler: boolean): Promise<WatchEventResponse> {
+async function handleWatchEvent(
+  ctx: HandlerContext,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<WatchEventResponse> {
   if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler sends watch events" };
-  if (parseWatchEvent(payload) === null) {
-    return { ok: false, code: "invalid_request", message: "malformed watch-event request" };
-  }
-  return { ok: true, delivered: [] };
+  const parsed = parseWatchEvent(payload);
+  if (parsed === null) return { ok: false, code: "invalid_request", message: "malformed watch-event request" };
+  if (ctx.watches === undefined) return { ok: false, code: "unsupported", message: "this daemon keeps no watches" };
+  return ctx.watches.onEvent(parsed);
 }
 
 /**
@@ -1059,7 +1067,7 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
       run("deliver-message", crypto.randomUUID(), () => handleDeliverMessage(ctx, payload, true)),
     messageReceipt: (payload) =>
       run("message-receipt", crypto.randomUUID(), () => handleMessageReceipt(ctx, payload, true)),
-    watchEvent: (payload) => run("watch-event", crypto.randomUUID(), () => handleWatchEvent(payload, true)),
+    watchEvent: (payload) => run("watch-event", crypto.randomUUID(), () => handleWatchEvent(ctx, payload, true)),
   };
 }
 
@@ -1120,7 +1128,7 @@ export function createHandler(
         case "message-receipt":
           return { payload: await handleMessageReceipt(ctx, plain.payload, from === SCHEDULER_ID) };
         case "watch-event":
-          return { payload: await handleWatchEvent(plain.payload, from === SCHEDULER_ID) };
+          return { payload: await handleWatchEvent(ctx, plain.payload, from === SCHEDULER_ID) };
         case "availability":
           return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
         case "custodian":

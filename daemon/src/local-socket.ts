@@ -15,6 +15,7 @@ import { peerPid, socketFd } from "./peer.ts";
 import type { SessionEventReply } from "./session-event-frame.ts";
 import { isSessionEventFrameKind } from "./session-events.ts";
 import { EMPTY, flush, sendLine } from "./socket-lines.ts";
+import { isWatchFrameKind, type WatchReply } from "./watch-frame.ts";
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,
@@ -58,7 +59,11 @@ import { EMPTY, flush, sendLine } from "./socket-lines.ts";
  * by the kernel's peer pid only and refused where the host names no peer, never by a field a sender
  * claims. DESIGN.md's "Session messages" records the widening.
  *
- * The sixth kind, `custodian`, is answered `unsupported` here, always: the round's verbs live on the round's own
+ * `watch` (`watch-frame.ts`, `watches.ts`) is a session's ask to its own daemon to watch a GitHub PR or Actions run:
+ * bound to its pane and `claude` process by the peer's pid only, refused `unbound` where the host names no peer, and
+ * carrying no pane, task or session field. DESIGN.md's "Watches" records the widening.
+ *
+ * `custodian` is answered `unsupported` here, always: the round's verbs live on the round's own
  * socket (`custodian-socket.ts`), which the round's sandbox can reach and this one it cannot. The branch stays so a
  * misdirected client or an old shim gets a clear answer, not a Plain parse error. DESIGN.md's "The custodian frame
  * kind" records it.
@@ -116,6 +121,11 @@ export interface LocalSocketOpts {
    * connection. Absent, both kinds are answered `unsupported`.
    */
   readonly messages?: Pick<Messages, "listen" | "send">;
+  /**
+   * The watch table's entry (`createWatches(...).handle`): a session's ask to watch a GitHub PR or run, bound to its pane
+   * by `peer` and never by a field (DESIGN.md, "Watches"). Absent, a `watch` frame is answered `unsupported`.
+   */
+  readonly watches?: (raw: unknown, peer: number | null) => Promise<WatchReply>;
   readonly path?: string;
 }
 
@@ -222,6 +232,24 @@ async function dispatchMessage(
   sendLine(sock, conn, JSON.stringify(reply));
 }
 
+/** Always answers, so a session's `watch_github` can wait for the reply — and stay alive while its pid is walked. */
+async function dispatchWatch(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  watches: LocalSocketOpts["watches"],
+): Promise<void> {
+  let reply: WatchReply;
+  try {
+    reply = watches === undefined ? { ok: false, code: "unsupported" } : await watches(raw, conn.peer);
+  } catch (err) {
+    // Never the frame: it carries the watched URL.
+    log.error(`local socket: watch handling crashed: ${String(err)}`);
+    reply = { ok: false, code: "internal" };
+  }
+  sendLine(sock, conn, JSON.stringify(reply));
+}
+
 /** The main socket never serves the round's verbs (`custodian-socket.ts` does): whoever sends one is told so. */
 function dispatchCustodian(sock: Socket<undefined>, conn: Conn): void {
   sendLine(sock, conn, JSON.stringify({ ok: false, code: "unsupported" }));
@@ -266,7 +294,7 @@ async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages">,
+  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages" | "watches">,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -298,6 +326,10 @@ async function dispatch(
   }
   if (isInboxFrameKind(raw)) {
     await dispatchInbox(sock, conn, raw, opts.messages);
+    return;
+  }
+  if (isWatchFrameKind(raw)) {
+    await dispatchWatch(sock, conn, raw, opts.watches);
     return;
   }
   if (isCustodianFrameKind(raw)) {

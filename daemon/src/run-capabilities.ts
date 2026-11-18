@@ -9,6 +9,7 @@ import {
   daemonSink,
   drainAskAudit,
   messageAudit,
+  watchAudit,
   pushAudit,
   reapAudit,
 } from "./audit.ts";
@@ -83,6 +84,7 @@ import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { createMessages, type Messages } from "./messages.ts";
+import { appRelayClient, LazyRelay } from "./app-relay.ts";
 import {
   adaptersDir,
   custodianActivityPath,
@@ -90,6 +92,7 @@ import {
   custodianSessionsPath,
   pruneLogPath,
   reapRefusalsPath,
+  watchesPath,
 } from "./paths.ts";
 import { readSavedActivity, writeSavedActivity } from "./pane-activity-store.ts";
 import { peerPidSupported } from "./peer.ts";
@@ -107,6 +110,8 @@ import type { Fetch } from "./seams.ts";
 import { listPanes } from "./sessions.ts";
 import { capturePane, paneWindowName, tmux } from "./tmux.ts";
 import { isDirTrusted } from "./trust.ts";
+import { createWatchLeader } from "./watch-leader.ts";
+import { createWatches, type Watches } from "./watches.ts";
 import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
 
@@ -124,6 +129,8 @@ export interface WiringCtx {
   readonly resolved: ResolvedPsk;
   readonly key: CryptoKey;
   readonly deviceId: string;
+  /** This process's boot id (`instance`): a watch set's `gen.boot`, so its counter restarts safely with the process. */
+  readonly instance: string;
   readonly client: RelayClient;
   readonly leader: Leader;
   readonly backend: SessionBackend;
@@ -165,7 +172,7 @@ export interface WiringCtx {
 }
 
 /** A local op socket surface a capability brings; the socket starts after every capability, with all of them. */
-export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages">;
+export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages" | "watches">;
 
 export interface Started {
   readonly stop: () => void;
@@ -174,6 +181,8 @@ export interface Started {
   readonly armPassClose?: SessionEvents["armPassClose"];
   /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
   readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
+  /** The watch table's intake for the leader's `watch-event`, once session events run: the handler context reads it late (`run.ts`). */
+  readonly watches?: Pick<Watches, "onEvent">;
   /** The drain's session ask, once session events run: `run.ts`'s availability reads it late. */
   readonly drainAsk?: DrainAsk;
   /** The custodian seat's view for the status's `cu`, read late by `run.ts`; absent where no seat is enabled. */
@@ -262,6 +271,8 @@ const flagStoreFor = (path: string, now: () => number): CustodianFlags => {
 const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<boolean>>();
 /** The session-events capability's messaging, which the custodian's `nudge` delivers through (C26), read at each nudge. */
 const messagesOf = new WeakMap<WiringCtx, Messages>();
+/** The session-events capability's watch table, which the custodian's `awaitsWake` reads: a live watch holds its session open. */
+const watchesOf = new WeakMap<WiringCtx, Watches>();
 /** The session-events capability's conversation table, which the adapters' state feed reads. */
 const conversationsOf = new WeakMap<WiringCtx, Conversations>();
 
@@ -312,6 +323,24 @@ const sessionEvents: DaemonCapability = (ctx) => {
       ctx.leader.term() !== null
         ? Promise.resolve(ctx.leader.onSessionMessage(message, ctx.deviceId))
         : ctx.client.sendSessionMessage(message),
+  });
+  // Beside messaging because it binds panes the same way and delivers through it (docs/gh-watch.md W1).
+  const watches = createWatches({
+    panes: listPanePids,
+    messages,
+    leader: createWatchLeader({
+      selfLeads: () => ctx.leader.term() !== null,
+      inProcess: (set) => ctx.leader.onWatchSet(set, ctx.deviceId),
+      sendRelay: (set) => ctx.client.sendWatchSet(set),
+      // Held only while the table is non-empty: a daemon with no watches keeps no extra socket.
+      relay: new LazyRelay({ create: () => appRelayClient(ctx.config, ctx.key, (line) => log.info(line)) }),
+      // The new leader holds none of this daemon's watches: restate the table at once.
+      onNominee: () => void watches.resend(),
+    }),
+    boot: ctx.instance,
+    path: watchesPath(),
+    audit: watchAudit(daemonSink),
+    now: ctx.now,
   });
   const conversations = createConversations({
     configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
@@ -373,7 +402,10 @@ const sessionEvents: DaemonCapability = (ctx) => {
         }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
-    onEnded: messages.onEnded,
+    onEnded: (pane, taskId) => {
+      messages.onEnded(pane, taskId);
+      watches.onEnded(pane, taskId);
+    },
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
     retain: retainFrame({
       activity: (paneId) => paneActivity.activity(paneId),
@@ -389,25 +421,38 @@ const sessionEvents: DaemonCapability = (ctx) => {
   late.events = events;
   eventsOf.set(ctx, events);
   messagesOf.set(ctx, messages);
+  watchesOf.set(ctx, watches);
   conversationsOf.set(ctx, conversations);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
   // The daemon's own read for sessions that were running before it started and have not reported since.
   void conversations.sweep().catch((err: unknown) => log.warn(`conversations: ${String(err)}`));
+  void watches.start().catch((err: unknown) => log.warn(`watches: ${String(err)}`));
   return {
     stop: (): void => {
       drainAsk?.stop();
       events.stop();
       conversations.stop();
+      // Before messaging stops, so no note is placed into a stopped messaging; its last writes are awaited by `watchesSettled`.
+      watchStops.add(watches.stop());
       messages.stop();
     },
-    local: { sessionEvents: events.handle, messages },
+    local: { sessionEvents: events.handle, messages, watches: watches.handle },
     armPassClose: events.armPassClose,
     messages,
+    watches,
     conversations,
     ...(drainAsk === undefined ? {} : { drainAsk }),
   };
 };
+
+/** Watch tables' stops in flight: their last `watches.json` writes, which a restart's reload reads. */
+const watchStops = new Set<Promise<void>>();
+
+/** Resolves once every watch table a stopped daemon instance ran has written what it held. */
+export async function watchesSettled(): Promise<void> {
+  await Promise.all(watchStops);
+}
 
 /** Adapters' stops in flight: `run.ts`'s stop waits for them, so no child outlives the daemon unsignalled. */
 const adapterStops = new Set<Promise<void>>();
@@ -574,8 +619,9 @@ const custodianSeat: DaemonCapability = (ctx) => {
   const untouchable = (pane: string): boolean =>
     eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true;
   // Its last turn left background work or a cron to wake it: `close` refuses it, and it makes no round due.
+  // A live watch counts too: its note is what wakes the session, and it has yet to arrive.
   const awaitsWake = (pane: string, taskId?: string | null): boolean =>
-    eventsOf.get(ctx)?.awaitsWake(pane, taskId) === true;
+    eventsOf.get(ctx)?.awaitsWake(pane, taskId) === true || watchesOf.get(ctx)?.holds(pane, taskId) === true;
 
   /** The seat's checks failed, it refused this host or it could not start: no round will ever run here. */
   let seatFailed = false;
@@ -972,6 +1018,7 @@ export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
   /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
   readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
+  readonly watches?: Pick<Watches, "onEvent">;
   readonly drainAsk?: DrainAsk;
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
   readonly custodianPoke?: () => void;
@@ -997,6 +1044,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
     let local: LocalSurfaces = {};
     let armPassClose: Started["armPassClose"];
     let messages: Started["messages"];
+    let watches: Started["watches"];
     let drainAsk: Started["drainAsk"];
     let custodianStatus: Started["custodianStatus"];
     let custodianPoke: Started["custodianPoke"];
@@ -1008,6 +1056,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       local = mergeSurfaces(local, entry);
       armPassClose ??= entry.armPassClose;
       messages ??= entry.messages;
+      watches ??= entry.watches;
       drainAsk ??= entry.drainAsk;
       custodianStatus ??= entry.custodianStatus;
       custodianPoke ??= entry.custodianPoke;
@@ -1023,6 +1072,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       stop,
       ...(armPassClose === undefined ? {} : { armPassClose }),
       ...(messages === undefined ? {} : { messages }),
+      ...(watches === undefined ? {} : { watches }),
       ...(drainAsk === undefined ? {} : { drainAsk }),
       ...(custodianStatus === undefined ? {} : { custodianStatus }),
       ...(custodianPoke === undefined ? {} : { custodianPoke }),
