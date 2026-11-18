@@ -114,30 +114,32 @@ export function loadConversationStore(path: string, now: () => number = Date.now
     for (const id of written.keys()) if (!entries.has(id)) written.delete(id);
   };
 
+  const relabel = async (id: string, value: string): Promise<void> => {
+    const before = entries;
+    const after = new Map(entries);
+    const held = after.get(id);
+    after.delete(id);
+    const at = now();
+    const entry: Kept = {
+      ...(value === "" ? {} : { ownerLabel: { value, at } }),
+      subscriptions: held?.subscriptions ?? [],
+      lastLive: at,
+    };
+    if (entry.ownerLabel !== undefined || entry.subscriptions.length > 0) after.set(id, entry);
+    capped(after);
+    entries = after;
+    try {
+      await write();
+    } catch (err) {
+      entries = before;
+      throw err;
+    }
+  };
+
   return {
     label: (id) => entries.get(id)?.ownerLabel,
     setLabel: (id, value) => {
-      const run = chain.then(async () => {
-        const before = entries;
-        const next = new Map(entries);
-        const held = next.get(id);
-        next.delete(id);
-        const at = now();
-        const entry: Kept = {
-          ...(value === "" ? {} : { ownerLabel: { value, at } }),
-          subscriptions: held?.subscriptions ?? [],
-          lastLive: at,
-        };
-        if (entry.ownerLabel !== undefined || entry.subscriptions.length > 0) next.set(id, entry);
-        capped(next);
-        entries = next;
-        try {
-          await write();
-        } catch (err) {
-          entries = before;
-          throw err;
-        }
-      });
+      const run = chain.then(() => relabel(id, value));
       chain = run.catch(() => {});
       return run;
     },
