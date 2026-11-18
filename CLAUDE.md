@@ -62,6 +62,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   Code mods; MCP server; Threat model item 6). What is left in the file is the adapter seam (PR 3), the open questions
   and the spike evidence. Read it before adding a leader event op or an adapter.
 - **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of docs/tags.md's model), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
+- **docs/gh-watch.md** — spec, nothing built: a session asks the fleet to watch a GitHub PR or Actions run (MCP
+  `watch_github`, the local socket's `watch` frame, bound by peer pid) and is woken by a fixed note in its inbox, the
+  leader folding watched targets into its batched GraphQL PR poll (`watch-set`, `watch-event`, `CAPABILITIES.watches`),
+  with rate-limit backoff and the weighing against extending `hand_off_task`. Read it before touching the PR poller,
+  `askGithub`, or adding a way for sessions to wait on GitHub.
 - **docs/custodian.md** — what is left of the custodian spec: what 4b's drills left unsettled (the round's
   containment — its own socket, the masks, the built environment, no network — is built, rounds are live, and it was
   drilled on macOS and on Linux in both bwrap modes under its vsock filter: strict on WSL2, weaker nested on LXC), the open build-time details, and an
