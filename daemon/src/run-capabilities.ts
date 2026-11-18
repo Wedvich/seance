@@ -95,6 +95,7 @@ import {
   watchesPath,
 } from "./paths.ts";
 import { readSavedActivity, writeSavedActivity } from "./pane-activity-store.ts";
+import { paneHolds } from "./pane-holds.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import type { RelayClient } from "./relay-client.ts";
@@ -434,7 +435,8 @@ const sessionEvents: DaemonCapability = (ctx) => {
       events.stop();
       conversations.stop();
       // Before messaging stops, so no note is placed into a stopped messaging; its last writes are awaited by `watchesSettled`.
-      watchStops.add(watches.stop());
+      const watchStop = watches.stop().finally(() => watchStops.delete(watchStop));
+      watchStops.add(watchStop);
       messages.stop();
     },
     local: { sessionEvents: events.handle, messages, watches: watches.handle },
@@ -615,13 +617,13 @@ const custodianSeat: DaemonCapability = (ctx) => {
     releaseActivity = null;
     retainedSince = null;
   };
-  // A hand-off, pass or drain ask marked it: one expression for the seat's due check and the `close` verb.
-  const untouchable = (pane: string): boolean =>
-    eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true;
-  // Its last turn left background work or a cron to wake it: `close` refuses it, and it makes no round due.
-  // A live watch counts too: its note is what wakes the session, and it has yet to arrive.
-  const awaitsWake = (pane: string, taskId?: string | null): boolean =>
-    eventsOf.get(ctx)?.awaitsWake(pane, taskId) === true || watchesOf.get(ctx)?.holds(pane, taskId) === true;
+  // One expression each for the seat's due check and the `close` verb. A live watch holds a pane as `awaitsWake`, since its
+  // note is what wakes the session and has yet to arrive, and is no part of `untouchable`.
+  const { untouchable, awaitsWake } = paneHolds({
+    events: () => eventsOf.get(ctx),
+    drain: () => drainHoldsOf.get(ctx),
+    watches: () => watchesOf.get(ctx),
+  });
 
   /** The seat's checks failed, it refused this host or it could not start: no round will ever run here. */
   let seatFailed = false;
