@@ -825,7 +825,7 @@ export const OP_TIMEOUT_MS = {
   "pass-close": 10_000,
   "deliver-message": 10_000,
   "message-receipt": 10_000,
-  // As `deliver-message`: step 2's handler parses and answers; step 3's places a line in a pane's inbox.
+  // As `deliver-message`: the daemon's handler parses and answers, and the watch table places a line in a pane's inbox.
   "watch-event": 10_000,
 } as const satisfies Record<RequestOp, number>;
 

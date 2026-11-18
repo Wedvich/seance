@@ -249,7 +249,7 @@ export interface Leader {
    */
   readonly onCustodianEvent: (event: CustodianEvent, from: string) => Promise<boolean>;
   /**
-   * A daemon's whole `watch-set`, already parsed, from this machine in process (step 3's table) as `onCustodianEvent`
+   * A daemon's whole `watch-set`, already parsed, from this machine in process (the daemon's watch table) as `onCustodianEvent`
    * is; other machines' arrive through the term's leg. True when taken or dropped for good (a sender that is no
    * registered machine, which resending would not change); false when the sender should resend (no running term, no
    * registry push yet) or the set was ignored as an older generation. Logged at info or warn without the set: its
