@@ -2,12 +2,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { quote, type PrStatus } from "@seance/shared";
+import { parseGithubPr, quote, type PrStatus } from "@seance/shared";
 import type { Task } from "../src/leader.ts";
 import {
   LIMIT_JITTER_MS,
   limitedDelay,
-  parseGithubPr,
   readPrHead,
   startPrPoller,
   type PrPollerOpts,

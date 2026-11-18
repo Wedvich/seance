@@ -711,8 +711,8 @@ export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
 
 /**
  * Fire-and-forget ops — nothing correlates a reply: `update-available` a
- * broadcast, `session-event`, `session-pass`, `session-message` and `branch-state` reports to the scheduler, and
- * `queue-changed` the scheduler's nudge to every app.
+ * broadcast, `session-event`, `session-pass`, `session-message`, `branch-state`, `custodian-event` and `watch-set`
+ * reports to the scheduler, and `queue-changed` the scheduler's nudge to every app.
  */
 export type EventOp =
   | "update-available"
@@ -721,7 +721,8 @@ export type EventOp =
   | "session-message"
   | "branch-state"
   | "queue-changed"
-  | "custodian-event";
+  | "custodian-event"
+  | "watch-set";
 
 export type OpName =
   | "sessions"
@@ -735,6 +736,7 @@ export type OpName =
   | "pass-close"
   | "deliver-message"
   | "message-receipt"
+  | "watch-event"
   | "archive-status"
   | "archive-metrics"
   | "archive-tasks"
@@ -820,6 +822,8 @@ export const OP_TIMEOUT_MS = {
   "pass-close": 10_000,
   "deliver-message": 10_000,
   "message-receipt": 10_000,
+  // As `deliver-message`: step 2's handler parses and answers; step 3's places a line in a pane's inbox.
+  "watch-event": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -1191,6 +1195,10 @@ export interface MachineInfo {
  * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`). It also means the daemon
  * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
  * rounds were held (`ROUNDS_LIVE`) on every build before custodian 4b, so the one bit gates the Machines card's menu too.
+ * `watches`: as a leader, takes `watch-set`, reads watched PRs and runs in its PR poller and sends `watch-event`; as a
+ * daemon, parses `watch-event`. A leader sends `watch-event` only to a device advertising it, and a daemon sends
+ * `watch-set` only to a verified leader advertising it. An older leader drops the unknown event op. A step-2 daemon
+ * answers every event `delivered: []`, so nothing is ever marked delivered for it.
  * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
  * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
  * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
@@ -1225,6 +1233,7 @@ export const CAPABILITIES = {
   messageReply: "messageReply",
   custodian: "custodian",
   limits: "limits",
+  watches: "watches",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -2182,6 +2191,114 @@ export type DeliverMessageRequest =
       readonly addressed?: undefined;
       readonly settled?: undefined;
     });
+
+/** `CheckConclusionState`, lowercased: what a watched run or a PR's checks may end as (`shared/src/watch.ts`). */
+export const WATCH_CONCLUSIONS = [
+  "action_required",
+  "timed_out",
+  "cancelled",
+  "failure",
+  "success",
+  "neutral",
+  "skipped",
+  "startup_failure",
+  "stale",
+] as const;
+export type WatchConclusion = (typeof WATCH_CONCLUSIONS)[number];
+
+/** Why a watch is not being read: a poller class (`limited`, `unauthenticated`, `missing`), the reserve for tasks, or a failed read. */
+export const WATCH_SUSPEND_REASONS = ["limited", "reserve", "unauthenticated", "missing", "failed"] as const;
+export type WatchSuspendReason = (typeof WATCH_SUSPEND_REASONS)[number];
+
+/** Why the leader did not poll a watch: `fleet_full` means "not polled for now", never "ended". */
+export const WATCH_REFUSALS = ["fleet_full", "invalid"] as const;
+export type WatchRefusal = (typeof WATCH_REFUSALS)[number];
+
+export const WATCH_EVENT_ERROR_CODES = ["invalid_request", "unsupported", ...TRANSPORT_ERROR_CODES] as const;
+export type WatchEventErrorCode = (typeof WATCH_EVENT_ERROR_CODES)[number];
+
+/** A daemon's boot id (its `instance`) and a counter it bumps on every `watch-set` it sends. */
+export interface WatchGeneration {
+  readonly boot: string;
+  readonly n: number;
+}
+
+export interface WatchSetEntry {
+  readonly id: string;
+  readonly kind: "pr" | "run";
+  readonly url: string;
+  readonly head?: string;
+  readonly seen: readonly string[];
+}
+
+/**
+ * `op: "watch-set"`, daemon → scheduler, sealed to `SCHEDULER_ID` from the daemon's own device id (or the leader in
+ * process), fire-and-forget (DESIGN.md, Scheduler, "PR status"; docs/gh-watch.md W9). The daemon's whole set of watches:
+ * the leader replaces what it holds for that device. It names no pane, task or session. Generation contract: an equal
+ * `gen` is a duplicate, re-answered as last computed without replacing; a lower `n` on the same boot is ignored
+ * unanswered; a different boot or a higher `n` replaces. The leader answers every accepted set with a `watch-event`
+ * carrying `set`.
+ */
+export interface WatchSet {
+  readonly gen: WatchGeneration;
+  readonly watches: readonly WatchSetEntry[];
+}
+
+export interface WatchFailing {
+  readonly name: string;
+  readonly required?: true;
+  readonly job?: { readonly run: string; readonly job: string };
+}
+
+export type WatchEventBody =
+  | {
+      readonly kind: "checks";
+      readonly outcome: "pass" | "fail";
+      readonly head: string;
+      readonly headMoved?: true;
+      readonly failing?: readonly WatchFailing[];
+    }
+  | { readonly kind: "conflict"; readonly head: string; readonly headMoved?: true }
+  | { readonly kind: "merged"; readonly stacked?: true }
+  | { readonly kind: "closed" }
+  | {
+      readonly kind: "completed";
+      readonly attempt: number;
+      readonly conclusion: WatchConclusion;
+      readonly failing?: readonly WatchFailing[];
+    }
+  | { readonly kind: "unreadable" }
+  | {
+      readonly kind: "suspended";
+      readonly reason: WatchSuspendReason;
+      readonly since: number;
+      readonly resetAt?: number;
+    };
+
+export interface WatchEvent {
+  readonly id: string;
+  readonly key: string;
+  readonly event: WatchEventBody;
+}
+
+/**
+ * `op: "watch-event"`, scheduler → the daemon that sent the set, sealed `from: SCHEDULER_ID` (or the leader in
+ * process) (DESIGN.md, Scheduler, "PR status"). `set` answers a `watch-set` (its generation, and the entries the
+ * leader did not take); `events` are the level-triggered facts it read. It names no pane, task or session: the
+ * daemon binds an event to a pane by the watch id it minted.
+ */
+export interface WatchEventRequest {
+  readonly set?: {
+    readonly gen: WatchGeneration;
+    readonly refused: readonly { readonly id: string; readonly code: WatchRefusal }[];
+  };
+  readonly events: readonly WatchEvent[];
+}
+
+/** `delivered`: the ids of the events the daemon placed; the leader marks only those acknowledged. */
+export type WatchEventResponse =
+  | { readonly ok: true; readonly delivered: readonly string[] }
+  | { readonly ok: false; readonly code: WatchEventErrorCode; readonly message: string };
 
 export const DELIVER_OUTCOMES = ["delivered", "sent", "held", "ended", "unknown"] as const;
 

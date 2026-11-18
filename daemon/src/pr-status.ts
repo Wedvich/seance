@@ -2,9 +2,11 @@ import type { PrHeadReading } from "@seance/scheduler";
 import {
   isBranchName,
   isRecord,
+  parseGithubPr,
   PR_FAILING_LIMITS,
   PR_MERGE_STATES,
   quote,
+  type GithubPr,
   type PrChecks,
   type PrMergeState,
   type PrState,
@@ -34,27 +36,6 @@ import { askGithub, type GhAnswer, type GhFailure } from "./gh.ts";
  * number reach `gh` only as GraphQL variables in an argv array, never in the
  * query text, which is built from alias indices alone.
  */
-
-export interface GithubPr {
-  readonly owner: string;
-  readonly repo: string;
-  readonly number: number;
-}
-
-const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})\/pull\/([1-9][0-9]{0,9})$/u;
-
-/** GraphQL's `Int`: one variable past it fails the whole batch. */
-const MAX_PR_NUMBER = 2_147_483_647;
-
-/** The one URL shape read: anything else (another forge, `/files`, a fork's host) is skipped silently. */
-export function parseGithubPr(url: string): GithubPr | null {
-  const match = PR_URL.exec(url);
-  if (match === null) return null;
-  const [, owner, repo, digits] = match;
-  const number = Number(digits);
-  if (owner === undefined || repo === undefined || number > MAX_PR_NUMBER) return null;
-  return { owner, repo, number };
-}
 
 export interface PrPollerOpts {
   /** The `gh` binary, resolved per poll from `SEANCE_GH_BIN` (tests) then the PATH. */

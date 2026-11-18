@@ -6,6 +6,7 @@ import {
   isFlagReason,
   isTaskId,
   MESSAGE_PUSH_MAX,
+  parseGithubPr,
   type CustodianEvent,
   type FlagReason,
 } from "@seance/shared";
@@ -44,7 +45,6 @@ import { custodianNotesPath, reapRefusalsPath } from "./paths.ts";
 import { ancestorIn, peerPidSupported } from "./peer.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { SAMPLE_INTERVAL_MS, type PaneActivity } from "./pane-activity.ts";
-import { parseGithubPr } from "./pr-status.ts";
 import { DEAD_PANE_MIN_AGE_MS, readReapRefusals } from "./reap.ts";
 import type { EndedTasks } from "./session-events.ts";
 import { classifyPane, listPanes, paneInfo, type PaneInfo, type PaneState } from "./sessions.ts";
