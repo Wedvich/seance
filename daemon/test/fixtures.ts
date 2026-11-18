@@ -227,6 +227,24 @@ export async function bunNamed(name: string): Promise<string> {
   return path;
 }
 
+/**
+ * The reference adapter (`bin/reference-adapter.ts`) linked into `dir` and exec'd once, for the first-exec reason above:
+ * call it from `beforeAll`. A copy stands in where a link can't reach (a tmpdir on another filesystem).
+ */
+export async function linkReferenceAdapter(dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "reference-adapter.ts");
+  await link(REFERENCE_ADAPTER, path).catch(async () => {
+    await Bun.write(path, Bun.file(REFERENCE_ADAPTER));
+    await chmod(path, 0o755);
+  });
+  const warmed = await exec([path, "--warm"]);
+  if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);
+  return path;
+}
+
+const REFERENCE_ADAPTER = join(import.meta.dir, "bin", "reference-adapter.ts");
+
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /**

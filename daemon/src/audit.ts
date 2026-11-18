@@ -915,7 +915,7 @@ export type MessageAudit = (line: {
   readonly outcome: MessageOutcome;
 }) => Promise<void>;
 
-/** The daemon running an adapter this machine's `config.json` names (`adapter-host.ts`; docs/messaging.md §6). */
+/** The daemon running an adapter this machine's `config.json` names (`adapter-host.ts`; DESIGN.md, "Adapters"). */
 export type AdapterOrigin = "adapter";
 
 /** What became of a session's message to an adapter. */
@@ -931,10 +931,20 @@ export type AdapterMessageOutcome =
 
 /**
  * Why an adapter's process went or is held: `exited` on its own, `stopped` with the daemon, `invalid` too many malformed lines, `unread` it stopped
- * reading its stdin, `handshake` no valid `hello` in time, `spawn` it could not be started; `protocol` it speaks no
+ * reading its stdin, `handshake` no valid `hello` in time, `spawn` it could not be started, `restarted` the owner's
+ * `seance adapter restart` ended it; `protocol` it speaks no
  * major this daemon does, `name` its `hello` named another adapter.
  */
-export type AdapterReason = "exited" | "stopped" | "invalid" | "unread" | "handshake" | "spawn" | "protocol" | "name";
+export type AdapterReason =
+  | "exited"
+  | "stopped"
+  | "invalid"
+  | "unread"
+  | "handshake"
+  | "spawn"
+  | "restarted"
+  | "protocol"
+  | "name";
 
 export interface AdapterAudit {
   /** A start, with what the argv may say: its word count and `argv[0]`'s basename, never another word. */
@@ -944,7 +954,7 @@ export interface AdapterAudit {
   readonly restart: (name: string, delayMs: number) => Promise<void>;
   /** Stopped and never restarted: a protocol or name refusal. */
   readonly refused: (name: string, reason: AdapterReason) => Promise<void>;
-  /** Held after `exits` exits in the window, until the next daemon start. */
+  /** Held after `exits` exits in the window, until the next daemon start or `seance adapter restart`. */
   readonly failed: (name: string, exits: number) => Promise<void>;
   readonly stop: (name: string) => Promise<void>;
   /**
@@ -1006,6 +1016,43 @@ export function adapterAudit(sink: AuditSink): AdapterAudit {
         `dir=out from=${from} kind=${line.kind} bytes=${line.bytes} outcome=${line.outcome} subscribed=${line.subscribed}`,
       );
     },
+  };
+}
+
+/**
+ * The owner's `seance adapter add | remove | restart` (`adapter-cli.ts`), under the `cli` origin like every command
+ * typed at this machine: the name, counts and booleans, and `argv[0]`'s basename as the daemon's `op=start` writes it.
+ * Never another argv word, the directory, the commit or anything read from the manifest but its name.
+ */
+export interface AdapterOwnerAudit {
+  readonly add: (
+    name: string,
+    line: {
+      readonly argv: readonly string[];
+      readonly kinds: readonly MessageKind[];
+      readonly repos: number | null;
+      readonly commit: boolean;
+      readonly replaced: boolean;
+    },
+  ) => Promise<void>;
+  readonly remove: (name: string) => Promise<void>;
+  readonly restart: (name: string, outcome: "requested" | "not_running") => Promise<void>;
+}
+
+export function adapterOwnerAudit(sink: AuditSink): AdapterOwnerAudit {
+  const origin: SpawnOrigin = "cli";
+  const emit = async (op: string, name: string, rest = ""): Promise<void> => {
+    await sink(`audit adapter origin=${origin} op=${op} name=${name}${rest === "" ? "" : ` ${rest}`}`);
+  };
+  return {
+    add: (name, line) =>
+      emit(
+        "add",
+        name,
+        `argv=${line.argv.length} argv0=${quote(basename(line.argv[0] ?? ""))} kinds=${line.kinds.join(",")} repos=${line.repos ?? "all"} commit=${line.commit} replaced=${line.replaced}`,
+      ),
+    remove: (name) => emit("remove", name),
+    restart: (name, outcome) => emit("restart", name, `outcome=${outcome}`),
   };
 }
 

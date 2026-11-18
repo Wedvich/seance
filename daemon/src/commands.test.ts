@@ -40,7 +40,7 @@ describe("the table against the parsers", () => {
     );
     // Flags of other programs' argv (`claude mcp add --scope user`, `stty -echo`), never ours.
     const foreign = new Set(["--scope", "--", "-echo"]);
-    const modules = ["cli.ts", "custodian-owner-cli.ts", "custodian-cli.ts"];
+    const modules = ["cli.ts", "custodian-owner-cli.ts", "custodian-cli.ts", "adapter-cli.ts"];
     const sources = await Promise.all(
       modules.map(async (module) => readFile(new URL(`./${module}`, import.meta.url), "utf8")),
     );

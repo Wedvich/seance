@@ -28,11 +28,18 @@ interface Entry {
   readonly lastLive: number;
 }
 
-/** What makes an adapter "the same program" across a daemon restart: its argv and recorded commit, hashed. */
-export function adapterFingerprint(config: { readonly argv: readonly string[]; readonly commit?: string }): string {
-  return createHash("sha256")
-    .update(JSON.stringify([config.argv, config.commit ?? null]))
-    .digest("hex");
+/**
+ * What makes an adapter "the same program" across a daemon restart: its argv, recorded commit and, once
+ * `seance adapter add` wrote one, the time of that add, hashed. `added` joins only when present, so an entry written
+ * before it keeps the fingerprint it had.
+ */
+export function adapterFingerprint(config: {
+  readonly argv: readonly string[];
+  readonly commit?: string;
+  readonly added?: string;
+}): string {
+  const parts = [config.argv, config.commit ?? null, ...(config.added === undefined ? [] : [config.added])];
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 }
 
 export interface Subscriptions {

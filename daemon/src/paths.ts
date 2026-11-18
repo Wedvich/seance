@@ -92,9 +92,19 @@ export function runDir(): string {
   return join(stateDir(), "run");
 }
 
-/** Each adapter's own 0700 directory sits under this (`SEANCE_ADAPTER_DIR`, docs/messaging.md §6.1). */
+/** Each adapter's own 0700 directory sits under this (`SEANCE_ADAPTER_DIR`, DESIGN.md, "Adapters"). */
 export function adaptersDir(): string {
   return join(stateDir(), "adapters");
+}
+
+/** What the daemon's adapters are doing, for `seance adapter status` (0600, the daemon's own; never in `adapters/`). */
+export function adapterStatusPath(): string {
+  return join(stateDir(), "adapter-status.json");
+}
+
+/** `seance adapter restart`'s request, read and removed by the running daemon. */
+export function adapterRestartPath(): string {
+  return join(stateDir(), "adapter-restart.json");
 }
 
 /** The adapter subscriptions kept at rest (docs/tags.md §3.2, §8): 0600, the daemon's own. */

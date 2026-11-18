@@ -81,6 +81,7 @@ const RUN: Record<
   reap: (cli, rest) => cli.cmdReap(rest),
   mcp: (cli, rest) => cli.cmdMcp(rest),
   mod: (cli, rest) => cli.cmdMod(rest),
+  adapter: async (_cli, rest) => (await import("./adapter-cli.ts")).cmdAdapter(rest),
   raycast: (cli, rest) => cli.cmdRaycast(rest),
 };
 

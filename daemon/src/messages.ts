@@ -245,7 +245,7 @@ export interface Messages {
     onFate: WatchNoteFate,
   ) => Promise<"delivered" | "sent" | "nolistener" | "gone" | "unreadable">;
   /**
-   * An adapter's `deliver` (docs/messaging.md §6.1): to a task launched here, a conversation subscribed to it, or the
+   * An adapter's `deliver` (DESIGN.md, "Adapters"): to a task launched here, a conversation subscribed to it, or the
    * session whose message it answers, by the same listener write or hold a local message takes, in the adapter wrapper.
    * Never routed. `kinds` is the host's to check first.
    */

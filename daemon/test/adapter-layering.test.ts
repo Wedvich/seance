@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 /**
- * Nothing an adapter sends or is sent reaches a log or an audit line (docs/messaging.md §6.6): the audit carries the
+ * Nothing an adapter sends or is sent reaches a log or an audit line (DESIGN.md, "Adapters"): the audit carries the
  * name, an exit code and a reason, from the supervisor's own constants. So the adapter modules load no module that
  * logs, by any runtime import, and reach `audit.ts` only for its types (`AdapterAudit`, whose methods take no text the
  * adapter wrote): the walk follows every relative import that is not `import type`.

@@ -40,7 +40,7 @@ export const LISTENER_GRACE_MS = 120_000;
 /** Per sending task, held in its daemon's memory. */
 export const MESSAGE_RATE = { perMinute: 20, perHour: 200 } as const;
 
-/** One adapter's bucket across all its deliveries; each target also keeps `MESSAGE_RATE` (docs/messaging.md §6.1). */
+/** One adapter's bucket across all its deliveries; each target also keeps `MESSAGE_RATE` (DESIGN.md, "Adapters"). */
 export const ADAPTER_RATE = { perMinute: 60, perHour: 600 } as const;
 
 export function isMessageKind(value: unknown): value is MessageKind {
@@ -221,7 +221,7 @@ function adapterPhrase(from: AdapterSender, id: string): string {
 }
 
 /**
- * A delivery from an adapter (docs/messaging.md §6.1): named as the adapter and machine, its label display-only, never
+ * A delivery from an adapter (DESIGN.md, "Adapters"): named as the adapter and machine, its label display-only, never
  * the user or a Séance session. Answered by its id (the daemon keeps a handle for it), or anew by `adapter:<name>`.
  */
 export function renderAdapterMessage(m: {

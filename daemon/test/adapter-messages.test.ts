@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { appendFile, link, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { isRecord, MESSAGE_MAX, MESSAGE_RATE, type RepoEntry } from "@seance/shared";
 import { createAdapterFeed, type AdapterFeed } from "../src/adapter-feed.ts";
 import { startAdapterHost, type AdapterHost } from "../src/adapter-host.ts";
@@ -18,15 +18,21 @@ import { processStart } from "../src/peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { paneWindowName, tmuxOk } from "../src/tmux.ts";
-import { linkClaudeNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import {
+  bunNamed,
+  linkReferenceAdapter,
+  pollUntil,
+  underClaude,
+  usePrivateTmux,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 /**
- * Text in and out of an adapter (docs/messaging.md §6, 3b) with real processes: `claude`-named processes in panes of a
+ * Text in and out of an adapter (DESIGN.md, "Adapters", 3b) with real processes: `claude`-named processes in panes of a
  * private tmux server, their conversations verified from `sessions/<pid>.json` or the launch ledger, the real message
  * surface and inbox listeners, and the reference adapter (`test/bin/reference-adapter.ts`) driven through its outbox.
  */
 
-const REFERENCE = resolve(import.meta.dir, "bin/reference-adapter.ts");
 const INBOX = { v: 1, kind: "inbox" };
 
 let base: string;
@@ -231,11 +237,8 @@ beforeAll(async () => {
   await exec(["git", "init", "-q", "-b", "feature-x", project]);
   exclaves = [{ id: "default", root: base, configDir: join(base, ".claude"), configFile: join(base, ".claude.json") }];
   repos = [{ name: "proj", path: project, defaultBranch: "main" }];
-  claude = await linkClaudeNamed(join(base, "bin"));
-  adapter = join(base, "bin", "reference-adapter.ts");
-  await link(REFERENCE, adapter);
-  const warmed = await exec([adapter, "--warm"]);
-  if (warmed.exitCode !== 0) throw new Error(`reference adapter failed to start: ${warmed.stderr}`);
+  claude = await bunNamed("claude");
+  adapter = await linkReferenceAdapter(join(base, "bin"));
   privateTmux = usePrivateTmux(base, "adaptermsg");
   await tmuxOk(["new-session", "-d", "-s", "adaptermsg", "-c", base, "sleep", "600"]);
   ended = new EndedTasks(LaunchLedger.memory());

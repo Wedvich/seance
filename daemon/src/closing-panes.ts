@@ -1,6 +1,6 @@
 /**
  * Panes Séance itself set out to close (`despawnSession`: a despawn, a hand-off's or pass's close, a custodian `close`),
- * for an adapter's `session-gone` to say `closed` rather than `exited` (docs/messaging.md §6.1). Memory only, per
+ * for an adapter's `session-gone` to say `closed` rather than `exited` (DESIGN.md, "Adapters"). Memory only, per
  * process, keyed by pane id and the pane's pid: a pane id is unique only within one tmux server, which reuses it after
  * a restart (and a test process runs one server per file). A reader asks within `CLOSING_TTL_MS` of the close
  * starting, past the graceful exit's grace and the kill after it. Display only: nothing binds, routes or acts on it.

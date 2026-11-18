@@ -4,7 +4,7 @@ import { isAgentSessionId, TAG_SUFFIX_PATTERN, type SessionTag } from "./tags.ts
 import { NEEDS_INPUT_REASONS, TASK_ID_PATTERN, type NeedsInputReason } from "./types.ts";
 
 /**
- * The adapter protocol (docs/messaging.md §6.1; DESIGN.md, "Adapters"): what the daemon and an adapter, a program the
+ * The adapter protocol (DESIGN.md, "Adapters"): what the daemon and an adapter, a program the
  * machine's owner names in its own `config.json`, say to each other over the adapter's stdin and stdout. The schema of
  * record: `adapter-protocol.schema.json` beside this file is generated from it (`adapterProtocolSchema`, written by
  * `bun run adapter-schema`, held equal by `adapter-protocol.test.ts`), so an adapter in any language can vendor a copy
@@ -41,7 +41,7 @@ export function isAdapterName(value: unknown): value is string {
 }
 
 /**
- * How a session addresses an adapter on its own machine in `send_message`'s `to` (docs/messaging.md §6.2). Task ids
+ * How a session addresses an adapter on its own machine in `send_message`'s `to` (DESIGN.md, "Adapters"). Task ids
  * are UUIDs, so the prefix cannot collide with one.
  */
 export const ADAPTER_ADDRESS_PREFIX = "adapter:";
@@ -168,7 +168,7 @@ export interface ErrorFrame {
 }
 
 /**
- * A session's message to this adapter (`send_message` to `adapter:<name>`, docs/messaging.md §6.2), or a session's reply
+ * A session's message to this adapter (`send_message` to `adapter:<name>`, DESIGN.md, "Adapters"), or a session's reply
  * to one of its deliveries. `id` is the handle the adapter replies by (`deliver.inReplyTo`). `from.key` is the sending
  * `claude` process, `from.session` its verified conversation, present exactly when `subscribed`. `leave`: the session
  * ended its subscription with this message.
@@ -266,7 +266,7 @@ export interface ResyncFrame {
 export type DeliverAddress = { readonly to: string } | { readonly toSession: string } | { readonly inReplyTo: string };
 
 /**
- * Text for a session on this machine (docs/messaging.md §6.1, "Delivery"). `wake` submits a note as a turn, as a
+ * Text for a session on this machine (DESIGN.md, "Adapters"). `wake` submits a note as a turn, as a
  * question or request always is. `from` is a display label (a person or bot in the tool), scrubbed by the wrapper.
  */
 export type DeliverFrame = {

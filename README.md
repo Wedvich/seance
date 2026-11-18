@@ -657,6 +657,50 @@ The `file:` URI's `?mode=ro` keeps the attached file read-only on its own, whate
 the connection it is attached to was opened with. Run the queries as `archivist` or
 root; the archivist's user is the files' only reader.
 
+### 10. Optional: an adapter for a tool
+
+An adapter is a program, in a repository of its own, that bridges this machine's
+sessions and an outside tool (a chat, a hosted workspace, a notifier): the tool sees
+the sessions and their tasks, and can put notes and questions into them. Séance never
+names a tool; the adapter is the one piece that knows both (DESIGN.md "Adapters" is the
+record). Each machine runs its own, set up on its own:
+
+```bash
+git clone <adapter repo> ~/src/seance-<tool>   # anywhere you keep code
+(cd ~/src/seance-<tool> && bun install)         # plus the tool's own login or key, as its README says
+seance adapter add ~/src/seance-<tool>          # reads its seance-adapter.json, writes adapters.<name> in config.json
+seance restart                                  # the daemon starts it
+seance adapter status                           # running, protocol, counts, last exit
+```
+
+**An adapter runs as you, with everything you can reach.** Séance cannot contain it: it
+can read `state.json`, your keychain where it is unlocked and every worktree, and drive
+tmux. Installing one trusts its code as much as an MCP server or a Claude Code plugin
+you install. What séance bounds is what it grants: the adapter sees no prompt,
+attachment, session-to-session message, account id or key; it can deliver only through
+the `inbox` mod, within its `kinds` and rate limits; and nothing it sends is logged. It
+also means:
+
+- **The tool becomes a source of prompt text for every session on the machine.**
+  Anyone who can write into the tool can put a note or a question in a session. A
+  request (act on this) is off unless you add it: `--kinds note,question,request`.
+  `--repo <name>` (repeatable) limits which sessions and tasks it sees and reaches.
+- **What the adapter sees goes to the tool's server**: titles, repos, branches, PR
+  URLs, states, and the text of messages sessions send it. Prompts never do.
+- **A session that messages the adapter subscribes to it**, and the tool can reach that
+  conversation until the session leaves (`send_message` with `leave`), 30 days pass
+  without it running, or the adapter is added again or removed.
+
+`add` records the checkout's commit, and `seance doctor` warns when the checkout has
+moved since: a pulled update is new code running at the next start, so review it and run
+`add` again. A self-update never pulls or rebuilds an adapter. `seance adapter restart
+[<name>]` restarts a running one, and lifts one held after crashing five times in ten
+minutes; `seance adapter remove <name>` takes it out of `config.json` (its own data
+under `~/.local/state/seance/adapters/<name>` stays for you to delete). An adapter's
+contract is a process, newline-delimited JSON on stdin and stdout, and the schema in
+`shared/src/adapter-protocol.schema.json`; `daemon/test/bin/reference-adapter.ts` is the
+template a new one starts from.
+
 ## Usage
 
 ### From the phone
@@ -793,6 +837,7 @@ seance despawn %12           # end one by id: asks claude to exit, kills the pan
 seance reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
 seance status                # this machine: service, relay, repo count, running vs on-disk sha
 seance doctor                # preflight config, binaries, roots, relay, service
+seance adapter status        # this machine's adapters: running, protocol, counts, last exit (setup step 10)
 seance help                  # every command
 ```
 

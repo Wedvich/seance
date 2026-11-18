@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Séance's reference adapter (docs/messaging.md §6.4): the smallest program that speaks the adapter protocol, the
+ * Séance's reference adapter (DESIGN.md, "Adapters"): the smallest program that speaks the adapter protocol, the
  * daemon tests' stub, and the template a new adapter starts from. Standalone on purpose (no import from Séance): an
  * adapter vendors `shared/src/adapter-protocol.schema.json`, never Séance's code.
  *
