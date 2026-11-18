@@ -101,9 +101,16 @@ afterAll(async () => {
   await rm(dirname(testSocket), { recursive: true, force: true });
 });
 
+/**
+ * What the seats built here said, warnings and audit lines unredacted: the rig would otherwise drop why a round never
+ * launched, and a round-pane wait that times out prints it (`roundPanesNow`). Cleared after each test.
+ */
+const seatLines: string[] = [];
+
 /** Round sockets a test started: closed after it, so a failed assertion cannot leave the path held for the next one. */
 const sockets: { readonly stop: () => void }[] = [];
 afterEach(() => {
+  seatLines.length = 0;
   for (const each of sockets.splice(0)) each.stop();
 });
 
@@ -144,6 +151,7 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }, weakerNested
     },
   ];
   const sink = custodianAudit((line) => {
+    seatLines.push(line);
     audit.push(line.replace(/ pane=%\d+/u, " pane=%N").replace(/ exclave="?default"?/u, " exclave=default"));
     return Promise.resolve();
   });
@@ -204,7 +212,7 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }, weakerNested
     },
     removeTmp: removeRoundTmp,
     audit: sink,
-    warn: () => {},
+    warn: (line) => void seatLines.push(line),
   });
   return { seat, clock, audit, saved, rounds };
 }
@@ -216,18 +224,28 @@ async function tmpExists(path: string): Promise<boolean> {
   );
 }
 
+/** The round panes tmux holds now, and what the seats said: a round-pane wait's explanation when it times out. */
+async function roundPanesNow(): Promise<string> {
+  return [`round panes: ${JSON.stringify(await listRoundPanes())}`, ...seatLines].join("\n");
+}
+
 async function onlyRound(): Promise<string> {
   let found = "";
-  await pollUntil(async () => {
-    const rounds = await listRoundPanes();
-    found = rounds[0]?.pane ?? "";
-    return rounds.length === 1;
-  }, "one round pane");
+  await pollUntil(
+    async () => {
+      const rounds = await listRoundPanes();
+      found = rounds[0]?.pane ?? "";
+      return rounds.length === 1;
+    },
+    "one round pane",
+    undefined,
+    roundPanesNow,
+  );
   return found;
 }
 
 async function noRounds(): Promise<void> {
-  await pollUntil(async () => (await listRoundPanes()).length === 0, "no round pane");
+  await pollUntil(async () => (await listRoundPanes()).length === 0, "no round pane", undefined, roundPanesNow);
 }
 
 describe("a round, with the stubs for claude", () => {
