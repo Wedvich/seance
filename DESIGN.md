@@ -1129,6 +1129,18 @@ nothing checked it. The last is the gap they leave.
   request another. A round request is spaced and expires as the
   shell's is, so a holder of the PSK gains at most a round per 15 minutes it could not already ask for at a machine's
   shell; thresholds, the model and on/off stay in `config.json` (C46), out of its reach.
+- **A session's name is the owner's display write, sealed, and never reachable without the app role** (2026-11-18,
+  Presence & identity, "Session identity", "The owner's label"; docs/tags.md step 2). The daemon answers
+  `session-tag` only when sealed `from: "app"` on the relay leg, parsed by `parseSessionTagRequest`, audited without a
+  payload (`audit session-tag origin=relay key-count=<0|1> outcome=<…>`, never the label or an id); neither
+  `LOCAL_OPS`, `BROKER_OPS` nor MCP carries it, so a session cannot name itself as the owner (the residual is
+  `set-limits`' and `availability`'s: a process holding the PSK can seal `from: "app"`). It is the second thing a
+  verified `agent.session` names, beside adapter delivery (not built): re-checked with `atAct` at the act, refused
+  `moved`, `unverified`, `ambiguous`, `ended` or `tasked` otherwise, and binding, routing and authorizing nothing. The
+  label is the one text `conversations.json` holds (0600, the owner's own, under `displayLine` and the title's cap,
+  never logged), and it reaches a reader only while its conversation's one claimant is verified, so a session that
+  claims a labelled id shows its own name, never the owner's. MCP's `get_sessions` prints `owner.label` through
+  `AGENT_VISIBLE_TAG_KEYS`; message wrappers, receipts and the custodian's `sessions` never carry it.
 - **The drain's session ask is constant keys, into ledger-bound panes, while draining** (2026-11-13, Daemon, "The
   drain's session ask"; `CLAUDE.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
@@ -12655,7 +12667,7 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   the conversation (`session`), so the session can give the tool the id it holds it under. A sender with no verified
   conversation still reaches the adapter, `subscribed: false`, answerable by reply for the hour. A reply by handle
   subscribes nothing. Kept at rest in `stateDir()/conversations.json` (`openSubscriptions`, 0600, written durably on
-  one chain): ids, adapter names, fingerprints and times, never text; one the daemon cannot read loads empty. Ended
+  one chain, beside the owner's labels: "The owner's label"): ids, adapter names, fingerprints and times, never text; one the daemon cannot read loads empty. Ended
   by the session's `leave` (`send_message`'s `leave: true`, no text needed; the frame still goes, with `leave`), by
   the conversation not live for `CONVERSATION_IDLE_MS` (30 days; a verified, unconflicted session the feed reports
   touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and at each
@@ -13634,8 +13646,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     - **Unverifiable.** Two config dirs' matching files, or neither source, leave the claim unverifiable.
     - **Conflicts.** Two live claimants of one id (verified, unverifiable or still settling) are a conflict.
     - **At each act.** `atAct` re-reads the source before any act a verified id names, demotes the claim on a
-      mismatch and answers `ambiguous` on a conflict. In this step no act uses it; adapter delivery and the owner's
-      `session-tag` will (docs/tags.md §3.1, §8).
+      mismatch and answers `ambiguous` on a conflict. The owner's `session-tag` (below) is its first act; adapter
+      delivery will be the second (docs/tags.md §8).
   - **The daemon's own read.** At start and at each `sweep`, a live pane with no report since this process began is
     matched to a `sessions/<pid>.json` whose pid is the innermost `claude` on its own chain, exactly one under that
     pane. That conversation is linked verified, with the file's `bridgeSessionId` as `agent.remote`. An idle session
@@ -13648,6 +13660,43 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     `message-layering.test.ts` holds the three modules that keep them off both sinks, type-only imports included.
   - **Rejected:** the custodian's per-pane tracker (`pane-activity.ts`) as the store. It is `ours`-only and keyed by
     pane for the custodian's own reads, so it would have had to change both to serve this.
+  - **The owner's label** (built 2026-11-18, docs/tags.md step 2; `daemon/src/adapter-subscriptions.ts`,
+    `Conversations.label`, `handleSessionTag` in `daemon/src/handlers.ts`). The owner names an **untasked**
+    conversation; a tasked session's name stays its task's title until task tags (docs/tags.md step 3).
+    - **The op.** `session-tag` (`SessionTagRequest`: `{ pane, session, key: "label", value }`, `""` clears),
+      answered only when sealed `from: "app"` on the relay leg (`refused` otherwise), parsed by
+      `parseSessionTagRequest` (`invalid_request`: an unknown field, a key other than `label`, a value
+      `parseTagValue("owner.label", …)` refuses), and `unsupported` from a daemon running no conversation table. The
+      act sweeps, then takes the pane's newest live process: none is `ended`, one carrying a task `tasked`, one
+      claiming another conversation `moved`; then `atAct` re-reads its source (`unverified`, `ambiguous`), and a
+      claimant on another pane or pid is `moved` too. Only then is the label written. The reply is `{ ok: true, value }`
+      (the label now held) or `{ ok: false, code, message }`; a value that would not fit whole (past the title's
+      character cap, or `displayLine`'s 256 bytes, which multibyte text reaches first) is `invalid_request`, never
+      shortened; a write that throws, or a call before the table starts, is `internal_error`, holding nothing new. Audited `audit session-tag
+      origin=relay key-count=<0|1> outcome=<set|cleared|code>`. `CAPABILITIES.sessionTag` advertises it,
+      unconditionally: session events always run, so every daemon of this build has the table.
+    - **At rest.** `stateDir()/conversations.json`, 0600, the adapter subscriptions' file ("Adapters"), with one
+      owner: `openSubscriptions`, opened once by the session-events capability and handed to the adapter host, so no
+      second writer of another shape erases its entries (each loading the other's as empty). Written whole through
+      `writeDurable` (temp, fsync, rename) on one chain: `{ v: 1, adapters, conversations }`, each conversation
+      `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }], lastLive }`. At most `CONVERSATIONS_KEPT_MAX`
+      (256), the least recently live dropped first; an entry not live for `CONVERSATION_IDLE_MS` (30 days), or holding
+      neither a label nor a subscription, dropped. `lastLive` is touched on every report and reaches the disk at most
+      hourly, since only the prune reads it. A file the daemon cannot read loads empty: labels are lost, never invented;
+      a malformed label drops the label, never the entry's subscriptions. A label write awaits its own write and puts
+      the label back when it fails; a subscription's end keeps the label, and a label's clear keeps the subscriptions.
+    - **The join.** `tagsFor` adds `owner.label` (conversation scope) only to an untasked process, while its
+      conversation's claim is verified, not through the `pane` fallback, and has exactly one claimant (a tasked
+      process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
+      of a labelled id shows its own name. A restart keeps the label and reattaches it at the next verified claim.
+    - **The name, in the PWA.** The Machines card lists an awake machine's sessions by `displayName` over
+      `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (decided as
+      docs/tags.md's open question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
+      then the window, marked "(self-named)" or "(window)" for the last two. Rename is offered only for a connected
+      machine advertising `CAPABILITIES.sessionTag`, on an untasked row whose `agent.session` is verified; a refusal
+      shows a fixed text by its code. Sessions are read for every connected machine when the screen opens, on wake, when a
+      `sessionTag` machine's reported session counts move, and after a rename or a refusal that says the row is stale
+      (`ended`, `moved`, `tasked`). The dialog refuses a name past the daemon's byte cap before sending.
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
   `question`, `permission` and (2026-11-17, from the settings `Elicitation` hook) `elicitation`, an MCP

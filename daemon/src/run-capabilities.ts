@@ -3,7 +3,7 @@ import type { CustodianEvent, CustodianStatus, QuotaReading, RepoEntry } from "@
 import { takeRestartRequest, writeAdaptersView } from "./adapter-control.ts";
 import { createAdapterFeed } from "./adapter-feed.ts";
 import { startAdapterHost } from "./adapter-host.ts";
-import { openSubscriptions } from "./adapter-subscriptions.ts";
+import { openSubscriptions, type Subscriptions } from "./adapter-subscriptions.ts";
 import { attachmentsRoot } from "./attachments.ts";
 import {
   adapterAudit,
@@ -195,8 +195,8 @@ export interface Started {
   readonly custodianPoke?: () => void;
   /** Whether the seat exists: `starting` while its async checks run, `failed` once they declined. The op reads it, never the file view. */
   readonly custodianHost?: () => CustodianHost;
-  /** Session identity and tags, once session events run: an app's `sessions` reads it late (`run.ts`). */
-  readonly conversations?: SessionTagsSource;
+  /** Session identity and tags, once session events run: an app's `sessions` and `session-tag` read it late (`run.ts`). */
+  readonly conversations?: SessionTagsSource & Pick<Conversations, "label">;
   /** Run once the local op socket is up (`run.ts`): what must not start before a session's `seance` can reach it. */
   readonly afterLocal?: () => void;
 }
@@ -279,6 +279,7 @@ const messagesOf = new WeakMap<WiringCtx, Messages>();
 const watchesOf = new WeakMap<WiringCtx, Watches>();
 /** The session-events capability's conversation table, which the adapters' state feed reads. */
 const conversationsOf = new WeakMap<WiringCtx, Conversations>();
+const subscriptionsOf = new WeakMap<WiringCtx, Subscriptions>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -315,10 +316,13 @@ const sessionEvents: DaemonCapability = (ctx) => {
         });
   // Beside session events because that capability owns pane binding, the peer warnings above and the `ended` frame
   // that clears a pane's held messages: a second capability would need a late-bound hook into it.
+  // The one owner of `conversations.json`: the owner's labels here, the adapters' subscriptions (`adapters` below).
+  const store = openSubscriptions(conversationsPath());
   const conversations = createConversations({
     configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
     launchSession: (taskId) => ctx.endedTasks.launchSession(taskId),
     panes: listPanePids,
+    store,
   });
   const messages = createMessages({
     panes: listPanePids,
@@ -428,6 +432,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   messagesOf.set(ctx, messages);
   watchesOf.set(ctx, watches);
   conversationsOf.set(ctx, conversations);
+  subscriptionsOf.set(ctx, store);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
   // The daemon's own read for sessions that were running before it started and have not reported since.
@@ -480,8 +485,14 @@ export async function adaptersSettled(): Promise<void> {
 const adapters: DaemonCapability = (ctx) => {
   const configured = ctx.config.adapters;
   const conversations = conversationsOf.get(ctx);
+  const subscriptions = subscriptionsOf.get(ctx);
   const messages = messagesOf.get(ctx);
-  if (configured === undefined || Object.keys(configured).length === 0 || conversations === undefined) {
+  if (
+    configured === undefined ||
+    Object.keys(configured).length === 0 ||
+    conversations === undefined ||
+    subscriptions === undefined
+  ) {
     return { stop: (): void => {} };
   }
   const feed = createAdapterFeed({
@@ -508,7 +519,7 @@ const adapters: DaemonCapability = (ctx) => {
     onChange: publish,
     adapters: configured,
     conversations,
-    subscriptions: openSubscriptions(conversationsPath()),
+    subscriptions,
     launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
     ...(messages === undefined ? {} : { messages }),
     feed,
@@ -1068,7 +1079,7 @@ export interface StartedCapabilities {
   readonly custodianStatus?: (now: number) => CustodianStatus | null;
   readonly custodianPoke?: () => void;
   readonly custodianHost?: () => CustodianHost;
-  readonly conversations?: SessionTagsSource;
+  readonly conversations?: Started["conversations"];
   readonly local: LocalSurfaces;
   /** Every capability's `afterLocal`, in start order. */
   readonly afterLocal: () => void;

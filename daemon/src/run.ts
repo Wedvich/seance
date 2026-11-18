@@ -417,6 +417,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
         ...(custodianOn ? [CAPABILITIES.custodian] : []),
+        // Unconditional: session events always run, and a host whose frames cannot bind verifies no conversation,
+        // which is all the PWA offers a rename for.
+        CAPABILITIES.sessionTag,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
@@ -533,7 +536,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // And the leader's `watch-event`: the watch table that places its notes starts with session events as well.
   const routedWatches: { current?: NonNullable<HandlerContext["watches"]> } = {};
   // And the session tags an app's `sessions` carries: the table that holds them starts with session events too.
-  const sessionTags: { current?: NonNullable<HandlerContext["conversations"]> } = {};
+  const sessionTags: {
+    current?: NonNullable<HandlerContext["conversations"]> & {
+      readonly label: NonNullable<HandlerContext["sessionTag"]>;
+    };
+  } = {};
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
   // A `now` landing before the wiring is replayed there, since `start()` asks without it.
   const drainAsk = createLateDrainAsk();
@@ -662,6 +669,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sweep: () => sessionTags.current?.sweep() ?? Promise.resolve(),
       tagsFor: (pane) => sessionTags.current?.tagsFor(pane),
     },
+    // Advertised from register on, so before the table starts it is a retryable failure (`internal_error`), not "unsupported".
+    sessionTag: (pane, id, value) =>
+      sessionTags.current?.label(pane, id, value) ?? Promise.reject(new Error("session events have not started")),
     backend: opts.backend ?? createBackend(config, { home }),
     getRepos: () => state.repos,
     rescan,

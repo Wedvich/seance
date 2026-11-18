@@ -10,6 +10,7 @@ import type {
   GaugeIcon,
   MachineCard,
   MachinesView,
+  SessionRow,
 } from "../machines-view.ts";
 import { custodianMenu } from "../machines-view.ts";
 import {
@@ -21,7 +22,14 @@ import {
   type HistoryTarget,
   type HistoryView,
 } from "../state.ts";
-import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
+import {
+  ACCOUNT_ALIAS_MAX_LENGTH,
+  displayLine,
+  TAG_VALUE_MAX,
+  TASK_REQUEST_LIMITS,
+  type CustodianRequest,
+  type Machine,
+} from "@seance/shared";
 import type { Timed } from "../timed.ts";
 import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
@@ -104,6 +112,10 @@ export function MachinesScreen(props: {
   onCloseRename: () => void;
   /** Resolves once the rename has settled: true when the name landed, which closes the dialog. */
   onRename: (accountId: string, text: string) => Promise<boolean>;
+  /** Reads the sessions of every machine that can rename one: asked as the screen opens. */
+  onReadSessions: () => void;
+  /** Names a session's conversation (blank clears); resolves null once it landed, else the refusal to show. */
+  onRenameSession: (deviceId: string, pane: string, session: string, text: string) => Promise<string | null>;
 }): JSX.Element {
   const {
     view,
@@ -127,8 +139,19 @@ export function MachinesScreen(props: {
     onOpenRename,
     onCloseRename,
     onRename,
+    onReadSessions,
+    onRenameSession,
   } = props;
   const { renaming } = accounts;
+  // Once per visit, not per render (the app passes a fresh callback each time): a rename reads its machine again itself.
+  const readSessions = useRef(onReadSessions);
+  useEffect(() => readSessions.current(), []);
+  // The open session rename: a dialog local to this screen, like the confirm sheets.
+  const [sessionRename, setSessionRename] = useState<{
+    readonly deviceId: string;
+    readonly row: SessionRow;
+    readonly rename: NonNullable<SessionRow["rename"]>;
+  } | null>(null);
   // The open confirm sheet: closing an open machine, or Drain / Drain now on a closed one.
   const [closing, setClosing] = useState<{ readonly deviceId: string; readonly act: "close" | DrainAction } | null>(
     null,
@@ -173,6 +196,7 @@ export function MachinesScreen(props: {
               onReadDrain(card.deviceId);
               setClosing({ deviceId: card.deviceId, act });
             }}
+            onRenameSession={(row, rename) => setSessionRename({ deviceId: card.deviceId, row, rename })}
           />
         ))}
         {archivist !== null && <ArchivistCardView card={archivist} />}
@@ -215,6 +239,17 @@ export function MachinesScreen(props: {
           onClose={onCloseRename}
         />
       )}
+      {sessionRename !== null && (
+        <SessionRenameDialog
+          key={`${sessionRename.deviceId}/${sessionRename.rename.pane}`}
+          row={sessionRename.row}
+          label={sessionRename.rename.label}
+          onSave={(text) =>
+            onRenameSession(sessionRename.deviceId, sessionRename.rename.pane, sessionRename.rename.session, text)
+          }
+          onClose={() => setSessionRename(null)}
+        />
+      )}
     </>
   );
 }
@@ -232,6 +267,8 @@ function MachineCardView(props: {
   onToggleOpen: (open: boolean) => void;
   /** Drain or Drain now on a closed machine: asks for confirmation first. */
   onDrain: (act: DrainAction) => void;
+  /** Opens the rename dialog for one of its sessions. */
+  onRenameSession: (row: SessionRow, rename: NonNullable<SessionRow["rename"]>) => void;
 }): JSX.Element {
   const {
     card,
@@ -244,6 +281,7 @@ function MachineCardView(props: {
     onHideHistory,
     onToggleOpen,
     onDrain,
+    onRenameSession,
   } = props;
   // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
   const here = availability[card.deviceId] ?? null;
@@ -397,10 +435,126 @@ function MachineCardView(props: {
         </ul>
       )}
 
+      {card.sessions !== null && card.sessions.length > 0 && (
+        <ul className="fleet-sessions" aria-label={`Sessions on ${card.name}`}>
+          {card.sessions.map((row, index) => {
+            const { rename } = row;
+            return (
+              <li key={row.pane ?? `#${index}`} className="fleet-session">
+                <span className="fleet-session-name" title={row.name}>
+                  {row.name}
+                </span>
+                {row.mark !== null && <span className="fleet-session-mark">{row.mark}</span>}
+                {rename !== null && (
+                  <button
+                    type="button"
+                    className="quiet fleet-session-rename"
+                    aria-label={`Rename ${row.name}`}
+                    onClick={() => onRenameSession(row, rename)}
+                  >
+                    Rename
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
       {history !== null && (
         <HistoryChart history={history} ranges={ranges} onPick={(range) => onShowHistory(target, range)} />
       )}
     </section>
+  );
+}
+
+/**
+ * The owner's name for an untasked session, kept against its conversation on that machine. Stays open on a refusal,
+ * the reason where the hint was, so the draft is there to send again; closes once the name landed.
+ */
+function SessionRenameDialog(props: {
+  row: SessionRow;
+  /** The owner's label now, `""` for none. */
+  label: string;
+  onSave: (text: string) => Promise<string | null>;
+  onClose: () => void;
+}): JSX.Element {
+  const { row, label, onSave, onClose } = props;
+  const [draft, setDraft] = useState(label);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const noticeId = useId();
+  const inputId = useId();
+  // The daemon refuses what its byte cap would cut (multibyte text reaches it well before the character cap).
+  const tooLong = new TextEncoder().encode(displayLine(draft, Infinity)).length > TAG_VALUE_MAX;
+  // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
+  useEffect(() => {
+    if (!saving) input.current?.focus();
+  }, [saving]);
+
+  return (
+    <Sheet title="Rename session" variant="dialog" onClose={onClose}>
+      <form
+        className="rename"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (saving) return;
+          setSaving(true);
+          setNotice(null);
+          void onSave(draft).then((refusal) => {
+            setSaving(false);
+            if (refusal === null) onClose();
+            else setNotice(refusal);
+          });
+        }}
+      >
+        <p className="rename-account">
+          {row.name}
+          {row.mark === null ? "" : ` ${row.mark}`}
+        </p>
+        <label className="rename-label" htmlFor={inputId}>
+          Session name
+        </label>
+        <input
+          ref={input}
+          id={inputId}
+          type="text"
+          className="rename-input"
+          placeholder="Name this session"
+          maxLength={TASK_REQUEST_LIMITS.title}
+          value={draft}
+          disabled={saving}
+          aria-invalid={notice !== null}
+          aria-describedby={notice === null ? undefined : noticeId}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        {notice === null ? (
+          <p className="rename-hint">
+            <span>
+              {tooLong
+                ? `Too long: at most ${TAG_VALUE_MAX} bytes, which non-ASCII characters use up faster.`
+                : "Kept for this conversation on its machine. Leave it empty to go back to the session's own name."}
+            </span>
+            <span className="rename-count">
+              {Array.from(draft).length}/{TASK_REQUEST_LIMITS.title}
+            </span>
+          </p>
+        ) : (
+          <p id={noticeId} className="rename-error" role="alert">
+            {notice}
+          </p>
+        )}
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={saving || tooLong}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </Sheet>
   );
 }
 

@@ -1,6 +1,7 @@
 import { writeTags, type AgentKind, type NeedsInputReason, type SessionState, type SessionTag } from "@seance/shared";
 import { readAgentSession, sessionFilePids, type AgentSessionRead } from "./agent-session-file.ts";
 import { claudeProcessOf, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
+import type { ConversationStore } from "./adapter-subscriptions.ts";
 import { ancestorBelow, processStart } from "./peer.ts";
 
 /** What of a bound pane the table reads (`BoundPane`, `session-events.ts`, which this module must not load: it logs). */
@@ -38,6 +39,10 @@ type TrackedState = Exclude<SessionState, "done">;
  *
  * Nothing here binds a frame to a pane (peer pid does that, `session-events.ts`), and no tag binds, routes or moves
  * anything; the verified id's one use is to name a conversation to the acts docs/tags.md §3.1 and §8 list.
+ *
+ * The owner's label on an untasked conversation (`label`, the `session-tag` op) is kept at rest against the id
+ * (`adapter-subscriptions.ts`) and joins a process's tags as `owner.label` only while that process's claim of the id is
+ * verified and no other live process claims it: an unverified claimer of a labelled id shows its own name.
  */
 
 /** How long a report the file does not name yet is re-read before the claim is refuted: ten times the slowest lag seen (S1). */
@@ -109,6 +114,11 @@ export interface ProcessView {
   readonly session: { readonly id: string; readonly verified: boolean; readonly conflict: boolean } | null;
 }
 
+/** The owner's `session-tag` act: the label was written, or why not (the op's codes, `SESSION_TAG_ERROR_CODES`). */
+export type LabelOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: "unsupported" | "ended" | "tasked" | "moved" | "unverified" | "ambiguous" };
+
 export type ActCheck =
   | { readonly ok: true; readonly pane: string; readonly pid: number; readonly key: SessionKey }
   | { readonly ok: false; readonly code: "ended" | "unverified" | "ambiguous" };
@@ -126,6 +136,8 @@ export interface ConversationsDeps {
   readonly now?: () => number;
   readonly settleMs?: number;
   readonly retryMs?: number;
+  /** The owner's labels at rest (`conversations.json`); absent, `label` answers `unsupported` and no tag carries one. */
+  readonly store?: Pick<ConversationStore, "label" | "setLabel" | "live">;
 }
 
 /** What an adapter's `tag` frame names: a subscribed conversation, or a task launched here (docs/tags.md §8.4). */
@@ -180,6 +192,12 @@ export interface Conversations {
    * nothing in it, for a reader that re-reads (`adapter-feed.ts`). Returns its unsubscribe.
    */
   readonly listen: (listener: () => void) => () => void;
+  /**
+   * The owner's label on the untasked conversation `id` in `pane` (`""` clears it), checked now: the pane listing read
+   * afresh, its newest live process carrying no task (`tasked`) and claiming `id` (`moved`), then `atAct`, whose one
+   * live claimant must be that same process. Throws when the pane listing or the file write fails.
+   */
+  readonly label: (pane: string, id: string, value: string) => Promise<LabelOutcome>;
   /** Whether the process reported `ended` here lately: it is leaving, so no reader should list it as a session again. */
   readonly ended: (key: SessionKey) => boolean;
   readonly stop: () => void;
@@ -217,6 +235,7 @@ export function createConversations(deps: ConversationsDeps): Conversations {
       if (conversations.size <= CONVERSATIONS_MEMORY_MAX) break;
       conversations.delete(old);
     }
+    deps.store?.live(id);
   };
 
   type Check = "verified" | "refuted" | "mismatch" | "unverifiable";
@@ -446,6 +465,17 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     }
   };
 
+  const sweep = async (): Promise<void> => {
+    if (stopped) return;
+    const live = (await deps.panes()).filter((pane) => !pane.dead);
+    const panes = new Map(live.map((pane) => [pane.id, pane]));
+    for (const [key, entry] of processes) {
+      const pane = panes.get(entry.pane);
+      if (pane === undefined || pane.taskId !== entry.taskId || !alive(entry)) processes.delete(key);
+    }
+    await adopt(live);
+  };
+
   const atAct = async (id: string): Promise<ActCheck> => {
     const live = claimants(id);
     const [only] = live;
@@ -474,18 +504,26 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     return out;
   };
 
+  /**
+   * The owner's label for the entry's conversation, only while its claim is verified and no other live process claims
+   * it, and never on a tasked process: its name is its task's (docs/tags.md §3.1; the act refuses `tasked` the same).
+   */
+  const ownerLabel = (entry: ProcessEntry): SessionTag | null => {
+    const claim = entry.claim;
+    if (
+      entry.taskId !== null ||
+      claim?.verdict !== "verified" ||
+      entry.fallback ||
+      claimants(claim.session).length !== 1
+    )
+      return null;
+    const label = deps.store?.label(claim.session);
+    return label === undefined ? null : { ...label, scope: "conversation" };
+  };
+
   return {
     report,
-    sweep: async (): Promise<void> => {
-      if (stopped) return;
-      const live = (await deps.panes()).filter((pane) => !pane.dead);
-      const panes = new Map(live.map((pane) => [pane.id, pane]));
-      for (const [key, entry] of processes) {
-        const pane = panes.get(entry.pane);
-        if (pane === undefined || pane.taskId !== entry.taskId || !alive(entry)) processes.delete(key);
-      }
-      await adopt(live);
-    },
+    sweep,
     tagsFor: (pane): Readonly<Record<string, SessionTag>> | undefined => {
       const entry = newest(pane);
       if (entry === null) return undefined;
@@ -505,6 +543,8 @@ export function createConversations(deps: ConversationsDeps): Conversations {
           ...(entry.claim.verdict === "verified" ? { verified: true as const } : {}),
         };
       }
+      const label = ownerLabel(entry);
+      if (label !== null) tags["owner.label"] = label;
       return Object.keys(tags).length === 0 ? undefined : tags;
     },
     process: (pane) => {
@@ -513,6 +553,22 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     },
     conversation: (id) => conversations.get(id) ?? null,
     atAct,
+    label: async (pane, id, value): Promise<LabelOutcome> => {
+      const store = deps.store;
+      if (store === undefined || stopped) return { ok: false, code: "unsupported" };
+      // Afresh: a pane now under a task, or a process gone from it, must not be labelled on an older read.
+      await sweep();
+      const entry = newest(pane);
+      if (entry === null) return { ok: false, code: "ended" };
+      if (entry.taskId !== null) return { ok: false, code: "tasked" };
+      if (entry.claim?.session !== id) return { ok: false, code: "moved" };
+      const at = await atAct(id);
+      if (!at.ok) return at;
+      if (at.pane !== pane || at.pid !== entry.pid) return { ok: false, code: "moved" };
+      await store.setLabel(id, value);
+      changed();
+      return { ok: true };
+    },
     verifiedFor: async (key): Promise<string | null> => {
       const entry = processes.get(key);
       if (entry === undefined || entry.fallback || entry.claim?.verdict !== "verified") return null;

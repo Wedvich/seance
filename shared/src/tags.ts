@@ -1,5 +1,10 @@
 import { httpsUrl, isRecord, isRemoteSessionId } from "./parse.ts";
-import { TASK_REQUEST_LIMITS } from "./types.ts";
+import {
+  SESSION_TAG_ERROR_CODES,
+  TASK_REQUEST_LIMITS,
+  type SessionTagRequest,
+  type SessionTagResponse,
+} from "./types.ts";
 
 /**
  * Tags: one vocabulary for every writer and reader (docs/tags.md §2.1). A tag is a key in a writer's namespace and a
@@ -324,4 +329,38 @@ export function displayName(
   const self = joined["self.name"]?.value;
   if (self !== undefined) return { text: self, source: "self" };
   return { text: displayLine(window), source: "window" };
+}
+
+/** A tmux pane id, as `SessionEntry.id` carries it. */
+const PANE_ID = /^%\d{1,10}$/u;
+
+const SESSION_TAG_FIELDS: ReadonlySet<string> = new Set(["pane", "session", "key", "value"]);
+
+/**
+ * `session-tag`, at the daemon (docs/tags.md §3.1): the pane, a conversation id, the bare suffix `label` (a full key,
+ * or any other suffix, refuses the request: never re-homed) and a value through `owner.label`'s parser, `""` clearing
+ * it. Null for anything else, an extra field included, and for a value too long to keep whole (never shortened).
+ */
+export function parseSessionTagRequest(value: unknown): SessionTagRequest | null {
+  if (!isRecord(value)) return null;
+  if (Object.keys(value).some((field) => !SESSION_TAG_FIELDS.has(field))) return null;
+  const { pane, session, key, value: raw } = value;
+  if (typeof pane !== "string" || !PANE_ID.test(pane) || !isAgentSessionId(session) || key !== "label") return null;
+  const label = parseTagValue("owner.label", raw, "conversation");
+  if (label === null) return null;
+  // `displayLine` cuts at TAG_VALUE_MAX bytes, which would shorten a long multibyte name silently: refuse it instead.
+  if (typeof raw === "string" && utf8.encode(displayLine(raw, Infinity)).length > TAG_VALUE_MAX) return null;
+  return { pane, session, key, value: label };
+}
+
+/** A `session-tag` answer at a client: a code it does not know reads as a failure. */
+export function parseSessionTagResponse(value: unknown): SessionTagResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === true) {
+    const label = value["value"];
+    return typeof label === "string" ? { ok: true, value: label } : null;
+  }
+  const code = SESSION_TAG_ERROR_CODES.find((c) => c === value["code"]);
+  if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
 }

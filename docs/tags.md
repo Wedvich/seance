@@ -1,9 +1,11 @@
 # Tags, session identity and the adapter subscription — spec
 
 **Status: draft 2026-11-17; build step 1 built 2026-11-17** (the vocabulary, the frame's `agent`, the conversation
-table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record);
-step 4 (§8, the adapter subscription and adapter tags) built 2026-11-18 with docs/messaging.md's 3b (DESIGN.md,
-"Adapters", and "Replies by handle" for §4.4's amended rejection). Steps 2 and 3 are not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
+table and its verification, `SessionEntry.tags`: DESIGN.md, "Session events", "Session identity", is its record),
+**step 2 built 2026-11-18** (the `session-tag` op, `conversations.json`, the `owner.label` join, the PWA's names and
+rename: DESIGN.md, "Session identity", "The owner's label"), and step 4 (§8, the adapter subscription and adapter tags)
+built 2026-11-18 with docs/messaging.md's 3b (DESIGN.md, "Adapters", and "Replies by handle" for §4.4's amended
+rejection). Step 3 is not built. The owner decided T1–T4 (below) on 2026-11-17; everything else is
 proposed, with a recommendation where there is a choice. Two drafts build on this file: docs/presence.md (draft PR
 #526: `self.doing`, `set_self_tag`, the `tags` map on `SessionEntry`), which already fixes the first key and must stay
 valid under this model, and DESIGN.md, "Adapters" (draft PR #486: the adapter seam), whose `Session` record, addressing
@@ -168,16 +170,10 @@ session or path that something acts on.
 - **`seance.*`: the daemon**, in memory. None in v1; reserved so a daemon-made fact (a verification time, a health
   mark) never needs a new field.
 - **`adapter.<name>.*`: the adapter**, by a `tag` frame on its stdin, addressed by `agent.session` (§8.4).
-- **`owner.*` on a session: a new app op, `session-tag`**, sealed `from: "app"` on the relay leg, parsed by
-  `parseSessionTagRequest`, audited without a payload (`op=session-tag key-count=1 outcome=…`), addressed by
-  `{ pane, session: <agent.session>, key: "label", value }`: the daemon checks that the pane's bound process's current
-  conversation is that id, verified and unconflicted (`moved`, `unverified` or `ambiguous` otherwise), and only then
-  stores the label against the id. This is a second thing a verified `agent.session` names, beside §8's delivery: the
-  owner's own display write, which binds and routes nothing, and is named in the threat model as such. On no local op, broker action or MCP tool, so a session cannot
-  rename itself as the owner: the same rule, and the same honest residual, as `set-limits` and `availability` (a
-  process holding the PSK can seal `from: "app"`). Used for **untasked** conversations only; a tasked session's
-  `owner.label` lives on the task (§5.2), so it survives the queue and its chain. A `session-tag` naming a
-  conversation whose live pane carries a task is answered `tasked` and points the client at the task.
+- **`owner.*` on a session: the app op `session-tag`** (built, step 2; DESIGN.md, "Session identity", "The owner's
+  label", is its record). A second thing a verified `agent.session` names, beside §8's delivery: the owner's own
+  display write, for **untasked** conversations only. A tasked session's `owner.label` lives on the task (§5.2), so it
+  survives the queue and its chain; the op answers `tasked` for one.
 
 ### 3.2 Where each level's tags live
 
@@ -195,12 +191,8 @@ precedence, never the owner's label, and receives nothing addressed to the id.
 - **Memory, except two things nobody re-sends.** `agent.*` is re-sent by the mod on every report, `self.*` by
   the session, and adapter tags by the adapter after each `snapshot` (it keeps its own state; #486's restart already
   starts from a fresh snapshot). The owner's label on an untasked conversation and the adapter subscriptions are not
-  re-sent by anyone, so they are kept at rest in `stateDir()/conversations.json` (0600, written atomically), keyed by
-  conversation id: `{ ownerLabel?, subscriptions: [{ adapter, since }], lastLive }`. The owner's label is the one text it holds, the
-  owner's own, under `displayLine` and the title's cap. At most
-  `CONVERSATIONS_KEPT_MAX` (256) entries, the least recently live dropped first, and an entry not live for
-  `CONVERSATION_IDLE_MS` (30 days) dropped at load. A file the daemon cannot read loads empty (labels and
-  subscriptions are lost, never invented), and nothing in it is logged.
+  re-sent by anyone, so they are kept at rest in `stateDir()/conversations.json` (built, step 2, with the label; its
+  shape, caps and prune are in DESIGN.md, "The owner's label"; step 4 writes its `subscriptions`, through the same one owner, `openSubscriptions`).
 - **Clearing.** Process tags clear as #526's D1.4 says (`ended`, the pane gone, a different task on the pane, a
   restart, or the writer's own `""`), with "a new pane pid" read as "the bound `claude` process gone". Conversation tags clear when the conversation has no live process
   and the daemon restarts (memory), or at the `CONVERSATION_IDLE_MS` prune (what is at rest), or for one adapter's
@@ -569,8 +561,7 @@ New, and what bounds it:
   from a frame to bind anything.
 - **A long-lived subscription** (§8.3): the session's own act, at rest in one 0600 file of conversation ids, adapter
   names and the owner's labels (its one text, the owner's own).
-- **The owner's `session-tag`** names a conversation by a verified id to label it: a display write the owner seals,
-  binding and routing nothing (§3.1).
+- **The owner's `session-tag`** (built, step 2): DESIGN.md Threat model item 6.
 - **Task tags in the record**: display text sealed like a title, held to the sentinel, the gate and the archivist's
   strip.
 
@@ -594,8 +585,8 @@ Wording this changes, each in the PR that builds it:
   write in any state.
 - CLAUDE.md, the archivist's `archive.sqlite` sentence: `tags` dropped but `creator.ref` and `creator.ref-url`.
 - CLAUDE.md, the push sentence: "its payload carries ids and state only" gains "and never a tag".
-- CLAUDE.md, a new bullet beside "Closing a machine is the owner's sealed act": `session-tag` is the owner's sealed
-  act (relay leg, `from: "app"`, its parser, audited without payload, on no local op, broker action or MCP tool).
+- ~~CLAUDE.md, a new bullet beside "Closing a machine is the owner's sealed act": `session-tag` is the owner's sealed
+  act~~ (done, step 2).
 - CLAUDE.md, messaging bullet: §8.5.
 - CLAUDE.md, the task-sealer list's phrase for `amend`, and the broker bullet's `amend` action: neither carries
   `ownerTags`; the leader drops `owner.*` and `scheduler.*` from a version-1 record.
@@ -619,8 +610,10 @@ second:
 
 ## Open questions
 
-1. **`self.name` at all?** It is third in T2's precedence and fills the hand-started case. _Recommend yes_, accepted
-   by `set_self_tag`, not asked for by the standing instruction, shown only on the owner's surfaces (§6.1).
+1. **`self.name` at all?** It is third in T2's precedence and fills the hand-started case. **Taken as recommended in
+   step 2, pending the owner's review:** yes, accepted by `set_self_tag` (not built), not asked for by the standing
+   instruction, shown only on the owner's surfaces (§6.1). Step 2's PWA already ranks it third and marks it
+   "(self-named)"; nothing writes it yet.
 2. **Should an owner label on an untasked conversation follow it into a task?** Nothing adopts a hand-started session
    into a task today. _Recommend nothing until something does._
 3. **Sessions outside the daemon's tmux server** (an IDE terminal), which a tool would also like to see. _Recommend
@@ -789,7 +782,8 @@ this spec's (the `tags` map, the caps, the `self` frame), and the edits above fo
      retention for a hand-started pane with a `claude` stub, none for a shell's child, and a `claude` restarted under
      the same shell starting with no `self.*`; the mod's test that `agent` rides every report; the layering test that
      no tag text reaches `log.ts` or `audit.ts`.
-2. **Owner labels on sessions, and the name.** The `session-tag` app op, `conversations.json`, the PWA's rename on
+2. **Owner labels on sessions, and the name.** **Built 2026-11-18** (DESIGN.md, "Session identity", "The owner's
+   label"). The `session-tag` app op, `conversations.json`, the PWA's rename on
    the Machines screen, `displayName` on the PWA with its source mark.
    - Tested by: the op refused unless sealed `from: "app"` on the relay leg, absent from `LOCAL_OPS`, `BROKER_OPS`
      and MCP (a test over each list); `tasked`, `moved`, `unverified` and `ambiguous`; the label not shown for an

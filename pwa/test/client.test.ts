@@ -2334,18 +2334,30 @@ describe("store", () => {
     }
   });
 
-  test("the custodian controls send the op to a machine advertising custodian, and show a refusal as fixed text", async () => {
+  // One daemon for both owner acts: the file's relay caps its registry, so a test does not get a machine of its own.
+  test("the custodian controls and a session rename send their op only to a machine advertising it, and show a refusal as fixed text", async () => {
     const seated = await newDeviceId();
     const plain = await newDeviceId();
     const asked: unknown[] = [];
+    const tagged: unknown[] = [];
+    let reads = 0;
     let refuse = false;
+    let tagCode = "tasked";
     const daemon = await startFakeDaemon(
       relay,
       key,
       seated,
-      { ...machineInfo("Seated"), capabilities: ["custodian"] },
+      { ...machineInfo("Seated"), capabilities: ["custodian", "sessionTag"] },
       {
-        sessions: () => ({ sessions: [], at: Date.now() }),
+        sessions: () => {
+          reads += 1;
+          return { sessions: [], at: Date.now() };
+        },
+        "session-tag": (payload) => {
+          tagged.push(payload);
+          if (refuse) return { ok: false, code: tagCode, message: "daemon text, never shown" };
+          return { ok: true, value: "release notes" };
+        },
         custodian: (payload) => {
           asked.push(payload);
           if (refuse) return { ok: false, code: "held", message: "daemon text, never shown" };
@@ -2370,6 +2382,32 @@ describe("store", () => {
       await store.custodianControl(plain, { act: "resume" });
       expect(asked).toHaveLength(2);
       expect(store.getState().custodian[plain]?.kind).toBe("failed");
+
+      // A rename: trimmed, re-reads the machine's sessions (where the name shows), a refusal as fixed text.
+      const conversation = "1a2b3c4d-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+      refuse = false;
+      await pollUntil(() => store.getState().sessions[seated] !== undefined, "the wake's sessions read");
+      const before = reads;
+      expect(await store.renameSession(seated, "%3", conversation, "  release notes ")).toBeNull();
+      expect(tagged).toEqual([{ pane: "%3", session: conversation, key: "label", value: "release notes" }]);
+      expect(reads).toBe(before + 1);
+      refuse = true;
+      expect(await store.renameSession(seated, "%3", conversation, "x")).toBe(
+        "This session now runs a task, which names it",
+      );
+      // The row it was offered from is stale, so the machine's sessions are read again.
+      expect(reads).toBe(before + 2);
+      tagCode = "ended";
+      expect(await store.renameSession(seated, "%3", conversation, "x")).toBe("This session has ended");
+      expect(reads).toBe(before + 3);
+      // A refusal that says nothing of the list leaves it be.
+      tagCode = "invalid_request";
+      expect(await store.renameSession(seated, "%3", conversation, "x")).toBe("That name is too long or can't be used");
+      expect(reads).toBe(before + 3);
+      expect(await store.renameSession(plain, "%3", conversation, "x")).toBe(
+        "This machine can't rename sessions right now",
+      );
+      expect(tagged).toHaveLength(4);
     } finally {
       stop();
       daemon.close();

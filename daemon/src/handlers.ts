@@ -20,6 +20,7 @@ import type {
   RescanResponse,
   SessionEntry,
   SessionsResponse,
+  SessionTagResponse,
   SpawnRequest,
   SpawnResponse,
   TaskProgress,
@@ -41,6 +42,7 @@ import {
   parseAvailabilityRequest,
   parseCustodianRequest,
   parsePushBranchRequest,
+  parseSessionTagRequest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
@@ -54,6 +56,7 @@ import {
   availabilityAudit,
   custodianOwnerAudit,
   pushAudit,
+  sessionTagAudit,
   spawnAudit,
   type AuditSink,
   type CustodianOwnerAudit,
@@ -76,7 +79,7 @@ import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import type { Messages } from "./messages.ts";
 import type { Watches } from "./watches.ts";
-import type { SessionTagsSource } from "./conversations.ts";
+import type { Conversations, SessionTagsSource } from "./conversations.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 import type { AvailabilityOutcome, CloseMode } from "./state.ts";
@@ -122,6 +125,11 @@ export interface HandlerContext {
   readonly watches?: Pick<Watches, "onEvent">;
   /** Session identity and tags (`conversations.ts`), for an app's `sessions` only; absent, no entry carries `tags`. */
   readonly conversations?: SessionTagsSource;
+  /**
+   * The owner's label on an untasked conversation (`Conversations.label`), for the `session-tag` op; absent, answered
+   * `unsupported`. Throws when the pane listing or `conversations.json` cannot be written.
+   */
+  readonly sessionTag?: Conversations["label"];
   /** Closed-to-new-work state (docs/drain.md); absent, `availability` answers `unsupported` and no spawn is gated. */
   readonly availability?: MachineAvailability;
   /**
@@ -889,6 +897,56 @@ async function handleCustodian(
   }
 }
 
+const SESSION_TAG_MESSAGES = {
+  unsupported: "this daemon keeps no session labels",
+  ended: "that session is gone",
+  tasked: "a session running a task is named by its task",
+  moved: "that pane now holds another session",
+  unverified: "that session's conversation is not verified",
+  ambiguous: "more than one session claims that conversation",
+} as const;
+
+/**
+ * `session-tag`: the owner names (or, with `""`, unnames) an untasked conversation (docs/tags.md §3.1). The owner's
+ * act, as `availability` is: only an app, on the relay leg, never the scheduler, the local socket or MCP. The act
+ * re-checks the pane and the conversation's one verified claimant (`Conversations.label`).
+ */
+async function handleSessionTag(
+  ctx: HandlerContext,
+  audit: ReturnType<typeof sessionTagAudit>,
+  payload: unknown,
+  from: string | undefined,
+  origin: SpawnOrigin,
+): Promise<SessionTagResponse> {
+  if (origin !== "relay" || from !== APP_ID) {
+    await audit(false, "refused");
+    return { ok: false, code: "refused", message: "only an app may name a session" };
+  }
+  const request = parseSessionTagRequest(payload);
+  if (request === null) {
+    await audit(false, "invalid_request");
+    return { ok: false, code: "invalid_request", message: "malformed session-tag request" };
+  }
+  if (ctx.sessionTag === undefined) {
+    await audit(true, "unsupported");
+    return { ok: false, code: "unsupported", message: SESSION_TAG_MESSAGES.unsupported };
+  }
+  try {
+    const outcome = await ctx.sessionTag(request.pane, request.session, request.value);
+    if (!outcome.ok) {
+      await audit(true, outcome.code);
+      return { ok: false, code: outcome.code, message: SESSION_TAG_MESSAGES[outcome.code] };
+    }
+    await audit(true, request.value === "" ? "cleared" : "set");
+    return { ok: true, value: request.value };
+  } catch (err) {
+    await audit(true, "internal_error");
+    // The error is a pane listing's or a file write's; neither carries the label.
+    log.error(`session-tag: could not act: ${String(err)}`);
+    return { ok: false, code: "internal_error", message: "could not save the session's label" };
+  }
+}
+
 /**
  * One decimal: the units are whole percent, MiB and KiB/s, and a rollup's
  * average otherwise serializes to seventeen digits — a third of the reply.
@@ -1099,6 +1157,7 @@ export function createHandler(
   const passCloseTrail = passCloseAudit(origin, ctx.auditSink);
   const availabilityTrail = availabilityAudit(origin, ctx.auditSink);
   const custodianTrail = custodianOwnerAudit(origin, ctx.auditSink);
+  const sessionTagTrail = sessionTagAudit(origin, ctx.auditSink);
   return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
@@ -1133,6 +1192,8 @@ export function createHandler(
           return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
         case "custodian":
           return { payload: await handleCustodian(ctx, custodianTrail, plain.payload, from, origin) };
+        case "session-tag":
+          return { payload: await handleSessionTag(ctx, sessionTagTrail, plain.payload, from, origin) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {

@@ -107,7 +107,7 @@ export function adapterRestartPath(): string {
   return join(stateDir(), "adapter-restart.json");
 }
 
-/** The adapter subscriptions kept at rest (docs/tags.md §3.2, §8): 0600, the daemon's own. */
+/** The adapter subscriptions and the owner's labels kept at rest (docs/tags.md §3.2; `adapter-subscriptions.ts`): 0600. */
 export function conversationsPath(): string {
   return join(stateDir(), "conversations.json");
 }
