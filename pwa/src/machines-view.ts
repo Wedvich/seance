@@ -759,7 +759,8 @@ function servesMetrics(machine: Machine): boolean {
 function quotaBar(label: string, pct: number, resetsAt: number | undefined, now: number): QuotaBar {
   const bar = gauge(label, effectivePct(pct, resetsAt, now));
   if (resetsAt === undefined) return { ...bar, note: null };
-  if (resetsAt * 1000 <= now) return { ...bar, note: ["reset"] };
+  // "now" keeps the reset's instant like every other note, so a hover still says when it was.
+  if (resetsAt * 1000 <= now) return { ...bar, note: ["reset ", { text: "now", at: resetsAt * 1000 }] };
   return { ...bar, note: [until(resetsAt * 1000, now)] };
 }
 
