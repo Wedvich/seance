@@ -1,7 +1,8 @@
 # Fleet GitHub watches — spec
 
-**Status: spec; build step 1 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the reset-time
-backoff — DESIGN.md, Scheduler, "PR status", "A spent budget is waited out"); steps 2–4 (the watches) are not.
+**Status: spec; build steps 1 and 2 built (2026-11-18: `askGithub`'s `limited`, the in-query `rateLimit`, the
+reset-time backoff, then the leader's side: the run query, the watch registry, the reserve for tasks, `watch-set` and
+`watch-event` — DESIGN.md, Scheduler, "PR status"); steps 3 and 4 (the daemon's table and the surfaces) are not.
 Drafted 2026-11-17; every decision below is proposed for the owner's review unless marked decided.** A
 session asks the fleet to watch a pull request or an Actions run and is told through its inbox when something
 happens, instead of polling GitHub itself. The leader already reads every task's PR in batches (DESIGN.md, "PR
@@ -120,17 +121,18 @@ A watch is the daemon's, not the leader's, and is bound to the session that made
 Events are computed by the leader from a reading, per target, and fanned out to each watch whose `seen` set (below)
 lacks the event's key:
 
-| Target | Event       | Key                          | When                                                                                | Ends the watch |
-| ------ | ----------- | ---------------------------- | ----------------------------------------------------------------------------------- | -------------- |
-| PR     | `checks`    | `checks:<head>:<pass\|fail>` | the head's rollup (`statusCheckRollup.state`) reads `SUCCESS`, or `FAILURE`/`ERROR` | no             |
-| PR     | `conflict`  | `conflict:<head>`            | `mergeStateStatus` reads `DIRTY` on that head                                       | no             |
-| PR     | `merged`    | `merged`                     | `state` is `MERGED` (stacked or not; the note says which, `stacked`)                | yes            |
-| PR     | `closed`    | `closed`                     | `state` is `CLOSED`                                                                 | yes            |
-| Run    | `completed` | `completed:<attempt>`        | `checkSuite.status` is `COMPLETED`                                                  | yes            |
+| Target | Event       | Key                          | When                                                                       | Ends the watch |
+| ------ | ----------- | ---------------------------- | -------------------------------------------------------------------------- | -------------- |
+| PR     | `checks`    | `checks:<head>:<pass\|fail>` | every context of the head's last commit passes, or any one fails (S2)      | no             |
+| PR     | `conflict`  | `conflict:<head>`            | `mergeStateStatus` reads `DIRTY` or `mergeable` `CONFLICTING` on that head | no             |
+| PR     | `merged`    | `merged`                     | `state` is `MERGED` (stacked or not; the note says which, `stacked`)       | yes            |
+| PR     | `closed`    | `closed`                     | `state` is `CLOSED`                                                        | yes            |
+| Run    | `completed` | `completed:<attempt>`        | `checkSuite.status` is `COMPLETED`                                         | yes            |
 
 - **Fail-fast.** `checks` fires on the first `FAILURE` reading, while other checks may still run, as `gh pr checks
-  --watch --fail-fast` does; a later pass of the same head after a re-run fires `checks:<head>:pass` once more. That
-  the rollup reads `FAILURE` while other contexts are pending is spike S2.
+  --watch --fail-fast` does; a later pass of the same head after a re-run fires `checks:<head>:pass` once more. Built
+  2026-11-18 on the contexts, not the rollup's `state` (S2: DESIGN.md, "PR status", "What a watch's events are"). The
+  head is `headRefOid`.
 - **All checks, not only required ones.** A session fixing CI cares about an optional check too. The note marks which
   failing names are required (W5), so a session can tell a merge blocker from noise.
 - **A PR watch spans the PR's life** until it is merged or closed: a push, a failure, a fix, a conflict, a rebase and
@@ -209,13 +211,9 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
   which already reads the head, `mergeStateStatus` and every context with `isRequired`; it gains `detailsUrl` on
   `CheckRun`. A PR that is both a task's and watched shares its aliases. A watched PR's reading writes no record and
   no task: it only feeds W4.
-- **Runs, by GraphQL, not REST.** A third query, aliased `w<i>`: `resource(url: $u<i>){ ... on WorkflowRun {
-  databaseId checkSuite{ status conclusion } } }`, 50 a query, the URL as a `URI` variable built from the parsed
-  owner, repo and id (never the session's string). Spiked 2026-11-17 against this repo: `resource(url:)` resolves a
-  run URL to a `WorkflowRun`, two aliases in one query cost 1 point, and `checkSuite{ checkRuns(first: 20){ nodes{
-  name conclusion databaseId detailsUrl } } }` lists its jobs with job links. The failing jobs are read only for a run
-  that just read `COMPLETED` with a failing conclusion, in the same query's next poll or a fourth small one (S1 measures
-  which is cheaper).
+- **Runs, by GraphQL, not REST.** Built 2026-11-18 (DESIGN.md, "PR status", "The run query"): a third query, aliased
+  `w<i>`, 50 a query, the URL a `URI` variable built from the parsed owner, repo and id (never the session's string),
+  reading `checkRuns(first:20, filterBy:{checkType: LATEST})` in the same query, so no fourth query exists (S1).
 - **Why GraphQL for runs.** It is the budget that did not run out, it batches 50 runs into a point where REST costs a
   request each, and it keeps no per-run state. **Rejected: REST with `If-None-Match`**, which `gh-run-wait` proves
   free on a 304: a run's ETag changes whenever the run is updated, which during a run may be every poll (unmeasured),
@@ -237,20 +235,19 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
 - **A rate-limit answer is its own class, and the poller waits for the reset.** Built 2026-11-18: DESIGN.md,
   Scheduler, "PR status", "A spent budget is waited out" (the class, S3's shapes, the reset's sources and the
   backoff).
-- **A reserve for tasks.** When the last reading's `remaining` is under 500 points, the poller reads only tasks' PRs
-  (which settle tasks and release dependents) and drops watched targets until `resetAt`. A watch is a convenience; a
-  merge settling is not. Lands with step 2: until watched targets exist there is nothing to drop; step 1 keeps the
-  term's newest in-query `remaining` and `resetAt` for it.
-- **Watchers are told, once per suspension.** When a watch's reads stop for longer than two intervals (a rate limit,
-  the reserve, `unauthenticated`, `missing`, `failed`), the leader sends `suspended` with a reason enum and, for a
-  limit, the reset time. The daemon delivers a fixed note: for a limit "GitHub's budget for this fleet's account is
+- **A reserve for tasks.** Built 2026-11-18: DESIGN.md, "PR status", "Reserve for tasks". A watch is a convenience; a
+  merge settling is not.
+- **Watchers are told, once per suspension.** The leader's side is built (2026-11-18: DESIGN.md, "PR status",
+  "Suspended and unreadable"): a watch whose reads stop for longer than two intervals gets a `suspended` event with a
+  reason enum and, for a limit, the reset time. The daemon delivers a fixed note (step 3): for a limit "GitHub's budget for this fleet's account is
   spent until HH:MM UTC; this watch resumes then; do not poll GitHub yourself meanwhile", **without wake** (an
   `append`: the session is waiting either way, and waking it to say "keep waiting" costs a turn); for a login or a
   missing `gh`, "the fleet cannot read GitHub; this watch is suspended" **with wake**, since that may never heal by
   itself and the session should fall back to its own polling at 30 s or ask its user. The watch stays and resumes
   when reads do; the fallback is the session's call. One note per watch per suspension, and a resumption says nothing.
 - **A target the forge will not describe** (the alias answers `null`: no repo, no access, no such run) for two
-  consecutive polls ends the watch with an `unreadable` note, with wake.
+  consecutive polls ends the watch with an `unreadable` note, with wake. The leader's event is built (2026-11-18); the
+  note is step 3's.
 - **No leader, or one that does not advertise `watches`**: the add is refused (`no_leader`, `unsupported`) and the
   session polls itself. A leader lost after the add: the daemon, having had no `watch-set` answered for 10 minutes,
   sends its watches the `suspended` note with reason `no_leader`, with wake, once.
@@ -259,15 +256,11 @@ else reads GitHub for a watch. Watched targets join the poll's target list; noth
 
 ### W9. Leader change and daemon restart: the daemon is the owner of record
 
-- **The leader holds watches as soft state**, in memory per term, keyed by device id: what each daemon's last
-  accepted `watch-set` said. Nothing is in the relay's store.
-- **`watch-set` is the whole set**, never a delta: the daemon sends every live watch it holds (id, kind, target,
-  `head`, `seen`), on every change, every 5 minutes as a heartbeat, and at once when it sees a new leader nominee in a
-  registry push. The leader replaces that device's set with it, answers which entries it refused (`fleet_full`,
-  `invalid`), and drops a device's set when no `watch-set` from it arrived for 15 minutes. So a new leader, a relay
-  hiccup or a lost frame each heal within one heartbeat, with no takeover step of their own. Each set carries a
-  generation (the daemon's boot id and a counter); the leader keeps the highest per device, so a reordered older set is
-  ignored, and the one replay guard (`schedulerGuard`) refuses a replayed one.
+- **The leader's registry is built** (2026-11-18): DESIGN.md, "PR status", "The registry" (soft state per term, keyed by
+  device id, the whole set replacing, the generation, the 15 minute expiry, the caps and the refusals, the answers).
+  Nothing is in the relay's store. The daemon's side is step 3: it sends every live watch it holds (id, kind, target,
+  `head`, `seen`) on every change, every 5 minutes as a heartbeat, and at once when it sees a new leader nominee in a
+  registry push, so a new leader, a relay hiccup or a lost frame each heal within one heartbeat.
 - **The daemon persists its table** in `stateDir()/watches.json` (0600, written by atomic rename): per watch the id,
   kind, target, `head`, `seen`, the pane id, the pane process's pid and start time, the `claude` process's pid and
   start time, task id or none, made and expiry times. No note text, check name or reading. A restart (a self-update is
@@ -390,13 +383,11 @@ wants it, it is its own decision against the "manual" one above.
 
 ## Spikes before build
 
-- **S1 (partly done 2026-11-17).** `resource(url:)` resolves a run URL to a `WorkflowRun` and batches as aliases (2
-  aliases, 1 point). Still to measure: the point cost of 50 run aliases with and without `checkRuns(first: 20)`, of a
-  blocked-state run of 10 PRs with `detailsUrl` added, and what a run in a repo the token cannot see answers (expected:
-  a `null` alias and a `NOT_FOUND` error, as for a PR). If `resource(url:)` misbehaves, REST with `If-None-Match`
-  (W7's fallback) is the plan, with S1 measuring how often a running run's ETag changes.
-- **S2.** Does `statusCheckRollup.state` read `FAILURE` while other contexts are still pending? If not, fail-fast
-  needs the blocked-state read's contexts rather than the rollup.
+- **S1 (done 2026-11-18).** Recorded in DESIGN.md, "PR status", "The run query": 50 run aliases cost 1 point with and
+  without `checkRuns(first:20)`, a blocked read of 10 PRs costs 1 point with `detailsUrl`, and a run the token cannot
+  see answers a `null` alias with no error. `resource(url:)` is reliable, so the REST fallback is not needed.
+- **S2 (done 2026-11-18).** Not observed in 32 open PRs: a rollup reading `FAILURE` with pending contexts, so
+  fail-fast reads the contexts. Recorded in DESIGN.md, "PR status", "What a watch's events are".
 - **S3 (done 2026-11-18, from `gh`'s source and GitHub's docs, not a live spent budget).** Recorded beside the
   `limited` class in DESIGN.md, "PR status".
 - **S4.** An idle Claude session woken by a `wake` note after 30-plus minutes, with the session waiting by ended turn
@@ -410,12 +401,27 @@ wants it, it is its own decision against the "manual" one above.
 3. **A budget gauge**: built as #547 (`MachineStatus.gh`, the leader's `github` alert). **A live-watch count on the
    Machines row**: not built.
 
+## For step 3: the `watch-set` contract the leader built
+
+What the daemon's table must do to fit the leader's registry (DESIGN.md, "PR status", "The registry"):
+
+- **`gen.n` goes up on every send**, a heartbeat included. An equal `gen` is re-answered as last computed without
+  replacing the set; a lower `n` on the same boot is ignored unanswered (`onWatchSet` returns `false`), so a sender
+  that kept a counter across a restart without the boot id would be silent.
+- **`set` is repeated until `ok: true`.** Every accepted set is answered by a `watch-event` carrying `set`; the leader
+  sends it again at each poll until the daemon's answer reports it taken.
+- **`fleet_full` means "not polled for now", not "ended".** The entry stays in the table and in the next set; the
+  leader re-evaluates its refusals on every replacing set. An `invalid` entry is the daemon's to drop.
+- **Keys in `seen` cover `suspended:<since>`**, so a suspension already told is not sent again by a new leader.
+- **A watch id in `delivered` is the only acknowledgement** the leader keeps; a key is never recorded before it.
+
 ## Build order
 
 1. **Leader side, no new surface** (built 2026-11-18): `askGithub`'s `limited` class and the in-query `rateLimit`,
    the reset-time backoff (W8). The reserve moved to step 2.
 2. **Spikes S1 and S2**, then the run query, the watch registry and the reserve for tasks in the poller (W4, W7, W8), behind
-   `CAPABILITIES.watches`, with `watch-set` and `watch-event` (W6, W9) and their parsers, tests against a `gh` stub.
+   `CAPABILITIES.watches`, with `watch-set` and `watch-event` (W6, W9) and their parsers, tests against a `gh` stub
+   (built 2026-11-18).
 3. **The daemon's table, `watches.json`, the `watch` frame, delivery and the custodian hold** (W3, W5, W6, W9), the
    audit origin, and the threat-model invariants into CLAUDE.md and DESIGN.md.
 4. **MCP's `watch_github` and `unwatch_github`** with the verified-leader gate (W10), S4 live, then the /ship and
