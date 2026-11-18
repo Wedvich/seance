@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { importPsk, open as openSealed, parseMachineStatus, toBase64, type MachineStatus } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
-import { startGithubRate, type GithubRateReader } from "../src/github-rate.ts";
+import { graphqlResetOf, startGithubRate, type GithubRateReader } from "../src/github-rate.ts";
 import { startDaemon } from "../src/run.ts";
 import {
   makeGhStub,
@@ -270,5 +270,13 @@ describe("the daemon", () => {
       }
     });
     expect(await gh.calls()).toBe(0);
+  });
+});
+
+describe("graphqlResetOf", () => {
+  test("the GraphQL budget's reset in unix ms, or null with no GraphQL reading", () => {
+    expect(graphqlResetOf({ u: 7, c: [5000, 10, 100], g: [5000, 0, 1_800_000_000] })).toBe(1_800_000_000_000);
+    expect(graphqlResetOf({ c: [5000, 10, 100] })).toBeNull();
+    expect(graphqlResetOf(null)).toBeNull();
   });
 });

@@ -14,7 +14,11 @@ const MAX_OUTPUT_BYTES = 1 << 20;
 /** `gh`'s exit code for a missing or rejected credential. */
 const EXIT_AUTH = 4;
 
-export type GhFailure = "missing" | "unauthenticated" | "failed";
+/**
+ * `limited` is GitHub refusing for a spent rate limit, primary or secondary (DESIGN.md, "PR status", "Outcome classes"):
+ * its own class so a poller can wait for the reset rather than retry into an empty budget.
+ */
+export type GhFailure = "missing" | "unauthenticated" | "limited" | "failed";
 
 export type GhAnswer =
   | { readonly kind: GhFailure }
@@ -30,6 +34,26 @@ export interface GhOpts {
 /** A body with no `data` that is GitHub refusing the token: a revoked or expired one exits 1, not 4. */
 function isBadCredentials(body: Record<string, unknown>): boolean {
   return body["message"] === "Bad credentials" || body["status"] === "401" || body["status"] === 401;
+}
+
+const RATE_LIMIT_MESSAGE = /\brate limit\b/iu;
+
+/**
+ * A body with no `data` that is a rate limit (S3, from `gh`'s source and GitHub's docs, not a live spent budget): the
+ * primary GraphQL limit answers HTTP 200 with `errors[].type` `RATE_LIMITED`; the secondary limit (and REST's
+ * primary) a 403 or 429 whose `message` says rate limit. `gh api` prints either body to stdout and exits 1, and shows
+ * no header (`Retry-After` included) without `-i`.
+ */
+function isRateLimited(body: Record<string, unknown>): boolean {
+  if (typeof body["message"] === "string" && RATE_LIMIT_MESSAGE.test(body["message"])) return true;
+  const { errors } = body;
+  if (!Array.isArray(errors)) return false;
+  return errors.some(
+    (error) =>
+      isRecord(error) &&
+      (error["type"] === "RATE_LIMITED" ||
+        (typeof error["message"] === "string" && RATE_LIMIT_MESSAGE.test(error["message"]))),
+  );
 }
 
 type GhRun =
@@ -60,7 +84,7 @@ async function runGh(opts: GhOpts, args: readonly string[]): Promise<GhRun> {
  * One `gh` GraphQL run. A node the forge does not answer for (not found, no
  * access) makes `gh` exit 1 with the full JSON on stdout and `null` at its
  * alias, so a non-zero exit is not a failure by itself — only exit 4, a
- * timeout, or stdout that is no GraphQL answer is.
+ * timeout, stdout that is no GraphQL answer, or a body with no `data` is.
  */
 export async function askGithub(opts: GhOpts, query: string, variables: readonly string[]): Promise<GhAnswer> {
   const run = await runGh(opts, ["graphql", "-f", `query=${query}`, ...variables]);
@@ -73,7 +97,10 @@ export async function askGithub(opts: GhOpts, query: string, variables: readonly
   }
   if (!isRecord(body)) return { kind: "failed" };
   const { data } = body;
-  if (!isRecord(data)) return { kind: isBadCredentials(body) ? "unauthenticated" : "failed" };
+  if (!isRecord(data)) {
+    if (isBadCredentials(body)) return { kind: "unauthenticated" };
+    return { kind: isRateLimited(body) ? "limited" : "failed" };
+  }
   return { kind: "ok", body, data };
 }
 

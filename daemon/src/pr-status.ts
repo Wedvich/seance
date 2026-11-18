@@ -64,6 +64,13 @@ export interface PrPollerOpts {
   readonly maxBackoffMs?: number;
   /** One `gh` run, killed with its group past it. */
   readonly timeoutMs?: number;
+  /**
+   * The GraphQL budget's reset (unix ms) from this machine's own rate reader (`github-rate.ts`), or null: where a
+   * `limited` poll looks when no in-query `resetAt` of this term is still ahead.
+   */
+  readonly graphqlReset?: () => number | null;
+  /** In [0, 1): the share of `LIMIT_JITTER_MS` added to a wait for the reset. `Math.random` unless a test pins it. */
+  readonly random?: () => number;
 }
 
 export interface PrPollerDeps extends PrPollerOpts {
@@ -90,8 +97,48 @@ type Failure = GhFailure;
 const REMEDY: Record<Failure, string> = {
   missing: "gh is not on this leader's PATH — install it, then restart seanced",
   unauthenticated: "gh is not logged in on this leader — run gh auth login",
+  limited: "GitHub's rate limit for this leader's gh user is spent",
   failed: "gh did not answer usably",
 };
+
+/**
+ * Selected beside every poll query's aliases, so each answer says what the budget holds and what the query cost.
+ * Constant text: the queries stay built from alias indices alone.
+ */
+const RATE_LIMIT_SELECTION = "rateLimit{ cost remaining resetAt }";
+
+/** Spread over a fleet's leaders' (and terms') wakes at a reset, so none lands on the reset's first second. */
+export const LIMIT_JITTER_MS = 60_000;
+
+/** GraphQL's window is an hour: a reset further out than this is no reading of it. */
+const MAX_RESET_AHEAD_MS = 61 * 60_000;
+
+/** The GraphQL budget as the last good answer's `rateLimit` gave it; `resetAt` in unix ms. */
+export interface GraphqlBudget {
+  readonly remaining: number;
+  readonly resetAt: number;
+}
+
+function budgetOf(data: Record<string, unknown>): GraphqlBudget | null {
+  const rateLimit = data["rateLimit"];
+  if (!isRecord(rateLimit)) return null;
+  const { remaining, resetAt } = rateLimit;
+  if (typeof remaining !== "number" || !Number.isSafeInteger(remaining) || remaining < 0) return null;
+  if (typeof resetAt !== "string") return null;
+  const at = Date.parse(resetAt);
+  return Number.isFinite(at) ? { remaining, resetAt: at } : null;
+}
+
+/**
+ * The wait before the poll after a `limited` one: until `resetAt` plus up to `LIMIT_JITTER_MS`, or null (the
+ * ladder) when no reset is known, it has passed, or it lies past one GraphQL window.
+ */
+export function limitedDelay(resetAt: number | null, now: number, random: number): number | null {
+  if (resetAt === null) return null;
+  const ahead = resetAt - now;
+  if (!(ahead > 0) || ahead > MAX_RESET_AHEAD_MS) return null;
+  return ahead + Math.floor(Math.min(Math.max(random, 0), 1) * (LIMIT_JITTER_MS - 1));
+}
 
 interface Target {
   readonly pr: GithubPr;
@@ -130,7 +177,7 @@ function queryText(count: number): string {
         `p${i}: repository(owner:$o${i},name:$r${i}){ defaultBranchRef{ name } pullRequest(number:$n${i}){ state isDraft merged baseRefName mergeCommit{ oid } commits(last:1){ nodes{ commit{ statusCheckRollup{ state } } } } } }`,
     )
     .join(" ");
-  return `query(${vars}){ ${reads} }`;
+  return `query(${vars}){ ${reads} ${RATE_LIMIT_SELECTION} }`;
 }
 
 /** Strings through `-f`: `-F` reads `@file` and coerces types, so only the regex-checked number goes through it. */
@@ -153,7 +200,7 @@ function landedQueryText(landings: readonly Landing[]): string {
         `c${i}: repository(owner:$o${i},name:$r${i}){ defaultBranchRef{ compare(headRef:$h${i}){ status } } }`,
     )
     .join(" ");
-  return `query(${vars}){ ${reads} }`;
+  return `query(${vars}){ ${reads} ${RATE_LIMIT_SELECTION} }`;
 }
 
 function landedVariables(landings: readonly Landing[]): string[] {
@@ -181,7 +228,7 @@ function blockedQueryText(wide: readonly Wide[]): string {
         `b${i}: repository(owner:$o${i},name:$r${i}){ pullRequest(number:$n${i}){ mergeStateStatus isInMergeQueue autoMergeRequest{ enabledAt } reviewRequests{ totalCount } commits(last:1){ nodes{ commit{ oid statusCheckRollup{ contexts(first:50){ nodes{ __typename ... on CheckRun{ databaseId name status conclusion isRequired(pullRequestNumber:$n${i}) } ... on StatusContext{ context state isRequired(pullRequestNumber:$n${i}) } } } } } } } } }`,
     )
     .join(" ");
-  return `query(${vars}){ ${reads} }`;
+  return `query(${vars}){ ${reads} ${RATE_LIMIT_SELECTION} }`;
 }
 
 function blockedVariables(wide: readonly Wide[]): string[] {
@@ -425,14 +472,21 @@ type Chunk =
   | { readonly kind: Failure }
   | { readonly kind: "ok"; readonly reads: readonly Read[]; readonly wide: readonly Wide[] };
 
-/** `askGithub` (`gh.ts`) under the poller's default timeout. */
+/** The poller's own deps: `observe` sees every answer, for the budget and for a `limited` run. */
+interface PollDeps extends PrPollerDeps {
+  readonly observe: (answer: GhAnswer) => void;
+}
+
+/** `askGithub` (`gh.ts`) under the poller's default timeout, each answer shown to `observe` where given. */
 async function ask(
-  deps: Pick<PrPollerOpts, "gh" | "timeoutMs">,
+  deps: Pick<PrPollerOpts, "gh" | "timeoutMs"> & { readonly observe?: (answer: GhAnswer) => void },
   query: string,
   variables: readonly string[],
 ): Promise<GhAnswer> {
   const gh = deps.gh === undefined ? {} : { gh: deps.gh };
-  return askGithub({ ...gh, timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS }, query, variables);
+  const answer = await askGithub({ ...gh, timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS }, query, variables);
+  deps.observe?.(answer);
+  return answer;
 }
 
 /**
@@ -443,7 +497,7 @@ async function ask(
  * would hold such a task in `awaiting-merge` until it expires. Anything else —
  * a failed run, an unanswered alias, `DIVERGED` — keeps the merge stacked.
  */
-async function landedOnDefault(deps: PrPollerDeps, landings: readonly Landing[]): Promise<ReadonlySet<number>> {
+async function landedOnDefault(deps: PollDeps, landings: readonly Landing[]): Promise<ReadonlySet<number>> {
   const landed = new Set<number>();
   if (landings.length === 0) return landed;
   const answer = await ask(deps, landedQueryText(landings), landedVariables(landings));
@@ -461,10 +515,11 @@ async function landedOnDefault(deps: PrPollerDeps, landings: readonly Landing[])
 /**
  * The blocked-state fields of `wide`, by alias index, in runs of `BLOCKED_CHUNK`. Never a failure of
  * the poll: a run that fails adds nothing for the PRs it covered, and `onFailure` is told so the poller
- * can say so once; an alias a good run answers `null` adds nothing for its PR, silently.
+ * can say so once; an alias a good run answers `null` adds nothing for its PR, silently. A `limited` run
+ * stops the rest unasked (the poller ends the poll `limited` through `observe`) and is no `onFailure`.
  */
 async function readBlocked(
-  deps: PrPollerDeps,
+  deps: PollDeps,
   wide: readonly Wide[],
   onFailure: () => void,
 ): Promise<ReadonlyMap<number, WideFields>> {
@@ -473,6 +528,7 @@ async function readBlocked(
     const run = wide.slice(from, from + BLOCKED_CHUNK);
     // oxlint-disable-next-line no-await-in-loop -- runs go one after another, never overlapping
     const answer = await ask(deps, blockedQueryText(run), blockedVariables(run));
+    if (answer.kind === "limited") break;
     if (answer.kind !== "ok") {
       onFailure();
       continue;
@@ -491,11 +547,7 @@ async function readBlocked(
  * The blocked-state read (`readBlocked`) is the caller's, after every chunk's merge reading is written:
  * its latency must not hold a merge back. `wide` names the open PRs of `wideIndices` that await it.
  */
-async function readChunk(
-  deps: PrPollerDeps,
-  prs: readonly GithubPr[],
-  wideIndices: ReadonlySet<number>,
-): Promise<Chunk> {
+async function readChunk(deps: PollDeps, prs: readonly GithubPr[], wideIndices: ReadonlySet<number>): Promise<Chunk> {
   const answer = await ask(deps, queryText(prs.length), prVariables(prs));
   if (answer.kind !== "ok") return answer;
   const { body, data } = answer;
@@ -580,12 +632,16 @@ function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>, read: 
  * Polls on a timer chain — one poll at a time — starting now. A failing poll
  * (no `gh`, not logged in, a timeout, garbage) writes nothing, warns once on
  * entering that class, and backs the next poll off from `intervalMs` toward
- * `maxBackoffMs`; the first good poll after one says so once. `stop` also
- * drops an in-flight poll's results, so a term's end never writes after it.
+ * `maxBackoffMs`; the first good poll after one says so once. A `limited` poll
+ * (GitHub's rate limit, in any of its runs) asks nothing more, keeps what it
+ * wrote, and waits for the budget's reset (`limitedDelay`) instead, on the
+ * ladder only when no reset is known. `stop` also drops an in-flight poll's
+ * results, so a term's end never writes after it.
  */
 export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void } {
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
   const maxBackoffMs = deps.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+  const random = deps.random ?? Math.random;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let state: "ok" | Failure = "ok";
@@ -593,6 +649,19 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   const unreadable = new Set<string>();
   const readThisTerm = new Set<string>();
   let blockedFailed = false;
+  // The newest in-query reading this term; docs/gh-watch.md W8's reserve for tasks will read `remaining`.
+  let budget: GraphqlBudget | null = null;
+  // Set by any run of the poll in flight that GitHub refused for its rate limit.
+  let limited = false;
+  const pollDeps: PollDeps = {
+    ...deps,
+    observe: (answer) => {
+      if (answer.kind === "limited") limited = true;
+      if (answer.kind !== "ok") return;
+      const reading = budgetOf(answer.data);
+      if (reading !== null) budget = reading;
+    },
+  };
 
   /** Once a term, and without a URL: a repo whose blocked read always times out would otherwise warn every poll. */
   const blockedFailure = (): void => {
@@ -601,11 +670,18 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     deps.log.warn("pr-status: the blocked-state read did not answer; blocked reasons are unavailable until it does");
   };
 
-  const enter = (next: "ok" | Failure): void => {
+  /** The reset a `limited` poll waits for: this term's in-query `resetAt` while ahead, else the rate reader's. */
+  const resetAt = (now: number): number | null =>
+    budget !== null && budget.resetAt > now ? budget.resetAt : (deps.graphqlReset?.() ?? null);
+
+  /** `wait` is the reset a `limited` class waits for, when one is known; never `gh`'s words. */
+  const enter = (next: "ok" | Failure, wait: number | null): void => {
     if (next === state) return;
     state = next;
     if (next === "ok") deps.log.info("pr-status: gh answers again — PR status resumed");
-    else deps.log.warn(`pr-status: ${REMEDY[next]}; PR status paused (${next})`);
+    else if (next === "limited" && wait !== null) {
+      deps.log.warn(`pr-status: ${REMEDY[next]}; PR status paused until ${new Date(wait).toISOString()} (${next})`);
+    } else deps.log.warn(`pr-status: ${REMEDY[next]}; PR status paused (${next})`);
   };
 
   /** The writes for one PR's reading, one per task read on it; `fields` is its blocked state, where read. */
@@ -644,7 +720,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       const chunk = wanted.slice(from, from + CHUNK);
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
       const answer = await readChunk(
-        deps,
+        pollDeps,
         chunk.map((target) => target.pr),
         new Set(chunk.flatMap((target, i) => (target.tasks.some((task) => task.wide) ? [i] : []))),
       );
@@ -673,11 +749,13 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       // oxlint-disable-next-line no-await-in-loop -- as above
       await Promise.all(writes);
       if (stopped) return null;
+      // A limited landed check: the chunk's merges are written, and nothing more is asked this poll.
+      if (limited) return "limited";
     }
     for (const id of spent) readThisTerm.add(id);
     for (let next = owing[0]; next !== undefined; next = owing[0]) {
       // oxlint-disable-next-line no-await-in-loop -- as above
-      const fields = await readBlocked(deps, next.wide, blockedFailure);
+      const fields = await readBlocked(pollDeps, next.wide, blockedFailure);
       if (stopped) return null;
       // Off `owing` before its write: `poll`'s flush must not retry a rejected one, which could overwrite a
       // sibling that landed with its fields.
@@ -685,12 +763,15 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       // oxlint-disable-next-line no-await-in-loop -- as above
       await Promise.all(owed(next, fields));
       if (stopped) return null;
+      // The owed chunks after it go out with their base reading (`poll`'s flush).
+      if (limited) return "limited";
     }
     return "ok";
   }
 
   /** The class the poll ended in, or null when there was nothing to poll. */
   async function poll(): Promise<"ok" | Failure | null> {
+    limited = false;
     const wanted = targets(deps.tasks(), unreadable, readThisTerm);
     if (wanted.length === 0) return null;
     const owing: Owing[] = [];
@@ -722,8 +803,15 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       schedule(intervalMs);
       return;
     }
-    enter(outcome);
+    const now = deps.now();
+    const reset = outcome === "limited" ? resetAt(now) : null;
+    const wait = limitedDelay(reset, now, random());
+    enter(outcome, wait === null ? null : reset);
     failures = outcome === "ok" ? 0 : failures + 1;
+    if (wait !== null) {
+      schedule(wait);
+      return;
+    }
     schedule(outcome === "ok" ? intervalMs : Math.min(intervalMs * 2 ** failures, maxBackoffMs));
   }
 
