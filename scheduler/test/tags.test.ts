@@ -213,3 +213,111 @@ describe("chainOwnerTags", () => {
     expect(chainOwnerTags(labelled, tasks)).toBeNull();
   });
 });
+
+describe("a continuation or successor's first move out of `queued`", () => {
+  const at = { deviceId: "a", exclave: "main", clone: "app" };
+
+  /** The predecessor, labelled through the leader's own amend (so its record is past version 1, as a real one is). */
+  async function labelled(store: MemoryQueueStore, scheduler: Scheduler, label: string): Promise<Task> {
+    const old = await enqueue(store, scheduler, spec({ tags: { "creator.ref": "linear:ENG-1" } }), "old");
+    expect(await scheduler.amend({ taskId: old.id, ownerTags: { label } })).toMatchObject({ ok: true });
+    return old;
+  }
+
+  test("a continuation takes the predecessor's label, kept beside its own creator ref, in the stored record", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    await labelled(store, scheduler, "Release");
+    const next = await enqueue(
+      store,
+      scheduler,
+      spec({ mode: "continue", continues: { task: "old", at }, tags: { "creator.ref": "linear:ENG-1" } }),
+      "next",
+    );
+    await pass(scheduler);
+    const want = { "creator.ref": "linear:ENG-1", "owner.label": "Release" };
+    expect(scheduler.task(next.id)).toMatchObject({ state: "ready", spec: { tags: want } });
+    expect((await stored(store, next.id))?.body.spec.tags).toEqual(want);
+  });
+
+  test("a successor takes it on the write that releases it, from a predecessor `superseded` naming it", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const old: Task = {
+      id: "old",
+      state: "superseded",
+      createdAt: NOW,
+      successor: "next",
+      spec: spec({ tags: { "creator.ref": "linear:ENG-1", "owner.label": "Release" } }),
+    };
+    expect((await store.put(old.id, 0, old)).ok).toBe(true);
+    await scheduler.refresh(old.id);
+    const next = await enqueue(
+      store,
+      scheduler,
+      spec({ succeeds: { task: "old", account: "org:a", trigger: "manual", at } }),
+      "next",
+    );
+    await pass(scheduler);
+    expect(scheduler.task(next.id)).toMatchObject({ state: "ready", spec: { tags: { "owner.label": "Release" } } });
+  });
+
+  test("a label the owner set and cleared while it waited stays cleared", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    await labelled(store, scheduler, "Release");
+    const next = await enqueue(store, scheduler, spec({ mode: "continue", continues: { task: "old", at } }), "next");
+    expect(await scheduler.amend({ taskId: next.id, ownerTags: { label: "Hotfix" } })).toMatchObject({ ok: true });
+    expect(await scheduler.amend({ taskId: next.id, ownerTags: { label: "" } })).toMatchObject({ ok: true });
+    expect(scheduler.task(next.id)?.spec.tags).toBeUndefined();
+    await pass(scheduler);
+    expect(scheduler.task(next.id)?.state).toBe("ready");
+    expect(scheduler.task(next.id)?.spec.tags).toBeUndefined();
+    expect((await stored(store, next.id))?.body.spec.tags).toBeUndefined();
+  });
+});
+
+describe("a label the store has no room for", () => {
+  test("is tags_full, not a prompt error, and nothing is written", async () => {
+    class Full extends MemoryQueueStore {
+      override async put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (body.spec.tags?.["owner.label"] === "big") return { ok: false, code: "too_large" };
+        return super.put(id, version, body);
+      }
+    }
+    const { store, scheduler } = setup(new Full(), offline());
+    const task = await enqueue(store, scheduler, spec());
+    const before = await stored(store, task.id);
+    expect(await scheduler.amend({ taskId: task.id, ownerTags: { label: "big" } })).toEqual({
+      ok: false,
+      code: "tags_full",
+    });
+    expect(await stored(store, task.id)).toEqual(before);
+  });
+
+  test("is refused after one write when the held decision has nothing to cut, and after two when it has", async () => {
+    class Full extends MemoryQueueStore {
+      readonly writes: number[] = [];
+      override async put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (body.spec.tags?.["owner.label"] !== "big") return super.put(id, version, body);
+        this.writes.push(body.decision?.candidates.length ?? 0);
+        return { ok: false, code: "too_large" };
+      }
+    }
+    const store = new Full();
+    const fleet = new FakeFleet([machine("a"), machine("b")]);
+    const { scheduler } = setup(store, fleet);
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    const candidates = scheduler.task(task.id)?.decision?.candidates.length ?? 0;
+    expect(candidates).toBe(2);
+    expect(await scheduler.amend({ taskId: task.id, ownerTags: { label: "big" } })).toMatchObject({ ok: false });
+    expect(store.writes).toEqual([2, 1]);
+
+    const aloneStore = new Full();
+    const lone = setup(aloneStore, new FakeFleet([machine("a")]));
+    const one = await enqueue(lone.store, lone.scheduler, spec());
+    await pass(lone.scheduler);
+    expect(lone.scheduler.task(one.id)?.decision?.candidates).toHaveLength(1);
+    expect(await lone.scheduler.amend({ taskId: one.id, ownerTags: { label: "big" } })).toMatchObject({ ok: false });
+    expect(aloneStore.writes).toEqual([1]);
+  });
+});

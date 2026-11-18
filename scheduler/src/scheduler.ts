@@ -1417,7 +1417,8 @@ export class Scheduler {
         tooLarge = code === "too_large";
       },
     );
-    if (next === null) return tooLarge ? { ok: false, code: "prompt_too_long" } : outcome;
+    // A label alone sent no prompt: the store's refusal is about the record's room for it.
+    if (next === null) return tooLarge ? { ok: false, code: tagsOnly ? "tags_full" : "prompt_too_long" } : outcome;
     if (!tagsOnly) this.#forgetDecision(taskId);
     return { ok: true, task: next };
   }
@@ -2364,9 +2365,11 @@ export class Scheduler {
       [...moves].map(([id, move]) =>
         this.#update(id, (current) => {
           if ((current.state !== "queued" && current.state !== "blocked") || current.state === move.state) return null;
-          // The first write out of `queued` takes the predecessor's `owner.*` (a blocked task moving on takes none:
-          // a label the owner cleared since stays cleared).
-          const chained = current.state === "queued" ? chainOwnerTags(current, byId) : null;
+          // The first write out of `queued` takes the predecessor's `owner.*`, but only for the record as the client
+          // created it (store version 1): an amend while it waited (a label set and cleared leaves no key to show it)
+          // is the owner's word, and a blocked task moving on takes none either.
+          const untouched = this.#held.get(id)?.version === 1;
+          const chained = current.state === "queued" && untouched ? chainOwnerTags(current, byId) : null;
           const from = chained === null ? current : { ...current, spec: chained };
           if (move.state === "failed") return advance(from, move.state, { failure: move.failure });
           // A successor whose predecessor merged while it waited: its work is done, and nothing was placed.
@@ -2686,7 +2689,8 @@ export class Scheduler {
           this.#noteSuccessor(held.task, next);
           return next;
         }
-        if (write.code === "too_large" && !trim && next.decision !== undefined) {
+        // Only a cut that changes the record is worth the second write: the same bytes would be refused again.
+        if (write.code === "too_large" && !trim && trimmed(changed) !== changed) {
           trim = true;
           continue;
         }
