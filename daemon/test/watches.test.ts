@@ -131,6 +131,9 @@ interface FakeLeader extends WatchLeader {
   answer: boolean;
   /** Refuses every entry of a set it answers. */
   refuse: WatchRefusal | null;
+  /** Held open by a test: `check` waits on it, so adds queue behind each other at the verdict. */
+  gate: Promise<void> | null;
+  checks: number;
   holds: number;
   releases: number;
   stopped: boolean;
@@ -148,11 +151,17 @@ function fakeLeader(): FakeLeader {
     accept: true,
     answer: true,
     refuse: null,
+    gate: null,
+    checks: 0,
     holds: 0,
     releases: 0,
     stopped: false,
     target: null,
-    check: () => Promise.resolve(leader.verdict),
+    check: async () => {
+      leader.checks += 1;
+      await leader.gate;
+      return leader.verdict;
+    },
     hold: () => {
       leader.holds += 1;
     },
@@ -277,6 +286,18 @@ const checksFail = (id: string): WatchEvent =>
     failing: [{ name: "build", required: true }],
   });
 const merged = (id: string): WatchEvent => event(id, "merged", { kind: "merged" });
+
+/** The `seen` of the first watch in the saved file. */
+async function savedSeen(path: string): Promise<readonly unknown[]> {
+  // A write still in flight is no file yet: the caller polls.
+  const saved: unknown = await readFile(path, "utf8").then(
+    (text): unknown => JSON.parse(text),
+    () => null,
+  );
+  const entry = isRecord(saved) && Array.isArray(saved["watches"]) ? saved["watches"][0] : null;
+  const seen: unknown = isRecord(entry) ? entry["seen"] : null;
+  return Array.isArray(seen) ? seen : [];
+}
 
 const lineCount = (r: Rig, needle: string): number => r.audit.filter((line) => line.includes(needle)).length;
 const idsOf = (set: WatchSet): readonly string[] => set.watches.map((w) => w.id);
@@ -420,6 +441,45 @@ describe("add", () => {
     expect(isRecord(saved) ? saved["watches"] : null).toEqual([]);
   });
 
+  test("a replacement the leader refuses, or cannot be handed, leaves the old watch in place and unaudited as ended", async () => {
+    const r = rig();
+    const target = await listening(r, "add-keeps");
+    const old = await added(r, target, pr(1));
+    r.leader.refuse = "fleet_full";
+    expect(await r.watches.handle(addFrame(pr(1)), target.pid)).toEqual({ ok: false, code: "fleet_full" });
+    r.leader.refuse = null;
+    r.leader.accept = false;
+    expect(await r.watches.handle(addFrame(pr(1)), target.pid)).toEqual({ ok: false, code: "no_leader" });
+    r.leader.accept = true;
+    expect(r.watches.holds(target.id)).toBe(true);
+    await pollUntil(() => idsOf(r.latest()).join() === old, "the set to state the old watch again");
+    expect(lineCount(r, "reason=replaced")).toBe(0);
+    // The old watch still stands, so a remove by its id answers ok.
+    expect(await r.watches.handle(removeFrame(old), target.pid)).toEqual({ ok: true });
+  });
+
+  test("two adds of one target from one session are made one after the other, the later replacing the earlier", async () => {
+    const r = rig();
+    const target = await listening(r, "add-twice");
+    let open: () => void = () => undefined;
+    r.leader.gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const first = r.watches.handle(addFrame(pr(1)), target.pid);
+    const second = r.watches.handle(addFrame(pr(1)), target.pid);
+    // A negative: the second add must not have reached the leader's verdict while the first is still at it.
+    await Bun.sleep(50);
+    expect(r.leader.checks).toBe(1);
+    open();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toMatchObject({ ok: true });
+    expect(b).toMatchObject({ ok: true });
+    const ids = [a, b].map((reply) => ("id" in reply ? reply.id : ""));
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(idsOf(r.latest())).toEqual([ids[1]]);
+    expect(lineCount(r, "reason=replaced")).toBe(1);
+  });
+
   test("a leader that does not answer in time is taken as ok", async () => {
     const r = rig();
     const target = await listening(r, "add-silent");
@@ -529,6 +589,52 @@ describe("a leader's events", () => {
     expect(await r.watches.onEvent({ events: [checksFail(id)] })).toEqual({ ok: true, delivered: [id] });
     await pollUntil(() => !r.watches.holds(target.id), "the held note's fate to end the watch");
     expect(lineCount(r, "op=end kind=pr event=- reason=nolistener")).toBe(1);
+  });
+
+  test("a held note's keys are saved only once it lands: a stop before then leaves them for the leader to send again", async () => {
+    const r = rig({ graceMs: 5_000 });
+    const target = await listening(r, "ev-held-saved");
+    const id = await added(r, target, pr(1));
+    target.listener.drop();
+    expect(await r.watches.onEvent({ events: [checksFail(id)] })).toEqual({ ok: true, delivered: [id] });
+    const reconnected = sinkDouble();
+    await r.messages.listen(INBOX, target.pid, reconnected.sink);
+    await pollUntil(async () => (await savedSeen(r.path)).length === 1, "the landed note's key to be saved");
+    expect(notes(reconnected)).toHaveLength(1);
+
+    const held = rig({ graceMs: 5_000 });
+    const second = await listening(held, "ev-held-lost");
+    const secondId = await added(held, second, pr(2));
+    second.listener.drop();
+    expect(await held.watches.onEvent({ events: [checksFail(secondId)] })).toEqual({ ok: true, delivered: [secondId] });
+    await held.watches.stop();
+    // Held and never written: not in what a restart reloads, so the leader's next event for it is not skipped.
+    expect(await savedSeen(held.path)).toEqual([]);
+  });
+
+  test("a stopped table ends nothing and writes nothing: a held note's late fate leaves the file as the stop left it", async () => {
+    const r = rig({ graceMs: 60 });
+    const target = await listening(r, "ev-stopped");
+    const id = await added(r, target, pr(1));
+    target.listener.drop();
+    await r.watches.onEvent({ events: [checksFail(id)] });
+    await r.watches.stop();
+    const before = await readFile(r.path, "utf8");
+    // A negative: the grace runs out after the stop and must change nothing.
+    await Bun.sleep(200);
+    await r.watches.stop();
+    expect(await readFile(r.path, "utf8")).toBe(before);
+    expect(lineCount(r, "op=end")).toBe(0);
+  });
+
+  test("a note that finds the pane carrying another task ends the watch as task, not session", async () => {
+    const r = rig();
+    const target = await listening(r, "ev-moved", "task-moved-1");
+    const id = await added(r, target, pr(1));
+    await tmuxOk(["set-option", "-p", "-t", target.id, "@seance-task", "task-moved-2"]);
+    expect(await r.watches.onEvent({ events: [checksFail(id)] })).toEqual({ ok: true, delivered: [] });
+    expect(lineCount(r, "op=end kind=pr event=- reason=task")).toBe(1);
+    expect(lineCount(r, "reason=session")).toBe(0);
   });
 
   test("a failed pane read delivers nothing and ends nothing, and the next event delivers (review finding 2)", async () => {
@@ -670,10 +776,8 @@ describe("the tick", () => {
     expect(idsOf(second ?? first ?? r.latest())).toEqual([id]);
     r.leader.answer = true;
     await pollUntil(() => r.leader.sets.at(-1) !== second && r.leader.sets.length >= 3, "a resend that is answered");
-    await pollUntil(async () => {
-      const reply = await r.watches.onEvent({ events: [merged(id)] });
-      return reply.ok && reply.delivered.includes(id);
-    }, "the watch to be delivered after the answer");
+    // Driven once: a poll callback that drives the table would deliver as often as the poll's pace says.
+    expect(await r.watches.onEvent({ events: [merged(id)] })).toEqual({ ok: true, delivered: [id] });
   });
 
   test("an empty pane list is a failed read: it ends nothing by pane, while a dead claude still ends its watch", async () => {

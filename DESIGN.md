@@ -12250,8 +12250,14 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   `unsupported`). The entry is inserted and saved, the whole set sent, and the add waits at most 3 s for the answer to
   it: a `fleet_full` or `invalid` refusal in that answer removes the entry and is the reply; no answer in the window is
   `ok` (the watch stays, the tick resends). A send the leader could not be handed (no term in process, a leg that is
-  down) is `no_leader` and removes the entry. A replacement (the same target from the same session) ends the old watch
-  (`reason=replaced`) once the verdict has passed, so a refused add costs the session nothing.
+  down) is `no_leader` and removes the entry. A replacement (the same target from the same session) takes the old
+  watch out of the table for the new one's set and puts it back on any refusal or `no_leader`, so a refused add costs
+  the session nothing; the old watch's end (`reason=replaced`) is audited once the add has succeeded. **Adds of one
+  session run one at a time** (a chain per session), so a replacement is made over a finished add and never over one
+  still waiting for its answer, whose reply would otherwise name an id the table no longer holds. **Accepted:** during
+  the restart grace `canListen` passes any bound session, one with no inbox mod included (its listener may simply not
+  have reconnected yet); if none comes, the first note is held, its grace runs out, and the watch ends
+  `reason=nolistener` with nothing told to the session.
 - **Who leads, and how the set goes** (`watch-leader.ts`). A daemon that leads (`leader.term() !== null`) hands the
   set to its own registry in process (`onWatchSet`, parsed fresh like a frame, and answered in process). Otherwise the set
   goes on the daemon leg (`RelayClient.sendWatchSet`), sealed from this daemon's own device id. Nothing is ever sent
@@ -12264,14 +12270,16 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   A new verified nominee, once the baseline is taken, makes the table restate its set at once (`onNominee`), since a
   new leader holds none of it (W9).
 - **The set and its generation.** `gen` is `{boot, n}` with `boot` this daemon's `instance` and `n` rising on every
-  send, heartbeat and resend included, so the registry's order holds across a restart. One send per frame or tick (a
-  burst of adds is one set). A set carries each watch's id, kind, URL, `head` and `seen`, at most 64.
+  send, heartbeat and resend included, so the registry's order holds across a restart. A frame or a tick sends at most
+  one set (the leader's events, the sweep and `onEnded` coalesce); each add sends its own, since it waits on that
+  set's answer, so a burst of adds is a burst of sets, each the whole table, and the higher `n` replaces. A set carries each watch's id, kind, URL, `head` and `seen`, at most 64.
 - **A set nobody answered is resent** (plan review finding 1). The table keeps `answeredGen`, the highest `gen.n` any
   answer named, and at each 60 s tick restates the table while `answeredGen` is behind the latest `n`, the last send
   failed, or 5 minutes passed (the heartbeat). `gen.n` keeps rising across resends. `no_leader` is a separate clock:
   a watch that has seen no answer for 10 minutes since the later of its own creation, the last answer and this
   process's boot is told once (`noLeaderTold`, a flag of the entry, saved), with wake, and never again however many
-  answers follow; an answer only restarts the clock for watches made after it. Answers, not sends, keep it quiet.
+  answers follow. Any answer restarts the clock for every watch not yet told, older ones included; what is once is the
+  note, not the clock. Answers, not sends, keep it quiet.
 - **Answers** (`onEvent`). A `watch-event`'s `set` is the answer to `gen`: it resolves any add waiting on a `gen.n` at or
   below it. Its refusals act only when `gen.n` is the latest: `fleet_full` leaves the watch in the table and the next
   set and tells the session once, with wake (`fleet_full` note, `fleetFullTold`, a local flag that is never in `seen`
@@ -12287,14 +12295,23 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   watch (`reason=terminal` or `unreadable`) once the note is placed. `delivered` is all or nothing per watch per frame.
   The local kinds (`no_leader`, `expired`, `invalid`, `fleet_full`) are never in `seen`: the leader never sees them.
 - **A held note** (the listener is reconnecting): `deliverWatchNote` answers `sent` and calls back with the fate. The
-  watch is listed delivered and its keys go into `seen`; if the note is never written the fate is `ended`,
-  `nolistener` or `dropped` and the watch ends under that reason. The note is lost, which is accepted: the same
-  session was not reachable for the whole grace, and the keys it would have re-received would be lost to the same end.
-  A restart loses a held note for the same reason (memory only).
+  watch is listed delivered and its keys go into the in-memory `seen` (so a repeat is skipped) and into the entry's
+  `pending`; **`pending` keys are left out of `watches.json`** until the fate is `delivered`. If the note is never
+  written the fate is `ended`, `nolistener` or `dropped` and the watch ends under that reason; the note is lost, which
+  is accepted, since the session was not reachable for the whole grace. A restart (memory only) loses a held note
+  too, but its keys were never saved, so the reloaded watch's leader sends the event again and the session is told
+  after all (a double restart inside the grace no longer swallows a wake). The set stated to the leader carries the
+  full `seen`, pending keys included.
+- **A stopped table ends nothing and writes nothing.** `stop()` is a final state: `persist` and the end of a watch
+  (`drop`) are no-ops afterwards, so work that was past its `stopped` check when `stop` ran, a held note's grace timer
+  included, neither audits an end nor appends a snapshot of the old table behind the chain `stop()` returned, which
+  the next instance (a reload in the same process) has read the file after.
 - **A failed pane read ends nothing** (plan review finding 2). `deliverWatchNote` answers `unreadable` when the pane
   list could not be read (an empty list, as `listPanePids` answers a failed `tmux`): the id is left out of `delivered`,
   the watch stays and its keys stay out of `seen`, so the leader sends the events again at the next poll. `gone` (the
-  pane is not in a list that was read) ends the watch with `reason=session`; `nolistener` with `reason=nolistener`.
+  pane is not in a list that was read) ends the watch with `reason=session`, or `reason=task` when the pane is there
+  with the same process but carries another task (read again for the audit line only); `nolistener` with
+  `reason=nolistener`.
 - **The tick** (60 s). First the sweep: a pane missing from the list, a dead `claude` process or a pane pid that changed
   ends its watches (`reason=session`) and a pane whose task changed ends them (`reason=task`); an empty pane list skips
   the pane checks (a failed read is not a vanished pane) but a dead `claude` is checked on its own. Then expiry (24 h:
@@ -12313,9 +12330,15 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   The `Watches` table logs nothing else about a watch (a failed save or send is a warning with the error's text and no
   target).
 - **The custodian.** `awaitsWake` in `run-capabilities.ts` is true for a pane `SessionEvents.awaitsWake` holds or
-  `Watches.holds(pane, taskId)` does, so `close` answers `busy` and the seat counts no round due for it. `untouchable`
-  (hand-off, pass, drain) is not changed: those are the session's or the owner's own acts, and the session's end ends the
-  watch.
+  `Watches.holds(pane, taskId)` does, so `close` answers `busy` and the seat counts no round due for it (`paneHolds`,
+  `pane-holds.ts`, one composition for both, tested apart). `untouchable` (hand-off, pass, drain) is not changed: those
+  are the session's or the owner's own acts, and the session's end ends the watch. `holds` matches the pane id and task,
+  not the pane process: a respawned pane keeps `busy` until the next tick's sweep ends its watch (at most a minute),
+  which only ever errs toward not closing.
+- **A check name in a note** is a repo's text on its way to a model: `parseFailing` keeps one that holds only
+  characters other than C0, DEL and C1 (a ZWJ emoji is legitimate and refusing it would drop the whole event), and
+  `watchNote` replaces every control, format (bidi, zero-width), surrogate, line and paragraph separator character with
+  U+FFFD, the class `printable` and `isFlagNote` use, inside the fence.
 - **For step 4** (`seance mcp`'s `watch_github` and `unwatch_github`). The frame was advertised under
   `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it closes a `watch`
   frame as malformed. The client reads a closed connection or an unparseable reply as `unsupported`, in addition to the
