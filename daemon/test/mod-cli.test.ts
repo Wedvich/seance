@@ -57,7 +57,13 @@ exit 0
     await mkdir(join(root, ".claude"));
     await mkdir(work);
     await Bun.write(join(root, ".exclaves"), "work\ngone\n");
-    env = { ...process.env, HOME: root, PATH: `${bin}${delimiter}${dirname(process.execPath)}` };
+    env = {
+      ...process.env,
+      HOME: root,
+      PATH: `${bin}${delimiter}${dirname(process.execPath)}`,
+      // Its own: an inherited one names the developer's live daemon, which runs from another clone.
+      SEANCE_STATE_DIR: join(root, "state"),
+    };
     // An inherited one is an extra, ambient target — a developer's shell would
     // install into it where CI wouldn't.
     delete env["CLAUDE_CONFIG_DIR"];
@@ -94,6 +100,12 @@ exit 0
       expect(out).toContain(`Claude mod session-events installed in ${label}`);
       expect(out).toContain(`Claude mod inbox installed in ${label}`);
     }
+    // The settings hooks ride the same install, into each config dir set up, running this checkout's CLI.
+    for (const dir of [join(root, ".claude"), work]) {
+      const settings = await readFile(join(dir, "settings.json"), "utf8");
+      expect(settings).toContain(`${checkout}/daemon/src/main.ts' session-event --hook`);
+    }
+    expect(out).toContain(`séance's settings hooks written to ${join(work, "settings.json")}`);
   });
 
   test("a failing exclave is reported and fails the run, without stopping the ones after it", async () => {
@@ -104,6 +116,21 @@ exit 0
     expect(err).toContain("unexpected token");
     expect(argv.filter((line) => line.startsWith(work))).toHaveLength(4);
     expect(out).toContain("Claude mod session-events installed in work");
+  });
+
+  test("install from a clone the live daemon does not run from is refused before any exclave is touched", async () => {
+    // Every exclave's marketplace would repoint at this clone, and a mod the daemon's clone has and this one lacks
+    // would silently stop loading in each new session (the inbox mod did, 2026-11-17).
+    const other = join(root, "other-clone");
+    await Bun.write(join(root, "state", "runtime.json"), JSON.stringify({ pid: process.pid, root: other }));
+    const { err, code, argv } = await run("install");
+    expect(code).not.toBe(0);
+    // HOME is `root`, so the path prints tildified.
+    expect(err).toContain("the running daemon runs from ~/other-clone, not this checkout");
+    expect(argv).toEqual([]);
+
+    await Bun.write(join(root, "state", "runtime.json"), JSON.stringify({ pid: process.pid, root: checkout }));
+    expect((await run("install")).code).toBe(0);
   });
 
   test("a repeat install never removes first — that would delete the mods' saved data", async () => {
@@ -128,6 +155,8 @@ exit 0
       "- plugin marketplace remove seance --json",
       `${work} plugin marketplace remove seance --json`,
     ]);
+    expect(after.out).toContain(`removed séance's settings hooks from ${join(work, "settings.json")}`);
+    expect(JSON.parse(await readFile(join(work, "settings.json"), "utf8"))).toEqual({});
   });
 
   test("an unknown subcommand fails with the usage line and touches nothing", async () => {

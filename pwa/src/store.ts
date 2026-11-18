@@ -12,6 +12,8 @@ import type {
   CustodianResponse,
   RescanResponse,
   SessionsResponse,
+  SessionTagErrorCode,
+  SessionTagResponse,
   SpawnClient,
   StoreRefusal,
   Task,
@@ -27,6 +29,7 @@ import {
   METRICS_STEPS,
   parseAvailabilityResponse,
   parseCustodianResponse,
+  parseSessionTagResponse,
   CAPABILITIES,
   queuedTask,
   RequestFailure,
@@ -50,6 +53,7 @@ import {
   AUTONOMY_LABELS,
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
+  EMPTY_REF,
   HELD_MAX,
   heldOrder,
   heldStale,
@@ -62,6 +66,8 @@ import {
   withWorktree,
   worktreeFor,
   type Effort,
+  type NotBeforeChoice,
+  resolveNotBeforeChoice,
   type HeldTask,
   type HistoryRange,
   type HistoryResult,
@@ -99,12 +105,15 @@ import {
   derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
+  deriveTaskTagsAvailability,
   deriveTraitsAvailability,
   heldNeedsLeader,
   leaderVerified,
   resolveRepo,
   scopedRepos,
+  refTagsOf,
   settlesOnReport,
+  TASK_TAGS_UNAVAILABLE,
   TRAITS_UNAVAILABLE,
 } from "./view.ts";
 
@@ -150,7 +159,8 @@ function openLayers(state: AppState): number {
     (machines ? 1 : 0) +
     (queue ? 1 : 0) +
     (verdict === null ? 0 : 1) +
-    (accounts.renaming === null ? 0 : 1)
+    (accounts.renaming === null ? 0 : 1) +
+    (state.labelling === null ? 0 : 1)
   );
 }
 
@@ -158,6 +168,8 @@ function openLayers(state: AppState): number {
 function closeTop(state: AppState): Partial<AppState> | null {
   // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
   if (state.accounts.renaming !== null) return { accounts: { ...state.accounts, renaming: null, notice: null } };
+  // Opened over the Queue screen, so it closes before it.
+  if (state.labelling !== null) return { labelling: null };
   const { sheet } = state;
   if (sheet !== null) {
     // Cleared on the way out, not on the next open: a failure that landed while
@@ -222,6 +234,28 @@ function enqueueFailureText(failure: RequestFailure): string {
 }
 
 const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that settle on a done report yet.";
+
+const SESSION_TAG_TEXTS: Readonly<Record<SessionTagErrorCode, string>> = {
+  invalid_request: "That name is too long or can't be used",
+  refused: "This machine refused the rename",
+  unsupported: "This machine can't rename sessions yet",
+  tasked: "This session now runs a task, which names it",
+  moved: "This pane now holds another conversation",
+  unverified: "This machine can't confirm the session's conversation right now",
+  ambiguous: "More than one session claims this conversation",
+  ended: "This session has ended",
+  internal_error: "This machine couldn't save the name",
+  too_large: "That name is too long",
+};
+
+/** Refusals that say the list the rename was offered from is out of date. */
+const SESSION_GONE_CODES: ReadonlySet<SessionTagErrorCode> = new Set(["ended", "moved", "tasked"]);
+
+/** A rename refusal as the dialog says it: fixed text per code, never the daemon's message; unparsed reads as not reached. */
+export function sessionTagRefusalText(reply: SessionTagResponse | null, name: string): string {
+  if (reply === null) return `Couldn't reach ${name}`;
+  return reply.ok ? "" : SESSION_TAG_TEXTS[reply.code];
+}
 
 const CUSTODIAN_ACT_WORDS = {
   round: "ask for a round on",
@@ -357,6 +391,9 @@ export class Store {
       relay: client.getState(),
       form,
       autonomy: DEFAULT_AUTONOMY,
+      notBefore: null,
+      ref: EMPTY_REF,
+      labelling: null,
       promptUndo: null,
       sheet: null,
       settings: false,
@@ -581,14 +618,18 @@ export class Store {
     this.#nudgeTimer = null;
   }
 
-  /** On a relay change: the closed machines whose reported session counts moved since last seen. */
+  /**
+   * On a relay change: the machines whose reported session counts moved since last seen: a closed one under a drain
+   * leader (its drain row counts them), and any that names its sessions (`sessionTag`: the Machines card lists them).
+   */
   #readMovedSessions(woken: readonly { readonly deviceId: string }[]): void {
     const { relay } = this.#state;
-    if (!deriveDrainAvailability(relay)) return;
+    const drains = deriveDrainAvailability(relay);
     const justRead = new Set(woken.map((machine) => machine.deviceId));
     const due: string[] = [];
     for (const machine of relay.machines) {
-      if (!machine.connected || closedAt(machine) === null) {
+      const named = machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
+      if (!machine.connected || !((drains && closedAt(machine) !== null) || named)) {
         this.#closedSess.delete(machine.deviceId);
         continue;
       }
@@ -605,6 +646,17 @@ export class Store {
     if (!deriveDrainAvailability(this.#state.relay)) return;
     void this.refreshQueue();
     void this.#fetchSessions([deviceId]);
+  }
+
+  /**
+   * The Machines screen lists each session: read afresh, as it opens, every connected machine (an older daemon answers
+   * `sessions` too, its rows just offer no rename).
+   */
+  readNamedSessions(): void {
+    const { relay } = this.#state;
+    if (relay.status !== "open") return;
+    const due = relay.machines.filter((machine) => machine.connected).map((machine) => machine.deviceId);
+    if (due.length > 0) void this.#fetchSessions(due);
   }
 
   async #fetchSessions(deviceIds: readonly string[]): Promise<void> {
@@ -808,6 +860,17 @@ export class Store {
     this.#patch({ form: { ...form, after: form.after.filter((dep) => dep.task !== taskId) } });
   }
 
+  /** Sets or clears (`null`) the not-before choice. Re-previews: a deferred form asks for no preview, and a cleared one does. */
+  setNotBefore(choice: NotBeforeChoice | null): void {
+    this.#patch({ notBefore: choice });
+    void this.refreshPreview();
+  }
+
+  /** Sets the next task's ref as typed; checked at the press, shown as it is typed on the Ref sheet. */
+  setRef(ref: string, url: string): void {
+    this.#patch({ ref: { ref, url } });
+  }
+
   setUntil(until: TaskUntil): void {
     this.#patch({ form: { ...this.#state.form, until } });
   }
@@ -860,6 +923,8 @@ export class Store {
     if (wide === this.#state.wide) return;
     // The dialog is drawn only by the Machines screen, which the other layout may not show.
     this.closeAccountRename();
+    // Likewise the label dialog: the Queue screen draws it.
+    this.closeLabel();
     // Likewise: only the Queue screen draws it, and the narrow layout may not be showing that.
     this.closeOlderSheet();
     this.#patch({ wide });
@@ -1084,6 +1149,7 @@ export class Store {
     // Any traversal leaves the entry that was current, held or not.
     this.#held = false;
     this.#renameClosing = false;
+    this.#labelClosing = false;
     this.#olderSheetClosing = false;
     // One delivered traversal, not all: a second back may still be in flight.
     this.#pendingBacks = Math.max(0, this.#pendingBacks - 1);
@@ -1202,11 +1268,6 @@ export class Store {
     this.#older.loadMore();
   }
 
-  /** Reads Older's first page again, as the screen's ↻ re-reads the queue; nothing while it is closed. */
-  refreshOlder(): void {
-    this.#older.refresh();
-  }
-
   /** Set from asking for the filter sheet's back until the traversal lands, as `#renameClosing` is. */
   #olderSheetClosing = false;
 
@@ -1232,6 +1293,30 @@ export class Store {
     const { accounts } = this.#state;
     if (accounts.renaming === null) this.#pushLayer();
     this.#patch({ accounts: { ...accounts, renaming: accountId, notice: null } });
+  }
+
+  /** Set from asking for the label layer's back until the traversal lands, as `#renameClosing` is. */
+  #labelClosing = false;
+
+  /** The one way the app closes the label dialog; a no-op while closed or already closing. */
+  closeLabel(): void {
+    if (this.#state.labelling === null || this.#labelClosing) return;
+    this.#labelClosing = true;
+    this.#back();
+  }
+
+  /** The label dialog for a task: a layer like the sheets, so back closes it. */
+  openLabel(taskId: string): void {
+    const { labelling } = this.#state;
+    if (labelling === null) this.#pushLayer();
+    this.#patch({ labelling: { taskId, saving: false, notice: null } });
+  }
+
+  /** Labels a task (blank clears it) through `amend`; true when it landed, which closes the dialog. */
+  async labelTask(taskId: string, label: string): Promise<boolean> {
+    const landed = await this.#queue.labelTask(taskId, label);
+    if (landed && this.#state.labelling?.taskId === taskId) this.closeLabel();
+    return landed;
   }
 
   /** Names a Claude account (blank clears it); every client shows it. True when the name landed, which closes its dialog. */
@@ -1316,6 +1401,38 @@ export class Store {
   }
 
   /**
+   * Names (blank clears) an untasked session's conversation on its machine (`session-tag`), from the session's Rename.
+   * Offered only for a connected machine advertising `sessionTag`, checked again here. On success the machine's
+   * sessions are read again, which is where the name shows; the reply is null then, else the refusal as fixed text.
+   */
+  async renameSession(deviceId: string, pane: string, session: string, text: string): Promise<string | null> {
+    const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+    if (
+      machine === undefined ||
+      !machine.connected ||
+      machine.capabilities?.includes(CAPABILITIES.sessionTag) !== true
+    ) {
+      return "This machine can't rename sessions right now";
+    }
+    let parsed: SessionTagResponse | null;
+    try {
+      const payload = { pane, session, key: "label", value: text.trim() };
+      parsed = parseSessionTagResponse(
+        await this.#client.request<SessionTagResponse>(deviceId, "session-tag", payload),
+      );
+    } catch {
+      parsed = null;
+    }
+    if (parsed !== null && parsed.ok) {
+      await this.#fetchSessions([deviceId]);
+      return null;
+    }
+    // The row is stale: its session ended, moved on or now runs a task. Read again so the card stops offering the rename.
+    if (parsed !== null && SESSION_GONE_CODES.has(parsed.code)) await this.#fetchSessions([deviceId]);
+    return sessionTagRefusalText(parsed, machine.name);
+  }
+
+  /**
    * Round now, pause or resume one machine's custodian seat (`custodian`), from its card's menu. Offered only for a
    * machine advertising `custodian`, checked again here. A pause or resume is held as asked (`sent`) until the seat's
    * `cu` says so; a refusal is shown as fixed text by its code.
@@ -1380,6 +1497,11 @@ export class Store {
    */
   async #submit(runNow: boolean): Promise<void> {
     const { relay } = this.#state;
+    // The form hides the split while a time is set, so this is unreachable from it.
+    if (runNow && this.#state.notBefore !== null) {
+      this.#showVerdict(unqueued("Start now and a not-before time contradict each other."));
+      return;
+    }
     const holding = canHold(relay);
     if ((!holding && !deriveAutoAvailability(relay).available) || this.#state.spawning) return;
     // A resume's re-dial reconnects within a second or two (both settle windows are 1.5 s), so a tap
@@ -1473,7 +1595,19 @@ export class Store {
       const traitsProblem = this.#requiresProblem(form.requires, relay, form.machine, form.account);
       if (traitsProblem !== null) return refused(`${traitsProblem}.`);
     }
-    const { autonomy } = this.#state;
+    // A held task is checked when it is sent (`#sendOne`), like `requires`: no leader to ask now.
+    const refTagsEntry = refTagsOf(this.#state.ref);
+    if ("problem" in refTagsEntry) return refused(`${refTagsEntry.problem}.`);
+    const tags = Object.keys(refTagsEntry.tags).length === 0 ? undefined : refTagsEntry.tags;
+    if (tags !== undefined && !holding && !deriveTaskTagsAvailability(relay)) {
+      return refused(`${TASK_TAGS_UNAVAILABLE}, or clear the ref.`);
+    }
+    const { autonomy, notBefore } = this.#state;
+    // Resolved at the press, so "in 2 h" means 2 h from now however long the form sat open.
+    const startAt = notBefore === null ? null : resolveNotBeforeChoice(notBefore, Date.now());
+    if (notBefore?.kind === "at" && startAt !== null && startAt <= Date.now()) {
+      return refused("That time has already passed.");
+    }
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
     if (level === null) return refused(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
@@ -1506,10 +1640,12 @@ export class Store {
         ...(prompt === undefined ? {} : { prompt }),
         ...(form.machine === null && form.account === null ? {} : { pin }),
         ...(form.requires.length === 0 ? {} : { requires: form.requires }),
+        ...(tags === undefined ? {} : { tags }),
         client: "pwa" satisfies SpawnClient,
         ...(form.after.length === 0 ? {} : { deps: form.after }),
         ...(reported ? { until: form.until } : {}),
         ...(attachments === undefined ? {} : { attachments }),
+        ...(startAt === null ? {} : { notBefore: startAt }),
       }),
     };
   }
@@ -1558,6 +1694,8 @@ export class Store {
     const { form } = this.#state;
     // Only the files this task carries leave the form: a retry's task names the ones it was built with.
     const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
+    // `refreshPreview` patched the card away while a time was set, so nothing else asks again.
+    const hadNotBefore = this.#state.notBefore !== null;
     this.#patch({
       form: {
         ...form,
@@ -1567,10 +1705,13 @@ export class Store {
         requires: [],
       },
       autonomy: DEFAULT_AUTONOMY,
+      notBefore: null,
+      ref: EMPTY_REF,
       promptUndo: null,
       attachments: this.#state.attachments.filter((f) => f.upload.kind !== "stored" || !sent.has(f.upload.id)),
       attachNotice: null,
     });
+    if (hadNotBefore) void this.refreshPreview();
   }
 
   /** Why the store refused a create, as the verdict and a held row say it. */
@@ -1628,6 +1769,11 @@ export class Store {
         task,
         "The scheduler's leader doesn't take account pins yet. Update seanced on its machine, or discard it.",
       );
+      return;
+    }
+    // An older leader holds a tagged record unreadable; checked here as the form could not (no leader to ask when held).
+    if (task.spec.tags !== undefined && !deriveTaskTagsAvailability(this.#state.relay)) {
+      this.#heldFailed(task, `${TASK_TAGS_UNAVAILABLE}. Try again once it does, or discard it.`);
       return;
     }
     // The same checks the form made, against the registry as it stands when the task is sent.

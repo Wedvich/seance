@@ -1,7 +1,6 @@
-import { isRecord } from "@seance/shared";
+import { isRecord, parseGithubPr } from "@seance/shared";
 import type { PrCheckView, PrView } from "./custodian-frame.ts";
 import { askGithub } from "./gh.ts";
-import { parseGithubPr } from "./pr-status.ts";
 
 /**
  * The daemon's side of the round's `pr` verb (docs/custodian.md item 4b; DESIGN.md, "The custodian's seat"): one

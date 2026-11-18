@@ -6,7 +6,9 @@ import {
   TASK_PHASES,
   TASK_SPEC_LIMITS,
   continueOffer,
+  goneContinuation,
   knownAccounts,
+  parseTags,
   passOffer,
   taskPrBlock,
   waitingContinuation,
@@ -20,6 +22,9 @@ import {
   type PrState,
   type Task,
   FLEET_LIMIT_MAX,
+  BACKGROUND_KINDS,
+  type BackgroundKind,
+  type IdleTaskRef,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
@@ -27,6 +32,7 @@ import {
   decisionStartNowItem,
   inputWait,
   pinLine,
+  notBeforeLine,
   requiresLine,
   taskHeadline,
   waitingText,
@@ -35,6 +41,7 @@ import {
 import { settlingInput } from "./input-debounce.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
+import { taskTagLines } from "./task-tags.ts";
 import { taskTitle } from "./task-title.ts";
 import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
@@ -44,6 +51,8 @@ import {
   derivePassAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
+  deriveRunNowPastPause,
+  deriveTaskTagsAvailability,
   failedBody,
   formatSeen,
   seen,
@@ -133,6 +142,15 @@ export interface QueueRow {
    * Only ever in the menu: it ends the session, so it asks twice.
    */
   readonly canPass: boolean;
+  /**
+   * The owner can label the task (`amend` with `ownerTags`): any task, finished included, while the verified leader
+   * takes task tags. Never an archived row: its record left the leader's store.
+   */
+  readonly canLabel: boolean;
+  /** Its `owner.label`, shown beside the title (never in place of it); null when unset. */
+  readonly label: string | null;
+  /** Its `creator.ref`, linked to `creator.ref-url` when that is an https: URL; null without one. */
+  readonly ref: { readonly text: string; readonly url: string | null } | null;
   /** Continue is the card's primary action: a blocked PR is what the person was alerted to fix. */
   readonly inlinePrimary: boolean;
   /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules and until it is `ready`; null once it is no longer waiting. */
@@ -149,8 +167,12 @@ export interface QueueRow {
   readonly passedTo: LineageLine | null;
   /** What its worktree started from, by the leader's `Task.stack`, one line; null until a stacked dispatch ran. */
   readonly stackedOn: LineageLine | null;
-  /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
-  readonly continuing: { readonly id: string; readonly text: string } | null;
+  /**
+   * A continuation of it still in the queue, one line naming it and revealing its row on tap; else, when one was
+   * refused because the worktree and branch are gone, one line saying so (no reveal: that card may sit in Older);
+   * null for any other task.
+   */
+  readonly continuing: LineageLine | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
   readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
@@ -300,16 +322,44 @@ function dotOf(task: Task): QueueDot | null {
  * `run-now` takes only a `ready` task and answers anything earlier `not_waiting`, so Start now
  * greys until then rather than offering a tap that is always refused. Shown still: it says why.
  */
-function startNowFor(task: Task): StartNowItem {
+function startNowFor(task: Task, pastPause: boolean, leaderNow: number): StartNowItem {
+  // `run-now` ignores the time, but a stale decision's machine would be named for a task that is not being routed.
+  if (task.state === "ready" && notBeforeLine(task, leaderNow) !== null)
+    return { sub: "Skip the queue", enabled: true };
   if (task.state === "blocked") return { sub: "Waiting on the tasks it depends on", enabled: false };
   if (task.state === "queued") return { sub: "Waiting for the scheduler", enabled: false };
-  return decisionStartNowItem(task.decision ?? null);
+  return decisionStartNowItem(task.decision ?? null, pastPause);
 }
 
-/** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
-function bodyOf(task: Task, machines: readonly Machine[], now: number, skew: number, idleSince?: number): Timed | null {
-  const line = bodyLine(task, machines, now, skew, idleSince);
+/** `idle`, its `since` on this device's clock, is set only for a task the leader released idle. */
+function bodyOf(task: Task, machines: readonly Machine[], now: number, skew: number, idle?: IdleTaskRef): Timed | null {
+  const line = bodyLine(task, machines, now, skew, idle);
   return typeof line === "string" ? [line] : line;
+}
+
+const BACKGROUND_NOUNS: Record<BackgroundKind, readonly [string, string]> = {
+  shell: ["shell", "shells"],
+  agent: ["subagent", "subagents"],
+  monitor: ["monitor", "monitors"],
+  workflow: ["workflow", "workflows"],
+  other: ["other task", "other tasks"],
+  wakeup: ["scheduled wake-up", "scheduled wake-ups"],
+};
+
+/**
+ * What an idle session's last turn end left behind, as the clause before "since": its own background work (a CI
+ * watch), the API error that ended the turn, or plain idle. Exported for tests.
+ */
+export function idleClause(idle: IdleTaskRef): string {
+  const work = BACKGROUND_KINDS.flatMap((kind) => {
+    const count = idle.background?.[kind];
+    if (count === undefined) return [];
+    const [one, many] = BACKGROUND_NOUNS[kind];
+    return [`${count} ${count === 1 ? one : many}`];
+  });
+  if (work.length > 0) return `Idle, waiting on its background work (${work.join(", ")})`;
+  if (idle.stopError !== undefined) return `Stopped on an API error (${idle.stopError.replaceAll("_", " ")})`;
+  return "Idle at its prompt";
 }
 
 function bodyLine(
@@ -317,12 +367,14 @@ function bodyLine(
   machines: readonly Machine[],
   now: number,
   skew: number,
-  idleSince?: number,
+  idle?: IdleTaskRef,
 ): string | Timed | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
   }
+  const deferred = notBeforeLine(task, now + skew);
+  if (deferred !== null) return deferred.replace(/^until/u, "Not placed before");
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") {
@@ -341,7 +393,7 @@ function bodyLine(
       ? clause
       : timed`${clause} since ${seen(task.needsInputSince - skew, now)}`;
   }
-  if (idleSince !== undefined) return timed`Idle at its prompt since ${seen(idleSince, now)} — its slot is free`;
+  if (idle !== undefined) return timed`${idleClause(idle)} since ${seen(idle.since, now)} — its slot is free`;
   return null;
 }
 
@@ -410,11 +462,21 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
 }
 
 /**
- * `remoteSession` passed `isRemoteSessionId` at parse (`session_` and base62 only), so it can
- * name no other path, query or origin.
+ * The live session's `agent.remote` from its machine's last `sessions` read, else the task's `remoteSession` (DESIGN.md, "Tags and session identity",
+ * `remoteSession` and `agent.remote`). Both passed `isRemoteSessionId` at parse (`session_` and base62 only), so they can name no other path,
+ * query or origin.
  */
-function sessionOf(task: Task): string | null {
-  return task.remoteSession === undefined ? null : `https://claude.ai/code/${task.remoteSession}`;
+function sessionOf(task: Task, sessions: AppState["sessions"]): string | null {
+  const remote = liveRemote(task, sessions) ?? task.remoteSession;
+  return remote === undefined ? null : `https://claude.ai/code/${remote}`;
+}
+
+function liveRemote(task: Task, sessions: AppState["sessions"]): string | undefined {
+  const deviceId = task.assignment?.deviceId;
+  const read = deviceId === undefined ? undefined : sessions[deviceId];
+  if (read === undefined || read === "unknown") return undefined;
+  const entry = read.sessions.find((session) => session.taskId === task.id);
+  return parseTags(entry?.tags, { scope: "session" })?.["agent.remote"]?.value;
 }
 
 function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
@@ -500,7 +562,11 @@ function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"
   // A task whose continuation landed (`continuedBy`) is continued by whatever waits on that link, not on itself.
   const link = task.continuedBy === undefined ? undefined : tasks.find((other) => other.id === task.continuedBy?.task);
   const waiting = waitingContinuation(link ?? task, tasks);
-  return waiting === undefined ? null : { id: waiting.id, text: `Continuing as ${taskTitle(waiting)} · waiting` };
+  if (waiting !== undefined) return { text: `Continuing as ${taskTitle(waiting)} · waiting`, reveal: waiting.id };
+  // Why Continue is gone from this card; the daemon's refusal, with the path, is on the refused one's.
+  return goneContinuation(task, tasks) === undefined
+    ? null
+    : { text: "Can't continue: its worktree and its branch are gone", reveal: null };
 }
 
 function batchLine(task: Task): string | null {
@@ -525,10 +591,10 @@ function rowOf(
   skew: number,
   titles: ReadonlyMap<string, string>,
   tasks: readonly Task[],
-  idle: ReadonlyMap<string, number>,
+  idle: ReadonlyMap<string, IdleTaskRef>,
 ): QueueRow {
   const phase = TASK_PHASES[task.state];
-  const idleSince = idle.get(task.id);
+  const idleRef = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
   const canFollowUp = phase !== "finished";
   const context = { now: now + skew, leaderHandoff: deriveContinueHandoffAvailability(state.relay) };
@@ -536,15 +602,22 @@ function rowOf(
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
-  const item = startNowFor(task);
+  const item = startNowFor(task, deriveRunNowPastPause(state.relay), now + skew);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
-  const session = sessionOf(task);
+  const session = sessionOf(task, state.sessions);
   const autonomy = autonomyOf(task.spec);
+  const tags = taskTagLines(task);
   return {
     id: task.id,
     title: taskTitle(task),
-    headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
-    body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
+    headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now, now + skew)),
+    body: bodyOf(
+      task,
+      state.relay.machines,
+      now,
+      skew,
+      idleRef === undefined ? undefined : { ...idleRef, since: idleRef.since - skew },
+    ),
     dot: dotOf(task),
     age: seen(task.createdAt, now),
     canCancel: actionable,
@@ -554,6 +627,9 @@ function rowOf(
     canFollowUp,
     canContinue,
     canPass,
+    canLabel: deriveTaskTagsAvailability(state.relay),
+    label: tags.label,
+    ref: tags.ref,
     startNow,
     inline: primaryAction({ canContinue }),
     inlinePrimary: canContinue && taskPrBlock(task) !== null,
@@ -583,7 +659,7 @@ function asRunning(task: Task, leaderNow: number): Task {
 }
 
 /** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
-type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
+type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, IdleTaskRef>) => number | null;
 
 /**
  * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
@@ -645,7 +721,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
-  const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r.since]));
+  const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r]));
 
   const sections = SECTIONS.map(({ title, pick, oldestFirst }) => {
     const members = tasks
@@ -721,9 +797,8 @@ export interface AfterSheetView {
  */
 export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   const view = state.queueView;
-  const tasks = (view?.kind === "ok" ? view.tasks : []).map((task) =>
-    asRunning(task, now + (view?.kind === "ok" ? view.skew : 0)),
-  );
+  const skew = view?.kind === "ok" ? view.skew : 0;
+  const tasks = (view?.kind === "ok" ? view.tasks : []).map((task) => asRunning(task, now + skew));
   const held = new Map(state.form.after.map((dep) => [dep.task, dep.after]));
   const listed = tasks
     .filter(
@@ -733,7 +808,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .map((task) => ({
       id: task.id,
       title: taskTitle(task),
-      headline: plain(taskHeadline(task, state.relay.machines, state.accounts.aliases, now)),
+      headline: plain(taskHeadline(task, state.relay.machines, state.accounts.aliases, now, now + skew)),
       when: held.get(task.id) ?? null,
     }));
   const shown = new Set(listed.map((option) => option.id));

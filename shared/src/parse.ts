@@ -2,6 +2,8 @@ import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
 import { isTraitName, TRAIT_LIMITS } from "./traits.ts";
 import { isPromptBasis } from "./amend.ts";
+import { isNotBefore } from "./not-before.ts";
+import { chainTags, parseTaskTags, writeTags } from "./tags.ts";
 import {
   isMessageId,
   MESSAGE_KINDS,
@@ -64,6 +66,8 @@ import {
   PUSH_MAX_SUBSCRIPTIONS,
   AUTH_ALERTS_MAX,
   DISK_ALERTS_MAX,
+  GITHUB_ALERTS_MAX,
+  GITHUB_RESOURCES,
   PUSH_SERVICE_HOSTS,
   PUSH_SERVICE_VENDORS,
   REPO_MAX_SKILLS,
@@ -82,6 +86,7 @@ import {
   SUCCESSOR_DEP_SENTINEL,
   SUCCESSOR_RECORD_MAX,
   SUCCESSOR_TRIGGERS,
+  TAGS_DEP_SENTINEL,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
   TASK_PRS_MAX,
@@ -123,6 +128,9 @@ import {
   type ArchivistSilence,
   type AuthAlerted,
   type DiskAlerted,
+  type GithubAlerted,
+  type GithubBudget,
+  type GithubRate,
   type SpillStamp,
   type TaskPr,
   type VapidKeys,
@@ -168,6 +176,12 @@ import {
   type UnreadableTaskRef,
   type IdleRelease,
   type IdleTaskRef,
+  type IdleNote,
+  type BackgroundWork,
+  type StopError,
+  BACKGROUND_COUNT_MAX,
+  BACKGROUND_KINDS,
+  STOP_ERRORS,
   type PassRefusalRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
@@ -608,6 +622,28 @@ export function parseCustodianStatus(value: unknown): CustodianStatus | null {
   };
 }
 
+function parseGithubBudget(value: unknown): GithubBudget | null {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const [limit, remaining, reset] = value;
+  if (!isUint(limit) || !isUint(remaining) || !isUint(reset)) return null;
+  return limit > 0 && remaining <= limit && reset > 0 ? [limit, remaining, reset] : null;
+}
+
+/** `MachineStatus.gh`. Null for anything off, a key it does not know included: the caller drops `gh` alone. */
+export function parseGithubRate(value: unknown): GithubRate | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "u" || key === "c" || key === "g")) return null;
+  const { u, c, g } = value;
+  if (u !== undefined && !(isUint(u) && u > 0)) return null;
+  const core = c === undefined ? undefined : parseGithubBudget(c);
+  const graphql = g === undefined ? undefined : parseGithubBudget(g);
+  if (core === null || graphql === null || (core === undefined && graphql === undefined)) return null;
+  return {
+    ...(u === undefined ? {} : { u }),
+    ...(core === undefined ? {} : { c: core }),
+    ...(graphql === undefined ? {} : { g: graphql }),
+  };
+}
+
 /**
  * The decrypted `status` blob. Strict where `parseMachineInfo` is lenient: a
  * status is regenerated every tick and renders nothing on its own, so one bad
@@ -645,6 +681,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (dr !== undefined && !(isFiniteNumber(dr) && dr > 0 && cl !== undefined)) return null;
   // Unlike `drn`, `cl` and `dr`, a bad `cu` is dropped alone: losing a machine's quota and auth over a display row is worse.
   const cu = value["cu"] === undefined ? null : parseCustodianStatus(value["cu"]);
+  // Dropped alone too, for the same reason.
+  const gh = value["gh"] === undefined ? null : parseGithubRate(value["gh"]);
   return {
     at: value["at"],
     scan: value["scan"],
@@ -666,6 +704,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(cl === undefined ? {} : { cl }),
     ...(dr === undefined ? {} : { dr }),
     ...(cu === null ? {} : { cu }),
+    ...(gh === null ? {} : { gh }),
   };
 }
 
@@ -997,6 +1036,35 @@ export function isToolName(value: unknown): value is string {
   return typeof value === "string" && TOOL_NAME.test(value);
 }
 
+export function isStopError(value: unknown): value is StopError {
+  return STOP_ERRORS.some((code) => code === value);
+}
+
+/**
+ * A session's background work, kind by kind: null unless every key is a known kind and every count an integer from 1
+ * to `BACKGROUND_COUNT_MAX` — counts only, so nothing else can ride in it.
+ */
+export function parseBackgroundWork(value: unknown): BackgroundWork | null {
+  if (!isRecord(value)) return null;
+  const work: Partial<Record<string, number>> = {};
+  for (const [key, count] of Object.entries(value)) {
+    if (!BACKGROUND_KINDS.some((kind) => kind === key)) return null;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > BACKGROUND_COUNT_MAX) return null;
+    work[key] = count;
+  }
+  return work;
+}
+
+/** An `IdleNote` read off `value`'s `background` and `stopError`, each dropped alone when malformed. */
+export function parseIdleNote(value: Record<string, unknown>): IdleNote {
+  const background = parseBackgroundWork(value["background"]);
+  const { stopError } = value;
+  return {
+    ...(background === null ? {} : { background }),
+    ...(isStopError(stopError) ? { stopError } : {}),
+  };
+}
+
 /**
  * The leader's check on a forwarded event. The sender is a PSK holder, so this
  * is skew and bug hygiene rather than a trust boundary — the daemon already
@@ -1007,7 +1075,8 @@ export function isToolName(value: unknown): value is string {
  * `needs-input`, and dropped otherwise, never the event: a newer daemon's
  * reason costs this leader only the debounce it would have waited anyway. A
  * `tool` is kept only beside `permission` and only as `isToolName` passes it,
- * dropped otherwise, never the event.
+ * dropped otherwise, never the event. So are `background` and `stopError`, kept
+ * only beside `idle` (`parseIdleNote`).
  */
 export function parseSessionEvent(value: unknown): SessionEvent | null {
   if (!isRecord(value)) return null;
@@ -1027,6 +1096,7 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
     ...(state === "needs-input" && reason === "permission" && isToolName(tool) ? { tool } : {}),
+    ...(state === "idle" ? parseIdleNote(value) : {}),
   };
 }
 
@@ -1268,6 +1338,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const member = batch === undefined ? undefined : parseBatch(batch);
   const files = value["attachments"] === undefined ? undefined : parseAttachmentManifest(value["attachments"]);
   const needs = value["requires"] === undefined ? undefined : parseRequires(value["requires"]);
+  const tags = parseTaskTags(value["tags"]);
   const edges =
     deps === undefined
       ? undefined
@@ -1275,10 +1346,15 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
           attached: files !== undefined,
           required: needs !== undefined,
           succeeding: follows !== undefined,
+          // The raw field, not `tags`: a record whose every tag this build drops still carries its sentinel.
+          tagged: value["tags"] !== undefined,
         });
   const issue = linear === undefined ? undefined : parseLinear(linear);
+  const notBefore = value["notBefore"];
+  if (notBefore !== undefined && !isNotBefore(notBefore)) return null;
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
   if (issue === null || resumes === null || files === null || needs === null || follows === null) return null;
+  if (tags === null) return null;
   // A successor is a plain worktree spawn that resets its own branch: a resumed session or files would contradict that.
   if (follows !== undefined && (request.mode !== "worktree" || resumes !== undefined || files !== undefined)) {
     return null;
@@ -1305,19 +1381,26 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(resumes === undefined ? {} : { continues: resumes }),
     ...(files === undefined ? {} : { attachments: files }),
     ...(needs === undefined ? {} : { requires: needs }),
+    ...(tags === undefined ? {} : { tags }),
     ...(follows === undefined ? {} : { succeeds: follows }),
+    ...(notBefore === undefined ? {} : { notBefore }),
   };
 }
 
 /**
- * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`) is
+ * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`, `TAGS_DEP_SENTINEL`) is
  * dropped before the bound applies, and only beside its field: one without it is a record
  * something stripped the field from — or a sentinel with nothing it guards — and fails
  * `isTaskId`, nulling the spec. A requirement stripped is the reverse, `requires` without its
  * sentinel, and reads fine: no leader older than this one wrote it. Deps that were
  * sentinels alone read as none, as the spec was before sealing.
  */
-type DepGuards = { readonly attached: boolean; readonly required: boolean; readonly succeeding: boolean };
+type DepGuards = {
+  readonly attached: boolean;
+  readonly required: boolean;
+  readonly succeeding: boolean;
+  readonly tagged: boolean;
+};
 
 function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null | undefined {
   if (!Array.isArray(value)) return null;
@@ -1325,11 +1408,16 @@ function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null
     (dep) =>
       !(guards.attached && isAttachmentsSentinel(dep)) &&
       !(guards.required && isRequiresSentinel(dep)) &&
-      !(guards.succeeding && isSuccessorSentinel(dep)),
+      !(guards.succeeding && isSuccessorSentinel(dep)) &&
+      !(guards.tagged && isTagsSentinel(dep)),
   );
   if (real.length === 0 && value.length > 0) return undefined;
   const edges = parseList(real, parseDep);
   return edges === null || edges.length > TASK_SPEC_LIMITS.deps ? null : edges;
+}
+
+function isTagsSentinel(value: unknown): boolean {
+  return isRecord(value) && value["task"] === TAGS_DEP_SENTINEL.task && value["after"] === TAGS_DEP_SENTINEL.after;
 }
 
 function isSuccessorSentinel(value: unknown): boolean {
@@ -1442,6 +1530,7 @@ function parseReason(value: unknown): Reason | null {
     case "pressure_unknown":
     case "repo_absent":
     case "continue_elsewhere":
+    case "continue_clone_gone":
     case "predecessor_account":
     case "continue_unsupported":
     case "attachments_unsupported":
@@ -1925,7 +2014,22 @@ export function bindTaskRecord(
   if (record.task.spec.continues?.task === record.task.id) return "malformed";
   // Likewise a successor of itself: it would wait on its own `superseded` for ever.
   if (record.task.spec.succeeds?.task === record.task.id) return "malformed";
-  return record;
+  return record.version === 1 ? onlyCreatorTags(record) : record;
+}
+
+/**
+ * A client's create seals `creator.*` alone: `owner.*` is the leader's, by `amend` or at admission, and `scheduler.*` its
+ * own, so what a version-1 record holds of them is dropped here, for every reader to agree, and the leader's next write
+ * re-seals without them.
+ */
+function onlyCreatorTags(record: TaskRecord): TaskRecord {
+  const { tags, ...spec } = record.task.spec;
+  if (tags === undefined || Object.keys(tags).every((key) => key.startsWith("creator."))) return record;
+  const creator = chainTags(tags, "creator");
+  return {
+    ...record,
+    task: { ...record.task, spec: { ...spec, ...(creator === undefined ? {} : { tags: creator }) } },
+  };
 }
 
 function isAccountId(value: unknown): value is string {
@@ -2151,6 +2255,7 @@ const PUSH_ALERT_KEYS = {
   archivist: ["v", "kind", "at", "since"],
   flag: ["v", "kind", "at", "taskId", "reason"],
   "custodian-failing": ["v", "kind", "at", "deviceId"],
+  github: ["v", "kind", "at", "resource", "reset"],
 } as const;
 
 /**
@@ -2233,6 +2338,12 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     if (!known(PUSH_ALERT_KEYS["custodian-failing"]) || !isRoutingId(deviceId)) return null;
     return { v: 1, kind, at, deviceId };
   }
+  if (kind === "github") {
+    const { resource, reset } = value;
+    const budget = GITHUB_RESOURCES.find((r) => r === resource);
+    if (!known(PUSH_ALERT_KEYS.github) || budget === undefined || !isUint(reset)) return null;
+    return { v: 1, kind, at, resource: budget, reset };
+  }
   return null;
 }
 
@@ -2264,7 +2375,7 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
-  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts, archivistSilence } = value;
+  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts, archivistSilence, githubAlerts } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
   if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
@@ -2282,6 +2393,8 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (auth === null) return null;
   const silence = archivistSilence === undefined ? undefined : parseArchivistSilence(archivistSilence);
   if (silence === null) return null;
+  const github = githubAlerts === undefined ? undefined : parseGithubAlerts(githubAlerts);
+  if (github === null) return null;
   return {
     version: value["version"],
     ...(keys === undefined ? {} : { vapid: keys }),
@@ -2290,7 +2403,22 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
     ...(disk === undefined ? {} : { diskAlerts: disk }),
     ...(auth === undefined ? {} : { authAlerts: auth }),
     ...(silence === undefined ? {} : { archivistSilence: silence }),
+    ...(github === undefined ? {} : { githubAlerts: github }),
   };
+}
+
+/** One entry per GitHub user and budget. */
+function parseGithubAlerts(value: unknown): readonly GithubAlerted[] | null {
+  if (!Array.isArray(value) || value.length > GITHUB_ALERTS_MAX) return null;
+  const parsed = parseList(value, (entry): GithubAlerted | null => {
+    if (!isRecord(entry) || Object.keys(entry).length !== 4) return null;
+    const { u, r, reset, at } = entry;
+    const budget = GITHUB_RESOURCES.find((candidate) => candidate === r);
+    if (!isUint(u) || u === 0 || budget === undefined || !isUint(reset) || !isFiniteNumber(at)) return null;
+    return { u, r: budget, reset, at };
+  });
+  if (parsed === null || new Set(parsed.map((e) => `${e.u}:${e.r}`)).size !== parsed.length) return null;
+  return parsed;
 }
 
 function parseArchivistSilence(value: unknown): ArchivistSilence | null {
@@ -2335,7 +2463,16 @@ export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
-const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set(["taskId", "prompt", "basis", "title", "model", "effort"]);
+const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set([
+  "taskId",
+  "prompt",
+  "basis",
+  "title",
+  "model",
+  "effort",
+  "notBefore",
+  "ownerTags",
+]);
 const AMEND_PROMPT_KEYS: ReadonlySet<string> = new Set(["mode", "text"]);
 
 function onlyKeys(value: Record<string, unknown>, known: ReadonlySet<string>): boolean {
@@ -2352,7 +2489,7 @@ function amendField(value: unknown, max: number, empty: boolean): string | null 
  * `amend`, at the leader, which rewrites a task from it: built field by field, each held to
  * `TASK_REQUEST_LIMITS` as a create's is (an empty model or effort would reach the spawn as a flag
  * with no value; `null` drops one). `basis` comes exactly with `prompt`; an append of nothing, or an
- * amendment of nothing, is malformed. The amended prompt's own bound is the leader's (`amendSpec`),
+ * amendment of nothing, is malformed. `notBefore` (a positive safe integer, or `null` to clear) needs no `basis`. The amended prompt's own bound is the leader's (`amendSpec`),
  * since it depends on the task.
  *
  * Unlike most parsers here, a key it does not know refuses the whole request rather than being
@@ -2379,14 +2516,41 @@ export function parseAmendRequest(value: unknown): AmendRequest | null {
   const efforted = effort === undefined ? undefined : amendField(effort, limits.effort, false);
   if ((title !== undefined && titled === undefined) || (model !== undefined && modelled === undefined)) return null;
   if (effort !== undefined && efforted === undefined) return null;
-  if (amended === undefined && titled === undefined && modelled === undefined && efforted === undefined) return null;
+  const deferred = value["notBefore"];
+  if (deferred !== undefined && deferred !== null && !isNotBefore(deferred)) return null;
+  const owner = value["ownerTags"] === undefined ? undefined : parseOwnerTags(value["ownerTags"]);
+  if (owner === null) return null;
+  if (
+    amended === undefined &&
+    titled === undefined &&
+    modelled === undefined &&
+    efforted === undefined &&
+    deferred === undefined &&
+    owner === undefined
+  ) {
+    return null;
+  }
   return {
     taskId: value["taskId"],
     ...(amended === undefined || !isPromptBasis(basis) ? {} : { prompt: amended, basis }),
     ...(titled === undefined ? {} : { title: titled }),
     ...(modelled === undefined ? {} : { model: modelled }),
     ...(efforted === undefined ? {} : { effort: efforted }),
+    ...(deferred === undefined ? {} : { notBefore: deferred }),
+    ...(owner === undefined ? {} : { ownerTags: owner }),
   };
+}
+
+/** An amendment's `ownerTags`: non-empty and valid as `writeTags` takes owner suffixes, kept bare (`""` clears). */
+function parseOwnerTags(value: unknown): Readonly<Record<string, string>> | null {
+  if (!isRecord(value) || Object.keys(value).length === 0) return null;
+  if (!writeTags("owner", value, "task").ok) return null;
+  const bare: Record<string, string> = {};
+  for (const [suffix, text] of Object.entries(value)) {
+    if (typeof text !== "string") return null;
+    bare[suffix] = text;
+  }
+  return bare;
 }
 
 /**
@@ -2704,7 +2868,7 @@ function parsePassRefusalRef(value: unknown): PassRefusalRef | null {
 
 function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
   if (!isRecord(value) || !isTaskId(value["taskId"]) || !isFiniteNumber(value["since"])) return null;
-  return { taskId: value["taskId"], since: value["since"] };
+  return { taskId: value["taskId"], since: value["since"], ...parseIdleNote(value) };
 }
 
 function parseUnreadableTaskRef(value: unknown): UnreadableTaskRef | null {

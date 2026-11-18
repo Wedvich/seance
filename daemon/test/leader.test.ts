@@ -18,6 +18,7 @@ import {
   parsePassReply,
   parseQueueChanged,
   parseQueueReply,
+  parseWatchSet,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   QUOTA_KEY,
@@ -35,6 +36,7 @@ import {
   type Decision,
   type Envelope,
   type MachineInfo,
+  type ParsedWatchSet,
   type MachineStatus,
   type OpName,
   type PauseHold,
@@ -130,6 +132,7 @@ const noLocalOps: LocalOps = {
   passClose: () => Promise.reject(new Error("unexpected local pass-close")),
   deliverMessage: () => Promise.reject(new Error("unexpected local deliver-message")),
   messageReceipt: () => Promise.reject(new Error("unexpected local message-receipt")),
+  watchEvent: () => Promise.reject(new Error("unexpected local watch-event")),
 };
 
 /**
@@ -148,6 +151,7 @@ function leaderOver(
   storeTimeoutMs?: number,
   config?: SchedulerConfig,
   now?: () => number,
+  local: LocalOps = noLocalOps,
 ) {
   const legs: RelayClient[] = [];
   const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
@@ -155,7 +159,7 @@ function leaderOver(
   const leader: Leader = createLeader({
     selfDeviceId: "self",
     pushSubject: "https://relay.test",
-    local: noLocalOps,
+    local,
     store,
     reply: (to, response) => {
       replies.push({ to, response });
@@ -3772,5 +3776,226 @@ describe("session-message ↔ the leader's admit rule", () => {
     expect(
       lines.filter((line) => line.includes('session-message from="d" dropped — not a registered machine')),
     ).toHaveLength(1);
+  });
+});
+
+describe("watch-set ↔ the leader", () => {
+  const ID = "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11";
+  const BOOT = "00000000-0000-4000-8000-000000009000";
+  const PR_URL = "https://github.com/acme/app/pull/7";
+  const WATCHES = [CAPABILITIES.watches];
+
+  const rawSet = (n: number): { gen: { boot: string; n: number }; watches: object[] } => ({
+    gen: { boot: BOOT, n },
+    watches: [{ id: ID, kind: "pr", url: PR_URL, seen: [] }],
+  });
+  const parsedSet = (n: number): ParsedWatchSet => {
+    const parsed = parseWatchSet(rawSet(n));
+    if (parsed === null) throw new Error("test set did not parse");
+    return parsed;
+  };
+
+  /** The archivist seat: it holds the PSK and registers, and is no machine. */
+  async function archivistSeat(): Promise<RegistryView> {
+    return {
+      deviceId: "arch",
+      info: await seal(
+        key,
+        { to: APP_ID, from: "arch" },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "machine-info",
+          payload: { archivist: true, name: "archive-box", platform: "linux" },
+        },
+      ),
+      lastSeen: Date.now(),
+      connected: true,
+      archivist: true,
+    };
+  }
+
+  /** The next `watch-event` the leader sent, answered as a daemon answers it; anything else it asked is skipped. */
+  async function answerWatchEvent(relay: TestRelay): Promise<{ readonly device: string; readonly request: Plain }> {
+    for (;;) {
+      // oxlint-disable-next-line no-await-in-loop -- frames arrive one at a time
+      const asked = await nextRequest(relay, 5_000);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const request = await open(key, asked.env);
+      if (request.op !== "watch-event") continue;
+      const env = await seal(
+        key,
+        { to: SCHEDULER_ID, from: asked.env.to },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: request.op,
+          re: request.id,
+          payload: { ok: true, delivered: [] },
+        },
+      );
+      relay.sendToApps({ t: "msg", env });
+      return { device: asked.env.to, request };
+    }
+  }
+
+  /** The `watch-event` requests already queued toward machines. */
+  async function pendingWatchEvents(relay: TestRelay): Promise<number> {
+    const opened = await Promise.all((await queuedRequests(relay)).map((frame) => open(key, frame.env)));
+    return opened.filter((request) => request.op === "watch-event").length;
+  }
+
+  const sendSet = async (relay: TestRelay, from: string, payload: unknown): Promise<void> => {
+    const env = await seal(
+      key,
+      { to: SCHEDULER_ID, from },
+      { id: crypto.randomUUID(), ts: Date.now(), op: "watch-set", payload },
+    );
+    relay.sendToApps({ t: "msg", env });
+  };
+
+  /** A term over a registry of `a` (advertises `watches`), `b` (does not) and the archivist seat; the gh stub fails every read. */
+  async function scenario(
+    body: (ctx: { relay: TestRelay; leader: Leader; replies: { readonly size: number } }) => Promise<void>,
+  ): Promise<string[]> {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    relay.setRegistry([await routableEntry("a", true, {}, WATCHES), await routableEntry("b"), await archivistSeat()]);
+    const gh = await ghStub.fresh();
+    await gh.setReply("{}", 1);
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, {
+      gh: ghStub.path,
+      intervalMs: 60_000,
+    });
+    return captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        // A sealer that is no registered machine is taken (dropped for good) only once the registry has arrived.
+        await pollUntil(() => leader.onWatchSet(parsedSet(0), "probe"), "the registry");
+        await body({ relay, leader, replies });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+  }
+
+  test("a set sealed from a registered machine advertising watches is answered with a watch-event carrying its generation; nothing names the PR", async () => {
+    const lines = await scenario(async ({ relay, leader }) => {
+      await sendSet(relay, "a", rawSet(1));
+      const asked = await answerWatchEvent(relay);
+      expect(asked.device).toBe("a");
+      expect(asked.request.payload).toMatchObject({ set: { gen: { boot: BOOT, n: 1 }, refused: [] } });
+      // An older generation is ignored unanswered, which `false` tells the sender (the registry's tests hold the rest of
+      // the generation contract).
+      expect(leader.onWatchSet(parsedSet(0), "a")).toBe(false);
+    });
+    for (const line of lines) {
+      expect(line).not.toContain("acme/app/pull");
+      expect(line).not.toContain(ID);
+    }
+  });
+
+  test("an app's set, an unregistered sealer's, the archivist's and a malformed one are dropped: no watch-event, no reply", async () => {
+    let pending = -1;
+    let replied = -1;
+    const lines = await scenario(async ({ relay, replies }) => {
+      await sendSet(relay, APP_ID, rawSet(1));
+      await sendSet(relay, "stranger", rawSet(1));
+      await sendSet(relay, "arch", rawSet(1));
+      await sendSet(relay, "a", { ...rawSet(1), watches: "nope" });
+      // A good set behind them: its answer is the signal that the four before it were handled (in order), where a
+      // non-event cannot be polled for.
+      await sendSet(relay, "a", rawSet(1));
+      await answerWatchEvent(relay);
+      pending = await pendingWatchEvents(relay);
+      replied = replies.size;
+    });
+    expect(pending).toBe(0);
+    expect(replied).toBe(0);
+    expect(
+      lines.filter((line) => line.includes('watch-set from="stranger" dropped — not a registered machine')),
+    ).toHaveLength(1);
+    expect(
+      lines.filter((line) => line.includes('watch-set from="arch" dropped — not a registered machine')),
+    ).toHaveLength(1);
+    expect(lines.filter((line) => line.includes('dropped op="watch-set" from="a" — not a watch set'))).toHaveLength(1);
+    // An app's falls through to the final drop, which names no payload.
+    expect(lines.filter((line) => line.includes(`dropped op="watch-set" from="${APP_ID}"`))).toHaveLength(1);
+    for (const line of lines) expect(line).not.toContain("acme/app/pull");
+  });
+
+  test("a machine that does not advertise watches is dropped for good: never polled, never sent one", async () => {
+    let pending = -1;
+    const lines = await scenario(async ({ relay, leader }) => {
+      expect(leader.onWatchSet(parsedSet(1), "b")).toBe(true);
+      // The next set, from a machine that does advertise, is answered: it was handled after the first.
+      await sendSet(relay, "a", rawSet(1));
+      await answerWatchEvent(relay);
+      pending = await pendingWatchEvents(relay);
+    });
+    expect(pending).toBe(0);
+    expect(
+      lines.filter((line) => line.includes('watch-set from="b" dropped — the machine does not advertise watches')),
+    ).toHaveLength(1);
+  });
+
+  test("with no registry yet the set is held for the sender to resend, as with no term at all", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const gh = await ghStub.fresh();
+    await gh.setReply("{}", 1);
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), undefined, { gh: ghStub.path, intervalMs: 60_000 });
+    try {
+      const lines = await captureLog(async () => {
+        expect(leader.onWatchSet(parsedSet(1), "a")).toBe(false);
+        leader.lead(1);
+        await leader.settled();
+        expect(leader.onWatchSet(parsedSet(1), "a")).toBe(false);
+      });
+      expect(lines.some((line) => line.includes('watch-set from="a" dropped — no running term'))).toBe(true);
+      expect(lines.some((line) => line.includes('watch-set from="a" held — no registry yet'))).toBe(true);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("this machine's own set needs no registry entry and is answered in process through LocalOps", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const gh = await ghStub.fresh();
+    await gh.setReply("{}", 1);
+    const events: unknown[] = [];
+    const local: LocalOps = {
+      ...noLocalOps,
+      watchEvent: (request) => {
+        events.push(request);
+        return Promise.resolve({ ok: true, delivered: [] });
+      },
+    };
+    const { leader } = leaderOver(
+      relay,
+      new MemoryQueueStore(),
+      undefined,
+      { gh: ghStub.path, intervalMs: 60_000 },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      local,
+    );
+    try {
+      leader.lead(1);
+      await leader.settled();
+      expect(leader.onWatchSet(parsedSet(1), "self")).toBe(true);
+      await pollUntil(() => events.length > 0, "the in-process watch-event");
+      expect(events[0]).toMatchObject({ set: { gen: { boot: BOOT, n: 1 }, refused: [] } });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
   });
 });

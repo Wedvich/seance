@@ -1,17 +1,16 @@
-# Session messaging — spec
+# Session messaging — evidence and open questions
 
-**Status: PR 1 (local delivery) built 2026-11-13, PR 2 (cross-machine) and the reply by handle (D3, amended)
-built 2026-11-14; PR 3 (adapter seam) not built.** Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
-Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and
-macOS, 2.1.323 (`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three
-pre-PR 1 checks on Linux and on macOS (`origin/worktree-messaging-spike-2-macos`, `spike/REPORT-macos-2.md`). Like docs/drain.md,
-this file is the working record until the code lands; each part folds into DESIGN.md as it is built,
-and its text here goes. PR 1's and PR 2's record is in DESIGN.md: Local op socket, "Session messages"
-(the frames, the daemon's inbox, the outcomes, the wrappers, the audit) and its "Cross-machine"
-subsection (the gate, the leader's resolve, forward and receipt, the size budget, the skew table) and its
-"Replies by handle" subsection (the two tables, the `claude`-process binding, `wake`, `messageReply`),
-Claude Code mods (the `inbox` mod), MCP server (`send_message`) and Threat model item 6. What stays
-here is the evidence, PR 3, and the open questions.
+**Status: built.** PR 1 (local delivery) 2026-11-13; PR 2 (cross-machine) and the reply by handle (D3, amended)
+2026-11-14; PR 3, the adapter seam, 2026-11-18 (3a the child and state out, 3b delivery in, messages out and the
+subscription, 3c installing). Drafted 2026-11-13 from two spikes of text delivery into a live Claude Code session: Linux,
+Claude Code 2.1.322 (commit `0324f9f`, branch `worktree-spike-text-into-live-session`, `spike/`), and macOS, 2.1.323
+(`origin/worktree-spike-text-in-macos`, `spike/REPORT-macos.md`), then the three pre-PR 1 checks on Linux and on macOS
+(`origin/worktree-messaging-spike-2-macos`, `spike/REPORT-macos-2.md`). Each part folded into DESIGN.md as it was built:
+Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections; Daemon, "Adapters"
+(the protocol, supervision, state out, delivery, the subscription, installing, the owner's brief, the fit against three
+kinds of tool and the seam's rejected shapes); Claude Code mods (the `inbox` mod); MCP server (`send_message`); and
+Threat model item 6 and its adapter invariant. What stays here is the problem, the spike evidence, the owner's
+decisions D1 to D4, which the code cites, and the open questions.
 
 ## Problem
 
@@ -24,10 +23,9 @@ relaying is often the only path between two sessions that sit on one box.
 
 Wanted: **any session Séance knows about can message any other**, across machines and accounts,
 through MCP tools. Across machines it goes over the relay sealed under the PSK, so the relay never
-reads it. Later, a **locally installed adapter** in a separate private repo will use the same
-local delivery primitive to bridge sessions to an external system (a huddle project, which pushes
-a `nudge` held while the session is idle unless the item has `wake`). Séance offers the seam and
-knows nothing about huddle.
+reads it. Later, **adapters**, each a locally installed program in a repository of its own, will bridge
+sessions and an external tool both ways through the same local delivery primitive (DESIGN.md, "Adapters"). Séance offers
+the seam and names no tool.
 
 **Out of scope: a shared bulletin board** (a list every session reads and posts to). Its natural
 home would be the relay store, and the store is the wrong place for it:
@@ -43,7 +41,7 @@ home would be the relay store, and the store is the wrong place for it:
   on a new prefix, which is a threat-model change of its own (CLAUDE.md, the store invariants).
 
 A board is a separate spec, if it is wanted at all. Point-to-point messages need no resting place,
-and this spec gives them none (§3).
+and Séance gives them none (DESIGN.md, "Cross-machine").
 
 ## Evidence
 
@@ -83,262 +81,37 @@ and this spec gives them none (§3).
 - **Claude Code's native peer socket as transport.** It is a private protocol, works on one
   machine only, and reaches across accounts only through Remote Control.
 
-## Names
-
-Built in PR 1 (DESIGN.md, Local op socket, "Session messages"): the first eight rows, `CAPABILITIES.messages`, the
-caps, the audit origin `message`, and the outcomes `delivered`, `held` (in PR 1's meaning: a launched task with
-no pane yet), `ended`, `unknown`, `unsupported`, `too_long` and `rate_limited`, plus `sent`, `dropped`,
-`nolistener`, `unbound`, `invalid`, `stopping` and `internal`. PR 2 added `routed`, `remote` (a `route: "ask"`
-frame's answer for a task not deliverable here), `no_leader`, `offline` and, in a receipt, `unsupported` from the
-leader (DESIGN.md, "Cross-machine"). The audit gained `dir=receipt`.
-
-| Concept                                     | Name                                                                                                                           |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| The thing sent                              | **message**                                                                                                                    |
-| Its kind                                    | **note** (information), **question** (may answer), **request** (act on it)                                                     |
-| A pane's held messages                      | **inbox** (daemon memory only)                                                                                                 |
-| MCP tool, send                              | `send_message`                                                                                                                 |
-| Mod tool, read                              | `read_messages` (mod-registered, `mcp__inbox__read_messages`)                                                                  |
-| The mod                                     | `inbox` (`claude-mods/inbox/`)                                                                                                 |
-| Local-socket frame, a session sends         | `message` (frame kind)                                                                                                         |
-| Local-socket frame, a session's mod listens | `inbox` (frame kind)                                                                                                           |
-| Daemon → leader event op                    | `session-message`                                                                                                              |
-| Leader → daemon request op, deliver         | `deliver-message`                                                                                                              |
-| Leader → daemon request op, receipt         | `message-receipt`                                                                                                              |
-| Capability, a daemon that receives          | `CAPABILITIES.messages`                                                                                                        |
-| Capability, a leader that routes            | `CAPABILITIES.messageRoute`                                                                                                    |
-| Caps                                        | `MESSAGE_PUSH_MAX` (8 KiB), `MESSAGE_MAX` (64 KiB)                                                                             |
-| Audit origin                                | `message` (and `adapter` for the seam)                                                                                         |
-| Outcomes                                    | `delivered`, `held`, `offline`, `ended`, `unknown`, `unsupported`, `too_long`, `rate_limited`, `no_leader`, `routed`, `remote` |
-| Cross-machine size budget                   | `MESSAGE_ROUTE_MAX` (40 000 bytes of JSON-escaped text)                                                                        |
-| The gate on a `message` frame               | `route: "ask"` then `route: "send"`                                                                                            |
-
 ## Decided by the owner
 
 **From the brief (before 2026-11-13):**
 
 - **The sender chooses the authority per message**, by its kind: a note, a question or a request
-  (§4).
+  (DESIGN.md, "Session messages").
 - **Delivery is by Claude mod calls, never tmux keystrokes.**
 
 **Answered on 2026-11-13:**
 
-- **D1. Cross-machine goes through the leader** (§3).
+- **D1. Cross-machine goes through the leader** (DESIGN.md, "Cross-machine").
 - **D2. A target that is offline or asleep: drop, and answer `offline`.** Nothing is held anywhere
-  (§3).
+  (DESIGN.md, "Cross-machine").
 - **D3 (amended 2026-11-14). A session without a task is reached only as a reply, by the id of a message it
-  sent.** It was "Sessions without a task are out of v1; the task id is the only address (§2)". The owner's
+  sent.** It was "Sessions without a task are out of v1; the task id is the only address". The owner's
   2026-11-14 smoke test had a hand-started session ask a task a question, and the task had no way to answer. A
   reply names the message it answers (`inReplyTo`, no `to`); the daemon that minted the id knows which session
   asked, and answers only to the pane, pid, task and **`claude` process** that did, for an hour. A task id stays the
   only address for anything that is not a reply. Built: DESIGN.md, "Session messages", "Replies by handle".
-  **Rejected**, each in §2's list: machine + pane id as a general address; a synthetic task id or queue entry for a
-  hand-started session; a leader-held reply table; the Claude session id; replies on one machine only.
-- **D4. Wake by kind.** A question or request wakes an idle session; a note does not (§1). Built: a note is a
+  **Amended again 2026-11-17 (decided by the owner; DESIGN.md, "Tags and session identity", "The adapter subscription"):** "… or, by an adapter on its own machine, through the
+  subscription the session made by messaging that adapter", keyed by its verified conversation id (`agent.session`)
+  for the conversation's life. The hour bounds a reply handle because the handle is a bearer; a subscription is the
+  session's own act, usable only over that adapter's stdin, so the hour does not apply to it. Built
+  2026-11-18 with 3b: DESIGN.md, "Adapters", "The subscription".
+  **Rejected**, each in DESIGN.md, "Replies by handle": machine + pane id as a general address; a synthetic task id or queue entry for a
+  hand-started session; a leader-held reply table; the Claude session id **for replies** (narrowed 2026-11-17: the reason, a claim taken from a frame, stands for a claim and falls for an id the daemon verified itself, which may name two acts, the owner's `session-tag` and adapter delivery through a subscription; a reply is still by message id); replies on one machine only.
+- **D4. Wake by kind.** A question or request wakes an idle session; a note does not. Built: a note is a
   `$.session.append` row, added at once and read within a running turn too, which does not wake an idle session.
   **Extended 2026-11-14 (`wake`):** a note that answers a question or request the receiving session itself sent
   does wake it, since an idle asker would never read it otherwise. The daemon decides from its own `sent` table and
   marks the inbox line; the mod then uses `$.prompt.submit`. Nothing else about a note changed.
-
-## Decisions
-
-### 1. Local delivery: a mod listening on the local socket, bound by peer pid
-
-**Built (PR 1, 2026-11-13); the record moved to DESIGN.md**: Local op socket, "Session messages" (the
-listener and its refusals, the `inbox` and `message` frames, the daemon's inbox, the grace, the caps,
-the outcomes, the wrappers, the standing instruction (the spawn's command line; the compose layer was dropped 2026-11-13), what each kind of session gets, the
-rejected alternatives) and Claude Code mods, **inbox** (the mod, its delivery table, `read_messages`).
-The spike's three checks are in the Evidence table above.
-
-### 2. Addressing: the task id, following its chain
-
-**The task id is the only address for a message that is not a reply** (D3, amended 2026-11-14: a reply to a session
-with no task is addressed by the id of the message it answers, "Replies by handle" in DESIGN.md). It is the only
-handle stable across panes: tmux reuses
-pane ids, a session can be resumed in another pane, and a window name is display-only (DESIGN.md,
-"Claude Code mods": "nothing routes, binds or places on the window").
-
-**Resolution follows the task's chain**, as dependents already do (DESIGN.md, "Passing to a
-successor"). Built (PR 2) as `resolveMessageTarget` (`scheduler/src/message-route.ts`):
-
-| Target task state                                                                       | Resolves to                                                                                                                            |
-| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `running` / `needs-input` / `lost`                                                      | forward to the machine its `assignment` names                                                                                          |
-| `superseded`                                                                            | its `successor`, followed to the end of the chain (`holder`). A successor still `blocked` or otherwise waiting is `held` (below)       |
-| finished, and a later task carries `continues: { task: <id> }` and has landed           | that continuation, which resumes the same Claude conversation in the same worktree                                                     |
-| finished, a continuation exists but has not landed                                      | `held`                                                                                                                                 |
-| finished, with an `assignment`                                                          | forward, `settled`: that machine delivers to a live pane and answers `ended` for none, since a session can outlive its record's `done` |
-| finished, no `assignment`                                                               | `ended`                                                                                                                                |
-| `queued`, `ready`, `reserved`, `blocked`, or placed with no `assignment` yet            | `held`: answered at once, not queued (D2's rule applies; nothing is held at rest)                                                      |
-| not in the queue, or a chain that breaks (a cycle, a successor the queue does not hold) | `unknown`                                                                                                                              |
-
-"Held" here is an answer, not storage. The sender reads "the target has not started yet" and
-decides whether to retry. The word is kept for the adapter seam's boundary delivery (§6).
-
-**Who resolves.** The leader, whose queue holds the chain (§3). PR 1's local path, which needs no
-leader, is built (DESIGN.md, "Session messages", Resolution): the daemon resolves a task id against its
-own panes checked against its launch ledger, and **a live local pane wins over the leader's record**:
-the leader is asked only for what the sender's own daemon cannot deliver. Anything else goes to the leader
-(PR 2, built: DESIGN.md, "Cross-machine", where the built table is the record).
-
-Rejected:
-
-- **Machine + pane id** (D3), as a general address. A reused pane id delivers to a stranger. A hand-started
-  session has no task, nothing to resolve a chain through, and no placement the leader knows. (A pane id is
-  still part of a reply's binding, beside the pid, the task and the `claude` process, and is never an address a
-  frame supplies.)
-- **A synthetic task id, or a queue entry, for a hand-started session** (D3). It would put a session Séance never
-  spawned into the leader's record and the Queue screen, with a lifecycle nothing ends, and hand it the chain
-  resolution, `continues` and the reaper, none of which apply.
-- **A leader-held reply table** (D3). The leader would keep a map of who talked to whom, a mailbox's worth of
-  metadata, to answer what the asker's own daemon already can: it minted the id.
-- **Replies on one machine only** (D3). The smoke test that raised this was cross-machine, and asking a task on
-  another machine is the common case.
-- **The Claude session id.** It is stable across `--resume`, but it is the daemon's own choice
-  (`--session-id`), recorded only in the launch ledger of the machine that ran it. It is not in the
-  queue, so a sender could learn it only by asking that machine, and it is the very id the
-  continuation invariant forbids taking from a frame.
-- **Freezing a message at its first target** (no chain). A pass moves the work exactly when one
-  session runs out of usage, which is when a peer most needs to reach whoever carries it on.
-
-### 3. Cross-machine: through the leader, no hold
-
-**Built (PR 2, 2026-11-14); the record moved to DESIGN.md**: Local op socket, "Session messages",
-"Cross-machine" (the two-frame gate `route: "ask"` then `"send"`, the leader's admit, resolve, forward and
-receipt, `settled`, the de-dup by message id for `REPLAY_RETAIN_MS`, the outcomes `routed`, `no_leader`,
-`offline` and `unsupported`, the receipt's fixed texts, the size budget `MESSAGE_ROUTE_MAX`, the skew
-table, and the rejected alternatives: a direct `from: "app"` send, daemon-to-daemon, and the three holds
-for D2), Wire protocol (`session-message`, `deliver-message`, `message-receipt`) and Threat model item 6.
-D1 and D2 stand as decided above: through the leader, and a target that is offline or asleep is dropped
-and answered `offline`, nothing held anywhere.
-
-### 4. MCP surface and the frames a receiver reads
-
-**Built (PR 1); the record moved to DESIGN.md**: MCP server (`send_message`, no list tool,
-`read_messages` on the mod), Local op socket, "Session messages" (the `message` frame, the rejected
-broker, direct app-role client and `Plain` op, the wrappers, what a request may not do) and Threat
-model item 6 (the prompt-injection path a request opens between accounts). PR 2 reuses the same
-`send_message` and wrappers: a target on another machine goes to the leader (`routed`, §3) where PR 1
-answers `unknown`. The text of a request's wrapper names the sender as task id, title and machine;
-the leader binds `fromTask` to the sealing machine (§3), so the receiver's wrapper names the real task.
-
-### 5. Logging and audit
-
-**Built (PR 1); the record moved to DESIGN.md**, Local op socket, "Session messages", Audit. Message
-text is prompt text, under the same rules: never logged by the daemon, the leader, the mod or the
-relay, never in argv, never in `progress`, `get_queue`, `status`, a push notification or the
-archivist. The relay sees one more sealed envelope class of the same shape as `session-event`, and
-logs it as it logs those: failures only. The leader logs no line per routed message (the threat-model
-item 3 timeline rule `#route` already follows), only failures; PR 2's `dir=out`/`dir=in` lines are
-the daemons', with the outcomes of §3 added to the built set.
-
-### 6. The adapter seam
-
-What a local adapter (huddle, later) needs, and nothing more:
-
-- **Session state out**: per tasked pane on this machine, `{ taskId, state, turnEnded? }`. The
-  daemon already computes this for `session-event` before it forwards it.
-- **Delivery in**: "deliver this text to task X on this machine,
-  `{ when: "now" | "boundary", wake: boolean }`". This is the same primitive §1 uses:
-  - `now` with `wake` is `$.prompt.submit`.
-  - `now` without `wake` is `$.session.append` mid-turn, or held to the next turn when idle.
-  - `boundary` holds the text to the next `turnEnded` idle, then delivers by `wake`.
-
-  The adapter's text reads with a fixed wrapper naming the adapter ("from the `<name>` adapter on
-  this machine"), never as a session or the user.
-
-**How an adapter is registered.** Only in the machine's own `config.json`, as trait probes are
-(DESIGN.md, Daemon, "Trait probes"): `adapters: [{ name, argv }]`, an argv array, never a shell
-string. The daemon starts each one as a supervised child, under the environment a session gets
-less `CREDENTIALS_DIRECTORY`. It talks over an **inherited socketpair fd**, so no socket rendezvous
-exists for another process to claim the name on. The adapter is restarted with backoff and stopped
-with the daemon. Audited `origin=adapter` with the name and counts, never text, an argv word other
-than `argv[0]`'s basename, or its output.
-
-**What an adapter may not do:**
-
-- spawn, despawn, enqueue, cancel or touch the queue;
-- send cross-machine, or reach the relay at all;
-- read any inbox, prompt, transcript or other message;
-- address an untasked pane, or a task by anything but its id on this machine;
-- be declared from a frame, the PWA, MCP or another machine.
-
-Rejected:
-
-- **An adapter dialing the local socket and naming itself.** Any process of the same user could
-  claim the name. Peer-pid binding names a pane, not a program.
-- **An adapter as an MCP client of `seance mcp`.** That is app-role and fleet-wide, the opposite
-  of local-only.
-- **The adapter installing its own Claude mod.** Two mods would deliver into one session, with no
-  shared rule for wake or boundary, and Séance would lose its say over what reaches a session.
-
-The adapter protocol (frame shapes on the fd) is set in PR 3, not here.
-
-### 7. Build order
-
-Small PRs, each landing on its own:
-
-1. **Local delivery. Built 2026-11-13.** The `inbox` mod (listener child, `read_messages`,
-   the delivery table), the `inbox` and `message` local-socket frames, the in-memory inbox, the
-   `--append-system-prompt` constant, MCP `send_message` for tasks on this machine,
-   `CAPABILITIES.messages`, and audit origin `message`. Alone, this gives cross-account messaging
-   between sessions on one machine, since exclaves share a daemon.
-   - Spike first (§1's three items).
-   - Tested by: `bun:test` on the local socket with a real peer (the session-events tests'
-     fixtures), covering binding, refusal on a null pid, one listener per pane, inbox caps and
-     clear-on-rebind; the mod via `claude plugin test` (local only, skipped in CI); one live run
-     per platform.
-2. **Cross-machine. Built 2026-11-14; the record is DESIGN.md, "Cross-machine".** `session-message`, the
-   leader's resolve, forward and receipt, `deliver-message`, `message-receipt`,
-   `CAPABILITIES.messageRoute` and the chain resolution in the scheduler library.
-   - Tested by: `scheduler/` unit tests for resolution over successor and continuation chains;
-     leader tests for the admit rule (wrong machine, `from: "app"`); and an e2e test
-     (`e2e/messages.test.ts`) with the claude stub across two daemons, covering delivered both ways,
-     ended, offline, and a superseded predecessor whose chain breaks and is then completed. The held
-     phase (a successor still waiting) is covered in `scheduler/` and the leader's unit tests only: a
-     successor placed through `succeeds` dispatches at once and ignores `deps`, so the e2e cannot hold one.
-3. **Adapter seam.** `config.json` `adapters`, the supervised child and fd protocol, state out,
-   delivery in, and audit origin `adapter`.
-   - Tested by: daemon tests with a `scriptStub` adapter (`daemon/test/fixtures.ts`), covering
-     delivery by `when` and `wake`, refusals, restart, and stop with the daemon.
-
-**Replies by handle (D3, amended). Built 2026-11-14; the record is DESIGN.md, "Replies by handle".**
-`inReplyTo` with no `to`, the `sent` and `received` tables, the `claude`-process binding, `wake`,
-`CAPABILITIES.messageReply`, `replyTo` and `origin` on the routed ops.
-
-- Tested by: `daemon/test/messages.test.ts` with real peers, including the restart that matters most (a second
-  `claude` stub under the same shell pid must not read the first's replies or answer its questions, also in a pane
-  whose start command names `--remote-control`, under a wrapper named `claude` that runs it twice, and with a `claude` nested
-  under another; and a shell's child with no `claude` above it holds no handle but still sends by task id); leader tests
-  for forwarding by `replyTo` and the `messageReply` gate; the mod's test for `wake`; and an e2e test
-  (`e2e/messages.test.ts`) where a session with no task asks a task on the other machine and is answered by id, with
-  a wake, and answers back.
-
-## Threat model
-
-PR 1's part is built and recorded in DESIGN.md (Threat model item 6; Local op socket, "Session
-messages"; and CLAUDE.md's local-socket bullet): the `inbox` frame is the first on the local socket
-that _reads_ something a session did not write itself, so a reader is bound by kernel peer pid, never
-by a field, and refused where the host cannot name a peer. PR 2's part is built too (DESIGN.md, Threat
-model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will add, each to be kept:
-
-- **The leader honours a request only sealed by the right sender, through its own parser and the one
-  `schedulerGuard`.** `session-message` is from a daemon only, `parseSessionMessage`, the same guard.
-- **An event moves only a task placed on the machine that sealed it.** A `session-message` is
-  accepted only when its `fromTask` is placed on the sealing machine. It moves no task at all.
-- **A daemon acts on a scheduler op only sealed `from` the scheduler (or in process).**
-  `deliver-message` and `message-receipt` follow this.
-- **Every surface audits under its own origin, never reusing one.** `adapter` is the new origin PR 3
-  adds, beside PR 1's `message`.
-- **A service-delivered credential never leaves the daemon process.** An adapter's env drops
-  `CREDENTIALS_DIRECTORY`, as a session's and a trait probe's do.
-- **Traits are declared only in the machine's own `config.json`; probes run only that argv.**
-  Adapters follow the same rule (§6).
-- **Nothing reachable from `seance mcp` calls `log.ts`.** PR 2 adds no `seance mcp` code that logs.
-- **A reply handle is a bearer, so it is bound.** A message id is `crypto.randomUUID`, unguessable and in no log or
-  audit line. The replier's daemon accepts it only from the pane, pid, task and `claude` process the message was placed
-  for, and the asker's daemon delivers only to the pane, pid, task and process that sent it while it runs; the leader
-  keeps no table. Built (DESIGN.md, Threat model item 6).
 
 ## Open questions
 
@@ -353,3 +126,32 @@ model item 6, and CLAUDE.md's messaging bullet). What PR 2 added and PR 3 will a
 3. **The MCP channel** (`--channels`): one push covers mid-turn and wake. Worth revisiting once
    `allowedChannelPlugins` can be set org-wide without a startup dialog.
 4. **A sender-side "who can I message" view** beyond `get_queue`. Wait for use.
+
+The adapter seam's (DESIGN.md, "Adapters"), all decided by the owner on 2026-11-17 except 13's task-record half, which stays out:
+
+5. **May an adapter start or resume work** (spawn, continue, enqueue, amend)? **Decided 2026-11-17: no.** Work
+   a tool wants started goes through an orchestrator session the adapter delivers to (docs/orchestrator.md §1), so a
+   person or an agent with a fence decides what runs. That session may be the tool's own coordinator (DESIGN.md, "Adapters", "Checked
+   against three kinds of tool"). A per-adapter `grants` key would be its own threat-model change.
+6. **A fleet-wide queue view out** (tasks not yet placed on any machine)? **Decided 2026-11-17: not now.** Each
+   machine's adapter covers its own sessions and launched tasks; unplaced tasks reach a tool through whoever queued
+   them. Revisit when a tool needs it.
+7. **Addressing an untasked session beyond a reply** (D3)? **Decided 2026-11-17 by the subscription**
+   (DESIGN.md, "Adapters", "The subscription"; D3 amended): a session that messages `adapter:<name>` is reachable by that adapter for its
+   conversation's life. Still no general address: only that adapter, only that machine.
+8. **Session-to-session message metadata out** (who messaged whom, when)? **Decided 2026-11-17: no, not even
+   counts.** It is the mailbox-shaped record D3 rejected keeping at the leader, handed to a third party instead.
+9. **`request` from an adapter by default?** **Decided 2026-11-17: off**, opt-in per adapter in `kinds` (DESIGN.md, "Adapters", "Trust"),
+   since whoever can write into the tool can write into the session.
+10. **Contain the adapter** (the custodian round's masks with a network allowlist for the tool's host)? **Decided
+    2026-11-17: not in PR 3.** The same-uid trust is stated plainly (DESIGN.md, "Adapters", "Trust"); revisit before any adapter the owner did
+    not write is installed. Containment would have to be drilled as the custodian's was before it is claimed.
+11. **An external ref on a task in state out**, for a tool to map a task to its own object without keeping a
+    map? **Decided 2026-11-17**, with `creator.*`: `Session.task.ref`, the dispatched `creator.ref` (DESIGN.md, "Task tags", `SpawnRequest.ref`).
+12. **Adapters on the Machines row** (a `MachineStatus` field)? **Decided 2026-11-17: later**; `seance adapter
+    status` and `doctor` first.
+13. **State in beyond messages** (a tool setting a label, a flag or done on a task)? **Partly settled
+    2026-11-17**: an adapter may set its own `adapter.<name>.*` tags on a session (the `tag` frame), memory only, on its
+    machine. Nothing on the task record: a flag or done touches the leader's record, which the owner's brief keeps out of the seam.
+14. **The spec's `linear` field names a tool**, against the brief's rule. **Decided 2026-11-17**, with `creator.*`: it becomes the
+    task tag `creator.ref` (DESIGN.md, "Task tags"), which is also orchestrator.md's `ref`.

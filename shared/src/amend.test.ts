@@ -150,7 +150,58 @@ describe("amendSpec", () => {
   });
 });
 
+describe("amendSpec, notBefore", () => {
+  test("sets, moves and clears it", () => {
+    const set = amendSpec(spec(), { taskId: "t", notBefore: 5 });
+    expect(set).toEqual(spec({ notBefore: 5 }));
+    expect(amendSpec(spec({ notBefore: 5 }), { taskId: "t", notBefore: 9 })).toEqual(spec({ notBefore: 9 }));
+    expect(amendSpec(spec({ notBefore: 5 }), { taskId: "t", title: "x" })).toEqual(spec({ notBefore: 5, title: "x" }));
+    const cleared = amendSpec(spec({ notBefore: 5 }), { taskId: "t", notBefore: null });
+    expect(cleared).toEqual(spec());
+    expect(cleared).not.toHaveProperty("notBefore");
+  });
+});
+
+describe("amendSpec, ownerTags", () => {
+  test("merges the owner's keys alone, clears one with an empty string, and leaves every other tag and field", () => {
+    const base = spec({ tags: { "creator.ref": "linear:ENG-1", "owner.label": "mine" } });
+    expect(amendSpec(base, { taskId: "t", ownerTags: { label: "yours", note: "n" } })).toEqual(
+      spec({ tags: { "creator.ref": "linear:ENG-1", "owner.label": "yours", "owner.note": "n" } }),
+    );
+    expect(amendSpec(base, { taskId: "t", ownerTags: { label: "" } })).toEqual(
+      spec({ tags: { "creator.ref": "linear:ENG-1" } }),
+    );
+    const cleared = amendSpec(spec({ tags: { "owner.label": "mine" } }), { taskId: "t", ownerTags: { label: "" } });
+    expect(cleared).toEqual(spec());
+    expect(cleared).not.toHaveProperty("tags");
+  });
+
+  test("a bare ref key lands as owner.ref and never touches creator.ref", () => {
+    const base = spec({ tags: { "creator.ref": "linear:ENG-1" } });
+    expect(amendSpec(base, { taskId: "t", ownerTags: { ref: "linear:ENG-2" } })).toEqual(
+      spec({ tags: { "creator.ref": "linear:ENG-1", "owner.ref": "linear:ENG-2" } }),
+    );
+  });
+
+  test("a third owner key is tags_full, the existing ones counted", () => {
+    const base = spec({ tags: { "owner.a": "1", "owner.b": "2" } });
+    expect(amendSpec(base, { taskId: "t", ownerTags: { c: "3" } })).toBe("tags_full");
+    expect(amendSpec(base, { taskId: "t", ownerTags: { a: "9" } })).toEqual(
+      spec({ tags: { "owner.a": "9", "owner.b": "2" } }),
+    );
+  });
+});
+
 describe("amendedFields", () => {
+  test("names ownerTags, never its keys or values", () => {
+    expect(amendedFields({ taskId: "t", ownerTags: { label: "secret" } })).toEqual(["ownerTags"]);
+  });
+
+  test("names notBefore, never its time", () => {
+    expect(amendedFields({ taskId: "t", notBefore: 123 })).toEqual(["notBefore"]);
+    expect(amendedFields({ taskId: "t", notBefore: null })).toEqual(["notBefore"]);
+  });
+
   test("names the fields an amendment carries, null ones too, never a value", () => {
     expect(amendedFields({ taskId: "t", title: null, effort: "max" })).toEqual(["title", "effort"]);
     expect(amendedFields({ taskId: "t", prompt: { mode: "append", text: "secret" }, basis: BASIS })).toEqual([

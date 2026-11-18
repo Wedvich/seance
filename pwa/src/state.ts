@@ -3,6 +3,7 @@ import {
   DEFAULT_MODEL,
   EFFORTS,
   isEffort,
+  nextClockTime,
   type Effort,
   type ArchiveMetricsStep,
   type ArchiveTaskOutcome,
@@ -61,7 +62,48 @@ export const AUTONOMY_HINTS: Record<AutonomyLevel, string> = {
   auto: "Also makes reversible choices itself, and notes each one",
 };
 
-export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "autonomy" | "after" | "requires";
+export type SheetKind =
+  | "machine"
+  | "account"
+  | "repo"
+  | "model"
+  | "effort"
+  | "autonomy"
+  | "after"
+  | "requires"
+  | "ref"
+  | "notBefore";
+
+/**
+ * The Not before choice, kept as what was picked and resolved at submit (`resolveNotBefore`): an "in 2 h"
+ * picked and left open stays honest. Transient, like the autonomy level: a deferral is usually a one-off.
+ */
+export type NotBeforeChoice =
+  | { readonly kind: "in"; readonly ms: number }
+  /** The next `hh:mm` on the phone's clock: "Tonight". */
+  | { readonly kind: "clock"; readonly hh: number; readonly mm: number }
+  /** The next calendar day at `hh:mm`, even when picked at 02:00: "Tomorrow morning". */
+  | { readonly kind: "tomorrow"; readonly hh: number; readonly mm: number }
+  /** A date-time from the picker, as the phone's local clock read it. */
+  | { readonly kind: "at"; readonly at: number };
+
+/** The instant `choice` means at `now`; `at` is taken as picked, and refused later when it has passed. */
+export function resolveNotBeforeChoice(choice: NotBeforeChoice, now: number): number {
+  switch (choice.kind) {
+    case "in":
+      return now + choice.ms;
+    case "clock":
+      return nextClockTime(choice.hh, choice.mm, now);
+    case "tomorrow": {
+      const day = new Date(now);
+      day.setDate(day.getDate() + 1);
+      day.setHours(choice.hh, choice.mm, 0, 0);
+      return day.getTime();
+    }
+    case "at":
+      return choice.at;
+  }
+}
 
 /**
  * The Machine sheet's rescan action: inline scanning/failure state on the row it
@@ -429,6 +471,26 @@ export interface AccountsState {
   /** The account whose rename dialog is open: a layer, so back closes it. */
   readonly renaming: string | null;
   /** The last rename's refusal or failure, as a sentence; cleared by the next rename or a dismiss. */
+  readonly notice: string | null;
+}
+
+/**
+ * The next task's ref as typed (`creator.ref` and its URL, DESIGN.md, "Task tags"). Transient like the autonomy level, so
+ * never persisted: a ref names one task's work and must not ride along unnoticed on the next.
+ */
+export interface RefDraft {
+  readonly ref: string;
+  readonly url: string;
+}
+
+export const EMPTY_REF: RefDraft = { ref: "", url: "" };
+
+/** The label dialog on the Queue screen: a layer, so back closes it. */
+export interface LabellingState {
+  readonly taskId: string;
+  /** The `amend` is in flight. */
+  readonly saving: boolean;
+  /** The last save's refusal or failure, as a sentence; cleared by the next save or a dismiss. */
   readonly notice: string | null;
 }
 

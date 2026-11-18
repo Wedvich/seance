@@ -106,8 +106,35 @@ export function sanitizeWindowName(name: string): string {
   return name.replaceAll(FIELD_SEP, "-");
 }
 
+/** Subcommands that allocate a pty for a new pane: the only ones macOS's allocator races (`PTY_RACE`). */
+const PTY_OPENING: ReadonlySet<string> = new Set([
+  "new-window",
+  "new-session",
+  "split-window",
+  "respawn-pane",
+  "respawn-window",
+]);
+
+/**
+ * The two ways macOS fails a pty open that succeeds a moment later (XNU `bsd/kern/tty_ptmx.c`). ENXIO: an open made
+ * while every slot of the machine-wide pty vector is taken (it grows 16 at a time, so at each new high of ptys in use
+ * since boot) fails when any process frees a pty while the kernel allocates. -6, the kernel's internal
+ * `EREDRIVEOPEN`: two concurrent opens cloned the same free minor, and the loser's "redrive the open" leaks to
+ * userland. Neither leaves a window or pane behind. Linux has neither race.
+ */
+const PTY_RACE = /fork failed: (?:Device not configured|Unknown error: -6)$/mu;
+const PTY_RACE_RETRIES = 3;
+
 export async function tmuxOk(args: readonly string[]): Promise<string> {
-  const result = await tmux(args);
+  let result = await tmux(args);
+  if (PTY_OPENING.has(args[0] ?? "")) {
+    for (let retry = 1; retry <= PTY_RACE_RETRIES && result.exitCode !== 0 && PTY_RACE.test(result.stderr); retry++) {
+      // oxlint-disable-next-line no-await-in-loop -- each retry waits on the last one's failure
+      await Bun.sleep(20 * retry);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      result = await tmux(args);
+    }
+  }
   if (result.exitCode !== 0) {
     throw new TmuxError(`tmux ${args[0]} failed: ${result.stderr.trim() || result.stdout.trim()}`);
   }

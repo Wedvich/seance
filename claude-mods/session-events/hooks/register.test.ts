@@ -3,7 +3,18 @@ import type { Engine } from "claude-code/testing";
 import type { On, SessionEndReason, ToolCheckDecision } from "claude-code";
 import { daemonMain, prUrlFrom } from "./register.ts";
 
-type Sent = { readonly argv: readonly string[]; readonly report: unknown }[];
+/** `agent` apart from the rest: every report carries it, and only the tests about it read it. */
+type Sent = { readonly argv: readonly string[]; readonly report: unknown; readonly agent: unknown }[];
+
+const SESSION = "0b3f5e0a-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+
+function parseSent(stdin: string | undefined): { readonly report: unknown; readonly agent: unknown } {
+  const parsed: unknown = JSON.parse(stdin ?? "null");
+  if (typeof parsed !== "object" || parsed === null || !("agent" in parsed))
+    return { report: parsed, agent: undefined };
+  const { agent, ...report } = parsed;
+  return { report, agent };
+}
 
 /**
  * Records every `session-event` run the mod makes, answering as the CLI does: silently.
@@ -16,22 +27,29 @@ function record(
     fail = false,
     env = { TMUX_PANE: "%7" },
     gate,
+    session = () => SESSION,
   }: {
     readonly fail?: boolean;
     readonly env?: Readonly<Record<string, string>>;
+    /** The conversation `$.session.id` answers, read at each report; null, the read fails. */
+    readonly session?: (() => string) | null;
     /** Holds every run (as a wedged daemon would) until it resolves. */
     readonly gate?: Promise<void>;
   } = {},
 ): Sent {
   const sent: Sent = [];
   on("env.get", (_$, e) => ({ value: env[e.name] }));
+  on("session.id", () => {
+    if (session === null) throw new Error("no session id");
+    return { value: session() };
+  });
   // The engine's own step beneath each lifecycle event; the mod only observes, so its echo does.
   on("session.start", (_$, e) => ({ cwd: e.cwd }));
   on("session.end", (_$, e) => ({ sessionId: e.sessionId }));
   on("turn.start", (_$, e) => ({ turnId: e.turnId }));
   on("turn.complete", (_$, e) => ({ text: e.answer }));
   on("process.run", async (_$, e) => {
-    sent.push({ argv: [...e.argv], report: JSON.parse(e.init?.stdin ?? "null") });
+    sent.push({ argv: [...e.argv], ...parseSent(e.init?.stdin) });
     await gate;
     if (fail) throw new Error("spawn bun ENOENT");
     return { value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
@@ -129,39 +147,64 @@ describe("daemonMain", () => {
 });
 
 describe("reports", () => {
-  test("a session's life sends its states through this checkout's daemon CLI, never naming a session", async ($, on) => {
+  test("`agent` rides every report, the conversation read at each one", async ($, on) => {
+    let conversation = SESSION;
+    const sent = record(on, { session: () => conversation });
+    await $.turn.start({ ...turn, text: "hi" });
+    await $.turn.complete(answered);
+    await settled(sent, 2);
+    // `/clear` moves the conversation under the same process; the mod sends no report for it (the settings hook does).
+    conversation = "1c4a6f1b-2d3e-4f60-9bac-1d2e3f4a5b6c";
+    await end($, "clear");
+    await $.turn.start({ ...turn, text: "again" });
+    await end($, "prompt_input_exit");
+    await settled(sent, 4);
+    expect(sent.map((s) => s.agent)).toEqual([
+      { kind: "claude", session: SESSION },
+      { kind: "claude", session: SESSION },
+      { kind: "claude", session: "1c4a6f1b-2d3e-4f60-9bac-1d2e3f4a5b6c" },
+      { kind: "claude", session: "1c4a6f1b-2d3e-4f60-9bac-1d2e3f4a5b6c" },
+    ]);
+  });
+
+  test("an unreadable conversation id is left out, never guessed", async ($, on) => {
+    const sent = record(on, { session: null });
+    await $.turn.start({ ...turn, text: "hi" });
+    await settled(sent, 1);
+    expect(sent.map((s) => s.agent)).toEqual([{ kind: "claude" }]);
+  });
+
+  test("a session's life sends its states through this checkout's daemon CLI, binding nothing by what it says", async ($, on) => {
     const sent = record(on);
     await $.session.start({ cwd: "/repo", surface: "terminal", isInteractive: true });
     await $.turn.start({ ...turn, text: "hi" });
     await $.turn.complete(answered);
+    // `ended` drops a report still pending behind one in flight: let the idle land first.
+    await settled(sent, 2);
     await end($, "prompt_input_exit");
-    await settled(sent, 4);
+    await settled(sent, 3);
     // The checkout the mod is read from, never a name on PATH.
     const main = sent[0]?.argv[1] ?? "";
     expect(main.endsWith("/daemon/src/main.ts")).toBe(true);
-    expect(sent.map((s) => s.argv)).toEqual(Array.from({ length: 4 }, () => ["bun", main, "session-event"]));
+    expect(sent.map((s) => s.argv)).toEqual(Array.from({ length: 3 }, () => ["bun", main, "session-event"]));
+    // No idle at the start: that is the settings `SessionStart` hook's, which a respawn does not raise.
     expect(sent.map((s) => s.report)).toEqual([
-      { state: "idle" },
       { state: "busy" },
       { state: "idle", turnEnded: true },
       { state: "ended" },
     ]);
   });
 
-  test("only the main loop's turn ending marks an idle: a respawn's start mid-turn does not", async ($, on) => {
+  test("a respawn's start mid-turn reports nothing: the turn reads busy until it ends", async ($, on) => {
     const sent = record(on);
     await $.turn.start({ ...turn, text: "hi" });
     await settled(sent, 1);
     // A hooks-worker respawn raises session.start while the turn runs on.
     await $.session.start({ cwd: "/repo", surface: "terminal", isInteractive: true });
-    await settled(sent, 2);
     await $.turn.complete(answered);
-    await settled(sent, 3);
-    expect(sent.map((s) => s.report)).toEqual([
-      { state: "busy" },
-      { state: "idle" },
-      { state: "idle", turnEnded: true },
-    ]);
+    await settled(sent, 2);
+    // Ordered after the start: had it sent an idle, that would be second here.
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "idle", turnEnded: true }]);
   });
 
   test("a subagent's turns say nothing: the main loop's turn is still running", async ($, on) => {
@@ -221,8 +264,14 @@ describe("reports", () => {
     await settled(sent, 3);
     // A non-event cannot be polled for: wait as long as a send takes to land above.
     await settled(sent, 4);
-    // The CLI adds the id itself, from the env it inherits; the mod only decides that a report goes.
+    // The CLI adds `remoteSession` itself, from the env it inherits; the mod decides that a report goes, and claims the
+    // id as `agent.remote` read at the report.
     expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "busy" }, { state: "busy" }]);
+    expect(sent.map((s) => s.agent)).toEqual([
+      { kind: "claude", session: SESSION },
+      { kind: "claude", session: SESSION, remote: "session_01First" },
+      { kind: "claude", session: SESSION, remote: "session_01Own" },
+    ]);
   });
 
   test("a bridge id first seen at idle waits for the next turn: a repeated turn end would close a session", async ($, on) => {

@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  adapterAudit,
   admitAudit,
   auditLogChecks,
   availabilityAudit,
@@ -12,7 +13,9 @@ import {
   drainAskAudit,
   ensureAuditLog,
   enqueueAudit,
+  queueAudit,
   messageAudit,
+  watchAudit,
   spawnAudit,
   traitRefusalAudit,
   type AuditSink,
@@ -264,6 +267,28 @@ describe("enqueue audit lines", () => {
     ]);
   });
 
+  test("the leader's amend line names notBefore as a field, never the time", async () => {
+    await queueAudit(collect).amended(
+      "req-1",
+      { id: "t-1", spec: {} },
+      {
+        taskId: "t-1",
+        notBefore: 1_900_123_456_789,
+      },
+    );
+    expect(collected).toEqual(['audit queue origin=relay op=amend id="req-1" task="t-1" fields=notBefore ok']);
+    expect(emitted()).not.toContain("1900123456789");
+  });
+
+  test("a deferred enqueue carries notBefore=1 and never the time", async () => {
+    await enqueueAudit(collect, "cli")(
+      { ...task, spec: { notBefore: 1_900_123_456_789 } },
+      { kind: "queued", landedEarlier: false },
+    );
+    expect(collected).toEqual(['audit enqueue origin=cli client=cli task="t-1" notBefore=1 createdAt=42 queued']);
+    expect(emitted()).not.toContain("1900123456789");
+  });
+
   test("the broker's line says claimed_client: the peer's word, never client=", async () => {
     await enqueueAudit(collect, "local-broker", "cli")(task, { kind: "queued", landedEarlier: true });
     await enqueueAudit(collect, "local-broker", "mcp")(task, { kind: "refused", code: 'rate"limited' });
@@ -285,9 +310,14 @@ describe("trait audit lines", () => {
     });
     await admitAudit(collect)({ id: "t-2", createdAt: 43, state: "ready", spec: {} });
     expect(collected).toEqual([
-      'audit queue origin=leader op=admit task="t-1" client="mcp" createdAt=42 state=ready avoid=1 requires=2 pin=1',
-      'audit queue origin=leader op=admit task="t-2" createdAt=43 state=ready avoid=0 requires=0 pin=0',
+      'audit queue origin=leader op=admit task="t-1" client="mcp" createdAt=42 state=ready avoid=1 requires=2 pin=1 notBefore=0',
+      'audit queue origin=leader op=admit task="t-2" createdAt=43 state=ready avoid=0 requires=0 pin=0 notBefore=0',
     ]);
+    await admitAudit(collect)({ id: "t-3", createdAt: 44, state: "ready", spec: { notBefore: 1_900_123_456_789 } });
+    expect(collected.at(-1)).toBe(
+      'audit queue origin=leader op=admit task="t-3" createdAt=44 state=ready avoid=0 requires=0 pin=0 notBefore=1',
+    );
+    expect(emitted()).not.toContain("1900123456789");
     expect(emitted()).not.toMatch(/atlas|gpu|secret|device-x/u);
   });
 
@@ -424,5 +454,66 @@ describe("auditLogChecks — what doctor renders", () => {
   test("a writable 0600 log reports only its size", async () => {
     await ensureAuditLog();
     expect(await auditLogChecks()).toEqual([{ level: "ok", message: `log 0KB (${logPath()})` }]);
+  });
+});
+
+describe("adapterAudit", () => {
+  test("lifecycle lines carry the name, an argv count and argv[0]'s basename, never another word", async () => {
+    const audit = adapterAudit(collect);
+    await audit.start("tg", ["/opt/tg/bin/tg", "--token", "secret-value"], 4242);
+    await audit.exit("tg", 3, "exited");
+    await audit.exit("tg", "SIGKILL", "stopped");
+    await audit.exit("tg", null, "spawn");
+    await audit.restart("tg", 2000);
+    await audit.refused("tg", "protocol");
+    await audit.failed("tg", 5);
+    await audit.stop("tg");
+    expect(collected).toEqual([
+      'audit adapter origin=adapter op=start name=tg argv=3 argv0="tg" pid=4242',
+      "audit adapter origin=adapter op=exit name=tg code=3 reason=exited",
+      "audit adapter origin=adapter op=exit name=tg code=SIGKILL reason=stopped",
+      "audit adapter origin=adapter op=exit name=tg code=- reason=spawn",
+      "audit adapter origin=adapter op=restart name=tg delay=2000ms",
+      "audit adapter origin=adapter op=refused name=tg reason=protocol",
+      "audit adapter origin=adapter op=failed name=tg exits=5",
+      "audit adapter origin=adapter op=stop name=tg",
+    ]);
+    expect(emitted()).not.toContain("secret-value");
+  });
+
+  test("text in and out: ids, kind, bytes and an outcome, never text, a label, a message or conversation id", async () => {
+    const audit = adapterAudit(collect);
+    await audit.deliver("tg", { to: "t-1", kind: "question", bytes: 12, outcome: "delivered" });
+    await audit.deliver("tg", { to: "session", kind: "note", bytes: 3, outcome: "refused", code: "kind" });
+    await audit.deliver("tg", { to: "reply", kind: "note", bytes: 3, outcome: "nolistener" });
+    await audit.message("tg", { from: "t-1", kind: "request", bytes: 40, outcome: "delivered", subscribed: true });
+    await audit.message("tg", { from: null, kind: "note", bytes: 2, outcome: "refused", subscribed: false });
+    await audit.message("tg", { from: undefined, kind: "note", bytes: 2, outcome: "unbound", subscribed: false });
+    expect(collected).toEqual([
+      'audit adapter origin=adapter op=deliver name=tg dir=in to="t-1" kind=question bytes=12 outcome=delivered',
+      'audit adapter origin=adapter op=deliver name=tg dir=in to="session" kind=note bytes=3 outcome=refused code=kind',
+      'audit adapter origin=adapter op=deliver name=tg dir=in to="reply" kind=note bytes=3 outcome=nolistener',
+      'audit adapter origin=adapter op=message name=tg dir=out from="t-1" kind=request bytes=40 outcome=delivered subscribed=true',
+      "audit adapter origin=adapter op=message name=tg dir=out from=untasked kind=note bytes=2 outcome=refused subscribed=false",
+      "audit adapter origin=adapter op=message name=tg dir=out from=- kind=note bytes=2 outcome=unbound subscribed=false",
+    ]);
+  });
+});
+
+describe("watchAudit", () => {
+  test("each op is one line of closed values, with - for what is absent", async () => {
+    const audit = watchAudit(collect);
+    await audit({ op: "add", kind: "pr", outcome: "ok" });
+    await audit({ op: "add", outcome: "too_many" });
+    await audit({ op: "remove", outcome: "unknown" });
+    await audit({ op: "event", kind: "run", event: "completed", outcome: "delivered" });
+    await audit({ op: "end", kind: "pr", reason: "terminal" });
+    expect(collected).toEqual([
+      "audit watch origin=watch op=add kind=pr event=- reason=- outcome=ok",
+      "audit watch origin=watch op=add kind=- event=- reason=- outcome=too_many",
+      "audit watch origin=watch op=remove kind=- event=- reason=- outcome=unknown",
+      "audit watch origin=watch op=event kind=run event=completed reason=- outcome=delivered",
+      "audit watch origin=watch op=end kind=pr event=- reason=terminal outcome=-",
+    ]);
   });
 });

@@ -1927,4 +1927,157 @@ describe("a closed machine", () => {
       expect(trail().at(-1)).toBe("audit availability origin=relay open=false outcome=internal_error");
     });
   });
+
+  describe("the session-tag op", () => {
+    const session = "1a2b3c4d-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+    const ask = (extra: Record<string, unknown> = {}): Plain =>
+      request("session-tag", { pane: "%3", session, key: "label", value: "notes", ...extra });
+    const trail = (): string[] => lines.filter((l) => l.startsWith("audit session-tag"));
+
+    test("a malformed payload is invalid_request, no table is unsupported, the act's code and a throw pass through", async () => {
+      const acts: string[] = [];
+      const handle = createHandler({
+        ...ctx,
+        sessionTag: (_pane, _id, value) => {
+          acts.push(value);
+          return Promise.resolve({ ok: false, code: "tasked" });
+        },
+      });
+      for (const bad of [
+        { key: "title" },
+        { pane: "3" },
+        { session: "nope" },
+        { extra: 1 },
+        { value: 5 },
+        { value: "日".repeat(120) },
+      ]) {
+        expect((await handle(ask(bad), APP_ID))?.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      }
+      expect(acts).toEqual([]);
+      expect((await handle(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "tasked" });
+      expect((await createHandler(ctx)(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "unsupported" });
+      const broken = createHandler({ ...ctx, sessionTag: () => Promise.reject(new Error("disk full")) });
+      expect((await broken(ask(), APP_ID))?.payload).toMatchObject({ ok: false, code: "internal_error" });
+      expect(trail()).toEqual([
+        ...Array.from({ length: 6 }, () => "audit session-tag origin=relay key-count=0 outcome=invalid_request"),
+        "audit session-tag origin=relay key-count=1 outcome=tasked",
+        "audit session-tag origin=relay key-count=1 outcome=unsupported",
+        "audit session-tag origin=relay key-count=1 outcome=internal_error",
+      ]);
+    });
+
+    test("the leader's in-process ops carry no session-tag op", () => {
+      expect(Object.keys(createLocalOps(ctx, "leader"))).not.toContain("session-tag");
+    });
+  });
+});
+
+describe("a task's spawn and the ref it carries", () => {
+  const TASK = "tagged";
+  const REF = { ref: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" };
+
+  // `log.warn` writes to stdout, not the audit sink: the drop's one line names the task and never the claim.
+  let out: ReturnType<typeof spyOn<typeof console, "log">>;
+  beforeEach(() => {
+    out = spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => out.mockRestore());
+  const warned = (): string =>
+    out.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes(" warn spawn: ignored a ref"))
+      .join("\n");
+
+  const tagged = (extra: Record<string, unknown> = {}): Plain =>
+    request("spawn", { repo: "myrepo", mode: "worktree", taskId: TASK, client: SCHEDULER_CLIENT, ref: REF, ...extra });
+
+  function rig() {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    let spawned = 0;
+    const backend: SessionBackend = {
+      spawn: () => {
+        spawned += 1;
+        return Promise.resolve({ window: "s", path: "/r/.claude/worktrees/s", registered: true, handle: "@1" });
+      },
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+    };
+    const handlerCtx: HandlerContext = { ...ctx, backend, getRepos: () => REPOS, tasks };
+    return { ledger, tasks, spawns: () => spawned, handlerCtx };
+  }
+
+  test("sealed from the scheduler, over the relay or in process, in either mode, it is noted for an adapter and never logged", async () => {
+    for (const mode of ["worktree", "here"] as const) {
+      const relay = rig();
+      // oxlint-disable-next-line no-await-in-loop -- each case has its own rig
+      const relayReply = await createHandler(relay.handlerCtx)(tagged({ mode }), SCHEDULER_ID);
+      const local = rig();
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const localReply = await createLocalOps(local.handlerCtx, "leader").spawn({
+        repo: "myrepo",
+        mode,
+        taskId: TASK,
+        client: SCHEDULER_CLIENT,
+        ref: REF,
+      });
+      for (const [reply, { ledger, tasks, spawns }] of [
+        [relayReply?.payload, relay],
+        [localReply, local],
+      ] as const) {
+        expect(reply, mode).toMatchObject({ ok: true });
+        expect(spawns(), mode).toBe(1);
+        expect(tasks.ref(TASK), mode).toEqual(REF);
+        // Internal: a note, not progress the leader would read as the session's own report.
+        expect(ledger.progress().find((entry) => entry.taskId === TASK)).toBeUndefined();
+      }
+    }
+    expect(logged()).not.toContain("linear.app");
+    expect(logged()).not.toContain("ENG-1");
+  });
+
+  test("from any other sender, client or task-less spawn it runs but notes nothing, and the warn names no value", async () => {
+    const cases: readonly (readonly [string, (h: HandlerContext) => Promise<Plain | null>, boolean])[] = [
+      ["an app", (h) => createHandler(h)(tagged(), APP_ID), true],
+      ["no sender", (h) => createHandler(h)(tagged(), undefined), true],
+      ["the local socket", (h) => createHandler(h, "local")(tagged(), undefined), true],
+      ["another client", (h) => createHandler(h)(tagged({ client: "mcp" }), SCHEDULER_ID), true],
+      ["no task id", (h) => createHandler(h)(tagged({ taskId: undefined }), SCHEDULER_ID), false],
+    ];
+    for (const [why, send, hasTask] of cases) {
+      const { ledger, tasks, spawns, handlerCtx } = rig();
+      // oxlint-disable-next-line no-await-in-loop -- each case has its own rig
+      const reply = await send(handlerCtx);
+      expect(reply?.payload, why).toMatchObject({ ok: true });
+      expect(spawns(), why).toBe(1);
+      expect(
+        ledger.notes().filter((note) => note.ref !== undefined),
+        why,
+      ).toEqual([]);
+      expect(tasks.ref(TASK), why).toBeUndefined();
+      expect(warned(), why).not.toContain("ENG-1");
+      expect(warned(), why).not.toContain("linear.app");
+      if (hasTask) expect(warned(), why).toContain(`(task "${TASK}")`);
+      else expect(warned(), why).not.toBe("");
+    }
+  });
+
+  test("a value this daemon does not read is dropped, never refused; a bad URL beside a good ref loses the URL alone", async () => {
+    for (const ref of [{ ref: "no" }, { ref: 7 }, "linear:ENG-1", { url: REF.url }]) {
+      const { tasks, spawns, handlerCtx } = rig();
+      // oxlint-disable-next-line no-await-in-loop -- each case has its own rig
+      const reply = await createHandler(handlerCtx)(tagged({ ref }), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: true });
+      expect(spawns()).toBe(1);
+      expect(tasks.ref(TASK)).toBeUndefined();
+      expect(warned()).toContain(`(task "${TASK}")`);
+    }
+    const { tasks, handlerCtx } = rig();
+    const reply = await createHandler(handlerCtx)(
+      tagged({ ref: { ref: "linear:ENG-1", url: "http://linear.app/x" } }),
+      SCHEDULER_ID,
+    );
+    expect(reply?.payload).toMatchObject({ ok: true });
+    expect(tasks.ref(TASK)).toEqual({ ref: "linear:ENG-1" });
+  });
 });

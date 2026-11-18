@@ -28,7 +28,7 @@ From the memo, in order. These are wants, not decisions on mechanism.
    starts building.
 2. Amend has to grow for this. As work proceeds it creates follow-up issues and more work, which
    must adapt the graph already in the queue, and Séance should support that.
-3. Séance is not tied hard to Linear. As with the companion tool (huddle; docs/messaging.md §6),
+3. Séance is not tied hard to Linear. As with the adapter seam for other tools (DESIGN.md, "Adapters"),
    neither codebase knows the other: Séance offers an adapter interface, and a separate adapter
    mediates. Work tracking is the same shape, with a Linear adapter as the first one.
 4. A new role, after Steve Yegge's split: short-lived agents do the implementation and are gone;
@@ -49,7 +49,7 @@ From the memo, in order. These are wants, not decisions on mechanism.
 | A tracker link                | The spec's `linear` field, carried and shown, read by nothing                                                                                    |
 | The tracker inside the leader | Decided, not built (docs/scheduler.md, M4, "Linear", #18): a Linear key in `settings:main`, relations read once at admission, `doneBy: "linear"` |
 | A session that is not a task  | The custodian's round (C10), specced: no task id, no slot, its own pane option                                                                   |
-| An adapter seam               | docs/messaging.md §6, specced: local to one machine, delivers text into sessions, and may not enqueue, cancel or reach the relay                 |
+| An adapter seam               | DESIGN.md, "Adapters", built: local to one machine, delivers text into sessions, and may not enqueue, cancel or reach the relay                  |
 | A long session that fills up  | The successor pass, for tasks only                                                                                                               |
 | Capacity                      | 128 task records (`MAX_TASKS`), finished ones included until pruned; `get_queue` shows 20                                                        |
 
@@ -74,14 +74,15 @@ What Séance owes that session is a queue surface complete enough to keep a grap
 - **Amend deps**, the decided follow-up. This is the one missing op.
 - **An opaque external ref on a task** (`ref: { source, id, url? }`), display-only like an alias:
   never used to route, bind or settle. It replaces the spec's `linear` as the general form;
-  `linear` stays readable on the wire.
+  `linear` stays readable on the wire. Built as `creator.ref` and `creator.ref-url` (DESIGN.md,
+  "Task tags"): `spawn_session`'s `ref` and `ref_url`.
 - **A way to find its own tasks.** `get_queue` shows 20, unfinished first. An orchestrator needs
   every task of a project, by batch or by ref, including finished ones it must not queue twice.
 - **Settling from outside**, which exists: mark-done.
 
 If the tracker should also _push_ ("an issue was added") rather than be polled by the
 orchestrator, that is a local adapter delivering a nudge into the orchestrator's session, which is
-exactly docs/messaging.md §6 once an orchestrator is an addressable target (open question 5).
+exactly DESIGN.md, "Adapters" once an orchestrator is an addressable target (open question 5).
 
 ### 2. Retire the leader's Linear item
 
@@ -100,7 +101,7 @@ Working name **orchestrator**. Proposed shape, each line a decision to take:
 
 - **Not a task**, as the custodian's round is not: no task id, no queue record, no concurrency
   slot, its own pane option so every reader of panes can tell it apart.
-- **Any number per machine**, started by the owner (PWA, `seanced`, MCP), one per project or per
+- **Any number per machine**, started by the owner (PWA, `seance`, MCP), one per project or per
   standing brief. Not a daemon seat, not a registry role: the relay learns nothing.
 - **Long-lived**, unlike a round. The custodian rejected a standing session for itself (recycle
   rules, a liveness check, context cost between rounds). Those costs are real here too and have to

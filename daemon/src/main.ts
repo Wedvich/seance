@@ -34,6 +34,7 @@ async function runForeground(): Promise<void> {
   const daemon = await startSupervisor({
     authHealth: {},
     custodian: {},
+    githubRate: {},
     usageRefresh: {},
     ...(supervised ? { selfUpdate: {} } : {}),
   });
@@ -80,6 +81,7 @@ const RUN: Record<
   reap: (cli, rest) => cli.cmdReap(rest),
   mcp: (cli, rest) => cli.cmdMcp(rest),
   mod: (cli, rest) => cli.cmdMod(rest),
+  adapter: async (_cli, rest) => (await import("./adapter-cli.ts")).cmdAdapter(rest),
   raycast: (cli, rest) => cli.cmdRaycast(rest),
 };
 
@@ -101,7 +103,7 @@ const [command, ...rest] = process.argv.slice(2);
 try {
   switch (command) {
     case "session-event":
-      await cmdSessionEvent();
+      await cmdSessionEvent(rest);
       break;
     case "inbox":
       await cmdInbox();

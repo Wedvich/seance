@@ -2,6 +2,7 @@ import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
 import { blockedBrief, taskPrBlock } from "./pr-blocked.ts";
 import { TASK_PHASES } from "./task-phase.ts";
+import { chainTags, withoutTaskTags } from "./tags.ts";
 import {
   CAPABILITIES,
   LAUNCH_LEDGER_MAX_AGE_MS,
@@ -40,6 +41,14 @@ const LANDED_FAILURES: ReadonlySet<string> = new Set<TaskFailureCode>([
   "lost_expired",
   "merge_expired",
 ]);
+
+/**
+ * The words of the daemon's `not_continuable` refusal when a continuation's worktree and local branch are both gone
+ * (`readdWorktree`, which never checks out origin's ref). The daemon builds its message around them and the offer
+ * looks for them: that refusal is the one that no retry on the same session can get past, where a held lock or an
+ * open session can clear. Changing them makes an older daemon's refusal read as a passing one, which only re-offers.
+ */
+export const WORKTREE_AND_BRANCH_GONE = "and its branch are both gone";
 
 /** The failures whose session can be resumed: it died, or its window was closed from outside. */
 const RESUMABLE_FAILURES: ReadonlySet<string> = new Set<TaskFailureCode>(["session_failed", "session_closed"]);
@@ -131,6 +140,27 @@ export function continuationUnderway(task: Task, tasks: readonly Task[]): boolea
   return false;
 }
 
+/**
+ * A continuation of `task`'s session, among `tasks`, that its machine refused because the worktree and branch are
+ * both gone: nothing is left to resume in, so the offer stops. The session is the leader's pointer's, else the task's
+ * own. A refused continuation never landed, so the session it named still holds. Fallen off a bounded list, it is
+ * missed and the offer stands: one more refusal, as before.
+ */
+export function goneContinuation(task: Task, tasks: readonly Task[]): Task | undefined {
+  const session = task.continuedBy?.task ?? task.id;
+  return tasks.find(
+    (other) =>
+      other.spec.continues?.task === session &&
+      other.state === "failed" &&
+      other.failure?.code === "not_continuable" &&
+      other.failure.message.includes(WORKTREE_AND_BRANCH_GONE),
+  );
+}
+
+function goneReason(gone: Task): string {
+  return `task ${gone.id} could not continue it: its worktree and its branch are both gone, so nothing is left to resume`;
+}
+
 /** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */
 function sessionResumable(task: Task): boolean {
   if (task.state === "cancelled") return task.assignment !== undefined && task.endedAt === undefined;
@@ -197,6 +227,8 @@ export function continueOffer(
   if (waiting !== undefined) {
     return { ok: false, reason: `already continuing as task ${waiting.id}, which is still waiting in the queue` };
   }
+  const gone = goneContinuation(task, tasks);
+  if (gone !== undefined) return { ok: false, reason: goneReason(gone) };
   const placed = placement(task, machines);
   if (!placed.ok) return placed;
   if (task.state === "cancelled" && !placed.machine.capabilities?.includes(CAPABILITIES.continueCancelled)) {
@@ -258,6 +290,8 @@ function blockedOffer(
   if (task.continuedBy?.live === true || continuationUnderway(task, tasks)) {
     return { ok: false, reason: "a continuation of it is still waiting or running" };
   }
+  const gone = goneContinuation(task, tasks);
+  if (gone !== undefined) return { ok: false, reason: goneReason(gone) };
   const resumes = task.continuedBy?.task ?? task.id;
   const since = task.continuedBy?.createdAt ?? task.createdAt;
   // The ledger evicts by launch time, `createdAt` is never later than the launch: this stops early, never late.
@@ -285,8 +319,9 @@ function blockedOffer(
 
 /**
  * The spec of the task that continues `task`. Carries what shapes the session
- * (model, effort, plan, autonomy, title) and what settles it (`until`, `linear`), and
- * nothing that places or orders it: the target is exact, and the old task's
+ * (model, effort, plan, autonomy, title), what settles it (`until`, `linear`) and its `creator.*` tags (never `owner.*`:
+ * the leader copies those at admission; never `scheduler.*`), and
+ * nothing that places or orders it (never `notBefore`, DESIGN.md "Not before"): the target is exact, and the old task's
  * dependents stay failed. The caller stamps `client`.
  *
  * `continues` names the session it resumes: the task itself, or, for a chain's later continuation, the
@@ -300,6 +335,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
   const { spec } = task;
   const note = prompt?.trim();
   const steered = autonomyOf(spec) === "steer";
+  const creator = chainTags(spec.tags, "creator");
   return {
     repo: spec.repo,
     mode: "continue",
@@ -316,6 +352,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.requires === undefined ? {} : { requires: spec.requires }),
+    ...(creator === undefined ? {} : { tags: creator }),
     continues: { task: continues, at },
   };
 }
@@ -323,11 +360,19 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
 /**
  * What every client writes for an accepted offer: the continuation's spec with the blocked PR's brief ahead of
  * the user's own note (a blank line between), resuming the session the offer names. One place, so no client
- * can skip the brief.
+ * can skip the brief. `leaderTakesTags` is whether the verified leader advertises `CAPABILITIES.taskTags`: when it does
+ * not, the copied `creator.*` tags are dropped, never refused, since display data must not block a resume and an older
+ * leader would hold a tagged record unreadable. Both clients go through here, so neither drops them on its own.
  */
-export function offeredSpec(task: Task, offer: Extract<ContinueOffer, { ok: true }>, prompt?: string): TaskSpec {
+export function offeredSpec(
+  task: Task,
+  offer: Extract<ContinueOffer, { ok: true }>,
+  prompt: string | undefined,
+  leaderTakesTags: boolean,
+): TaskSpec {
   const joined = [offer.brief, prompt?.trim()].filter((part) => part !== undefined && part !== "").join("\n\n");
-  const spec = continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  const copied = continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  const spec: TaskSpec = leaderTakesTags ? copied : withoutTaskTags(copied);
   // An untitled task would otherwise be named by its prompt's first line, the brief's: on its card and as its window.
   return offer.brief === undefined || spec.title !== undefined ? spec : { ...spec, title: blockedTitle(task) };
 }

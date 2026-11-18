@@ -6,10 +6,11 @@ import {
   type RelayState,
   type SessionsResponse,
   type Task,
+  type WatchEventRequest,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
 import type { LocalOps } from "./handlers.ts";
-import { successorCreate, termFleet, termMessages } from "./leader-adapters.ts";
+import { successorCreate, termFleet, termMessages, termWatches } from "./leader-adapters.ts";
 
 const unused = (): Promise<never> => Promise.reject(new Error("unexpected relay call"));
 
@@ -44,6 +45,7 @@ function fleetOver(sessions: () => Promise<SessionsResponse>, sessionsTimeoutMs?
     passClose: unused,
     deliverMessage: unused,
     messageReceipt: unused,
+    watchEvent: unused,
   };
   return termFleet({
     relay,
@@ -116,6 +118,7 @@ describe("a push-branch from the leader", () => {
         passClose: unused,
         deliverMessage: unused,
         messageReceipt: unused,
+        watchEvent: unused,
       },
       live: () => opts.live ?? true,
       demote: () => {},
@@ -200,6 +203,7 @@ describe("a pass-close from the leader", () => {
         passClose: opts.local ?? unused,
         deliverMessage: unused,
         messageReceipt: unused,
+        watchEvent: unused,
       },
       live: () => opts.live ?? true,
       demote: () => {},
@@ -297,6 +301,7 @@ describe("a message op from the leader", () => {
         passClose: unused,
         deliverMessage: opts.local?.deliverMessage ?? unused,
         messageReceipt: opts.local?.messageReceipt ?? unused,
+        watchEvent: unused,
       },
       live: () => opts.live ?? true,
       demote: (reason) => void opts.demoted?.push(reason),
@@ -368,6 +373,96 @@ describe("a message op from the leader", () => {
       expect(await messages.deliverMessage(device, deliver)).toMatchObject({ ok: false, code: "unreachable" });
       // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
       expect(await messages.messageReceipt(device, receipt)).toMatchObject({ ok: false, code: "unreachable" });
+    }
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a watch-event from the leader", () => {
+  const request: WatchEventRequest = { events: [] };
+
+  function watchFleet(opts: {
+    readonly local?: LocalOps["watchEvent"];
+    readonly remote?: () => Promise<unknown>;
+    readonly live?: boolean;
+    readonly demoted?: string[];
+  }) {
+    const asked: { deviceId: string; op: string; payload: unknown }[] = [];
+    const wire: AppRelay = {
+      ...relay,
+      request: (<T>(deviceId: string, op: string, payload: unknown) => {
+        asked.push({ deviceId, op, payload });
+        return (opts.remote ?? unused)() as Promise<T>;
+      }) as AppRelay["request"],
+    };
+    const watches = termWatches({
+      relay: wire,
+      selfDeviceId: "self",
+      local: {
+        sessions: unused,
+        spawn: unused,
+        despawn: unused,
+        pushBranch: unused,
+        passClose: unused,
+        deliverMessage: unused,
+        messageReceipt: unused,
+        watchEvent: opts.local ?? unused,
+      },
+      live: () => opts.live ?? true,
+      demote: (reason) => void opts.demoted?.push(reason),
+    });
+    return { watches, asked };
+  }
+
+  test("this machine's own is answered in process, never over the relay", async () => {
+    const { watches, asked } = watchFleet({ local: () => Promise.resolve({ ok: true, delivered: [] }) });
+    expect(await watches.watchEvent("self", request)).toEqual({ ok: true, delivered: [] });
+    expect(asked).toEqual([]);
+  });
+
+  test("this machine's own reply is parsed too: a delivered id that is no watch id is a malformed reply", async () => {
+    const { watches } = watchFleet({ local: () => Promise.resolve({ ok: true, delivered: ["not-an-id"] }) });
+    expect(await watches.watchEvent("self", request)).toEqual({
+      ok: false,
+      code: "internal_error",
+      message: "malformed watch-event reply",
+    });
+  });
+
+  test("another machine's goes over the relay as watch-event, and the reply is parsed before it is believed", async () => {
+    const { watches, asked } = watchFleet({ remote: () => Promise.resolve({ ok: true, delivered: [] }) });
+    expect(await watches.watchEvent("other", request)).toEqual({ ok: true, delivered: [] });
+    expect(asked).toEqual([{ deviceId: "other", op: "watch-event", payload: request }]);
+  });
+
+  test("a malformed reply from another machine is internal_error, whatever it claims", async () => {
+    for (const bad of [{ ok: true }, { ok: false, code: "new_code", message: "m" }, "nope", null]) {
+      // oxlint-disable-next-line no-await-in-loop -- one malformed reply at a time
+      const reply = await watchFleet({ remote: () => Promise.resolve(bad) }).watches.watchEvent("other", request);
+      expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+    }
+  });
+
+  test("a machine that did not answer is no answer, and not_leader from the relay demotes the term", async () => {
+    for (const reason of ["timeout", "offline"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one failure at a time
+      const reply = await watchFleet({
+        remote: () => Promise.reject(new RequestFailure(reason, "no")),
+      }).watches.watchEvent("other", request);
+      expect(reply).toBeNull();
+    }
+    const demoted: string[] = [];
+    const { watches } = watchFleet({ demoted, remote: () => Promise.reject(new RequestFailure("not_leader", "no")) });
+    expect(await watches.watchEvent("other", request)).toBeNull();
+    expect(demoted).toHaveLength(1);
+    expect(demoted[0]).toContain("not_leader");
+  });
+
+  test("an ended term sends nothing, to this machine or another", async () => {
+    const { watches, asked } = watchFleet({ live: false });
+    for (const device of ["self", "other"]) {
+      // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
+      expect(await watches.watchEvent(device, request)).toBeNull();
     }
     expect(asked).toEqual([]);
   });

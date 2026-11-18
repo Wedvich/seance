@@ -16,6 +16,12 @@ export interface ChartLine {
   readonly gaps: string;
 }
 
+/** An x range in the chart's own units where no gauge measured anything: the machine was asleep or its daemon down. */
+export interface ChartSpan {
+  readonly x: number;
+  readonly width: number;
+}
+
 /** Display names, shared by the chart legend and the machine card's gauges. */
 export const METRIC_LABELS = {
   [METRIC_NAMES.cpu]: "CPU",
@@ -75,18 +81,56 @@ function format(value: number): string {
   return String(Math.round(value * 10) / 10);
 }
 
+type Window = { readonly from: number; readonly to: number; readonly step: number };
+
+function xScale(window: Window, width: number): (ts: number) => number {
+  const span = Math.max(1, window.to - window.from);
+  return (ts) => ((ts - window.from) / span) * width;
+}
+
+/**
+ * Missing ticks (asleep, daemon down) break a gauge's line rather than drawing
+ * a gap nobody measured as a measurement; half a step of slack absorbs raw-tier
+ * jitter, so one missed tick (two steps apart) already breaks it.
+ */
+function gapAfter(step: number): number {
+  return step * 1.5;
+}
+
+/**
+ * Where the machine went unmeasured, for the chart's shaded bands: a break no
+ * gauge has a point inside, so one series missing a tick the others caught is
+ * no band. Only between points in the window — before the first there may just
+ * be no history yet, and after the last the next tick may not be due. Quota
+ * series hold across any gap and never make one.
+ */
+export function offlineSpans(series: readonly MetricsSeries[], window: Window, width: number): ChartSpan[] {
+  const x = xScale(window, width);
+  const gap = gapAfter(window.step);
+  const ticks = [
+    ...new Set(
+      series
+        .filter((entry) => !HELD.has(entry.metric))
+        .flatMap((entry) => entry.points.map(([ts]) => ts))
+        .filter((ts) => ts >= window.from && ts <= window.to),
+    ),
+  ].toSorted((a, b) => a - b);
+  return ticks.flatMap((ts, index): ChartSpan[] => {
+    const previous = ticks[index - 1];
+    if (previous === undefined || ts - previous <= gap) return [];
+    const start = Number(format(x(previous)));
+    return [{ x: start, width: Number(format(x(ts) - start)) }];
+  });
+}
+
 export function chartLines(
   series: readonly MetricsSeries[],
-  window: { readonly from: number; readonly to: number; readonly step: number },
+  window: Window,
   size: { readonly width: number; readonly height: number },
 ): ChartLine[] {
-  const span = Math.max(1, window.to - window.from);
-  const x = (ts: number): number => ((ts - window.from) / span) * size.width;
+  const x = xScale(window, size.width);
   const y = (value: number): number => size.height - (Math.min(100, Math.max(0, value)) / 100) * size.height;
-  // Missing ticks (asleep, daemon down) break a gauge's line rather than
-  // drawing a gap nobody measured as a measurement; half a step of slack absorbs
-  // raw-tier jitter, so one missed tick (two steps apart) already breaks it.
-  const gap = window.step * 1.5;
+  const gap = gapAfter(window.step);
 
   return series.map((entry) => {
     const held = HELD.has(entry.metric);

@@ -200,6 +200,30 @@ describe("fitStatus", () => {
     expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
   });
 
+  test("the GitHub budget is never trimmed, and at its widest beside every other kept field still fits", () => {
+    const gh = {
+      u: Number.MAX_SAFE_INTEGER,
+      c: [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+      g: [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    } as const;
+    const crowded = fitStatus({ ...status(3), gh, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.gh).toEqual(gh);
+    const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
+    const worst = fitStatus({
+      ...status(12),
+      ae,
+      cu: { s: "running", e: 1_763_000_000, n: [999, 999, 999], rc: `session_${"A".repeat(64)}` },
+      gh,
+      drn: true,
+      cl: 1_763_000_000_000,
+      dr: 1_763_000_300_000,
+      sess: [9],
+    });
+    expect(worst.gh).toEqual(gh);
+    expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
+  });
+
   test("an exclave list too long even for sess still says it was trimmed", () => {
     const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);

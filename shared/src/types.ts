@@ -1,3 +1,4 @@
+import type { SessionTag } from "./tags.ts";
 import type { AutonomyLevel } from "./autonomy.ts";
 import type { MessageKind } from "./messages.ts";
 
@@ -40,11 +41,14 @@ export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING
  * Plaintext `register.roles` values — the one capability the relay itself
  * reads. `scheduler`: the daemon may be nominated leader. `archivist`: the
  * fleet's one history seat (DESIGN.md, "Archivist"), honoured only from the id on
- * the relay's `ARCHIVIST` secret and never beside `scheduler`. Only a v2
+ * the relay's `ARCHIVIST` secret and never beside `scheduler`. `fallback`, only
+ * beside `scheduler`: nominate this daemon only when no eligible daemon without
+ * it is connected — a closed machine that has emptied (DESIGN.md, "Closing a
+ * machine", "A closed, empty machine leads only as a fallback"). Only a v2
  * register (signature over the roles) carries them; the relay acts on no other
  * value, and accepts an unknown one only so the signature covering it still verifies.
  */
-export const DAEMON_ROLES = { scheduler: "scheduler", archivist: "archivist" } as const;
+export const DAEMON_ROLES = { scheduler: "scheduler", archivist: "archivist", fallback: "fallback" } as const;
 
 export type DaemonRole = (typeof DAEMON_ROLES)[keyof typeof DAEMON_ROLES];
 
@@ -710,8 +714,8 @@ export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
 
 /**
  * Fire-and-forget ops — nothing correlates a reply: `update-available` a
- * broadcast, `session-event`, `session-pass`, `session-message` and `branch-state` reports to the scheduler, and
- * `queue-changed` the scheduler's nudge to every app.
+ * broadcast, `session-event`, `session-pass`, `session-message`, `branch-state`, `custodian-event` and `watch-set`
+ * reports to the scheduler, and `queue-changed` the scheduler's nudge to every app.
  */
 export type EventOp =
   | "update-available"
@@ -720,7 +724,8 @@ export type EventOp =
   | "session-message"
   | "branch-state"
   | "queue-changed"
-  | "custodian-event";
+  | "custodian-event"
+  | "watch-set";
 
 export type OpName =
   | "sessions"
@@ -728,12 +733,14 @@ export type OpName =
   | "despawn"
   | "availability"
   | "custodian"
+  | "session-tag"
   | "rescan"
   | "metrics"
   | "push-branch"
   | "pass-close"
   | "deliver-message"
   | "message-receipt"
+  | "watch-event"
   | "archive-status"
   | "archive-metrics"
   | "archive-tasks"
@@ -796,6 +803,8 @@ export const OP_TIMEOUT_MS = {
   availability: 10_000,
   // Two small file reads and one write, as `availability`.
   custodian: 10_000,
+  // A pane listing, at most one session-file read and one small write.
+  "session-tag": 10_000,
   metrics: 15_000,
   // Answered from a cached count and two stat calls, never a scan.
   "archive-status": 10_000,
@@ -819,6 +828,8 @@ export const OP_TIMEOUT_MS = {
   "pass-close": 10_000,
   "deliver-message": 10_000,
   "message-receipt": 10_000,
+  // As `deliver-message`: the daemon's handler parses and answers, and the watch table places a line in a pane's inbox.
+  "watch-event": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -991,6 +1002,12 @@ export interface SessionEntry {
    * session spawned without one, and from daemons without the capability.
    */
   readonly taskId?: string;
+  /**
+   * The session's tags (DESIGN.md, "Tags and session identity"): its bound `claude` process's and its current conversation's, full keys,
+   * each with its scope. Sent only to an app, never on a scheduler-sealed `sessions`; display-only, read only through
+   * `parseTags(…, { scope: "session" })`. Absent when there are none, and from older daemons.
+   */
+  readonly tags?: Readonly<Record<string, SessionTag>>;
 }
 
 /** Git identity of a daemon's own checkout. `commitTs` is ms, like every other wire timestamp. */
@@ -1127,6 +1144,9 @@ export interface MachineInfo {
  * so a second Continue would resume a session a continuation already owns.
  * `runNow`: as a leader, answers `run-now` — what a client checks of the
  * verified leader before offering it (an older one refuses the op as unknown).
+ * `runNowPaused`: as a leader, `run-now` places past a whole-queue pause too. A client
+ * offers Start now for a task the pause alone holds only to a verified leader advertising
+ * it: an older one answers `unplaceable`.
  * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
  * leader, routes, dispatches and leans them — what the PWA checks of the verified
  * leader before offering to attach. One build does both halves.
@@ -1181,9 +1201,23 @@ export interface MachineInfo {
  * advertises it; a daemon advertises it only while its seat is enabled (`seatEnabled`). It also means the daemon
  * answers the `custodian` app op (round now, pause, resume): no daemon advertised it before the op existed, since
  * rounds were held (`ROUNDS_LIVE`) on every build before custodian 4b, so the one bit gates the Machines card's menu too.
+ * `watches`: as a leader, takes `watch-set`, reads watched PRs and runs in its PR poller and sends `watch-event`; as a
+ * daemon, keeps its sessions' watch table (the local `watch` frame, `watch-set`) and places a note for each
+ * `watch-event`. A leader sends `watch-event` only to a device advertising it, and a daemon sends
+ * `watch-set` only to a verified leader advertising it. An older leader drops the unknown event op. A step-2 daemon
+ * (which advertised this before the table existed) answers every event `delivered: []`, so nothing is ever marked
+ * delivered for it, and closes a `watch` frame as malformed.
+ * `sessionTag`: as a daemon, answers `session-tag` (the owner's label on an untasked conversation, DESIGN.md, "Session identity", "The owner's label"),
+ * keeps it in `conversations.json` and joins it into `SessionEntry.tags` as `owner.label`. Advertised unconditionally: the
+ * conversation table it needs starts with the session-events capability, which every daemon runs. The PWA offers a session's
+ * Rename only on a machine advertising it: an older daemon ignores the unknown op, which an app sees only as a timeout.
  * `limits`: as a leader, reads its concurrency limit from `settings:scheduler` (none until one is set) and answers
  * `set-limits`. An older leader runs its built-in caps (8 in flight, 4 or 2 per account) and answers the op
  * `invalid_request`, so a client offers the limit only to a verified leader advertising it.
+ * `taskTags`: as a leader, parses, keeps and re-seals `TaskSpec.tags` behind `TAGS_DEP_SENTINEL` and takes
+ * `AmendRequest.ownerTags`, and sends `SpawnRequest.ref` to a daemon advertising it; as a daemon, takes
+ * `SpawnRequest.ref`. A client writes `tags` or `ownerTags` only to a verified leader advertising it (a continuation
+ * drops its copied tags instead of refusing), since an older leader holds a tagged record unreadable.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1197,6 +1231,7 @@ export const CAPABILITIES = {
   continueSession: "continueSession",
   continueHandoff: "continueHandoff",
   runNow: "runNow",
+  runNowPaused: "runNowPaused",
   attachments: "attachments",
   authHealth: "authHealth",
   traits: "traits",
@@ -1214,6 +1249,9 @@ export const CAPABILITIES = {
   messageReply: "messageReply",
   custodian: "custodian",
   limits: "limits",
+  watches: "watches",
+  taskTags: "taskTags",
+  sessionTag: "sessionTag",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1396,7 +1434,32 @@ export interface MachineStatus {
    * `running` and only as `isRemoteSessionId` passes it.
    */
   readonly cu?: CustodianStatus;
+  /**
+   * This machine's own `gh`'s GitHub API budget (DESIGN.md, "GitHub rate limits"): display-only but for the leader's
+   * `github` push, never trimmed by `fitStatus` (it is at most ~70 bytes), absent with no `gh`, no login, or a failed
+   * last read. A bad `gh` is dropped alone, never the status.
+   */
+  readonly gh?: GithubRate;
 }
+
+/** A budget's reading: `[limit, remaining, reset]`, reset in unix seconds, remaining at most limit, limit above 0. */
+export type GithubBudget = readonly [number, number, number];
+
+/**
+ * `MachineStatus.gh`. `u` is the GitHub user id the daemon's `gh` is signed in as, which is what tells budgets
+ * apart: every machine signed in as one user reads the same budget, and the leader alerts once per user, not per
+ * machine. Absent until `gh api user` has answered; a reading without it is never alerted on. `c` is the REST core
+ * budget, `g` the GraphQL one; at least one is present.
+ */
+export interface GithubRate {
+  readonly u?: number;
+  readonly c?: GithubBudget;
+  readonly g?: GithubBudget;
+}
+
+/** The two budgets a `github` push names: REST core and GraphQL, as `GithubRate.c` and `.g`. */
+export const GITHUB_RESOURCES = ["core", "graphql"] as const;
+export type GithubResource = (typeof GITHUB_RESOURCES)[number];
 
 export const CUSTODIAN_STATES = ["idle", "running", "paused", "failing"] as const;
 export type CustodianState = (typeof CUSTODIAN_STATES)[number];
@@ -1715,6 +1778,8 @@ export const METRIC_NAMES = {
   /** Label `model` carries the display name. */
   w: "quota_7d_model_pct",
   c: "quota_credits_pct",
+  /** The daemon's own `gh` budget used, label `resource` (`core` or `graphql`); `MachineStatus.gh`. */
+  gh: "github_used_pct",
 } as const;
 
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
@@ -1830,6 +1895,14 @@ export interface SpawnRequest {
    * else it is ignored. Never logged.
    */
   readonly inheritedPr?: string;
+  /**
+   * The task's ref (`creator.ref`, and `creator.ref-url` as `url`), set only by the leader's dispatch and only to a
+   * daemon advertising `CAPABILITIES.taskTags`. The daemon notes it in its launch ledger (`TaskNote.ref`) and reads it
+   * only into an adapter's `Session` (`AdapterSession.task.ref`), only from a spawn sealed from the scheduler with
+   * `client: SCHEDULER_CLIENT` and a `taskId`, in any mode; from any other sender it is ignored, as an older daemon
+   * ignores it. Each value as `parseTagValue` holds it, else it is ignored. Display only, never logged.
+   */
+  readonly ref?: { readonly ref: string; readonly url?: string };
 }
 
 /**
@@ -2005,6 +2078,43 @@ export type CustodianResponse =
   | { readonly ok: true; readonly pause: { readonly until: number | null } | null }
   | { readonly ok: false; readonly code: CustodianErrorCode; readonly message: string; readonly after?: number };
 
+/**
+ * `session-tag`, app → daemon, sealed `from: "app"` on the relay leg only (DESIGN.md, "Session identity", "The owner's label"): the owner's label on an
+ * untasked conversation, addressed by the pane and the conversation id (`agent.session`) the app read in `sessions`.
+ * `key` is a bare suffix, `label` alone; `value` has passed `displayLine` and the title's cap whole (a longer one is refused, never shortened), `""` clearing it.
+ */
+export interface SessionTagRequest {
+  readonly pane: string;
+  readonly session: string;
+  readonly key: "label";
+  readonly value: string;
+}
+
+/**
+ * `tasked`: the pane's session carries a task (its label is the task's, step 3); `moved`: the pane's newest process claims another conversation (or no
+ * conversation), or the id's one claimant is on another pane; `unverified`: the daemon's own source does not corroborate the
+ * claim; `ambiguous`: two live processes claim the id; `ended`: no live process in that pane, or no live process claims the id at the act;
+ * `unsupported`: this daemon keeps no conversation table or store.
+ */
+export const SESSION_TAG_ERROR_CODES = [
+  "invalid_request",
+  "refused",
+  "unsupported",
+  "tasked",
+  "moved",
+  "unverified",
+  "ambiguous",
+  "ended",
+  ...TRANSPORT_ERROR_CODES,
+] as const;
+
+export type SessionTagErrorCode = (typeof SESSION_TAG_ERROR_CODES)[number];
+
+/** `value`: the label now held, `""` when cleared. */
+export type SessionTagResponse =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly code: SessionTagErrorCode; readonly message: string };
+
 export type DespawnResponse =
   | {
       readonly ok: true;
@@ -2144,6 +2254,118 @@ export type DeliverMessageRequest =
       readonly addressed?: undefined;
       readonly settled?: undefined;
     });
+
+/** `CheckConclusionState`, lowercased: what a watched run or a PR's checks may end as (`shared/src/watch.ts`). */
+export const WATCH_CONCLUSIONS = [
+  "action_required",
+  "timed_out",
+  "cancelled",
+  "failure",
+  "success",
+  "neutral",
+  "skipped",
+  "startup_failure",
+  "stale",
+] as const;
+export type WatchConclusion = (typeof WATCH_CONCLUSIONS)[number];
+
+/** Why a watch is not being read: a poller class (`limited`, `unauthenticated`, `missing`), the reserve for tasks, or a failed read. */
+export const WATCH_SUSPEND_REASONS = ["limited", "reserve", "unauthenticated", "missing", "failed"] as const;
+export type WatchSuspendReason = (typeof WATCH_SUSPEND_REASONS)[number];
+
+/** Why the leader did not poll a watch: `fleet_full` means "not polled for now", never "ended". */
+export const WATCH_REFUSALS = ["fleet_full", "invalid"] as const;
+export type WatchRefusal = (typeof WATCH_REFUSALS)[number];
+
+export const WATCH_EVENT_ERROR_CODES = ["invalid_request", "unsupported", ...TRANSPORT_ERROR_CODES] as const;
+export type WatchEventErrorCode = (typeof WATCH_EVENT_ERROR_CODES)[number];
+
+/** A daemon's boot id (its `instance`) and a counter it bumps on every `watch-set` it sends. */
+export interface WatchGeneration {
+  readonly boot: string;
+  readonly n: number;
+}
+
+export interface WatchSetEntry {
+  readonly id: string;
+  readonly kind: "pr" | "run";
+  readonly url: string;
+  readonly head?: string;
+  readonly seen: readonly string[];
+}
+
+/**
+ * `op: "watch-set"`, daemon → scheduler, sealed to `SCHEDULER_ID` from the daemon's own device id (or the leader in
+ * process), fire-and-forget (DESIGN.md, Scheduler, "PR status"; docs/gh-watch.md W9). The daemon's whole set of watches:
+ * the leader replaces what it holds for that device. It names no pane, task or session. Generation contract: an equal
+ * `gen` is a duplicate, re-answered as last computed without replacing; a lower `n` on the same boot is ignored
+ * unanswered; a different boot or a higher `n` replaces. The leader answers every accepted set with a `watch-event`
+ * carrying `set`.
+ */
+export interface WatchSet {
+  readonly gen: WatchGeneration;
+  readonly watches: readonly WatchSetEntry[];
+}
+
+export interface WatchFailing {
+  readonly name: string;
+  readonly required?: true;
+  readonly job?: { readonly run: string; readonly job: string };
+}
+
+export type WatchEventBody =
+  | {
+      readonly kind: "checks";
+      readonly outcome: "pass" | "fail";
+      readonly head: string;
+      readonly headMoved?: true;
+      readonly failing?: readonly WatchFailing[];
+    }
+  | { readonly kind: "conflict"; readonly head: string; readonly headMoved?: true }
+  | { readonly kind: "merged"; readonly stacked?: true }
+  | { readonly kind: "closed" }
+  | {
+      readonly kind: "completed";
+      readonly attempt: number;
+      readonly conclusion: WatchConclusion;
+      readonly failing?: readonly WatchFailing[];
+    }
+  | { readonly kind: "unreadable" }
+  | {
+      readonly kind: "suspended";
+      readonly reason: WatchSuspendReason;
+      /** When this leader last read the watch (display only: a new leader's differs, so the key is the reason alone). */
+      readonly since: number;
+      readonly resetAt?: number;
+    };
+
+export interface WatchEvent {
+  readonly id: string;
+  readonly key: string;
+  readonly event: WatchEventBody;
+}
+
+/**
+ * `op: "watch-event"`, scheduler → the daemon that sent the set, sealed `from: SCHEDULER_ID` (or the leader in
+ * process) (DESIGN.md, Scheduler, "PR status"). `set` answers a `watch-set` (its generation, and the entries the
+ * leader did not take); `events` are the level-triggered facts it read. It names no pane, task or session: the
+ * daemon binds an event to a pane by the watch id it minted.
+ */
+export interface WatchEventRequest {
+  readonly set?: {
+    readonly gen: WatchGeneration;
+    readonly refused: readonly { readonly id: string; readonly code: WatchRefusal }[];
+  };
+  readonly events: readonly WatchEvent[];
+}
+
+/**
+ * `delivered`: the ids of the watches whose events in this frame the daemon placed. Events carry no id of their own, so
+ * delivery is all-or-nothing per watch per frame: the leader marks every event it sent for a listed id acknowledged.
+ */
+export type WatchEventResponse =
+  | { readonly ok: true; readonly delivered: readonly string[] }
+  | { readonly ok: false; readonly code: WatchEventErrorCode; readonly message: string };
 
 export const DELIVER_OUTCOMES = ["delivered", "sent", "held", "ended", "unknown"] as const;
 
@@ -2318,10 +2540,12 @@ export type SessionState = (typeof SESSION_STATES)[number];
  * mode's classifier asks do, so the leader alerts it without the 2-minute
  * debounce and the PWA shows it at once (DESIGN.md, "Session events").
  * `permission`: a permission prompt a person must answer, with the tool it is
- * for in `tool`. Both display on the PWA. A reader that does not know a value
+ * for in `tool`. `elicitation`: an MCP server's own question (Claude's settings
+ * `Elicitation` hook, `seance session-event --hook`), display-only like
+ * `permission`. All display on the PWA. A reader that does not know a value
  * drops it and keeps the event: an unknown reason costs only the wording.
  */
-export const NEEDS_INPUT_REASONS = ["question", "permission"] as const;
+export const NEEDS_INPUT_REASONS = ["question", "permission", "elicitation"] as const;
 
 export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
 
@@ -2330,6 +2554,52 @@ export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
  * only (`isToolName`), so no command text can ride in a tool name.
  */
 export const TOOL_NAME_MAX_LENGTH = 64;
+
+/**
+ * What a session left running when its turn ended (Claude's settings `Stop` hook: `background_tasks` by type, and
+ * `session_crons` as `wakeup`), so an idle session waiting on its own work (a CI watch) reads apart from one that is
+ * done. Counts only, never a command, description or prompt (DESIGN.md, "Session events", "Settings hooks").
+ * Display-only: no reader binds, routes, moves, releases or settles anything by it.
+ */
+export const BACKGROUND_KINDS = ["shell", "agent", "monitor", "workflow", "other", "wakeup"] as const;
+
+export type BackgroundKind = (typeof BACKGROUND_KINDS)[number];
+
+/** Each kind's count, 1 to `BACKGROUND_COUNT_MAX`; a kind with none is absent, and nothing running is `{}`. */
+export type BackgroundWork = Partial<Record<BackgroundKind, number>>;
+
+export const BACKGROUND_COUNT_MAX = 99;
+
+/**
+ * Why a turn ended on an API error (Claude's settings `StopFailure` hook), so an idle session that will not resume on
+ * its own says so. Claude's own error names; one this build does not know is `unknown`. Display-only.
+ */
+export const STOP_ERRORS = [
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "verification_required",
+  "billing_error",
+  "rate_limit",
+  "overloaded",
+  "invalid_request",
+  "model_not_found",
+  "server_error",
+  "max_output_tokens",
+  "cloud_credential_error",
+  "unknown",
+] as const;
+
+export type StopError = (typeof STOP_ERRORS)[number];
+
+/**
+ * What a session's last turn end left behind, beside an `idle`: its background work, or the API error that ended the
+ * turn. The daemon joins it to the idle from the settings hooks' `stop` note (`seance session-event --hook`).
+ */
+export interface IdleNote {
+  readonly background?: BackgroundWork;
+  readonly stopError?: StopError;
+}
 
 /**
  * Why the custodian flagged a session for its owner (docs/custodian.md, C29). `stuck` and `look` are
@@ -2387,6 +2657,12 @@ export interface SessionEvent {
    * session claimed it, kept only as `isToolName` passes it. Display-only.
    */
   readonly tool?: string;
+  /**
+   * Only beside `idle`: what the session's last turn end left running, or the error that ended it — the daemon's
+   * note from the settings hooks (`IdleNote`). Display-only; an older leader drops both.
+   */
+  readonly background?: BackgroundWork;
+  readonly stopError?: StopError;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
@@ -2733,6 +3009,16 @@ export const REQUIRES_DEP_SENTINEL = { task: "", after: "opened" } as const;
  */
 export const SUCCESSOR_DEP_SENTINEL = { task: "", after: "done" } as const;
 
+/**
+ * Sealed into `spec.deps` whenever a spec carries `tags` (`taskRecordAtRest`), as `REQUIRES_DEP_SENTINEL` is: an older
+ * leader's dep parser refuses the empty `task`, so it holds the record unreadable rather than seal it back without the
+ * owner's label and the creator's ref (a tag changes nothing it would route, so this is the one sentinel that guards
+ * display data: the next write would erase it silently). `after: "tags"` is outside `DEP_AFTER`, so an older parser
+ * refuses it twice (the empty id, the unknown `after`), and it stays apart from the `merged`, `opened` and `done`
+ * sentinels of the other three fields. This build's parser drops it only beside `tags`, and refuses it without.
+ */
+export const TAGS_DEP_SENTINEL = { task: "", after: "tags" } as const;
+
 /** What a session may send as the record of a pass, UTF-16 units: the successor's prompt below the preamble. */
 export const SUCCESSOR_RECORD_MAX = 7_168;
 
@@ -2861,6 +3147,14 @@ export interface TaskSpec extends TaskRequest {
    */
   readonly requires?: readonly string[];
   /**
+   * Display tags, full keys (`creator.*`, `owner.*`, `scheduler.*`; DESIGN.md, "Task tags"): at most `TASK_TAGS_MAX`, each
+   * namespace within `TASK_TAG_BUDGET`. Display only: never routes, binds, places, settles or alerts. `creator.*` is
+   * written at create, `owner.*` only by the leader on an `amend`, and `scheduler.*` by the leader (none in v1). Sealed
+   * only through `taskRecordAtRest`, which appends `TAGS_DEP_SENTINEL`; a client writes it only when the verified
+   * leader advertises `CAPABILITIES.taskTags`.
+   */
+  readonly tags?: Readonly<Record<string, string>>;
+  /**
    * The task whose work this one continues, passed on because its account ran out or its owner
    * asked (`pass`): the predecessor's id, the account its exclave bills (`ExclaveInfo.accountId`),
    * its `assignment` as a `Target`, and what set the pass off. Routing and display only: nothing
@@ -2884,6 +3178,12 @@ export interface TaskSpec extends TaskRequest {
    * from older clients.
    */
   readonly client?: string;
+  /**
+   * Epoch ms; the leader places the task no earlier than its first pass at or after this time on its
+   * own clock. Resolved by the client at submit time; never a zone or offset. Not inherited by a
+   * successor or continuation. `run-now` ignores it. DESIGN.md, "Not before".
+   */
+  readonly notBefore?: number;
 }
 
 /**
@@ -2934,6 +3234,11 @@ export type Reason =
   | { readonly code: "repo_absent" }
   /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
   | { readonly code: "continue_elsewhere" }
+  /**
+   * A continue task's target (machine, exclave) no longer lists the clone the session ran in (its name, with the
+   * task's origin). Only on the target: everywhere else is `continue_elsewhere`.
+   */
+  | { readonly code: "continue_clone_gone" }
   /**
    * The task passes on work from this exclave's account (`succeeds.account`, the automatic
    * trigger's only): that account ran out, so it is not where the work goes on. A manual or
@@ -3633,8 +3938,8 @@ export const PUSH_SERVICE_HOSTS = [
  * A push endpoint's length at most. Real ones run a few hundred characters;
  * the cap is what keeps the settings record under the store's cap: 16
  * subscriptions at it, each with a `PUSH_LABEL_MAX_LENGTH` label and an `addedAt`, the
- * `DISK_ALERTS_MAX` disk alerts, `AUTH_ALERTS_MAX` auth alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
- * their bounds, seal to ~40.1 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
+ * `DISK_ALERTS_MAX` disk alerts, `AUTH_ALERTS_MAX` auth alerts, `GITHUB_ALERTS_MAX` GitHub alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
+ * their bounds, seal to ~40.6 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
  * bound test in parse.test.ts. Little headroom is left: grow nothing here unchecked.
  */
 export const PUSH_ENDPOINT_MAX_LENGTH = 1024;
@@ -3681,6 +3986,23 @@ export interface SettingsRecord extends VersionBound {
    * archivist entry, so a fleet that never had one is never alerted, whichever leader reads it.
    */
   readonly archivistSilence?: ArchivistSilence;
+  /** GitHub budgets alerted in a reset window not yet over (`daemon/src/github-alerts.ts`). */
+  readonly githubAlerts?: readonly GithubAlerted[];
+}
+
+/**
+ * Budgets held in `SettingsRecord.githubAlerts` at most: two GitHub users' REST and GraphQL budgets. An entry
+ * goes once its window resets, within the hour, so past the cap a budget alerts once a slot frees. Small
+ * because the settings record has under 1 KB of headroom (`PUSH_ENDPOINT_MAX_LENGTH`).
+ */
+export const GITHUB_ALERTS_MAX = 4;
+
+/** A GitHub user's budget alerted (`u`, the user id; `r`, which budget), the window's reset (unix s), and when (ms). */
+export interface GithubAlerted {
+  readonly u: number;
+  readonly r: GithubResource;
+  readonly reset: number;
+  readonly at: number;
 }
 
 /**
@@ -3799,7 +4121,7 @@ export const SCHEDULER_ERROR_CODES = [
   "finished",
   /** `run-now`: the task is not `ready` — waiting on admission or its deps, or already placed. */
   "not_waiting",
-  /** `run-now`: something besides the concurrency limit (a pause, quota, a pin, …) keeps it from every machine. */
+  /** `run-now`: something besides the concurrency limit (an account's pause, an unreadable pause record or an older leader's queue pause, quota, a pin, …) keeps it from every machine. */
   "unplaceable",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
@@ -3942,6 +4264,12 @@ export interface PassRefusalRef {
 export interface IdleTaskRef {
   readonly taskId: string;
   readonly since: number;
+  /**
+   * Its session's latest idle note (`SessionEvent.background`/`stopError`). The leader's memory only: a new term has
+   * none until the session's next `idle`. Display-only.
+   */
+  readonly background?: BackgroundWork;
+  readonly stopError?: StopError;
 }
 
 /** `Task.idleRelease`: when the stay at the prompt began (leader's clock, ms), and the machine whose `idle` began it. */
@@ -4008,6 +4336,14 @@ export interface AmendRequest {
   readonly title?: string | null;
   readonly model?: string | null;
   readonly effort?: string | null;
+  /** Set or move the not-before time; `null` clears it; needs no `basis`. */
+  readonly notBefore?: number | null;
+  /**
+   * The owner's labels: bare `owner.*` suffixes, `""` clears a key (`writeTags`). Alone it is taken in any task state,
+   * finished included; beside another field it meets that field's state rules. Sent only by the PWA, to a verified leader advertising
+   * `CAPABILITIES.taskTags`; `parseAmendDraft` refuses it, so the broker, MCP and the CLI never carry it.
+   */
+  readonly ownerTags?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -4181,7 +4517,16 @@ export type PushAlert =
       readonly taskId: string;
       readonly reason: FlagReason;
     }
-  | { readonly v: 1; readonly kind: "custodian-failing"; readonly at: number; readonly deviceId: string };
+  | { readonly v: 1; readonly kind: "custodian-failing"; readonly at: number; readonly deviceId: string }
+  | {
+      readonly v: 1;
+      readonly kind: "github";
+      readonly at: number;
+      /** Which budget; no GitHub user id, no machine id: one fleet's budget, the same on every machine. */
+      readonly resource: GithubResource;
+      /** The window's reset, unix seconds. */
+      readonly reset: number;
+    };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */
 export const PUSH_ALERT_MAX_BYTES = 1024;

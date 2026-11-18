@@ -7,7 +7,7 @@ import { PANE_ID } from "./pane-id.ts";
 
 export const CUSTODIAN_FRAME_VERSION = 1;
 
-/** The sixth frame kind, served only on the round's own socket (`custodian-socket.ts`): the round's verbs, bound to its pane. */
+/** A frame kind of its own, served only on the round's own socket (`custodian-socket.ts`): the round's verbs, bound to its pane. */
 export const CUSTODIAN_FRAME_KIND = "custodian";
 
 export const CUSTODIAN_VERBS = [
@@ -167,7 +167,10 @@ export type CustodianReply =
       readonly ok: true;
       readonly verb: "sessions";
       readonly now: number;
-      /** When this process began retaining pane state: a pane with no state before it is "unobserved after a restart". */
+      /**
+       * Since when pane state is known: when this process began retaining it, or earlier, the oldest entry a restart
+       * took back and a sample confirmed. A pane with no state before it is "unobserved after a restart".
+       */
       readonly retainedSince: number | null;
       readonly panes: readonly CustodianPaneView[];
       /** The file reap last wrote (DESIGN.md, "Nothing lost"), as read; null when none. */

@@ -127,6 +127,27 @@ describe("amend lands on a waiting task", () => {
   });
 });
 
+describe("amend notBefore", () => {
+  test("setting it holds the task on the next pass; null releases it; no basis needed", async () => {
+    const { store, fleet, scheduler } = setup();
+    const task = await enqueue(store, scheduler, spec());
+    expect(await scheduler.amend({ taskId: task.id, notBefore: NOW + 60_000 })).toMatchObject({
+      ok: true,
+      task: { spec: { notBefore: NOW + 60_000 } },
+    });
+    await pass(scheduler);
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("ready");
+    expect(fleet.spawns).toEqual([]);
+
+    const released = await scheduler.amend({ taskId: task.id, notBefore: null });
+    expect(released.ok).toBe(true);
+    expect(scheduler.task(task.id)?.spec).not.toHaveProperty("notBefore");
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the spawn");
+  });
+});
+
 describe("amend refuses", () => {
   test("an unknown task, and a finished one", async () => {
     const { store, scheduler } = setup(new MemoryQueueStore(), offline());

@@ -2,6 +2,7 @@ import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   AUTONOMY_LEVELS,
+  parseDateTime,
   TASK_SPEC_LIMITS,
   type AutonomyLevel,
   type DepAfter,
@@ -19,6 +20,7 @@ import {
   MODEL_LABELS,
   type Effort,
   type Model,
+  type NotBeforeChoice,
   type PersistedForm,
   type PreviewState,
   type SheetKind,
@@ -43,7 +45,17 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   autonomy: "How much should it decide?",
   after: "Wait for which tasks?",
   requires: "Which traits must it have?",
+  ref: "What is it for?",
+  notBefore: "Not before when?",
 };
+
+/** The quick choices on the Not before sheet: what is stored is the choice, resolved when the task is queued. */
+const NOT_BEFORE_QUICK: readonly { readonly label: string; readonly choice: NotBeforeChoice }[] = [
+  { label: "In 1 h", choice: { kind: "in", ms: 3_600_000 } },
+  { label: "In 2 h", choice: { kind: "in", ms: 7_200_000 } },
+  { label: "Tonight (21:00)", choice: { kind: "clock", hh: 21, mm: 0 } },
+  { label: "Tomorrow morning (08:00)", choice: { kind: "tomorrow", hh: 8, mm: 0 } },
+];
 
 const WHEN_LABELS: Record<DepAfter, string> = { opened: "Opened", merged: "Merged", done: "Done" };
 
@@ -66,7 +78,6 @@ export interface SpawnActions {
   readonly dismissLayer: () => void;
   readonly pickMachine: (deviceId: string | null) => void;
   readonly pickAccount: (accountId: string | null) => void;
-  readonly refreshPreview: () => void;
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
   readonly rescan: (deviceId: string) => void;
@@ -77,6 +88,10 @@ export interface SpawnActions {
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
   readonly toggleRequires: (trait: string) => void;
+  /** Sets the next task's ref and its URL as typed (`creator.ref`, `creator.ref-url`). */
+  readonly setRef: (ref: string, url: string) => void;
+  /** Sets the not-before choice, or clears it with `null`. */
+  readonly setNotBefore: (choice: NotBeforeChoice | null) => void;
   /** Picked, pasted or dropped files; the store applies the limits. */
   readonly addFiles: (files: readonly File[]) => void;
   readonly removeFile: (key: string) => void;
@@ -469,6 +484,7 @@ function ActiveSheet(props: {
   model: Model;
   effort: Effort;
   autonomy: AutonomyLevel;
+  notBefore: NotBeforeChoice | null;
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
   worktree: boolean;
@@ -484,6 +500,7 @@ function ActiveSheet(props: {
     model: selectedModel,
     effort: selectedEffort,
     autonomy: selectedAutonomy,
+    notBefore,
     afterSheet,
     worktree,
     until,
@@ -601,6 +618,10 @@ function ActiveSheet(props: {
     );
   }
 
+  if (kind === "notBefore") {
+    return <NotBeforeSheet actions={actions} view={view} choice={notBefore} closing={closing} onExited={onExited} />;
+  }
+
   if (kind === "requires") {
     const { choices, note } = view.requires;
     return (
@@ -626,6 +647,10 @@ function ActiveSheet(props: {
     );
   }
 
+  if (kind === "ref") {
+    return <RefSheet actions={actions} view={view} closing={closing} onExited={onExited} />;
+  }
+
   if (kind === "after") {
     return (
       <Sheet title={SHEET_TITLES.after} closing={closing} onExited={onExited} onClose={close}>
@@ -644,6 +669,101 @@ function ActiveSheet(props: {
           onClick={() => actions.setEffort(effort)}
         />
       ))}
+    </Sheet>
+  );
+}
+
+function RefSheet(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, view, closing, onExited } = props;
+  const { ref, url, problem } = view.ref;
+  return (
+    <Sheet title={SHEET_TITLES.ref} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      <label className="sheet-note">
+        Ref
+        <input
+          type="text"
+          className="rename-input"
+          placeholder="linear:ENG-123"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellcheck={false}
+          maxLength={100}
+          value={ref}
+          aria-invalid={problem !== null}
+          onInput={(event) => actions.setRef(event.currentTarget.value, url)}
+        />
+      </label>
+      <label className="sheet-note">
+        Ref URL
+        <input
+          type="url"
+          className="rename-input"
+          placeholder="https://linear.app/…"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellcheck={false}
+          value={url}
+          aria-invalid={problem !== null}
+          onInput={(event) => actions.setRef(ref, event.currentTarget.value)}
+        />
+      </label>
+      {ref !== "" || url !== "" ? <SheetItem label="Clear" action onClick={() => actions.setRef("", "")} /> : null}
+      <p className="sheet-note">
+        {problem ??
+          "The issue or PR this task is for, as source:id. Shown on its card and by get_queue; nothing reads the tracker."}
+      </p>
+    </Sheet>
+  );
+}
+
+/** `datetime-local`'s value for `at`, in the phone's own zone. */
+function localInputValue(at: number): string {
+  const d = new Date(at);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function NotBeforeSheet(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  choice: NotBeforeChoice | null;
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, view, choice, closing, onExited } = props;
+  return (
+    <Sheet title={SHEET_TITLES.notBefore} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      {NOT_BEFORE_QUICK.map(({ label, choice: quick }) => (
+        <SheetItem
+          key={label}
+          label={label}
+          selected={JSON.stringify(choice) === JSON.stringify(quick)}
+          onClick={() => actions.setNotBefore(quick)}
+        />
+      ))}
+      <label className="sheet-note">
+        Or pick a time
+        <input
+          type="datetime-local"
+          value={choice?.kind === "at" ? localInputValue(choice.at) : ""}
+          onInput={(event) => {
+            // The picker's value has no zone: the phone's own, as the spec's `at` kind says.
+            const at = parseDateTime(event.currentTarget.value, { requireOffset: false });
+            actions.setNotBefore(at === null ? null : { kind: "at", at });
+          }}
+        />
+      </label>
+      {choice !== null && <SheetItem label="Clear" action onClick={() => actions.setNotBefore(null)} />}
+      <p className="sheet-note">
+        {choice === null
+          ? "It starts as soon as it can."
+          : `Not placed before ${view.notBeforeTile.value}. Start now is not offered while a time is set.`}
+      </p>
     </Sheet>
   );
 }
@@ -779,16 +899,10 @@ function PreviewCard(props: {
   preview: PreviewState | null;
   machines: readonly Machine[];
   now: number;
-  onRefresh: () => void;
 }): JSX.Element | null {
-  const { preview, machines, now, onRefresh } = props;
+  const { preview, machines, now } = props;
   if (preview === null) return null;
   const pending = preview.kind === "loading";
-  const refresh = (
-    <button type="button" className="preview-refresh" onClick={onRefresh} disabled={pending} aria-label="Preview again">
-      ↻
-    </button>
-  );
   const decision = preview.kind === "ok" ? preview.decision : pending ? preview.previous : undefined;
   if (decision !== undefined) {
     // Same tree for a re-ask as for its answer, so the card neither collapses nor closes its candidates.
@@ -800,7 +914,6 @@ function PreviewCard(props: {
           quota={false}
           age={seen(decision.at, now)}
         />
-        {refresh}
       </div>
     );
   }
@@ -812,7 +925,6 @@ function PreviewCard(props: {
           {preview.kind === "failed" ? preview.message : "Asking the scheduler…"}
         </p>
       </section>
-      {refresh}
     </div>
   );
 }
@@ -846,6 +958,7 @@ function QueueButton(props: {
       enabled={button.enabled}
       busy={button.busy}
       preview={props.preview}
+      pastPause={props.view.startNowPastPause}
       onStartNow={props.onStartNow}
     />
   );
@@ -857,11 +970,12 @@ function SplitQueueButton(props: {
   enabled: boolean;
   busy: boolean;
   preview: PreviewState | null;
+  pastPause: boolean;
   onStartNow: () => void;
 }): JSX.Element {
   const { face, enabled, busy } = props;
   const menu = useMenu<HTMLDivElement>();
-  const item = startNowItem(props.preview);
+  const item = startNowItem(props.preview, props.pastPause);
   return (
     <>
       <div ref={menu.anchor} className={busy ? "split split-busy" : "split"}>
@@ -939,6 +1053,7 @@ export function SpawnScreen(props: {
   view: ViewModel;
   form: PersistedForm;
   autonomy: AutonomyLevel;
+  notBefore: NotBeforeChoice | null;
   /** Text a CLEAR stashed; non-null for as long as UNDO is on offer. */
   promptUndo: string | null;
   sheet: SheetKind | null;
@@ -948,7 +1063,7 @@ export function SpawnScreen(props: {
   /** The After sheet's list; non-null only while that sheet is open. */
   afterSheet: AfterSheetView | null;
 }): JSX.Element {
-  const { actions, view, form, autonomy, promptUndo, sheet, machines, now, preview, afterSheet } = props;
+  const { actions, view, form, autonomy, notBefore, promptUndo, sheet, machines, now, preview, afterSheet } = props;
   const [dropping, setDropping] = useState(false);
   const attachOffered = view.attachments.offered;
   const offline = view.machine !== null && !view.machine.connected;
@@ -1277,16 +1392,16 @@ export function SpawnScreen(props: {
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
           <TileButton tile={view.autonomyTile} onClick={() => actions.openSheet("autonomy")} />
           <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
+          <TileButton tile={view.notBeforeTile} onClick={() => actions.openSheet("notBefore")} />
           {view.requiresTile !== null && (
             <TileButton tile={view.requiresTile} onClick={() => actions.openSheet("requires")} />
           )}
+          {view.refTile !== null && <TileButton tile={view.refTile} onClick={() => actions.openSheet("ref")} />}
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
 
-        {view.previewShown && (
-          <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
-        )}
+        {view.previewShown && <PreviewCard preview={preview} machines={machines} now={now} />}
       </div>
 
       {renderedSheet !== null && (
@@ -1298,6 +1413,7 @@ export function SpawnScreen(props: {
           model={form.model}
           effort={form.effort}
           autonomy={autonomy}
+          notBefore={notBefore}
           afterSheet={lastAfterSheet.current}
           worktree={view.worktree}
           until={form.until}

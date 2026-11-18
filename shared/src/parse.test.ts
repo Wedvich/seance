@@ -92,6 +92,7 @@ import {
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   AUTH_ALERTS_MAX,
+  GITHUB_ALERTS_MAX,
   DISK_ALERTS_MAX,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
@@ -155,6 +156,7 @@ import {
   type TaskRequest,
   type TaskSpec,
 } from "./types.ts";
+import { TAG_VALUE_MAX } from "./tags.ts";
 import { TRAIT_LIMITS } from "./traits.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
@@ -592,6 +594,16 @@ describe("parseTaskSpec", () => {
     client: "pwa",
   };
 
+  test("notBefore: a positive safe integer is kept, anything else nulls the spec", () => {
+    expect(parseTaskSpec({ ...request, notBefore: 1_900_000_000_000 })).toEqual({
+      ...request,
+      notBefore: 1_900_000_000_000,
+    });
+    for (const bad of [0, -1, 1.5, Number.NaN, "1", 2 ** 53, null]) {
+      expect(parseTaskSpec({ ...request, notBefore: bad })).toBeNull();
+    }
+  });
+
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
     expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
@@ -912,7 +924,9 @@ describe("tasks and their records", () => {
     expect(parseTask(waiting)).toEqual(waiting);
     const question = { ...stay, inputReason: "question" } as const;
     expect(parseTask(question)).toEqual(question);
-    expect(parseTask({ ...waiting, inputReason: "elicitation" })).toEqual(stay);
+    const elicitation = { ...stay, inputReason: "elicitation" } as const;
+    expect(parseTask(elicitation)).toEqual(elicitation);
+    expect(parseTask({ ...waiting, inputReason: "mystery" })).toEqual(stay);
     expect(parseTask({ ...waiting, inputReason: 3 })).toEqual(stay);
     for (const inputTool of ["rm -rf /", "a/b", "", "t".repeat(65), 4]) {
       expect(parseTask({ ...waiting, inputTool })).toEqual({ ...stay, inputReason: "permission" });
@@ -1469,6 +1483,18 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
   });
 
+  test("an idle task's note rides its entry; a malformed part is dropped alone, the entry kept", () => {
+    const noted = { taskId: "t-1", since: 4, background: { shell: 2, wakeup: 1 }, stopError: "rate_limit" } as const;
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [noted] })).toEqual({ tasks: [], at: 5, idle: [noted] });
+    expect(
+      parseQueueReply({
+        tasks: [],
+        at: 5,
+        idle: [{ ...noted, background: { shell: 1, teleport: 1 }, stopError: "x" }],
+      }),
+    ).toEqual({ tasks: [], at: 5, idle: [{ taskId: "t-1", since: 4 }] });
+  });
+
   test("queue lists refused session passes, each one alone; a bad list costs only the explanations, never the reply", () => {
     const refused = { taskId: "t-1", code: "finished", sentAt: 4 };
     const stampless = { taskId: "t-2", code: "branch_mismatch" };
@@ -1562,8 +1588,20 @@ describe("parseSessionEvent", () => {
   test("a question reason rides needs-input only; elsewhere, or unknown, it is dropped and the event kept", () => {
     expect(parseSessionEvent({ ...event, reason: "question" })).toEqual({ ...event, reason: "question" });
     expect(parseSessionEvent({ ...event, state: "busy", reason: "question" })).toEqual({ ...event, state: "busy" });
-    expect(parseSessionEvent({ ...event, reason: "elicitation" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, reason: "elicitation" })).toEqual({ ...event, reason: "elicitation" });
+    expect(parseSessionEvent({ ...event, reason: "mystery" })).toEqual(event);
     expect(parseSessionEvent({ ...event, reason: true })).toEqual(event);
+  });
+
+  test("an idle note rides idle only; each malformed count or error is dropped alone, the event kept", () => {
+    const idle = { ...event, state: "idle" } as const;
+    const note = { background: { shell: 2, agent: 1, wakeup: 99 }, stopError: "overloaded" } as const;
+    expect(parseSessionEvent({ ...idle, ...note })).toEqual({ ...idle, ...note });
+    expect(parseSessionEvent({ ...event, ...note })).toEqual(event);
+    for (const background of [{ shell: 0 }, { shell: 100 }, { shell: 1.5 }, { teleport: 1 }, [], "shell", null]) {
+      expect(parseSessionEvent({ ...idle, background })).toEqual(idle);
+    }
+    expect(parseSessionEvent({ ...idle, stopError: "on_fire" })).toEqual(idle);
   });
 
   test("a permission reason carries its tool only when it is a tool name; a bad tool is dropped, reason and event kept", () => {
@@ -1681,6 +1719,21 @@ describe("store", () => {
   // Every field at its bound, two UTF-8 bytes a character wherever a field is free text.
   const device = "A".repeat(43);
   const placement = { deviceId: device, exclave: "x".repeat(TASK_SPEC_LIMITS.placement) };
+  // Task tags at their bounds: a ref of the longest pattern match, a URL whose normalised href is 256 bytes (a
+  // longer one is refused, and a normalised `"` is `%22`, so no URL JSON-escapes worse than plain ASCII), and opaque
+  // keys of 256 `"` (the worst JSON escaping: two bytes a byte), a 32-character suffix each; the owner's label at its
+  // cap in `"` too.
+  const refUrl = `https://linear.app/${"u".repeat(TAG_VALUE_MAX - "https://linear.app/".length)}`;
+  const worstValue = '"'.repeat(TAG_VALUE_MAX);
+  const creatorTags = {
+    "creator.ref": `a${"b".repeat(31)}:${"c".repeat(64)}`,
+    "creator.ref-url": refUrl,
+    [`creator.${"k".repeat(32)}`]: worstValue,
+  };
+  const ownerTags = {
+    "owner.label": '"'.repeat(TASK_REQUEST_LIMITS.title),
+    [`owner.${"k".repeat(32)}`]: worstValue,
+  };
   const created: Task = {
     id: crypto.randomUUID(),
     state: "queued",
@@ -1711,6 +1764,7 @@ describe("store", () => {
       },
       client: "ø".repeat(TASK_SPEC_LIMITS.client),
       until: "reported",
+      notBefore: 8.64e15,
     },
   };
   const target: Target = { ...placement, clone: "c".repeat(TARGET_LIMITS.clone) };
@@ -1758,6 +1812,48 @@ describe("store", () => {
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  // Task tags at their true worst case, measured by these tests: opaque values of 256 `"` (two bytes JSON-escaped
+  // each), a 256-byte ref URL (the longest `parseTagValue` keeps: a longer one is refused, never cut), a 96-character
+  // ref and a label of 200 `"`, beside every other field at its cap. A create with the three creator keys seals to
+  // 28252 of 28672 (420 spare), 28528 (144 spare) with the legacy `linear` they replace kept too, which no writer
+  // sets beside them. A decided record with eight candidates and a legacy `linear` has only 216 of 40960 spare before
+  // any tag, so the five keys a leader writes cannot be asked to fit beside eight candidates: they fit (39540, 1420
+  // spare) where the leader cuts, a decision of its winner alone (`winnerOnly`, the one cut its retry makes on
+  // `too_large`, since everything else a record holds is bounded), and 38040 (2920 spare) with no decision; a sixth,
+  // `scheduler.*` key of a later build still fits that cut (40284, 676 spare). Key count was not cut: no count above
+  // one key fits the eight-candidate bound, and three creator keys fit the create cap.
+  const taggedSpec = (spec: TaskSpec, tags: Readonly<Record<string, string>>): TaskSpec => ({ ...spec, tags });
+  // `scheduler.*` has no known key in v1, so `parseTask` drops one: its measurement is a conservative overestimate
+  // of a later build's key, never a record the leader writes today.
+  const schedulerTags = { [`scheduler.${"k".repeat(32)}`]: worstValue };
+
+  test("a create with its creator tags at their true worst case fits the create cap, with and without the legacy `linear`", async () => {
+    const { linear: _linear, ...rest } = created.spec;
+    const tagged: Task = { ...created, spec: taggedSpec(rest, creatorTags) };
+    expect(parseTask(tagged)).toEqual(tagged);
+    expect(await sealedLength(tagged)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
+    const both: Task = { ...created, spec: taggedSpec(created.spec, creatorTags) };
+    expect(parseTask(both)).toEqual(both);
+    expect(await sealedLength(both)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
+  });
+
+  test("the leader's record with all it adds at every bound and every task tag key, the decision cut to its winner, fits", async () => {
+    const decided: Task = {
+      ...written,
+      spec: taggedSpec(written.spec, { ...creatorTags, ...ownerTags }),
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: [candidate] },
+    };
+    expect(parseTask(decided)).toEqual(decided);
+    expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+    expect(await sealedLength({ ...decided, decision: undefined })).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+    // ...and a later build's `scheduler.*` key beside them, as an overestimate.
+    const sixth: Task = {
+      ...decided,
+      spec: taggedSpec(written.spec, { ...creatorTags, ...ownerTags, ...schedulerTags }),
+    };
+    expect(await sealedLength(sixth)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
   test("a needs-input record carrying its wait at every bound, in place of the failure, fits beside eight candidates", async () => {
@@ -2508,6 +2604,29 @@ describe("M4 shapes", () => {
     expect(extra?.cu).toEqual({ s: "idle" });
   });
 
+  test("a status carries this machine's GitHub budget as `gh`; a bad one is dropped alone", () => {
+    const gh = { u: 583231, c: [5000, 120, 1_763_000_000], g: [5000, 4990, 1_763_000_100] } as const;
+    expect(parseMachineStatus({ at: 1, scan: 2, gh })).toEqual({ at: 1, scan: 2, gh });
+    // No user yet, and one budget alone, are readings too.
+    expect(parseMachineStatus({ at: 1, scan: 2, gh: { g: gh.g } })?.gh).toEqual({ g: gh.g });
+    for (const bad of [
+      {},
+      { u: 7 },
+      { ...gh, u: 0 },
+      { ...gh, u: "7" },
+      { ...gh, c: [5000, 5001, 1] },
+      { ...gh, c: [0, 0, 1] },
+      { ...gh, c: [5000, 1, 0] },
+      { ...gh, c: [5000, 1] },
+      { ...gh, g: [5000, 1.5, 1] },
+      { ...gh, login: "octocat" },
+      "gh",
+      null,
+    ]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, gh: bad })).toEqual({ at: 1, scan: 2, cpu: 40 });
+    }
+  });
+
   test("cu's p is a pause behind running or failing, kept only as true beside those", () => {
     for (const s of ["running", "failing"] as const) {
       expect(parseMachineStatus({ at: 1, scan: 2, cu: { s, p: true } })?.cu).toEqual({ s, p: true });
@@ -2621,6 +2740,7 @@ describe("M4 shapes", () => {
       { code: "trait_absent", trait: "atlas" },
       { code: "trait_unhealthy", trait: "atlas" },
       { code: "continue_elsewhere" },
+      { code: "continue_clone_gone" },
       { code: "continue_unsupported" },
       { code: "attachments_unsupported" },
     ];
@@ -2815,6 +2935,10 @@ describe("M4 shapes", () => {
         { deviceId: "dev-1", exclave: "work", state: "expiring", at: 1_760_000_000_001 },
       ],
       archivistSilence: { state: "alerted", since: 1_760_000_000_002 },
+      githubAlerts: [
+        { u: 7, r: "core", reset: 1_760_000_000, at: 1_760_000_000_003 },
+        { u: 7, r: "graphql", reset: 1_760_000_000, at: 1_760_000_000_004 },
+      ],
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
     for (const archivistSilence of [{ state: "present" }, { state: "absent", since: 1 }] as const) {
@@ -2874,6 +2998,26 @@ describe("M4 shapes", () => {
       { ...settings, archivistSilence: { state: "alerted", since: 8.64e15 + 1 } },
       { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
       { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
+      { ...settings, githubAlerts: [{ u: 7, r: "search", reset: 1, at: 1 }] },
+      { ...settings, githubAlerts: [{ u: 0, r: "core", reset: 1, at: 1 }] },
+      { ...settings, githubAlerts: [{ u: 7, r: "core", reset: 1 }] },
+      { ...settings, githubAlerts: [{ u: 7, r: "core", reset: 1, at: 1, login: "octocat" }] },
+      {
+        ...settings,
+        githubAlerts: [
+          { u: 7, r: "core", reset: 1, at: 1 },
+          { u: 7, r: "core", reset: 2, at: 2 },
+        ],
+      },
+      {
+        ...settings,
+        githubAlerts: Array.from({ length: GITHUB_ALERTS_MAX + 1 }, (_, i) => ({
+          u: i + 1,
+          r: "core",
+          reset: 1,
+          at: 1,
+        })),
+      },
       {
         ...settings,
         diskAlerts: Array.from({ length: DISK_ALERTS_MAX + 1 }, (_, i) => ({ deviceId: `dev-${i}`, at: 1 })),
@@ -2995,6 +3139,12 @@ describe("M4 shapes", () => {
         at: 1_760_000_000_000,
       })),
       archivistSilence: { state: "alerted", since: 8.64e15 },
+      githubAlerts: Array.from({ length: GITHUB_ALERTS_MAX }, (_, i) => ({
+        u: Number.MAX_SAFE_INTEGER - i,
+        r: "graphql" as const,
+        reset: Number.MAX_SAFE_INTEGER,
+        at: Number.MAX_SAFE_INTEGER,
+      })),
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -3023,7 +3173,23 @@ describe("parsePushAlert", () => {
     const archivist = { v: 1, kind: "archivist", at: 5, since: 3 } as const;
     const flagged = { v: 1, kind: "flag", at: 5, taskId: "t-1", reason: "stuck" } as const;
     const failing = { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1" } as const;
-    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring, archivist, flagged, failing]) {
+    const github = { v: 1, kind: "github", at: 5, resource: "core", reset: 1_763_000_000 } as const;
+    const graphql = { ...github, resource: "graphql" } as const;
+    for (const alert of [
+      spill,
+      spending,
+      input,
+      question,
+      disk,
+      bare,
+      auth,
+      expiring,
+      archivist,
+      flagged,
+      failing,
+      github,
+      graphql,
+    ]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -3099,6 +3265,11 @@ describe("parsePushAlert", () => {
       { v: 1, kind: "custodian-failing", at: 5, deviceId: "a/b" },
       { v: 1, kind: "custodian-failing", at: 5, deviceId: "dev-1", note: "free text" },
       { v: 1, kind: "custodian-failing", at: 5 },
+      { v: 1, kind: "github", at: 5, resource: "search", reset: 1 },
+      { v: 1, kind: "github", at: 5, resource: "core" },
+      { v: 1, kind: "github", at: 5, resource: "core", reset: -1 },
+      { v: 1, kind: "github", at: 5, resource: "core", reset: 1, deviceId: "dev-1" },
+      { v: 1, kind: "github", at: 5, resource: "core", reset: 1, u: 7 },
       null,
       "spill",
     ]) {
@@ -3114,6 +3285,29 @@ describe("parsePushAlert", () => {
 describe("parseAmendRequest", () => {
   const basis = "a".repeat(64);
   const append = { taskId: "t-1", prompt: { mode: "append", text: "also" }, basis } as const;
+
+  test("notBefore: set or null, alone, with no basis; anything else is refused", () => {
+    expect(parseAmendRequest({ taskId: "t-1", notBefore: 1_900_000_000_000 })).toEqual({
+      taskId: "t-1",
+      notBefore: 1_900_000_000_000,
+    });
+    expect(parseAmendRequest({ taskId: "t-1", notBefore: null })).toEqual({ taskId: "t-1", notBefore: null });
+    for (const bad of ["x", 0, -5, 1.5]) expect(parseAmendRequest({ taskId: "t-1", notBefore: bad })).toBeNull();
+  });
+
+  test("ownerTags: bare suffixes in a printable-text map, empty string clears, never an empty or full-key map", () => {
+    expect(parseAmendRequest({ taskId: "t-1", ownerTags: { label: "mine" } })).toEqual({
+      taskId: "t-1",
+      ownerTags: { label: "mine" },
+    });
+    expect(parseAmendRequest({ taskId: "t-1", ownerTags: { label: "" } })).toEqual({
+      taskId: "t-1",
+      ownerTags: { label: "" },
+    });
+    for (const bad of [{}, { "owner.label": "x" }, { label: 7 }, { Label: "x" }, "x", null, []]) {
+      expect(parseAmendRequest({ taskId: "t-1", ownerTags: bad })).toBeNull();
+    }
+  });
 
   test("takes a prompt with its basis, and title, model and effort, each alone or together", () => {
     expect(parseAmendRequest(append)).toEqual(append);

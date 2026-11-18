@@ -8,11 +8,14 @@ import {
   offeredSpec,
   continueOffer,
   failureReasonText,
+  formatNotBefore,
   httpsUrl,
   isTaskId,
   isTransportError,
   passOffer,
   parseTaskSpec,
+  parseTaskTags,
+  TASK_TAG_BUDGET,
   queuedTask,
   RequestFailure,
   QUEUE_MAX_TASKS,
@@ -148,7 +151,10 @@ function overBound(
 
 /** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), a pin and avoid, never lineage or base. */
 export type AutoSpec = TaskRequest &
-  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires">;
+  Pick<
+    TaskSpec,
+    "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires" | "notBefore" | "tags"
+  >;
 
 /**
  * `machine` is the human name from the target's config, resolved against the
@@ -444,9 +450,17 @@ export function taskRequestError(request: TaskRequest, surface: EnqueueSurface =
 export function specError(spec: AutoSpec, surface: EnqueueSurface = "mcp"): string | null {
   const request = taskRequestError(spec, surface);
   if (request !== null) return request;
-  const { deps, linear, pin, avoid, requires } = spec;
+  const { deps, linear, pin, avoid, requires, tags } = spec;
   if (pin !== undefined && pin.deviceId === undefined && pin.account === undefined) {
     return "pin names neither a machine nor an account";
+  }
+  if (tags !== undefined) {
+    if (Object.keys(tags).some((key) => !key.startsWith("creator.")))
+      return "tags: only creator tags are set at create";
+    const kept = parseTaskTags(tags);
+    if (kept === null || kept === undefined || Object.keys(kept).length !== Object.keys(tags).length) {
+      return `tags: at most ${TASK_TAG_BUDGET.creator} creator tags; ref must be source:id (a-z, 0-9, - for the source; letters, digits and ._#/- for the id, at most 64), ref-url an https: URL`;
+    }
   }
   if (requires !== undefined) {
     if (requires.length === 0) return "requires is empty; leave it out to require nothing";
@@ -535,6 +549,7 @@ export async function continueAuto(
   prompt: string | undefined,
   audit: AuditSink,
   surface: EnqueueSurface,
+  notBefore?: number,
 ): Promise<AutoEnqueued> {
   const label = surface === "mcp" ? "continue_task" : "continue";
   const shown = JSON.stringify(taskId.slice(0, 64));
@@ -564,7 +579,10 @@ export async function continueAuto(
     leaderHandoff: leaderAdvertises(lease, CAPABILITIES.continueHandoff),
   });
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
-  const spec = offeredSpec(task, offer, prompt);
+  // Tags are dropped, not refused, under a leader without `taskTags`: nobody asked for them on a continue.
+  const copied = offeredSpec(task, offer, prompt, leaderAdvertises(lease, CAPABILITIES.taskTags));
+  // `notBefore` is its own, never the continued task's: `offeredSpec` carries none.
+  const spec: AutoSpec = { ...copied, ...(notBefore === undefined ? {} : { notBefore }) };
   const invalid = specError(spec, surface);
   if (invalid !== null) return failed(`${label} refused: ${invalid}`);
   // No unknown-name check: the target is exact and the names came from the stored task. A leader that
@@ -600,6 +618,18 @@ export function traitsGateError(lease: SchedulerLease, field: string, label = "s
   return lease.scheduler.availability().kind === "ready"
     ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seance update\``
     : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to route on ${field} — try again once one leads`;
+}
+
+/**
+ * The submit-time half of the `taskTags` gate (the record's `TAGS_DEP_SENTINEL` is the other): an older leader holds a
+ * tagged record unreadable, so nothing is written to one — or to none, which cannot say. Unlike `traits` there is no
+ * stale-daemon check: a tag routes nothing, so an older broker daemon that drops it only loses display data.
+ */
+export function taskTagsGateError(lease: SchedulerLease, label: string, field: string): string | null {
+  if (leaderAdvertises(lease, CAPABILITIES.taskTags)) return null;
+  return lease.scheduler.availability().kind === "ready"
+    ? `${label} refused: the scheduler's leader does not take task tags yet — its daemon needs \`seance update\`; retry without ${field}`
+    : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to take task tags — try again once one leads, or retry without ${field}`;
 }
 
 /** A refused `requires`: the line to show, and what to count in its audit line. */
@@ -697,8 +727,8 @@ async function sendRunNow(lease: SchedulerLease, taskId: string, surface: Enqueu
 
 /**
  * `start_task` / `seance start`: the Queue screen's Start now — one `run-now` for a task already
- * queued, placing it past the concurrency limit and nothing else (DESIGN.md "Run now lifts the cap
- * for one task"). Sent once, never retried: a lost answer may have reserved it. Never logs; the
+ * queued, placing it past the concurrency limit and the queue's pause and nothing else (DESIGN.md "Run now
+ * lifts the cap for one task"). Sent once, never retried: a lost answer may have reserved it. Never logs; the
  * leader's own `op=run-now` audit line, and the broker's where it carried it, are the record.
  */
 export async function startAuto(lease: SchedulerLease, taskId: string, surface: EnqueueSurface): Promise<AutoEnqueued> {
@@ -801,9 +831,15 @@ const AMEND_CHECK: Readonly<Record<EnqueueSurface, string>> = {
 /** Why `draft` would be refused as malformed, in a caller's words, or null. The leader's parser is the authority. */
 export function amendDraftError(draft: AmendDraft): string | null {
   const limits = TASK_REQUEST_LIMITS;
-  const { prompt, title, model, effort } = draft;
-  if (prompt === undefined && title === undefined && model === undefined && effort === undefined) {
-    return "nothing to amend: give a prompt, title, model or effort";
+  const { prompt, title, model, effort, notBefore } = draft;
+  if (
+    prompt === undefined &&
+    title === undefined &&
+    model === undefined &&
+    effort === undefined &&
+    notBefore === undefined
+  ) {
+    return "nothing to amend: give a prompt, title, model, effort or not-before time";
   }
   if (prompt !== undefined && prompt.text.length > limits.prompt) {
     return `the prompt text is past the ${limits.prompt}-character bound`;
@@ -874,7 +910,16 @@ export async function amendAuto(
     return failed(isTransportError(reply.code) ? `${said} — ${mayHave}` : said);
   }
   const fields = amendedFields(draft).join(", ");
-  return done(`task ${taskId}: amended (${fields}); it is still ${reply.task.state} and starts with the amended spec`);
+  // The resolved instant, with its zone: `--at 21:30` on a UTC host is 21:30 UTC, and the field name alone hides that.
+  const timing =
+    draft.notBefore === undefined
+      ? ""
+      : draft.notBefore === null
+        ? ", not-before time cleared"
+        : `, not before ${formatNotBefore(draft.notBefore, undefined, { withOffset: true })}`;
+  return done(
+    `task ${taskId}: amended (${fields})${timing}; it is still ${reply.task.state} and starts with the amended spec`,
+  );
 }
 
 /** The reads between a `--start` spawn's create and its `run-now`, as the PWA's Start now waits for `ready`. */
@@ -1038,8 +1083,12 @@ export async function enqueueAuto(
     }
     // oxlint-disable-next-line no-await-in-loop -- as above
     await audited(task, { kind: "queued", landedEarlier: reply.landedEarlier });
+    const deferred =
+      request.notBefore === undefined
+        ? ""
+        : `, not before ${formatNotBefore(request.notBefore, undefined, { withOffset: true })}`;
     const lines = [
-      `task ${task.id}: queued${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
+      `task ${task.id}: queued${deferred}${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
       followUp.placed,
     ];
     if (schedulerRefusal(scheduler.availability()) !== null) {

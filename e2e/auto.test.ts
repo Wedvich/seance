@@ -198,7 +198,14 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await stack.waitForLead("the suite's daemon to lead");
       await stack.daemon.leader.settled();
 
-      const spawned = await call("spawn_session", { machine: "auto", repo: "myrepo", prompt: "route me by mcp" });
+      const refUrl = "https://linear.app/x/issue/ENG-7";
+      const spawned = await call("spawn_session", {
+        machine: "auto",
+        repo: "myrepo",
+        prompt: "route me by mcp",
+        ref: "linear:ENG-7",
+        ref_url: refUrl,
+      });
       expect(spawned.error).toBe(false);
       // The spawn is an enqueue: it answers queued, and the leader places it afterwards.
       expect(spawned.text).toMatch(/^task (\S+): queued/u);
@@ -207,15 +214,22 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const id = taskId;
 
       type Queue = {
-        tasks: { id: string; state: string; placement?: { machine: string; window?: string } }[];
+        tasks: {
+          id: string;
+          state: string;
+          placement?: { machine: string; window?: string };
+          tags?: Record<string, string>;
+        }[];
         holds: unknown[];
       };
-      const seen: { queue: Queue | null } = { queue: null };
+      const seen: { queue: Queue | null; text: string } = { queue: null, text: "" };
       await pollUntil(
         async () => {
-          const queue = JSON.parse((await call("get_queue", {})).text) as Queue;
+          const answer = await call("get_queue", {});
+          const queue = JSON.parse(answer.text) as Queue;
           if (queue.tasks.find((t) => t.id === id)?.state !== "running") return false;
           seen.queue = queue;
+          seen.text = answer.text;
           return true;
         },
         "the queued task to run",
@@ -225,6 +239,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(seenRunning?.tasks.find((t) => t.id === id)).toMatchObject({
         state: "running",
         placement: { machine: "TestMac" },
+        tags: { "creator.ref": "linear:ENG-7" },
+      });
+      // The ref is shown, its URL is not.
+      expect(seen.text).not.toContain(refUrl);
+      expect((await stack.queue().get(id))?.body?.spec.tags).toEqual({
+        "creator.ref": "linear:ENG-7",
+        "creator.ref-url": refUrl,
       });
       expect(seenRunning?.holds).toEqual([]);
       window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
@@ -540,6 +561,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         async () => (await stack.queue().get(requiredId))?.body?.state === "running",
         "the required task to run",
         20_000,
+        async () => {
+          const stored = (await stack.queue().get(requiredId))?.body;
+          return `stored: ${JSON.stringify({ state: stored?.state, decision: stored?.decision })}`;
+        },
       );
       const body = (await stack.queue().get(requiredId))?.body;
       expect(body?.assignment?.deviceId).toBe(second.deviceId);
@@ -1302,6 +1327,56 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (window !== null) await killWindow(window);
       app.stop();
       await stack.restartDaemon();
+    }
+  }, 60_000);
+
+  // The leader skips a deferred ready task before routing, so it is never placed and carries no decision;
+  // run-now ignores the time.
+  test("a task with a not-before time waits ready and unrouted, and run-now starts it", async () => {
+    const id = crypto.randomUUID();
+    const app = startApp(stack);
+    let window: string | null = null;
+    try {
+      await stack.waitForLead("the suite's daemon to lead");
+      await stack.daemon.leader.settled();
+      const up = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the leader verified, with the repos listed",
+      );
+      const created = await app.client.createTask({
+        id,
+        spec: { repo: fixtureOrigin(up) ?? "", mode: "worktree", prompt: "not yet", notBefore: Date.now() + 3_600_000 },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "ready",
+        "the task to be admitted ready",
+      );
+      // A non-event can't be polled: give a pass or two to place it, which it must not.
+      await Bun.sleep(1_500);
+      const waiting = (await stack.queue().get(id))?.body;
+      expect(waiting?.state).toBe("ready");
+      expect(waiting?.decision).toBeUndefined();
+
+      // The leader's own view, as the mark-done test waits for, before an op on it.
+      await pollUntil(async () => {
+        const queue = await app.client.queue();
+        return queue !== null && "tasks" in queue && queue.tasks.some((t) => t.id === id && t.state === "ready");
+      }, "the leader to hold the task ready");
+      const started = await app.client.runNow(id);
+      expect(started).toMatchObject({ task: { id } });
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the task to run past its time",
+        20_000,
+      );
+      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+    } finally {
+      await cancelTask(app.client, id);
+      if (window !== null) await killWindow(window);
+      app.stop();
     }
   }, 60_000);
 

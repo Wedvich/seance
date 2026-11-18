@@ -20,10 +20,12 @@ import type {
   RescanResponse,
   SessionEntry,
   SessionsResponse,
+  SessionTagResponse,
   SpawnRequest,
   SpawnResponse,
   TaskProgress,
   UpdateAvailable,
+  WatchEventResponse,
 } from "@seance/shared";
 import {
   isMetricsRequest,
@@ -33,12 +35,15 @@ import {
   isBranchName,
   isTaskId,
   parseAttachmentManifest,
+  parseSpawnRef,
   parseDeliverMessageRequest,
   parseMessageReceiptRequest,
+  parseWatchEvent,
   parsePassCloseRequest,
   parseAvailabilityRequest,
   parseCustodianRequest,
   parsePushBranchRequest,
+  parseSessionTagRequest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
@@ -52,6 +57,7 @@ import {
   availabilityAudit,
   custodianOwnerAudit,
   pushAudit,
+  sessionTagAudit,
   spawnAudit,
   type AuditSink,
   type CustodianOwnerAudit,
@@ -73,6 +79,8 @@ import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import type { Messages } from "./messages.ts";
+import type { Watches } from "./watches.ts";
+import type { Conversations, SessionTagsSource } from "./conversations.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 import type { AvailabilityOutcome, CloseMode } from "./state.ts";
@@ -114,6 +122,15 @@ export interface HandlerContext {
    * `unsupported`.
    */
   readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
+  /** The watch table's intake for the leader's `watch-event` (`Watches.onEvent`). Absent, answered `unsupported`. */
+  readonly watches?: Pick<Watches, "onEvent">;
+  /** Session identity and tags (`conversations.ts`), for an app's `sessions` only; absent, no entry carries `tags`. */
+  readonly conversations?: SessionTagsSource;
+  /**
+   * The owner's label on an untasked conversation (`Conversations.label`), for the `session-tag` op; absent, answered
+   * `unsupported`. Throws when the pane listing or `conversations.json` cannot be written.
+   */
+  readonly sessionTag?: Conversations["label"];
   /** Closed-to-new-work state (docs/drain.md); absent, `availability` answers `unsupported` and no spawn is gated. */
   readonly availability?: MachineAvailability;
   /**
@@ -376,6 +393,22 @@ function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | unde
 }
 
 /**
+ * The ref a task's spawn carries (`SpawnRequest.ref`): from the scheduler's own task spawn alone, sealed from the
+ * scheduler (or its own process), `client: SCHEDULER_CLIENT`, with a task id to note it under, in any mode. Anything
+ * else, or a value `parseSpawnRef` does not hold, drops the claim, never refuses it: it is display text, and the spawn
+ * runs as an older daemon runs it. Never logs the value.
+ */
+function refOf(request: SpawnRequest, scheduler: boolean): { readonly ref: string; readonly url?: string } | undefined {
+  if (request.ref === undefined) return undefined;
+  const { taskId } = request;
+  const held =
+    scheduler && request.client === SCHEDULER_CLIENT && taskId !== undefined ? parseSpawnRef(request.ref) : undefined;
+  if (held !== undefined) return held;
+  log.warn(`spawn: ignored a ref this daemon does not take${taskId === undefined ? "" : ` (task ${quote(taskId)})`}`);
+  return undefined;
+}
+
+/**
  * Who may start a session from another branch: the scheduler's own task spawn, the gate attachments and an
  * inherited PR have. Refused, never dropped: dropped, the session would start from the default branch.
  */
@@ -529,6 +562,7 @@ async function handleSpawn(
     continuation = site;
   }
   const inherited = inheritedPrOf(payload, scheduler);
+  const ref = refOf(payload, scheduler);
   // Before the write-ahead record: a refused or abandoned fetch then leaves no ledger entry, and
   // the leader's TTL check proves the task never landed. Past its deadline nothing launches.
   let attachments: SessionAttachments | undefined;
@@ -599,6 +633,7 @@ async function handleSpawn(
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),
+      ...(ref === undefined ? {} : { ref }),
     });
     // A continuation finds the directory by this note; `here` has no worktree, and the age prune covers it.
     if (payload.attachments !== undefined && payload.taskId !== undefined && payload.mode === "worktree") {
@@ -792,6 +827,24 @@ async function handleMessageReceipt(
 }
 
 /**
+ * `watch-event`: only the scheduler tells a daemon what became of a GitHub target one of its sessions watches. The
+ * sender and the shape are checked here; the watch table (`watches.ts`) binds each event to a pane by the watch id it
+ * minted, places the note and answers which ids it delivered. A daemon with no table answers `unsupported`, so the
+ * leader keeps every event unacknowledged.
+ */
+async function handleWatchEvent(
+  ctx: HandlerContext,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<WatchEventResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler sends watch events" };
+  const parsed = parseWatchEvent(payload);
+  if (parsed === null) return { ok: false, code: "invalid_request", message: "malformed watch-event request" };
+  if (ctx.watches === undefined) return { ok: false, code: "unsupported", message: "this daemon keeps no watches" };
+  return ctx.watches.onEvent(parsed);
+}
+
+/**
  * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
  * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
  * machine's own sticky `closed` and refreshes `status`. A plain close starts the drain; `soft` closes without one (a later
@@ -863,6 +916,56 @@ async function handleCustodian(
   }
 }
 
+const SESSION_TAG_MESSAGES = {
+  unsupported: "this daemon keeps no session labels",
+  ended: "that session is gone",
+  tasked: "a session running a task is named by its task",
+  moved: "that pane now holds another session",
+  unverified: "that session's conversation is not verified",
+  ambiguous: "more than one session claims that conversation",
+} as const;
+
+/**
+ * `session-tag`: the owner names (or, with `""`, unnames) an untasked conversation (DESIGN.md, "Session identity", "The owner's label"). The owner's
+ * act, as `availability` is: only an app, on the relay leg, never the scheduler, the local socket or MCP. The act
+ * re-checks the pane and the conversation's one verified claimant (`Conversations.label`).
+ */
+async function handleSessionTag(
+  ctx: HandlerContext,
+  audit: ReturnType<typeof sessionTagAudit>,
+  payload: unknown,
+  from: string | undefined,
+  origin: SpawnOrigin,
+): Promise<SessionTagResponse> {
+  if (origin !== "relay" || from !== APP_ID) {
+    await audit(false, "refused");
+    return { ok: false, code: "refused", message: "only an app may name a session" };
+  }
+  const request = parseSessionTagRequest(payload);
+  if (request === null) {
+    await audit(false, "invalid_request");
+    return { ok: false, code: "invalid_request", message: "malformed session-tag request" };
+  }
+  if (ctx.sessionTag === undefined) {
+    await audit(true, "unsupported");
+    return { ok: false, code: "unsupported", message: SESSION_TAG_MESSAGES.unsupported };
+  }
+  try {
+    const outcome = await ctx.sessionTag(request.pane, request.session, request.value);
+    if (!outcome.ok) {
+      await audit(true, outcome.code);
+      return { ok: false, code: outcome.code, message: SESSION_TAG_MESSAGES[outcome.code] };
+    }
+    await audit(true, request.value === "" ? "cleared" : "set");
+    return { ok: true, value: request.value };
+  } catch (err) {
+    await audit(true, "internal_error");
+    // The error is a pane listing's or a file write's; neither carries the label.
+    log.error(`session-tag: could not act: ${String(err)}`);
+    return { ok: false, code: "internal_error", message: "could not save the session's label" };
+  }
+}
+
 /**
  * One decimal: the units are whole percent, MiB and KiB/s, and a rollup's
  * average otherwise serializes to seventeen digits — a third of the reply.
@@ -917,7 +1020,9 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
   const sessions = await ctx.backend.sessions(ctx.getRepos());
   await ctx.tasks?.harvestExits?.();
   const at = Date.now();
-  if (ctx.tasks === undefined || !scheduler) return { sessions, at };
+  // Never on a scheduler-sealed reply: the leader has no use for them, and they would reach no one else through it.
+  if (!scheduler) return { sessions: await withTags(ctx.conversations, sessions), at };
+  if (ctx.tasks === undefined) return { sessions, at };
   const { ended, ledgerSince, interrupted } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
   const base: SessionsResponse = {
     sessions,
@@ -927,6 +1032,19 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
     ...(interrupted === undefined || interrupted.length === 0 ? {} : { interrupted }),
   };
   return fitProgress(base, ctx.tasks.progress());
+}
+
+async function withTags(
+  source: SessionTagsSource | undefined,
+  sessions: readonly SessionEntry[],
+): Promise<readonly SessionEntry[]> {
+  if (source === undefined) return sessions;
+  // Tags are display: a failed sweep shows what the table already held, never fails the reply.
+  await source.sweep().catch(() => {});
+  return sessions.map((entry) => {
+    const tags = entry.id === undefined ? undefined : source.tagsFor(entry.id);
+    return tags === undefined ? entry : { ...entry, tags };
+  });
 }
 
 const PROGRESS_KEY_BYTES = Buffer.byteLength(',"progress":[]', "utf8");
@@ -986,12 +1104,13 @@ export interface LocalOps {
   readonly passClose: (payload: unknown) => Promise<PassCloseResponse | ErrorResponse>;
   readonly deliverMessage: (payload: unknown) => Promise<DeliverMessageResponse | ErrorResponse>;
   readonly messageReceipt: (payload: unknown) => Promise<MessageReceiptResponse | ErrorResponse>;
+  readonly watchEvent: (payload: unknown) => Promise<WatchEventResponse | ErrorResponse>;
 }
 
 /**
  * The leader reaching its own machine (`termFleet` in `leader-adapters.ts`): the same validation,
  * backend and audit lines as `createHandler`, under the caller's origin. No
- * `Plain` goes in, so nothing but these ops (spawn, despawn, push-branch, pass-close, deliver-message, message-receipt)
+ * `Plain` goes in, so nothing but these ops (spawn, despawn, push-branch, pass-close, deliver-message, message-receipt, watch-event)
  * can be asked for.
  */
 export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalOps {
@@ -1025,6 +1144,7 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
       run("deliver-message", crypto.randomUUID(), () => handleDeliverMessage(ctx, payload, true)),
     messageReceipt: (payload) =>
       run("message-receipt", crypto.randomUUID(), () => handleMessageReceipt(ctx, payload, true)),
+    watchEvent: (payload) => run("watch-event", crypto.randomUUID(), () => handleWatchEvent(ctx, payload, true)),
   };
 }
 
@@ -1056,6 +1176,7 @@ export function createHandler(
   const passCloseTrail = passCloseAudit(origin, ctx.auditSink);
   const availabilityTrail = availabilityAudit(origin, ctx.auditSink);
   const custodianTrail = custodianOwnerAudit(origin, ctx.auditSink);
+  const sessionTagTrail = sessionTagAudit(origin, ctx.auditSink);
   return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
@@ -1084,10 +1205,14 @@ export function createHandler(
           return { payload: await handleDeliverMessage(ctx, plain.payload, from === SCHEDULER_ID) };
         case "message-receipt":
           return { payload: await handleMessageReceipt(ctx, plain.payload, from === SCHEDULER_ID) };
+        case "watch-event":
+          return { payload: await handleWatchEvent(ctx, plain.payload, from === SCHEDULER_ID) };
         case "availability":
           return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
         case "custodian":
           return { payload: await handleCustodian(ctx, custodianTrail, plain.payload, from, origin) };
+        case "session-tag":
+          return { payload: await handleSessionTag(ctx, sessionTagTrail, plain.payload, from, origin) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {

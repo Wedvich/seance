@@ -55,6 +55,37 @@ describe("parseSessionEventFrame", () => {
       state: "idle",
     });
   });
+
+  test("`agent` keeps each claim its parser passes, may ride alone, and an unknown key drops the field, never the frame", () => {
+    const agent = { kind: "claude", session: SESSION, remote: "session_01Abc" } as const;
+    expect(parseSessionEventFrame(frame({ agent }))).toEqual({ v: 1, kind: "session-event", agent });
+    // A bad value drops that claim alone.
+    expect(
+      parseSessionEventFrame(
+        frame({ state: "busy", agent: { kind: "codex", session: SESSION.toUpperCase(), remote: "session_01Abc" } }),
+      ),
+    ).toEqual({ v: 1, kind: "session-event", state: "busy", agent: { remote: "session_01Abc" } });
+    // A full key is never re-homed, and any key it does not know drops the field.
+    expect(parseSessionEventFrame(frame({ state: "busy", agent: { "agent.session": SESSION } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "busy",
+    });
+    expect(parseSessionEventFrame(frame({ state: "busy", agent: { session: SESSION, mood: "x" } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "busy",
+    });
+    // Nothing kept and nothing else to report: no frame.
+    expect(parseSessionEventFrame(frame({ agent: { kind: "codex" } }))).toBeNull();
+    // A stop note carries the hook's claim too.
+    expect(parseSessionEventFrame(frame({ stop: { background: {} }, agent: { session: SESSION } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      stop: { background: {} },
+      agent: { session: SESSION },
+    });
+  });
 });
 
 describe("activity", () => {
@@ -182,6 +213,133 @@ test("parent parsing survives a comm with spaces and parens", () => {
       [11, 10],
     ]),
   );
+});
+
+describe("idle notes (the settings Stop hook)", () => {
+  const panes: readonly BoundPane[] = [
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home" },
+  ];
+
+  function setup() {
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    const notes = (): unknown[] =>
+      forwarded.map(({ state, background, stopError }) => ({ state, background, stopError }));
+    return { events, send, notes };
+  }
+
+  test("a note stands alone: never beside a state, a hand-off or a pass, each malformed field dropped alone", () => {
+    expect(parseSessionEventFrame(frame({ stop: { background: { shell: 2 } }, pane: "%1" }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      stop: { background: { shell: 2 } },
+      pane: "%1",
+    });
+    expect(parseSessionEventFrame(frame({ stop: { background: { shell: 0 }, stopError: "rate_limit" } }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      stop: { stopError: "rate_limit" },
+    });
+    expect(parseSessionEventFrame(frame({ stop: {}, state: "idle" }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ stop: {}, handoff: true }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ stop: "busy" }))).toBeNull();
+  });
+
+  test("a note waits for the turn's idle and rides it; one landing after the idle re-sends that idle", async () => {
+    const { events, send, notes } = setup();
+    try {
+      await send("%2", { state: "busy" });
+      expect(await send("%2", { stop: { background: { shell: 1, wakeup: 1 } } })).toEqual({ ok: true });
+      await send("%2", { state: "idle", turnEnded: true });
+      expect(await send("%2", { stop: { stopError: "overloaded" } })).toEqual({ ok: true });
+      await pollUntil(() => notes().length === 3, "the busy, the noted idle and its re-send");
+      expect(notes()).toEqual([
+        { state: "busy", background: undefined, stopError: undefined },
+        { state: "idle", background: { shell: 1, wakeup: 1 }, stopError: undefined },
+        { state: "idle", background: undefined, stopError: "overloaded" },
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("the next busy clears the note; an untasked pane's note is taken and goes nowhere", async () => {
+    const { events, send, notes } = setup();
+    try {
+      await send("%2", { stop: { background: { agent: 3 } } });
+      await send("%2", { state: "busy" });
+      await send("%2", { state: "idle", turnEnded: true });
+      expect(await send("%1", { stop: { background: { shell: 1 } } })).toEqual({ ok: true });
+      await send("%1", { state: "idle", turnEnded: true });
+      await pollUntil(() => notes().length === 2, "the busy and the idle");
+      expect(notes()).toEqual([
+        { state: "busy", background: undefined, stopError: undefined },
+        { state: "idle", background: undefined, stopError: undefined },
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("awaitsWake: a turn that left work or a cron pending, tasked or not, until its next turn", async () => {
+    const { events, send } = setup();
+    try {
+      await send("%2", { state: "busy" });
+      await send("%2", { stop: { background: { wakeup: 1 } } });
+      await send("%2", { state: "idle", turnEnded: true });
+      expect(events.awaitsWake("%2")).toBe(true);
+      expect(events.awaitsWake("%2", "t1")).toBe(true);
+      // The caller read another task on the pane: another session's note.
+      expect(events.awaitsWake("%2", "t2")).toBe(false);
+      await send("%2", { state: "busy" });
+      expect(events.awaitsWake("%2")).toBe(false);
+
+      // An untasked pane is held too: the custodian closes those as well.
+      await send("%1", { stop: { background: { shell: 1 } } });
+      expect(events.awaitsWake("%1", null)).toBe(true);
+      // An error, or nothing left running, holds nothing.
+      await send("%1", { stop: { stopError: "overloaded" } });
+      expect(events.awaitsWake("%1")).toBe(false);
+      await send("%1", { stop: { background: { shell: 0 } } });
+      expect(events.awaitsWake("%1")).toBe(false);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("awaitsWake: a pane gone or under another process drops its note at the next frame", async () => {
+    let live: readonly BoundPane[] = panes;
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(live),
+      exclaves: () => [],
+      forward: () => undefined,
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    try {
+      await events.handle(frame({ pane: "%1", stop: { background: { monitor: 1 } } }), null);
+      expect(events.awaitsWake("%1")).toBe(true);
+      // A tmux server restart reused `%1` for another process.
+      live = [
+        { id: "%1", pid: 11, dead: false, taskId: null, ours: true, path: "/home" },
+        ...panes.filter((pane) => pane.id !== "%1"),
+      ];
+      await events.handle(frame({ pane: "%2", state: "busy" }), null);
+      expect(events.awaitsWake("%1")).toBe(false);
+    } finally {
+      events.stop();
+    }
+  });
 });
 
 describe("EndedTasks", () => {
@@ -1196,6 +1354,11 @@ describe("a session's hand-off", () => {
     });
     expect(parseSessionEventFrame(frame({ state: "busy", reason: "question" }))).toEqual({ ...base, state: "busy" });
     expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "elicitation" }))).toEqual({
+      ...base,
+      state: "needs-input",
+      reason: "elicitation",
+    });
+    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "mystery" }))).toEqual({
       ...base,
       state: "needs-input",
     });

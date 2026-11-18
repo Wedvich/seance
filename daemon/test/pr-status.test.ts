@@ -2,9 +2,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { quote, type PrStatus } from "@seance/shared";
+import { parseGithubPr, parseWatchSet, quote, type PrStatus, type WatchEvent } from "@seance/shared";
 import type { Task } from "../src/leader.ts";
-import { parseGithubPr, readPrHead, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
+import { LIMIT_JITTER_MS, limitedDelay, readPrHead, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
+import { createWatchRegistry, type PollerWatches } from "../src/watch-registry.ts";
 import { makeGhStub, pollUntil, type GhRun, type GhStub } from "./fixtures.ts";
 
 let base: string;
@@ -57,6 +58,10 @@ type Fake = {
   readonly oid?: string;
   readonly contexts?: readonly unknown[];
   readonly mergeStateStatus?: string;
+  /** What a watch reads of the head (`headRefOid`, `mergeable`) and of a long check list (`totalCount`). */
+  readonly headRefOid?: string;
+  readonly mergeable?: string;
+  readonly totalCount?: number;
   readonly autoMerge?: boolean;
   readonly inMergeQueue?: boolean;
   readonly reviewRequests?: number;
@@ -72,8 +77,19 @@ function run(
   required = true,
   status = "COMPLETED",
   databaseId?: number,
+  suite?: number,
+  detailsUrl?: string,
 ): unknown {
-  return { __typename: "CheckRun", databaseId, name, status, conclusion, isRequired: required };
+  return {
+    __typename: "CheckRun",
+    databaseId,
+    name,
+    status,
+    conclusion,
+    isRequired: required,
+    ...(suite === undefined ? {} : { checkSuite: { databaseId: suite } }),
+    ...(detailsUrl === undefined ? {} : { detailsUrl }),
+  };
 }
 
 function statusContext(context: string, state: string, required = true): unknown {
@@ -85,6 +101,9 @@ function wideOf(fake: Exclude<Fake, null>): boolean {
     fake.oid !== undefined ||
     fake.contexts !== undefined ||
     fake.mergeStateStatus !== undefined ||
+    fake.headRefOid !== undefined ||
+    fake.mergeable !== undefined ||
+    fake.totalCount !== undefined ||
     fake.autoMerge !== undefined ||
     fake.inMergeQueue !== undefined ||
     fake.reviewRequests !== undefined ||
@@ -123,6 +142,8 @@ function reply(...prs: readonly Fake[]): string {
           : {
               pullRequest: {
                 mergeStateStatus: fake.mergeStateStatus ?? "CLEAN",
+                mergeable: fake.mergeable,
+                headRefOid: fake.headRefOid,
                 isInMergeQueue: fake.inMergeQueue ?? false,
                 autoMergeRequest: fake.autoMerge === true ? { enabledAt: "2026-11-12T00:00:00Z" } : null,
                 reviewRequests: { totalCount: fake.reviewRequests ?? 0 },
@@ -131,7 +152,10 @@ function reply(...prs: readonly Fake[]): string {
                     {
                       commit: {
                         oid: fake.oid ?? HEAD,
-                        statusCheckRollup: fake.contexts === undefined ? null : { contexts: { nodes: fake.contexts } },
+                        statusCheckRollup:
+                          fake.contexts === undefined
+                            ? null
+                            : { contexts: { totalCount: fake.totalCount, nodes: fake.contexts } },
                       },
                     },
                   ],
@@ -150,7 +174,11 @@ interface Seen {
 }
 
 /** `rejects` names the tasks whose write the caller's `onStatus` refuses. */
-function start(tasks: readonly Task[], opts: PrPollerOpts = {}, rejects: ReadonlySet<string> = new Set()) {
+function start(
+  tasks: readonly Task[],
+  opts: PrPollerOpts & { readonly now?: () => number; readonly watches?: PollerWatches } = {},
+  rejects: ReadonlySet<string> = new Set(),
+) {
   const logs = { info: [] as string[], warn: [] as string[] };
   const seen: Seen[] = [];
   const poller = startPrPoller({
@@ -165,7 +193,7 @@ function start(tasks: readonly Task[], opts: PrPollerOpts = {}, rejects: Readonl
       seen.push({ id, url, status });
       return Promise.resolve();
     },
-    now: () => 1234,
+    now: opts.now ?? (() => 1234),
     log: { info: (line) => logs.info.push(line), warn: (line) => logs.warn.push(line) },
   });
   stops.push(poller.stop);
@@ -618,6 +646,256 @@ describe("when gh does not answer", () => {
   });
 });
 
+describe("when GitHub's budget is spent", () => {
+  // S3's two shapes, from gh's source and GitHub's docs: the primary GraphQL limit is HTTP 200 with
+  // `errors[].type` RATE_LIMITED; the secondary a 403 (or 429) whose message says so. gh exits 1 on both.
+  const PRIMARY = JSON.stringify({
+    errors: [
+      { type: "RATE_LIMITED", code: "graphql_rate_limit", message: "API rate limit already exceeded for user ID 77." },
+    ],
+  });
+  const SECONDARY = JSON.stringify({
+    message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again. ID F00D.",
+    documentation_url: "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+    status: "403",
+  });
+  const SELECTION = "rateLimit{ cost remaining resetAt }";
+  const withBudget = (body: string, resetAt: number, remaining = 4000): string => {
+    const parsed = JSON.parse(body);
+    parsed.data.rateLimit = { cost: 1, remaining, resetAt: new Date(resetAt).toISOString() };
+    return JSON.stringify(parsed);
+  };
+
+  test("either shape is `limited`: one warning naming the reset, never gh's words, and no poll before the reset", async () => {
+    for (const body of [PRIMARY, SECONDARY]) {
+      const now = Date.now();
+      const reset = now + 3_600_000;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await gh.setReply(body, 1);
+      const { logs, seen, stop } = start([pr(1)], { now: () => now, graphqlReset: () => reset, random: () => 0 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      // A non-event: an unlimited poller at 20 ms would have run several times by now.
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await Bun.sleep(200);
+      stop();
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      expect(await gh.calls()).toBe(1);
+      expect(logs.warn).toHaveLength(1);
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).toContain(`until ${new Date(reset).toISOString()}`);
+      expect(logs.warn[0]).not.toMatch(/user ID|secondary|F00D/u);
+      expect(seen).toEqual([]);
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next shape
+      gh = await stub.fresh();
+    }
+  });
+
+  test("with no reset known, or one already past, it backs off on the ladder and says no time", async () => {
+    for (const reset of [null, 1000]) {
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(PRIMARY, 1);
+      const { logs, stop } = start([pr(1)], { intervalMs: 10, graphqlReset: () => reset });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(async () => (await current.calls()) >= 2, "a second poll on the ladder");
+      stop();
+      expect(logs.warn).toHaveLength(1);
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).not.toContain("until");
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next case
+      gh = await stub.fresh();
+    }
+  });
+
+  test("other refusals with no data are not `limited`: a NOT_FOUND body is `failed`", async () => {
+    await gh.setReply(
+      JSON.stringify({ errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }] }),
+      1,
+    );
+    const { logs } = start([pr(1)]);
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("(failed)");
+  });
+
+  test("the in-query resetAt sets the wait, ahead of the rate reader's; the first good poll after it says so once", async () => {
+    const begun = Date.now();
+    const reset = begun + 400;
+    await gh.setReply(withBudget(reply({ state: "OPEN" }), reset), 0);
+    await gh.setCallReply(2, PRIMARY, 1);
+    // A clock that stands still: the reset stays 400 ms ahead however long a stub exec takes; the wait itself is real.
+    const { logs } = start([pr(1)], {
+      now: () => begun,
+      random: () => 0,
+      // Later than the in-query reset: were it read, the third poll would not come within the wait below.
+      graphqlReset: () => begun + 3_600_000,
+    });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain(`until ${new Date(reset).toISOString()}`);
+    await pollUntil(() => logs.info.length === 1, "the resumption");
+    expect(await gh.calls()).toBeGreaterThanOrEqual(3);
+    expect(logs.info[0]).toContain("resumed");
+    expect(logs.warn).toHaveLength(1);
+  });
+
+  test("a limited blocked-state run ends the poll limited: the merge readings land, no blocked warning, nothing more asked", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "MERGED" }), 0);
+    await gh.setBlockedReply(PRIMARY, 1);
+    const tasks = [pr(1, { state: "awaiting-merge" }), pr(2, { state: "awaiting-merge" })];
+    const { logs, seen } = start(tasks, { now: () => now, graphqlReset: () => now + 3_600_000, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1 && seen.length === 2, "the warning and both readings");
+    // A non-event: no third run comes before the reset.
+    await Bun.sleep(150);
+    expect(await gh.calls()).toBe(2);
+    expect(logs.warn).toHaveLength(1);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(seen.map((s) => [s.id, s.status.state])).toEqual([
+      ["t2", "merged"],
+      ["t1", "open"],
+    ]);
+  });
+
+  test("a reset beyond the window waits for the window's end rather than the ladder (a clock running behind GitHub's)", async () => {
+    await gh.setReply(PRIMARY, 1);
+    const { logs } = start([pr(1)], { now: () => 1234, graphqlReset: () => 1234 + 2 * 3_600_000, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain(`until ${new Date(1234 + 61 * 60_000).toISOString()}`);
+    await Bun.sleep(100);
+    expect(await gh.calls()).toBe(1);
+  });
+
+  test("a limit seen before a rejected write still ends the poll limited", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }), 0);
+    await gh.setBlockedReply(PRIMARY, 1);
+    const { logs } = start(
+      [pr(1, { state: "awaiting-merge" })],
+      { now: () => now, graphqlReset: () => now + 3_600_000, random: () => 0 },
+      new Set(["t1"]),
+    );
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    await Bun.sleep(150);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(await gh.calls()).toBe(2);
+  });
+
+  test("a limited landed check ends the poll limited: nothing more is asked before the reset", async () => {
+    const now = Date.now();
+    await gh.setReply(reply({ state: "MERGED", base: "feature", mergeOid: HEAD, landed: "BEHIND" }), 0);
+    await gh.setCallReply(2, PRIMARY, 1);
+    const { logs } = start([pr(1, { state: "awaiting-merge" })], {
+      now: () => now,
+      graphqlReset: () => now + 3_600_000,
+      random: () => 0,
+    });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    await Bun.sleep(150);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(await gh.calls()).toBe(2);
+  });
+
+  test("a revoked token whose body also mentions the limit stays `unauthenticated`", async () => {
+    await gh.setReply('{"message":"API rate limit exceeded for user ID 1","status":"401"}', 1);
+    const { logs } = start([pr(1)]);
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("gh auth login");
+  });
+
+  test("the limit by wording alone, by `errors[].message`, or typed beside data, is `limited`; an unrelated error is not", async () => {
+    const bodies = [
+      JSON.stringify({ errors: [{ message: "You have exceeded a secondary rate limit." }] }),
+      JSON.stringify({ message: "You have been rate limited. Try later." }),
+      JSON.stringify({ message: "You have triggered an abuse detection mechanism. Please wait." }),
+      JSON.stringify({ data: { p0: null, rateLimit: null }, errors: [{ type: "RATE_LIMITED", message: "slow down" }] }),
+    ];
+    for (const body of bodies) {
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(body, 1);
+      const { logs, stop } = start([pr(1)], { intervalMs: 10_000 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      stop();
+      expect(logs.warn[0]).toContain("(limited)");
+      expect(logs.warn[0]).not.toContain("not readable");
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next body
+      gh = await stub.fresh();
+    }
+    await gh.setReply(JSON.stringify({ errors: [{ message: "Something went wrong while executing your query." }] }), 1);
+    const { logs } = start([pr(1)], { intervalMs: 10_000 });
+    await pollUntil(() => logs.warn.length === 1, "the warning");
+    expect(logs.warn[0]).toContain("(failed)");
+  });
+
+  test("limited, failed, then ok: one warning per class and one resumption", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    await gh.setCallReply(1, PRIMARY, 1);
+    await gh.setCallReply(2, "not json", 0);
+    const { logs, seen } = start([pr(1)], { intervalMs: 10 });
+    await pollUntil(() => seen.length > 0, "the first good reading");
+    expect(logs.warn).toHaveLength(2);
+    expect(logs.warn[0]).toContain("(limited)");
+    expect(logs.warn[1]).toContain("(failed)");
+    expect(logs.info).toHaveLength(1);
+  });
+
+  test("a limited stay that gains a known reset warns again, naming it", async () => {
+    await gh.setReply(PRIMARY, 1);
+    let reset: number | null = null;
+    const { logs } = start([pr(1)], { intervalMs: 200, now: () => 1234, graphqlReset: () => reset, random: () => 0 });
+    await pollUntil(() => logs.warn.length === 1, "the first warning");
+    expect(logs.warn[0]).not.toContain("until");
+    reset = 1234 + 300;
+    await pollUntil(() => logs.warn.length === 2, "the warning with a time");
+    expect(logs.warn[1]).toContain(`until ${new Date(reset).toISOString()}`);
+  });
+
+  test("a rateLimit that is no budget is not kept: the rate reader's reset sets the wait", async () => {
+    for (const remaining of [1.5, -1, "x"]) {
+      const parsed = JSON.parse(reply({ state: "OPEN" }));
+      parsed.data.rateLimit = { cost: 1, remaining, resetAt: new Date(1234 + 500).toISOString() };
+      const current = gh;
+      // oxlint-disable-next-line no-await-in-loop -- one poller at a time over the shared stub
+      await current.setReply(JSON.stringify(parsed), 0);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await current.setCallReply(2, PRIMARY, 1);
+      const { logs, stop } = start([pr(1)], { now: () => 1234, graphqlReset: () => 1234 + 1000, random: () => 0 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await pollUntil(() => logs.warn.length === 1, "the warning");
+      stop();
+      expect(logs.warn[0]).toContain(`until ${new Date(1234 + 1000).toISOString()}`);
+      // oxlint-disable-next-line no-await-in-loop -- a fresh run dir for the next case
+      gh = await stub.fresh();
+    }
+  });
+
+  test("every query the poller sends selects the rate limit, as constant text", async () => {
+    await gh.setReply(
+      reply({ state: "OPEN", oid: HEAD }, { state: "MERGED", base: "feature", mergeOid: HEAD, landed: "BEHIND" }),
+      0,
+    );
+    const tasks = [pr(1, { state: "awaiting-merge" }), pr(2, { state: "awaiting-merge" })];
+    const { seen, stop } = start(tasks, { intervalMs: 60_000 });
+    await pollUntil(() => seen.length === 2, "both readings");
+    stop();
+    const queries = (await gh.argvs()).map((argv) => argv.find((arg) => arg.startsWith("query=")) ?? "");
+    expect(queries).toHaveLength(3);
+    for (const query of queries) expect(query.endsWith(` ${SELECTION} }`)).toBe(true);
+  });
+
+  test("limitedDelay waits until the reset plus under a minute's jitter, and gives no wait it cannot ground", () => {
+    expect(limitedDelay(10_000, 4_000, 0)).toBe(6_000);
+    expect(limitedDelay(10_000, 4_000, 0.999_999)).toBeLessThan(6_000 + LIMIT_JITTER_MS);
+    expect(limitedDelay(10_000, 4_000, 7)).toBeLessThan(6_000 + LIMIT_JITTER_MS);
+    expect(limitedDelay(10_000, 4_000, -1)).toBe(6_000);
+    expect(limitedDelay(null, 4_000, 0)).toBeNull();
+    expect(limitedDelay(4_000, 4_000, 0)).toBeNull();
+    expect(limitedDelay(4_000 + 61 * 60_000 + 1, 4_000, 0)).toBeNull();
+    expect(limitedDelay(4_000 + 61 * 60_000, 4_000, 0)).toBe(61 * 60_000);
+  });
+});
+
 describe("the blocked-state read", () => {
   const waiting = (n: number, fields: Partial<Task> = {}): Task => pr(n, { state: "awaiting-merge", ...fields });
   const read = async (
@@ -1000,5 +1278,417 @@ describe("readPrHead", () => {
     await gh.setReply("{}", 4);
     expect(await readPrHead(prUrl(1), { gh: stub.path })).toEqual({ kind: "unreadable" });
     expect(await readPrHead(prUrl(1), { gh: join(base, "no-such-gh") })).toEqual({ kind: "unreadable" });
+  });
+});
+
+describe("watched targets", () => {
+  const BOOT = "00000000-0000-4000-8000-000000009000";
+  const wid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const runUrl = (id: number): string => `https://github.com/octo-org/widgets/actions/runs/${id}`;
+  const JOB = "https://github.com/octo-org/widgets/actions/runs/77/job/88";
+
+  interface Entry {
+    readonly id: number;
+    readonly url: string;
+    readonly kind?: "pr" | "run";
+    readonly head?: string;
+  }
+
+  /** A real registry with a recording send; its set is accepted at `at`, and its watches are unread-suspended after `2 * intervalMs`. */
+  function watching(entries: readonly Entry[], intervalMs = 60_000, at = 0) {
+    const sent: { readonly events: readonly WatchEvent[] }[] = [];
+    const registry = createWatchRegistry({
+      send: (_to, request) => {
+        sent.push(request);
+        return Promise.resolve({ ok: true, delivered: request.events.map((e) => e.id) });
+      },
+      canReceive: () => true,
+      intervalMs,
+      log: { info: () => undefined, warn: () => undefined },
+    });
+    const set = parseWatchSet({
+      gen: { boot: BOOT, n: 1 },
+      watches: entries.map((e) => ({
+        id: wid(e.id),
+        kind: e.kind ?? "pr",
+        url: e.url,
+        seen: [],
+        ...(e.head === undefined ? {} : { head: e.head }),
+      })),
+    });
+    if (set === null) throw new Error("test set did not parse");
+    registry.accept("dev", set, at);
+    const events = (): WatchEvent[] => sent.flatMap((request) => request.events);
+    return { registry, events };
+  }
+
+  const checksOn = (contexts: readonly unknown[], totalCount = contexts.length): Exclude<Fake, null> => ({
+    state: "OPEN",
+    oid: HEAD,
+    headRefOid: HEAD,
+    contexts,
+    totalCount,
+  });
+
+  test("an open PR only a watch holds is read, and its passing checks reach the registry as one event", async () => {
+    await gh.setReply(reply(checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)])), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    const { seen, logs } = start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the checks event");
+    expect(events()[0]).toEqual({
+      id: wid(1),
+      key: `checks:${HEAD}:pass`,
+      event: { kind: "checks", outcome: "pass", head: HEAD },
+    });
+    const argv = await gh.argv();
+    expect(argv).toContain("n0=5");
+    expect(argv.join(" ")).not.toContain(wid(1));
+    expect(seen).toEqual([]);
+    expect(logs.info).toEqual([]);
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("every failing context counts, required or not, and a failure names its job only in the watched repo", async () => {
+    await gh.setReply(
+      reply(
+        checksOn([
+          run("lint", "FAILURE", false, "COMPLETED", 2, 10, JOB),
+          run(
+            "deploy",
+            "TIMED_OUT",
+            false,
+            "COMPLETED",
+            3,
+            10,
+            "https://github.com/other/widgets/actions/runs/1/job/2",
+          ),
+          run("build", "SUCCESS", true, "COMPLETED", 4, 10),
+        ]),
+      ),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the fail event");
+    expect(events()[0]?.event).toEqual({
+      kind: "checks",
+      outcome: "fail",
+      head: HEAD,
+      failing: [{ name: "lint", job: { run: "77", job: "88" } }, { name: "deploy" }],
+    });
+  });
+
+  test("the same check name in two suites is two contexts: one suite's success never hides the other's failure", async () => {
+    await gh.setReply(
+      reply(
+        checksOn([run("test", "SUCCESS", true, "COMPLETED", 5, 10), run("test", "FAILURE", true, "COMPLETED", 6, 11)]),
+      ),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the fail event");
+    expect(events()[0]?.event).toMatchObject({
+      kind: "checks",
+      outcome: "fail",
+      failing: [{ name: "test", required: true }],
+    });
+  });
+
+  test("pending contexts and a truncated list are no reading: nothing is sent until the head's checks are complete", async () => {
+    await gh.setReply(reply(checksOn([run("build", null, true, "IN_PROGRESS", 1, 10)])), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 4, "two polls");
+    expect(events()).toEqual([]);
+
+    await gh.setReply(reply(checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)], 80)), 0);
+    const before = await gh.calls();
+    await pollUntil(async () => (await gh.calls()) >= before + 4, "two polls of a truncated list");
+    expect(events()).toEqual([]);
+
+    await gh.setReply(reply(checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)])), 0);
+    await pollUntil(() => events().length > 0, "the pass once the list is complete");
+    expect(events()[0]?.event).toMatchObject({ kind: "checks", outcome: "pass" });
+  });
+
+  test("rollup of another commit than the head says nothing of it", async () => {
+    await gh.setReply(
+      reply({ ...checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)]), oid: "f".repeat(40) }),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 4, "two polls");
+    expect(events()).toEqual([]);
+  });
+
+  test("a conflict is an event of its own, from mergeStateStatus or mergeable", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD, headRefOid: HEAD, mergeable: "CONFLICTING" }), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the conflict event");
+    expect(events()[0]?.event).toEqual({ kind: "conflict", head: HEAD });
+  });
+
+  test("a draft PR is read wide for a watch, so its checks are seen", async () => {
+    await gh.setReply(reply({ ...checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)]), isDraft: true }), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the draft's checks event");
+    expect(events()[0]?.event).toMatchObject({ kind: "checks", outcome: "pass" });
+  });
+
+  test("merged and closed PRs end as their own events", async () => {
+    await gh.setReply(reply({ state: "MERGED" }, { state: "CLOSED" }), 0);
+    // One slice answers p0 and p1 from one body.
+    const { registry, events } = watching([
+      { id: 1, url: prUrl(5) },
+      { id: 2, url: prUrl(6) },
+    ]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length >= 2, "both events");
+    expect(events().map((e) => [e.id, e.event.kind])).toEqual([
+      [wid(1), "merged"],
+      [wid(2), "closed"],
+    ]);
+  });
+
+  test("a PR the forge answers null for is unreadable only from its second poll", async () => {
+    await gh.setReply(reply(null), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the unreadable event");
+    // The first null went unsent: the event came on a later poll.
+    expect(await gh.calls()).toBeGreaterThanOrEqual(2);
+    expect(events()[0]?.event).toEqual({ kind: "unreadable" });
+  });
+
+  test("a PR a task also holds is read once, in the task's chunk, and the task's status is what it was without the watch", async () => {
+    const body = reply({
+      state: "OPEN",
+      oid: HEAD,
+      headRefOid: HEAD,
+      contexts: [run("build", "SUCCESS", true, "COMPLETED", 1, 10)],
+      totalCount: 1,
+    });
+    const task = pr(5, { state: "awaiting-merge" });
+
+    await gh.setReply(body, 0);
+    const alone = start([task]);
+    await pollUntil(() => alone.seen.length > 0, "the task's own reading");
+    alone.stop();
+
+    gh = await stub.fresh();
+    await gh.setReply(body, 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }]);
+    const both = start([task], { watches: registry });
+    await pollUntil(() => events().length > 0 && both.seen.length > 0, "both readings");
+    expect(both.seen[0]?.status).toEqual(alone.seen[0]?.status);
+    expect(events()[0]?.event).toMatchObject({ kind: "checks", outcome: "pass" });
+    // One merge read and one blocked read for the one PR: the watch asked for nothing of its own.
+    expect((await gh.argvs()).slice(0, 2).every((argv) => argv.includes("n0=5") && !argv.includes("n1=5"))).toBe(true);
+  });
+
+  test("a task's draft PR stays unread by the blocked query when only a watch would want it", async () => {
+    await gh.setReply(reply({ ...checksOn([run("build", "SUCCESS", true, "COMPLETED", 1, 10)]), isDraft: true }), 0);
+    const { seen } = start([pr(5, { state: "awaiting-merge" })]);
+    await pollUntil(() => seen.length > 0, "the task's reading");
+    expect(seen[0]?.status).toEqual({ state: "draft", at: 1234 });
+  });
+
+  test("watch-only PRs are read after every task read, and a watch's failed read changes no task's reading or the poller's class", async () => {
+    // Calls 1 and 2 are the task's merge and blocked reads; 3 is the watch-only PR's merge read, which fails.
+    await gh.setReply(
+      reply({ state: "OPEN", oid: HEAD, contexts: [run("build", "SUCCESS", true, "COMPLETED", 1)] }),
+      0,
+    );
+    // The watch-only read fails in each of the first three polls (calls 3, 6 and 9).
+    for (const call of [3, 6, 9]) await gh.setCallReply(call, "{}", 1);
+    const { registry } = watching([{ id: 1, url: prUrl(6) }]);
+    const { seen, logs } = start([pr(5, { state: "awaiting-merge" })], { watches: registry });
+    // The fourth poll starts only after the third's failure was handled (a class entered would have warned by then).
+    await pollUntil(async () => (await gh.calls()) >= 10, "the fourth poll");
+    expect(seen[0]).toMatchObject({ id: "t5", url: prUrl(5), status: { state: "open", required: "passing" } });
+    const argvs = await gh.argvs();
+    expect(argvs[0]).toContain("n0=5");
+    expect(argvs[1]).toContain("n0=5");
+    expect(argvs[2]).toContain("n0=6");
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("a watch's failed blocked read on a PR of a task that needs none is no task-facing warning", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }), 0);
+    await gh.setBlockedReply("not json", 0);
+    const { registry } = watching([{ id: 1, url: prUrl(5) }]);
+    const reported = pr(5, { state: "awaiting-merge", spec: { repo: "r", mode: "worktree", until: "reported" } });
+    const { logs } = start([reported], { watches: registry });
+    // Each poll is a merge read and the watch's blocked read: the third starts after the first two failed and were handled.
+    await pollUntil(async () => (await gh.calls()) >= 5, "the third poll");
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("under the reserve a watch on a PR a task reads still hears it merge, and asks for nothing more", async () => {
+    const reset = Date.now() + 600_000;
+    const low = (state: string): string => {
+      const body = JSON.parse(reply({ state }));
+      body.data.rateLimit = { cost: 1, remaining: 100, resetAt: new Date(reset).toISOString() };
+      return JSON.stringify(body);
+    };
+    await gh.setReply(low("OPEN"), 0);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }], 3_600_000, Date.now());
+    const { logs } = start([pr(5)], { watches: registry, now: () => Date.now() });
+    await pollUntil(() => logs.warn.length === 1, "the reserve warning");
+    await gh.setReply(low("MERGED"), 0);
+    await pollUntil(() => events().some((e) => e.event.kind === "merged"), "the merge told under the reserve");
+    expect(logs.warn).toHaveLength(1);
+    expect(logs.info.some((line) => line.includes("recovered"))).toBe(false);
+  });
+
+  test("the poller's clock says whether a poll is in flight, so a slow poll suspends nothing", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0, 1);
+    const target = parseGithubPr(prUrl(5));
+    if (target === null) throw new Error("test PR did not parse");
+    const ticks: (boolean | undefined)[] = [];
+    const watches: PollerWatches = {
+      wanted: () => ({ prs: [{ key: "pr:octo-org/widgets#5", pr: target }], runs: [] }),
+      read: () => undefined,
+      tick: (_now, _reason, _resetAt, polling) => void ticks.push(polling),
+    };
+    start([], { watches });
+    await pollUntil(() => ticks.length >= 3, "ticks during the first poll");
+    expect(ticks.every((polling) => polling === true)).toBe(true);
+  });
+
+  test("a watched run's attempt and conclusion are an event, and a failing one names its jobs", async () => {
+    await gh.setReply(
+      JSON.stringify({
+        data: {
+          w0: {
+            databaseId: 99,
+            runAttempt: 2,
+            checkSuite: {
+              status: "COMPLETED",
+              conclusion: "FAILURE",
+              checkRuns: {
+                nodes: [
+                  { __typename: "CheckRun", name: "unit", conclusion: "FAILURE", databaseId: 3, detailsUrl: JOB },
+                  { __typename: "CheckRun", name: "lint", conclusion: "SUCCESS", databaseId: 4 },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
+    start([], { watches: registry });
+    await pollUntil(() => events().length > 0, "the completed event");
+    expect(events()[0]?.event).toEqual({
+      kind: "completed",
+      attempt: 2,
+      conclusion: "failure",
+      failing: [{ name: "unit", job: { run: "77", job: "88" } }],
+    });
+    const argv = await gh.argv();
+    expect(argv).toContain(`u0=${runUrl(99)}`);
+    expect(argv.find((a) => a.startsWith("query="))).not.toContain("99");
+  });
+
+  test("a run still going is not an event", async () => {
+    await gh.setReply(
+      JSON.stringify({
+        data: { w0: { databaseId: 99, runAttempt: 1, checkSuite: { status: "IN_PROGRESS", conclusion: null } } },
+      }),
+      0,
+    );
+    const { registry, events } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
+    start([], { watches: registry });
+    await pollUntil(async () => (await gh.calls()) >= 2, "two polls");
+    expect(events()).toEqual([]);
+  });
+
+  test("a run read is no poll failure: a failing run query leaves the tasks' reads, class and logs alone", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    // The run read is the second call of each of the first three polls.
+    for (const call of [2, 4, 6]) await gh.setCallReply(call, "{}", 1);
+    const { registry } = watching([{ id: 1, kind: "run", url: runUrl(99) }]);
+    const { seen, logs } = start([pr(5)], { watches: registry });
+    // The fourth poll starts only after the third's failure was handled.
+    await pollUntil(async () => (await gh.calls()) >= 7, "the fourth poll");
+    expect(seen[0]).toMatchObject({ id: "t5", status: { state: "open" } });
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("a GitHub budget under the reserve reads tasks only, says so once without a URL, and reads watches again past it", async () => {
+    const reset = Date.now() + 600_000;
+    const low = JSON.parse(reply({ state: "OPEN" }));
+    low.data.rateLimit = { cost: 1, remaining: 100, resetAt: new Date(reset).toISOString() };
+    await gh.setReply(JSON.stringify(low), 0);
+    // A set lives 15 minutes and a watch unread for two intervals is suspended: neither may end the test early.
+    const { registry, events } = watching([{ id: 1, url: prUrl(6) }], 3_600_000, Date.now());
+    let now = Date.now();
+    const { logs, seen } = start([pr(5)], { watches: registry, now: () => now });
+    await pollUntil(() => logs.warn.length === 1, "the reserve warning");
+    expect(logs.warn[0]).toContain("(reserve)");
+    expect(logs.warn[0]).not.toContain(prUrl(6));
+    // The budget is unknown until the first answer, so the first poll read the watch too; a non-event cannot be polled
+    // for, so give the later polls time to (wrongly) name it again.
+    const named = async (n: number): Promise<number> =>
+      (await gh.argvs()).filter((argv) => argv.includes(`n0=${n}`)).length;
+    const watchReads = await named(6);
+    const taskReads = await named(5);
+    await pollUntil(async () => (await named(5)) > taskReads, "a later task read under the reserve");
+    // A negative: the sleep gives a (wrong) watch read of that poll time to land.
+    await Bun.sleep(150);
+    expect(await named(6)).toBe(watchReads);
+    expect(logs.warn).toHaveLength(1);
+    expect(seen.length).toBeGreaterThan(0);
+
+    const calls = await gh.calls();
+    now = reset + 1;
+    await gh.setReply(reply({ state: "MERGED" }), 0);
+    await pollUntil(() => events().length > 0, "the watch read after the reset");
+    expect(await gh.calls()).toBeGreaterThan(calls);
+    expect(logs.info.some((line) => line.includes("recovered"))).toBe(true);
+  });
+
+  test("a watch unread for two intervals is suspended `failed`, from the poller's own clock", async () => {
+    await gh.setReply("{}", 1);
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }], 50, Date.now());
+    const { logs } = start([], { watches: registry, now: () => Date.now() });
+    await pollUntil(() => events().length > 0, "the suspension");
+    expect(events()[0]?.event).toMatchObject({ kind: "suspended", reason: "failed" });
+    expect(JSON.stringify(logs)).not.toContain(prUrl(5));
+  });
+
+  test("a spent budget parks the poll chain, and the clock still suspends the watch `limited` with the reset", async () => {
+    const reset = Date.now() + 3_600_000;
+    await gh.setReply(
+      JSON.stringify({
+        errors: [
+          {
+            type: "RATE_LIMITED",
+            code: "graphql_rate_limit",
+            message: "API rate limit already exceeded for user ID 77.",
+          },
+        ],
+      }),
+      1,
+    );
+    const { registry, events } = watching([{ id: 1, url: prUrl(5) }], 50, Date.now());
+    start([], { watches: registry, now: () => Date.now(), graphqlReset: () => reset, random: () => 0 });
+    await pollUntil(() => events().length > 0, "the suspension");
+    expect(events()[0]?.event).toMatchObject({ kind: "suspended", reason: "limited", resetAt: reset });
+    // The chain is parked until the reset: one run of gh, however long the clock ran.
+    expect(await gh.calls()).toBe(1);
+  });
+
+  test("with no registry a poll reads exactly what it did before: no watch query, no clock", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    const { seen } = start([pr(5)]);
+    await pollUntil(() => seen.length > 0, "the task's reading");
+    for (const argv of await gh.argvs()) expect(argv.find((a) => a.startsWith("query="))).not.toContain("resource(");
   });
 });

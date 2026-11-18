@@ -36,6 +36,7 @@ export const COMMANDS = [
   "reap",
   "mcp",
   "mod",
+  "adapter",
   "session-event",
   "inbox",
   "custodian",
@@ -155,8 +156,8 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
   spawn: {
     summary: "queue a session for the scheduler",
     usage:
-      "[--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]... " +
-      "[--requires <trait>]...] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
+      "[--now | [--start | --at <HH:MM|ISO> | --in <duration>] [--machine <name|here>] [--account <alias|email|id>] " +
+      "[--not <machine|here>]... [--requires <trait>]... [--ref <source:id> [--ref-url <url>]]] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
     details: [RELAY_NOTE],
     arg: "repo",
     flags: [
@@ -172,7 +173,26 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         repeatable: true,
         help: "only place it where every named trait is declared (traits in config.json; list_machines shows them)",
       },
-      { flag: "--start", help: "once the scheduler admits it, start it past the concurrency limit (as seance start)" },
+      {
+        flag: "--ref",
+        value: "source:id",
+        help: "what the task is for, e.g. linear:ENG-123 or github:owner/repo#12: shown in the app and by get_queue, read by nothing",
+      },
+      { flag: "--ref-url", value: "url", help: "the ref's https: URL, shown beside it; only with --ref" },
+      {
+        flag: "--start",
+        help: "once the scheduler admits it, start it past the concurrency limit and a paused queue (as seance start)",
+      },
+      {
+        flag: "--at",
+        value: "HH:MM|ISO",
+        help: "not before: the next HH:MM on this machine's clock, or a date-time (YYYY-MM-DDTHH:MM, local unless it ends in Z or an offset); never with --in, --start or --now",
+      },
+      {
+        flag: "--in",
+        value: "duration",
+        help: "not before: from now, e.g. 90m, 2h or 1d2h; never with --at, --start or --now",
+      },
       {
         flag: "--autonomy",
         value: "level",
@@ -181,19 +201,23 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
       },
       {
         flag: "--now",
-        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires or --start",
+        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires, --ref, --start, --at or --in",
       },
     ],
   },
   continue: {
     summary:
       "resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new queued task",
-    usage: "<task-id> [-p|--prompt <note>]",
+    usage: "<task-id> [-p|--prompt <note>] [--at <HH:MM|ISO> | --in <duration>]",
     details: [RELAY_NOTE],
-    flags: [{ flag: "-p", alias: "--prompt", value: "note", help: "a note to add" }],
+    flags: [
+      { flag: "-p", alias: "--prompt", value: "note", help: "a note to add" },
+      { flag: "--at", value: "HH:MM|ISO", help: "not before: as spawn's --at; never with --in" },
+      { flag: "--in", value: "duration", help: "not before: as spawn's --in; never with --at" },
+    ],
   },
   start: {
-    summary: "start a queued task now, past the concurrency limit (the app's Start now)",
+    summary: "start a queued task now, past the concurrency limit and a paused queue (the app's Start now)",
     usage: "<task-id>",
     details: [RELAY_NOTE],
   },
@@ -227,7 +251,9 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
   },
   amend: {
     summary: "change a task still waiting in the queue",
-    usage: "<task-id> [text…] [--replace] [--title <title>] [--model <model>] [--effort <effort>]",
+    usage:
+      "<task-id> [text…] [--replace] [--title <title>] [--model <model>] [--effort <effort>] " +
+      "[--at <HH:MM|ISO> | --in <duration> | --not-before none]",
     details: ["the text is appended to its prompt", RELAY_NOTE],
     flags: [
       { flag: "--replace", help: "make the text the prompt" },
@@ -239,6 +265,9 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         choices: ["low", "medium", "high", "xhigh", "max", "default"],
         help: "set its effort",
       },
+      { flag: "--at", value: "HH:MM|ISO", help: "set or move the time before which it will not start" },
+      { flag: "--in", value: "duration", help: "as --at, from now (e.g. 2h)" },
+      { flag: "--not-before", value: "none", choices: ["none"], help: "clear the not-before time" },
     ],
   },
   despawn: {
@@ -261,12 +290,42 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     verbs: INSTALL_VERBS("the MCP server in Claude's config"),
   },
   mod: {
-    summary: "install this checkout's Claude Code mods (claude-mods/) into Claude",
+    summary: "install this checkout's Claude Code mods (claude-mods/) and séance's settings hooks into Claude",
     usage: "install | uninstall",
     verbs: INSTALL_VERBS("this checkout's Claude Code mods"),
   },
+  adapter: {
+    summary: "run a tool's adapter on this machine: add, remove, restart, status",
+    usage: "add <dir> [--kinds <kinds>] [--repo <repo>]... | remove <name> | restart [<name>] | status",
+    details: [
+      "add reads <dir>/seance-adapter.json and writes adapters.<name> into config.json, ending that name's subscriptions",
+      "an adapter runs as you, with everything you can reach: install only code you trust as you would an MCP server",
+    ],
+    verbs: {
+      add: {
+        summary: "add, or re-add, the adapter checked out in <dir>; `seance restart` starts it",
+        flags: [
+          {
+            flag: "--kinds",
+            value: "kinds",
+            help: "what it may deliver (default note,question, or what it had; request is opt-in)",
+          },
+          {
+            flag: "--repo",
+            value: "repo",
+            repeatable: true,
+            help: "only sessions in this scanned repo (default all, or what it had)",
+          },
+        ],
+      },
+      remove: { summary: "remove <name> from config.json and end its subscriptions; `seance restart` stops it" },
+      restart: { summary: "restart one adapter, or every one, in the running daemon; lifts the failed hold" },
+      status: { summary: "each adapter's state, protocol, counts and last exit" },
+    },
+  },
   "session-event": {
-    summary: "read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)",
+    summary:
+      "read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call, or with --hook Claude's settings hooks'; silent)",
     internal: true,
   },
   inbox: {

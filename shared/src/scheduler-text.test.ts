@@ -107,6 +107,9 @@ describe("reasonText", () => {
 
   test("a continuation says why a candidate is not the one it resumes on", () => {
     expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
+    expect(reasonText({ code: "continue_clone_gone" })).toBe(
+      "the clone the session it continues ran in is no longer there",
+    );
     expect(reasonText({ code: "continue_unsupported" })).toContain("seance update");
   });
 

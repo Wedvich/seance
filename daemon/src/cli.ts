@@ -6,6 +6,7 @@ import {
   DEFAULT_MODEL,
   fromBase64,
   isAutonomyLevel,
+  resolveNotBefore,
   withAutonomy,
   type AmendDraft,
   type AutonomyLevel,
@@ -66,6 +67,8 @@ import {
 } from "./service.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { scanRepos } from "./scan.ts";
+import { adapterChecks } from "./adapter-checks.ts";
+import { readAdaptersView } from "./adapter-control.ts";
 import { defaultUpdateEffects, updateNow } from "./update.ts";
 import { checkoutRoot, describeCheckout, readSource, servingRoot, trimRoot } from "./selfsource.ts";
 import { deregisterMachine } from "./deregister.ts";
@@ -132,10 +135,18 @@ export interface SpawnCliArgs {
   readonly not?: readonly string[];
   /** Queued spawn only (refused with `--now`): traits the machine must declare, each given by one `--requires`; present only when given. */
   readonly requires?: readonly string[];
-  /** Queued spawn only (refused with `--now`): start it past the concurrency limit once admitted, as `seance start`; present only when given. */
+  /** Queued spawn only (refused with `--now`): what the task is for, `source:id` (`creator.ref`); present only when given. */
+  readonly ref?: string;
+  /** Queued spawn only, and only beside `ref`: its https: URL (`creator.ref-url`); present only when given. */
+  readonly refUrl?: string;
+  /** Queued spawn only (refused with `--now`): start it past the concurrency limit and a paused queue once admitted, as `seance start`; present only when given. */
   readonly start?: true;
   /** The task's autonomy level, queued or `--now`; present only when given. */
   readonly autonomy?: AutonomyLevel;
+  /** Queued spawn only (refused with `--now` and `--start`): `--at <HH:MM | ISO>`, resolved by `cli-auto.ts` against its clock; never with `in`. */
+  readonly at?: string;
+  /** Queued spawn only (refused with `--now` and `--start`): `--in <duration>`, resolved as `at` is; never with `at`. */
+  readonly in?: string;
 }
 
 const SPAWN_USAGE = usageLine("spawn");
@@ -148,11 +159,15 @@ const SPAWN_VALUE_FLAGS = {
   "--account": "account",
   "--not": "not",
   "--requires": "requires",
+  "--ref": "ref",
+  "--ref-url": "refUrl",
   "--autonomy": "autonomy",
+  "--at": "at",
+  "--in": "in",
 } as const;
 
 /** Given at most once each. */
-const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set(["machine", "account", "autonomy"]);
+const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set(["machine", "account", "autonomy", "at", "in", "ref", "refUrl"]);
 
 type SpawnValueFlag = keyof typeof SPAWN_VALUE_FLAGS;
 
@@ -176,6 +191,10 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let machine: string | undefined;
   let account: string | undefined;
   let autonomy: AutonomyLevel | undefined;
+  let at: string | undefined;
+  let duration: string | undefined;
+  let ref: string | undefined;
+  let refUrl: string | undefined;
   const not: string[] = [];
   const requires: string[] = [];
   const promptParts: string[] = [];
@@ -189,6 +208,10 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       else if (expect === "requires") requires.push(arg);
       else if (expect === "machine") machine = arg;
       else if (expect === "account") account = arg;
+      else if (expect === "at") at = arg;
+      else if (expect === "in") duration = arg;
+      else if (expect === "ref") ref = arg;
+      else if (expect === "refUrl") refUrl = arg;
       else if (isAutonomyLevel(arg)) autonomy = arg;
       else throw new Error(SPAWN_USAGE);
       expect = null;
@@ -218,9 +241,24 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     expect === "account" ||
     expect === "not" ||
     expect === "requires" ||
-    expect === "autonomy"
+    expect === "autonomy" ||
+    expect === "at" ||
+    expect === "in" ||
+    expect === "ref" ||
+    expect === "refUrl"
   ) {
     throw new Error(SPAWN_USAGE);
+  }
+  if (refUrl !== undefined && ref === undefined) {
+    throw new Error(`--ref-url is the URL of the --ref it comes with — give --ref too\n${SPAWN_USAGE}`);
+  }
+  if (at !== undefined && duration !== undefined) {
+    throw new Error(`--at and --in both set the start time — give one\n${SPAWN_USAGE}`);
+  }
+  if ((at !== undefined || duration !== undefined) && (now || start)) {
+    throw new Error(
+      `--at and --in hold a queued spawn until then; --now and --start run it now — contradictory\n${SPAWN_USAGE}`,
+    );
   }
   const placed = machine !== undefined || account !== undefined || not.length > 0;
   if (now && placed) {
@@ -230,6 +268,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   }
   if (now && requires.length > 0) {
     throw new Error(`--requires needs the scheduler: --now spawns directly and skips routing\n${SPAWN_USAGE}`);
+  }
+  if (now && ref !== undefined) {
+    throw new Error(`--ref needs the scheduler: --now spawns directly and queues no task to tag\n${SPAWN_USAGE}`);
   }
   if (now && start) {
     throw new Error(
@@ -248,7 +289,11 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
     ...(requires.length === 0 ? {} : { requires }),
+    ...(ref === undefined ? {} : { ref }),
+    ...(refUrl === undefined ? {} : { refUrl }),
     ...(autonomy === undefined ? {} : { autonomy }),
+    ...(at === undefined ? {} : { at }),
+    ...(duration === undefined ? {} : { in: duration }),
   };
 }
 
@@ -298,6 +343,10 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
 export interface ContinueCliArgs {
   readonly taskId: string;
   readonly prompt?: string;
+  /** `--at <HH:MM | ISO>`, resolved by `cli-auto.ts`; never with `in`. */
+  readonly at?: string;
+  /** `--in <duration>`, resolved as `at` is; never with `at`. */
+  readonly in?: string;
 }
 
 const CONTINUE_USAGE = usageLine("continue");
@@ -307,12 +356,24 @@ export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
   let taskId: string | undefined;
   const promptParts: string[] = [];
   let expectPrompt = false;
+  let expectTime: "at" | "in" | null = null;
+  let at: string | undefined;
+  let duration: string | undefined;
   for (const arg of argv) {
-    if (expectPrompt) {
+    if (expectTime !== null) {
+      if (expectTime === "at" ? at !== undefined : duration !== undefined) throw new Error(CONTINUE_USAGE);
+      if (expectTime === "at") at = arg;
+      else duration = arg;
+      expectTime = null;
+    } else if (expectPrompt) {
       promptParts.push(arg);
       expectPrompt = false;
     } else if (arg === "-p" || arg === "--prompt") {
       expectPrompt = true;
+    } else if (arg === "--at") {
+      expectTime = "at";
+    } else if (arg === "--in") {
+      expectTime = "in";
     } else if (arg.startsWith("-")) {
       throw new Error(CONTINUE_USAGE);
     } else if (taskId === undefined) {
@@ -321,9 +382,17 @@ export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
       promptParts.push(arg);
     }
   }
-  if (taskId === undefined || expectPrompt) throw new Error(CONTINUE_USAGE);
+  if (taskId === undefined || expectPrompt || expectTime !== null) throw new Error(CONTINUE_USAGE);
+  if (at !== undefined && duration !== undefined) {
+    throw new Error(`--at and --in both set the start time — give one\n${CONTINUE_USAGE}`);
+  }
   const prompt = promptParts.join(" ");
-  return { taskId, ...(prompt === "" ? {} : { prompt }) };
+  return {
+    taskId,
+    ...(prompt === "" ? {} : { prompt }),
+    ...(at === undefined ? {} : { at }),
+    ...(duration === undefined ? {} : { in: duration }),
+  };
 }
 
 export interface StartCliArgs {
@@ -339,7 +408,7 @@ export function parseStartArgs(argv: readonly string[]): StartCliArgs {
   return { taskId };
 }
 
-/** Starts a queued task now, past the concurrency limit (`cli-auto.ts`) — the app's Start now. */
+/** Starts a queued task now, past the concurrency limit and a paused queue (`cli-auto.ts`) — the app's Start now. */
 export async function cmdStart(argv: readonly string[]): Promise<void> {
   return cmdStartAuto(parseStartArgs(argv));
 }
@@ -413,19 +482,27 @@ export async function cmdOpen(argv: readonly string[]): Promise<void> {
   return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false, false);
 }
 
-const AMEND_USAGE = `${usageLine("amend")}  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default)`;
+const AMEND_USAGE = `${usageLine("amend")}  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default; --at, --in or --not-before none set, move or clear the time it starts)`;
 
 /** Exported for tests. Bare words after the task id are the text, as `spawn`'s are its prompt. */
 export function parseAmendArgs(argv: readonly string[]): AmendDraft {
   let taskId: string | undefined;
   let replace = false;
   const textParts: string[] = [];
-  const set: { title?: string | null; model?: string | null; effort?: string | null } = {};
-  let expect: "title" | "model" | "effort" | null = null;
+  const set: { title?: string | null; model?: string | null; effort?: string | null; notBefore?: number | null } = {};
+  let expect: "title" | "model" | "effort" | "at" | "in" | "not-before" | null = null;
+  const timing: { at?: string; in?: string; clear?: true } = {};
   for (const arg of argv) {
     if (expect === "title") set.title = arg === "" ? null : arg;
     else if (expect === "model") set.model = arg === "default" ? null : arg;
     else if (expect === "effort") set.effort = arg === "default" ? null : arg;
+    else if (expect === "at" || expect === "in") {
+      if (timing[expect] !== undefined) throw new Error(`--${expect} given twice\n${AMEND_USAGE}`);
+      timing[expect] = arg;
+    } else if (expect === "not-before") {
+      if (arg !== "none") throw new Error(`--not-before takes only \`none\`\n${AMEND_USAGE}`);
+      timing.clear = true;
+    }
     if (expect !== null) {
       expect = null;
       continue;
@@ -434,11 +511,21 @@ export function parseAmendArgs(argv: readonly string[]): AmendDraft {
     else if (arg === "--title") expect = "title";
     else if (arg === "--model") expect = "model";
     else if (arg === "--effort") expect = "effort";
+    else if (arg === "--at") expect = "at";
+    else if (arg === "--in") expect = "in";
+    else if (arg === "--not-before") expect = "not-before";
     else if (arg.startsWith("-")) throw new Error(AMEND_USAGE);
     else if (taskId === undefined) taskId = arg;
     else textParts.push(arg);
   }
   if (taskId === undefined || expect !== null) throw new Error(AMEND_USAGE);
+  if (Object.keys(timing).length > 1) throw new Error(`give one of --at, --in and --not-before\n${AMEND_USAGE}`);
+  if (timing.clear === true) set.notBefore = null;
+  else if (timing.at !== undefined || timing.in !== undefined) {
+    const resolved = resolveNotBefore(timing, Date.now());
+    if (!resolved.ok) throw new Error(`${resolved.error}\n${AMEND_USAGE}`);
+    set.notBefore = resolved.at;
+  }
   const text = textParts.join(" ");
   // A replace with no words clears the prompt; an append of nothing is no amendment.
   if (text === "" && !replace && Object.keys(set).length === 0) throw new Error(AMEND_USAGE);
@@ -750,6 +837,12 @@ export async function cmdDoctor(): Promise<void> {
       render(await custodianChecks({ config, home: homedir(), platform: process.platform }));
     }
 
+    if (config.adapters !== undefined && Object.keys(config.adapters).length > 0) {
+      console.log("adapters");
+      const [daemonPid, view] = await Promise.all([livePid(), readAdaptersView()]);
+      render(await adapterChecks(config.adapters, { view: view !== null && view.pid === daemonPid ? view : null }));
+    }
+
     console.log("relay");
     if (/^wss?:\/\/.+/u.test(config.relayUrl)) {
       const problem = await checkRelayReachable(config.relayUrl, config.bearerToken);
@@ -768,12 +861,9 @@ export async function cmdDoctor(): Promise<void> {
   const source = await readSource();
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
   else ok(`checkout ${describeCheckout(source)}`);
-  const runtime = await readRuntime();
-  const serving = servingRoot(runtime, runtime !== null && pidAlive(runtime.pid));
-  // Realpath'd both sides: a symlinked path to this clone is still this clone.
-  const real = (path: string): Promise<string> => realpath(path).catch(() => path);
-  if (serving !== null && (await real(serving)) !== (await real(trimRoot(checkoutRoot())))) {
-    warn(`the running daemon runs from ${tildify(serving)}, not this checkout — update that clone`);
+  const elsewhere = await servedElsewhere();
+  if (elsewhere !== null) {
+    warn(`the running daemon runs from ${tildify(elsewhere)}, not this checkout — update that clone`);
   }
 
   render(await auditLogChecks(await auditLogPath()));
@@ -1141,9 +1231,30 @@ export function parseModArgs(argv: readonly string[]): "install" | "uninstall" {
   return sub;
 }
 
+/**
+ * The clone a live daemon runs from when it is not this CLI's, else null. Realpath'd both sides: a symlinked path to
+ * this clone is still this clone.
+ */
+async function servedElsewhere(): Promise<string | null> {
+  const runtime = await readRuntime();
+  const serving = servingRoot(runtime, runtime !== null && pidAlive(runtime.pid));
+  if (serving === null) return null;
+  const real = (path: string): Promise<string> => realpath(path).catch(() => path);
+  return (await real(serving)) === (await real(trimRoot(checkoutRoot()))) ? null : serving;
+}
+
 /** Like `mcp install`, Claude's own CLI does the writing — see claude-mod.ts. */
 export async function cmdMod(argv: readonly string[]): Promise<void> {
   if (parseModArgs(argv) === "install") {
+    // The marketplace is one per exclave and read in place: an install from another clone repoints every exclave's
+    // mods at it, so each new session loads that clone's mods (one it lacks, silently not at all) beside a daemon
+    // running this one's (DESIGN.md, "Claude Code mods").
+    const elsewhere = await servedElsewhere();
+    if (elsewhere !== null) {
+      throw new Error(
+        `the running daemon runs from ${tildify(elsewhere)}, not this checkout — run \`seance mod install\` from that clone`,
+      );
+    }
     await installMods((line) => console.log(line));
     console.log("read in place from this checkout: new sessions pick it up, running ones on /reload-plugins");
     return;

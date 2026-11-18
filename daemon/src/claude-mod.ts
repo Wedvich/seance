@@ -13,6 +13,7 @@ import type { Check } from "./check.ts";
 import { exec, execFailure } from "./exec.ts";
 import { userScopeTargets, type ClaudeConfigTarget } from "./exclaves.ts";
 import { checkoutRoot } from "./selfsource.ts";
+import { installSettingsHooks, settingsHooksChecks, uninstallSettingsHooks } from "./settings-hooks.ts";
 
 export interface Marketplace {
   readonly name: string;
@@ -106,7 +107,8 @@ export async function installMods(report: (line: string) => void): Promise<void>
   const claude = claudeBin();
   const root = await realCheckoutRoot();
   const market = await readMarketplace(root);
-  await perTarget(report, async ({ label, env }) => {
+  await perTarget(report, async (target) => {
+    const { label, env } = target;
     const added = await exec([claude, "plugin", "marketplace", "add", root, "--scope", "user", "--json"], {
       timeoutMs: 30_000,
       env,
@@ -121,6 +123,8 @@ export async function installMods(report: (line: string) => void): Promise<void>
       if (result.exitCode !== 0) throw new Error(`claude plugin install ${plugin.name}: ${execFailure(result)}`);
       report(`Claude mod ${plugin.name} installed in ${label}`);
     }
+    // After the plugin installs, which rewrite the same file through Claude's CLI.
+    report(await installSettingsHooks(target, root));
   });
 }
 
@@ -128,12 +132,14 @@ export async function installMods(report: (line: string) => void): Promise<void>
 export async function uninstallMods(report: (line: string) => void): Promise<void> {
   const claude = claudeBin();
   const market = await readMarketplace(await realCheckoutRoot());
-  await perTarget(report, async ({ label, env }) => {
+  await perTarget(report, async (target) => {
+    const { label, env } = target;
     report(
       (await removeMarketplace(claude, market.name, env)) === "removed"
         ? `removed the ${market.name} marketplace and its mods from ${label}`
         : `nothing installed in ${label}`,
     );
+    report(await uninstallSettingsHooks(target));
   });
 }
 
@@ -153,6 +159,14 @@ export function modChecksFrom(market: Marketplace, root: string, listed: unknown
       return {
         level: "warn",
         message: `Claude mod ${plugin.name} not installed in ${label} — run \`seance mod install\``,
+      };
+    }
+    const errors = entry["errors"];
+    if (Array.isArray(errors) && errors.length > 0) {
+      // Enabled yet never loaded: the marketplace was repointed at a clone without this mod.
+      return {
+        level: "warn",
+        message: `Claude mod ${plugin.name} in ${label} cannot load (${errors.map(String).join("; ")}) — \`seance mod install\` repoints it`,
       };
     }
     const expected = join(root, plugin.source);
@@ -176,7 +190,12 @@ type Listing =
   | { readonly label: string; readonly problem: string };
 
 type Listed =
-  | { readonly market: Marketplace; readonly root: string; readonly listings: readonly Listing[] }
+  | {
+      readonly market: Marketplace;
+      readonly root: string;
+      readonly targets: readonly ClaudeConfigTarget[];
+      readonly listings: readonly Listing[];
+    }
   | { readonly problem: string };
 
 async function listPerTarget(): Promise<Listed> {
@@ -202,18 +221,19 @@ async function listPerTarget(): Promise<Listed> {
       }
     }),
   );
-  return { market, root, listings };
+  return { market, root, targets: present, listings };
 }
 
-/** Doctor's mod lines, per exclave, rendered in the binaries section beside the MCP ones. */
+/** Doctor's mod and settings-hook lines, per exclave, rendered in the binaries section beside the MCP ones. */
 export async function modChecks(): Promise<readonly Check[]> {
   const found = await listPerTarget();
   if ("problem" in found) return [{ level: "warn", message: found.problem }];
-  return found.listings.flatMap((entry): readonly Check[] =>
+  const mods = found.listings.flatMap((entry): readonly Check[] =>
     "problem" in entry
       ? [{ level: "warn", message: entry.problem }]
       : modChecksFrom(found.market, found.root, entry.listed, entry.label),
   );
+  return [...mods, ...(await settingsHooksChecks(found.targets, found.root))];
 }
 
 /**

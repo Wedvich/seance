@@ -4,13 +4,18 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   accountNameIn,
+  agentVisibleTags,
   CAPABILITIES,
+  creatorTaskTags,
+  refTags,
+  taskTagEntries,
   MESSAGE_KINDS,
   MESSAGE_MAX,
   MESSAGE_ROUTE_MAX,
   MESSAGE_PUSH_MAX,
   MESSAGE_RATE,
   fleetTraits,
+  parseDateTime,
   traitHealthByMachine,
   AUTONOMY_LEVELS,
   autonomyOf,
@@ -53,6 +58,7 @@ import {
   type SchedulerAvailability,
   TASK_PHASES,
   type DrainView,
+  type SessionEntry,
   type SessionsResponse,
   type SpawnClient,
   type Task,
@@ -88,6 +94,7 @@ import {
   startAuto,
   startGateError,
   startQueuedAuto,
+  taskTagsGateError,
   traitsGateError,
   requiresCheck,
   usesReported,
@@ -115,6 +122,8 @@ import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import { sendMessage, type RouteGate } from "./send-message.ts";
+import { WATCH_TTL_MS } from "./watch-frame.ts";
+import { unwatchGithub, watchGithub, type WatchGate } from "./watch-github.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -225,6 +234,8 @@ interface ToolResult {
 const HAND_OFF_TOOL = "hand_off_task";
 const PASS_SELF_TOOL = "pass_to_successor";
 const SEND_MESSAGE_TOOL = "send_message";
+const WATCH_TOOL = "watch_github";
+const UNWATCH_TOOL = "unwatch_github";
 
 /**
  * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
@@ -498,7 +509,14 @@ function localFailureText(op: string, err: unknown): string {
  */
 function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
   if ("ok" in reply) return errorResult(`get_sessions failed (${reply.code}): ${reply.message}`);
-  return textResult(JSON.stringify(reply.sessions, null, 2));
+  return textResult(JSON.stringify(reply.sessions.map(agentVisibleSession), null, 2));
+}
+
+/** A session as another agent's context may see it: its tags cut to the allowlist (DESIGN.md, "Tags and session identity"). */
+function agentVisibleSession(entry: SessionEntry): SessionEntry {
+  const { tags, ...rest } = entry;
+  const visible = agentVisibleTags(tags);
+  return visible === undefined ? rest : { ...rest, tags: visible };
 }
 
 /** One line per failure whichever transport carried it: a brokered `RequestFailure` renders as the direct one does. */
@@ -557,6 +575,52 @@ export function messageRouteGate(fleet: Fleet): RouteGate {
 }
 
 /**
+ * `watch_github`'s gate, run before the add is sent: this machine's daemon and the verified leader must both advertise
+ * `watches` (docs/gh-watch.md W10), never the daemon's word alone. Its own lease, as `messageRouteGate`'s. Exported
+ * for its tests.
+ */
+export function watchGate(fleet: Fleet, local: LocalMachine | null): WatchGate {
+  return async () => {
+    if (local === null) return { ok: false, text: "this machine has no daemon state, so no daemon can watch for it" };
+    let lease: FleetLease;
+    try {
+      lease = await fleet.open();
+    } catch (err) {
+      return { ok: false, text: openFailureText(err) };
+    }
+    try {
+      if (lease.scheduler === null) {
+        return { ok: false, text: `can't confirm a scheduler leader keeps watches (${SCHEDULER_NEEDS_NEWER_DAEMON})` };
+      }
+      const own = lease.machines.find((m) => m.deviceId === local.deviceId);
+      if (own === undefined) return { ok: false, text: "this machine's daemon is not in the fleet's registry" };
+      if (own.capabilities?.includes(CAPABILITIES.watches) !== true) {
+        return { ok: false, text: "this machine's daemon keeps no watches yet — it needs `seance update`" };
+      }
+      const availability = lease.scheduler.availability();
+      if (advertises(lease.machines, availability, CAPABILITIES.watches)) return { ok: true };
+      return {
+        ok: false,
+        text:
+          availability.kind === "ready"
+            ? "the scheduler's leader keeps no watches yet — its daemon needs `seance update`"
+            : "no verified scheduler is leading, so nothing would read GitHub for the watch",
+      };
+    } finally {
+      lease.release();
+    }
+  };
+}
+
+/** `watch_github`'s and `unwatch_github`'s frame client; `seance mcp` sends the `watch` frame, tests drive a double. */
+export interface WatchClient {
+  readonly add: typeof watchGithub;
+  readonly remove: typeof unwatchGithub;
+}
+
+const WATCH_CLIENT: WatchClient = { add: watchGithub, remove: unwatchGithub };
+
+/**
  * `machine: "auto"`: no machine pin, the scheduler places the spawn. Matched in
  * any case, as names are; a machine actually named "auto" is pinned by its deviceId.
  */
@@ -572,7 +636,24 @@ function isAutoRef(ref: string): boolean {
  * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins, avoided machines and required traits are set with spawn_session's after, until, linear, pin, avoid and requires fields and with queue_batch.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, refs (the issue or PR a task is for), pins, avoided machines and required traits are set with spawn_session's after, until, ref, pin, avoid and requires fields and with queue_batch. A start time (not_before) holds a task until then; it is not a deadline.";
+
+/** `not_before` on the tools that create a task: ISO 8601 with an offset, so the model resolves a relative request itself. */
+const NOT_BEFORE_FIELD = z
+  .string()
+  .optional()
+  .describe(
+    "Not before this time: ISO 8601 date-time with an offset (`2026-11-18T21:30:00+01:00` or `…Z`). Resolve relative requests ('in 2 hours') yourself. The task is not started before then (to within about 30 s); start_task ignores it, and a time already past is refused",
+  );
+
+/** `not_before` as the epoch ms a spec holds, or why it is refused. */
+function notBeforeInput(text: string): { readonly at: number } | { readonly error: string } {
+  const at = parseDateTime(text, { requireOffset: true });
+  if (at === null) {
+    return { error: `not_before ${JSON.stringify(text.slice(0, 64))} is not an ISO 8601 date-time with an offset` };
+  }
+  return at <= Date.now() ? { error: "not_before is in the past" } : { at };
+}
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
@@ -737,17 +818,9 @@ const AFTER_WHEN = z
     '"opened" (the default): the task has a PR and its branch is pushed. A worktree task\'s first "opened" entry is what it stacks on: its worktree starts from that task\'s pushed branch, not the default branch, so it builds on that work before it merges (from the default branch instead if that PR merged first, or if the task finished with nothing pushed). "merged": its branch merged, and the worktree starts from the default branch, which then holds the work: the choice for work that should not build on an unmerged branch. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
   );
 
-const LINEAR_FIELD = z
-  .strictObject({
-    issue: z
-      .string()
-      .describe(`The Linear issue identifier, e.g. "ENG-123" (at most ${TASK_SPEC_LIMITS.linearIssue} characters)`),
-    url: z.string().optional().describe("The issue's https: URL"),
-  })
-  .optional()
-  .describe(
-    "The Linear issue this task is for. Informational: the scheduler stores and shows it, and reads nothing from Linear",
-  );
+const REF_DESCRIPTION =
+  'What this task is for, as source:id — e.g. "linear:ENG-123" or "github:owner/repo#12" (a lowercase source of letters, digits and hyphens, then a colon, then an id of at most 64 letters, digits and ._#/-). Informational: the scheduler stores and shows it (get_queue lists it as tags["creator.ref"]), and reads nothing from the tracker. It replaces the retired `linear: { issue, url }` field: pass "linear:ENG-123" here and the URL as the ref URL';
+const REF_URL_DESCRIPTION = "The ref's https: URL, shown beside it in the app; only with the ref";
 
 const AUTONOMY_FIELD = z
   .enum(AUTONOMY_LEVELS)
@@ -833,27 +906,34 @@ function requestFields(input: {
   return withAutonomy(fields) ?? fields;
 }
 
-/**
- * The authoring fields as a spec holds them: `until` only when it is not the default, `linear.url` only
- * when given, and `linear.issue` trimmed as the PWA's form trims it (a blank one is then refused by `specError`).
- */
-function authoredFields(
-  deps: readonly TaskDep[],
-  until: TaskUntil | undefined,
-  linear: { readonly issue: string; readonly url?: string | undefined } | undefined,
-): Pick<AutoSpec, "deps" | "until" | "linear"> {
+/** The authoring fields as a spec holds them: `until` only when it is not the default. */
+function authoredFields(deps: readonly TaskDep[], until: TaskUntil | undefined): Pick<AutoSpec, "deps" | "until"> {
   return {
     ...(deps.length === 0 ? {} : { deps }),
     ...(until === "reported" ? { until } : {}),
-    ...(linear === undefined
-      ? {}
-      : {
-          linear: {
-            issue: linear.issue.trim(),
-            ...(linear.url === undefined || linear.url === "" ? {} : { url: linear.url }),
-          },
-        }),
   };
+}
+
+/**
+ * A caller's ref as the creator tags a spec holds (`creatorTaskTags`, the one validator), or the refusal naming the
+ * fields the caller wrote. A blank ref is none, and a URL beside none is a mistake worth saying so.
+ */
+function refInput(
+  ref: string | undefined,
+  url: string | undefined,
+  names: { readonly ref: string; readonly url: string },
+): Pick<AutoSpec, "tags"> | { readonly error: string } {
+  const bare = url === undefined || url.trim() === "" ? undefined : url;
+  if (ref === undefined || ref.trim() === "") {
+    return bare === undefined ? {} : { error: `${names.url} needs ${names.ref}` };
+  }
+  const written = creatorTaskTags(refTags(ref.trim(), bare));
+  if (!written.ok) {
+    return {
+      error: `${names.ref} must be source:id (a lowercase source, a colon, then an id of at most 64 letters, digits and ._#/-) and ${names.url} an https: URL`,
+    };
+  }
+  return { tags: written.tags };
 }
 
 /**
@@ -880,6 +960,11 @@ function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   return " (the instruction to report is appended to the prompt and counts)";
 }
 
+function shownTags(spec: Task["spec"], at: number): Readonly<Record<string, string>> | undefined {
+  const visible = agentVisibleTags(taskTagEntries(spec, at));
+  return visible === undefined ? undefined : Object.fromEntries(Object.entries(visible).map(([k, e]) => [k, e.value]));
+}
+
 function describeTask(
   task: Task,
   machines: readonly Machine[],
@@ -896,6 +981,7 @@ function describeTask(
   const { spec } = task;
   const level = autonomyOf(spec);
   const blocked = taskPrBlock(task);
+  const tags = shownTags(spec, task.createdAt);
   return {
     id: task.id,
     state: task.state,
@@ -917,7 +1003,13 @@ function describeTask(
             return { trait, machines: traits.get(trait) ?? [], ...(failing.length === 0 ? {} : { failing }) };
           }),
         }),
-    ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
+    // A deferred task's record decision is stale: the scheduler skips it unrouted until the time.
+    ...(task.decision === undefined ||
+    (spec.notBefore !== undefined &&
+      spec.notBefore > now &&
+      (task.state === "queued" || task.state === "blocked" || task.state === "ready"))
+      ? {}
+      : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
@@ -937,8 +1029,10 @@ function describeTask(
     ...(task.merged === true ? { merged: true } : {}),
     ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
     ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
-    ...(spec.linear === undefined ? {} : { linear: spec.linear }),
+    // Only what `AGENT_VISIBLE_TAG_KEYS` allows: never the ref's URL or an opaque creator tag (a legacy `linear` reads as `creator.ref`).
+    ...(tags === undefined ? {} : { tags }),
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
+    ...(spec.notBefore === undefined ? {} : { notBefore: new Date(spec.notBefore).toISOString() }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
     ...(task.stack === undefined ? {} : { stackedOn: { task: task.stack.task, base: task.stack.on } }),
@@ -1014,6 +1108,7 @@ export function buildMcpServer(
   sendMsg: typeof sendMessage = sendMessage,
   /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
   ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
+  watchClient: WatchClient = WATCH_CLIENT,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1188,7 +1283,7 @@ export function buildMcpServer(
     {
       title: "Start a queued scheduler task now",
       description:
-        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency limit — the app's Start now. Only the limit is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the limit like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
+        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency limit and a paused queue — the app's Start now. Only those are lifted (the queue stays paused for every other task): a paused account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the limit like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
       inputSchema: z.strictObject({ taskId: z.string().describe("The waiting task's id from get_queue") }),
       annotations: { readOnlyHint: false },
     },
@@ -1221,7 +1316,7 @@ export function buildMcpServer(
     "amend_task",
     {
       title: "Amend a task still waiting in the scheduler's queue",
-      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
+      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. \`not_before\` (ISO 8601 with an offset) sets or moves the time before which it will not start, and null clears it; it needs no prompt basis. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
       inputSchema: z.strictObject({
         taskId: z.string().describe("The waiting task's id from get_queue"),
         append: z.string().optional().describe("Text to add at the end of the prompt, after a blank line"),
@@ -1229,15 +1324,21 @@ export function buildMcpServer(
         title: z.string().nullable().optional().describe("A new title; null clears it"),
         model: z.string().nullable().optional().describe("A new model; null restores the default"),
         effort: z.string().nullable().optional().describe("A new effort; null restores the default"),
+        not_before: z
+          .union([z.string(), z.null()])
+          .optional()
+          .describe("Not before this time (ISO 8601 with an offset, in the future); null clears it"),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ taskId, append, replacePrompt, title, model, effort }) =>
+    async ({ taskId, append, replacePrompt, title, model, effort, not_before }) =>
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("amend_task"));
         if (append !== undefined && replacePrompt !== undefined) {
           return errorResult("amend_task refused: give append or replacePrompt, not both");
         }
+        const deferred = not_before === undefined || not_before === null ? null : notBeforeInput(not_before);
+        if (deferred !== null && "error" in deferred) return errorResult(`amend_task refused: ${deferred.error}`);
         const prompt =
           append !== undefined
             ? { mode: "append" as const, text: append }
@@ -1252,6 +1353,7 @@ export function buildMcpServer(
             ...(title === undefined ? {} : { title }),
             ...(model === undefined ? {} : { model }),
             ...(effort === undefined ? {} : { effort }),
+            ...(not_before === null ? { notBefore: null } : deferred === null ? {} : { notBefore: deferred.at }),
           },
           "mcp",
         );
@@ -1267,18 +1369,22 @@ export function buildMcpServer(
       inputSchema: z.strictObject({
         taskId: z.string().describe("The failed, cancelled or blocked awaiting-merge task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
+        not_before: NOT_BEFORE_FIELD,
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ taskId, prompt }) =>
+    async ({ taskId, prompt, not_before }) =>
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("continue_task"));
+        const deferred = not_before === undefined ? null : notBeforeInput(not_before);
+        if (deferred !== null && "error" in deferred) return errorResult(`continue_task refused: ${deferred.error}`);
         const outcome = await continueAuto(
           { machines: lease.machines, scheduler: lease.scheduler },
           taskId,
           prompt,
           audit,
           "mcp",
+          deferred === null ? undefined : deferred.at,
         );
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
@@ -1325,15 +1431,17 @@ export function buildMcpServer(
             'Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents. With when "opened" (the default), a worktree task is stacked: it starts from the first such task\'s pushed branch (get_queue\'s stackedOn says what it started from); use when "merged" for work that should start from the default branch',
           ),
         until: UNTIL_FIELD,
-        linear: LINEAR_FIELD,
+        ref: z.string().optional().describe(REF_DESCRIPTION),
+        ref_url: z.string().optional().describe(REF_URL_DESCRIPTION),
         pin: PIN_FIELD,
         avoid: AVOID_FIELD,
         requires: REQUIRES_FIELD,
+        not_before: NOT_BEFORE_FIELD,
         start: z
           .boolean()
           .optional()
           .describe(
-            "Start it now, past the fleet's concurrency limit, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only the limit is lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
+            "Start it now, past the fleet's concurrency limit and a paused queue, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only those are lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
           ),
       }),
       annotations: { readOnlyHint: false },
@@ -1349,12 +1457,19 @@ export function buildMcpServer(
       autonomy,
       after,
       until,
-      linear,
+      ref,
+      ref_url,
       pin,
       avoid,
       requires,
+      not_before,
       start,
     }) => {
+      if (start === true && not_before !== undefined) {
+        return errorResult("spawn refused: start and not_before contradict each other: start runs the task now");
+      }
+      const deferred = not_before === undefined ? null : notBeforeInput(not_before);
+      if (deferred !== null && "error" in deferred) return errorResult(`spawn refused: ${deferred.error}`);
       const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
       if (machinePin !== undefined && pin?.machine !== undefined) {
         return errorResult("spawn refused: give the machine once — machine or pin.machine, not both");
@@ -1366,6 +1481,8 @@ export function buildMcpServer(
       if ("error" in reported) return errorResult(`spawn refused: ${reported.error}`);
       const placement = placementInput(pin, avoid, names, machinePin);
       if ("error" in placement) return errorResult(`spawn refused: ${placement.error}`);
+      const refFields = refInput(ref, ref_url, { ref: "ref", url: "ref_url" });
+      if ("error" in refFields) return errorResult(`spawn refused: ${refFields.error}`);
       // `client` is not a TaskRequest field: the leader stamps its own
       // dispatch `client=scheduler`, so the target audits the session as the
       // scheduler's.
@@ -1375,9 +1492,10 @@ export function buildMcpServer(
         ...authoredFields(
           (after ?? []).map(({ task, when }) => ({ task, after: when })),
           until,
-          linear,
         ),
+        ...refFields,
         ...(requires === undefined ? {} : { requires }),
+        ...(deferred === null ? {} : { notBefore: deferred.at }),
       };
       // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
       const invalid = specError(spec);
@@ -1395,6 +1513,9 @@ export function buildMcpServer(
         if (gate !== null) return errorResult(gate);
         const traitsGate = requires === undefined ? null : traitsGateError(leg, "requires");
         if (traitsGate !== null) return errorResult(traitsGate);
+        // A create asked for the ref, so a leader that cannot take it refuses; the caller retries without it.
+        const tagsGate = spec.tags === undefined ? null : taskTagsGateError(leg, "spawn", "ref");
+        if (tagsGate !== null) return errorResult(tagsGate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
         if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
         // The origin a clone name resolved to is what the leader bounds, not the name.
@@ -1457,10 +1578,17 @@ export function buildMcpServer(
                   'Each entry names exactly one of task and ref. As spawn_session\'s after: with when "opened" (the default) a worktree member stacks on the first such task\'s pushed branch; when "merged" starts it from the default branch',
                 ),
               until: UNTIL_FIELD,
-              linear: LINEAR_FIELD,
+              external_ref: z
+                .string()
+                .optional()
+                .describe(
+                  `As spawn_session's ref, named apart because a member's ref names it within the batch. ${REF_DESCRIPTION}`,
+                ),
+              external_ref_url: z.string().optional().describe(REF_URL_DESCRIPTION),
               pin: PIN_FIELD,
               avoid: AVOID_FIELD,
               requires: REQUIRES_FIELD,
+              not_before: NOT_BEFORE_FIELD,
             }),
           )
           .min(1)
@@ -1515,6 +1643,14 @@ export function buildMcpServer(
         if ("error" in reported) return errorResult(`queue_batch refused: task ${n}: ${reported.error}`);
         const placement = placementInput(member.pin, member.avoid);
         if ("error" in placement) return errorResult(`queue_batch refused: task ${n}: ${placement.error}`);
+        const deferred = member.not_before === undefined ? null : notBeforeInput(member.not_before);
+        if (deferred !== null && "error" in deferred)
+          return errorResult(`queue_batch refused: task ${n}: ${deferred.error}`);
+        const refFields = refInput(member.external_ref, member.external_ref_url, {
+          ref: "external_ref",
+          url: "external_ref_url",
+        });
+        if ("error" in refFields) return errorResult(`queue_batch refused: task ${n}: ${refFields.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
           ...requestFields({
@@ -1522,8 +1658,10 @@ export function buildMcpServer(
             autonomy: member.autonomy ?? autonomy,
             prompt: reported.prompt,
           }),
-          ...authoredFields(deps, member.until, member.linear),
+          ...authoredFields(deps, member.until),
+          ...refFields,
           ...(member.requires === undefined ? {} : { requires: member.requires }),
+          ...(deferred === null ? {} : { notBefore: deferred.at }),
           batch: { id: batchId, index: n },
         };
         const invalid = specError(spec);
@@ -1544,6 +1682,12 @@ export function buildMcpServer(
         }
         if (planned.some(({ spec }) => spec.requires !== undefined)) {
           const gate = traitsGateError(leg, "requires");
+          if (gate !== null) return errorResult(gate);
+        }
+        // Naming the first member that asked for a ref: the caller retries that member without it.
+        const tagged = planned.findIndex(({ spec }) => spec.tags !== undefined);
+        if (tagged !== -1) {
+          const gate = taskTagsGateError(leg, `queue_batch task ${tagged + 1}`, "external_ref");
           if (gate !== null) return errorResult(gate);
         }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
@@ -1827,34 +1971,72 @@ export function buildMcpServer(
     SEND_MESSAGE_TOOL,
     {
       title: "Message another séance session's task",
-      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them), or, to answer a message you received, by \`inReplyTo\` alone (the message id its wrapper names; leave \`to\` out): that reaches the session that sent it even when it has no task, from this machine or another, for an hour, and only from the session the message reached. It goes to this machine's own daemon, bound to this session's pane. A task on this machine is delivered directly; a task on another machine is reached through the scheduler leader, which resolves it (a task passed to a successor, or continued, reaches the session that carries the work now), forwards the message and keeps nothing: the answer is then \`sent through the scheduler\`, which is not delivery, and a receipt note follows in your conversation saying whether it was delivered, or why not. A message to another machine is at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped. The receiver is told your task id, title and machine. Kinds: \`note\` is information, added to the receiver's conversation at once (read within a turn already running) and never waking an idle receiver; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message; the answer wakes you, since it answers a question you sent); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`.`,
+      description: `Send a message to another séance session, addressed by its task id (\`get_queue\` lists them), or, to answer a message you received, by \`inReplyTo\` alone (the message id its wrapper names; leave \`to\` out): that reaches the session that sent it even when it has no task, from this machine or another, for an hour, and only from the session the message reached. It goes to this machine's own daemon, bound to this session's pane. A task on this machine is delivered directly; a task on another machine is reached through the scheduler leader, which resolves it (a task passed to a successor, or continued, reaches the session that carries the work now), forwards the message and keeps nothing: the answer is then \`sent through the scheduler\`, which is not delivery, and a receipt note follows in your conversation saying whether it was delivered, or why not. A message to another machine is at most ${MESSAGE_ROUTE_MAX} bytes once JSON-escaped. The receiver is told your task id, title and machine. Kinds: \`note\` is information, added to the receiver's conversation at once (read within a turn already running) and never waking an idle receiver; \`question\` wakes an idle receiver, which may answer you with its own \`send_message\` (kind note, \`inReplyTo\` the id of your message; the answer wakes you, since it answers a question you sent); \`request\` wakes it and asks it to do something, which it may decline when it does not fit its task or its user's instructions. A request is at most ${MESSAGE_PUSH_MAX} bytes and any message at most ${MESSAGE_MAX} bytes; a note or question over ${MESSAGE_PUSH_MAX} arrives as a stub the receiver pulls with its \`read_messages\` tool. At most ${MESSAGE_RATE.perMinute} messages a minute and ${MESSAGE_RATE.perHour} an hour per task. The text is prompt text: it is never logged. The answer says whether it was delivered or held for a listener that has not connected yet, and a message id that a reply carries as \`inReplyTo\`. To write to a tool your user connected to this machine through a Séance adapter, address it as \`adapter:<name>\` (its deliveries name it): the message goes to that adapter on this machine only, and the tool may answer by replying to the message id. When this session has a verified conversation id, messaging an adapter also subscribes it, so the tool may write to this conversation later by that id (named in the answer), across a restart with --resume, until you send it \`leave: true\`.`,
       inputSchema: z.strictObject({
         to: z
           .string()
           .optional()
           .describe(
-            "the receiving task's id (get_queue lists them); omit it to reply to a message you received (give inReplyTo)",
+            "the receiving task's id (get_queue lists them), or adapter:<name> for a tool's adapter on this machine; omit it to reply to a message you received (give inReplyTo)",
           ),
         kind: z
           .enum(MESSAGE_KINDS)
           .describe(
             "note: information, read at the receiver's next turn; question: wakes it, may be answered; request: wakes it, asks it to act",
           ),
-        text: z.string().min(1).describe("the message"),
+        text: z.string().optional().describe("the message; may be left out only with leave"),
         inReplyTo: z.string().optional().describe("the message id you are answering"),
+        leave: z
+          .boolean()
+          .optional()
+          .describe("to an adapter only: end this conversation's subscription to it (no text needed)"),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
-    async ({ to, kind, text, inReplyTo }) => {
+    async ({ to, kind, text, inReplyTo, leave }) => {
+      if ((text === undefined || text === "") && leave !== true) return errorResult("the message has no text");
       const result = await sendMsg(
         {
           ...(to === undefined ? {} : { to }),
           kind,
-          text,
+          text: text ?? "",
           ...(inReplyTo === undefined ? {} : { inReplyTo }),
+          ...(leave === true ? { leave } : {}),
         },
         { routeGate: messageRouteGate(fleet) },
       );
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    WATCH_TOOL,
+    {
+      title: "Wait on a GitHub PR or Actions run",
+      description: `Instead of polling GitHub, have the fleet watch a pull request or Actions run (its github.com URL) and wake this session with a note in its inbox when something happens: a PR's checks pass or fail, a conflict, its merge or close; a run's completion. After a successful call, end your turn: the note wakes you. Do not poll the same target meanwhile. \`head\` (a PR only) is the commit you pushed, so a result for an older head is not taken for yours. Calling again with the same URL replaces its watch (a new \`head\` after a fix push). A watch ends with this session, when its PR is merged or closed or its run completes, or after ${WATCH_TTL_MS / 3_600_000} h. A refusal says how to wait yourself instead. Needs the inbox mod in this session's Claude account.`,
+      inputSchema: z.strictObject({
+        url: z.string().describe("https://github.com/<owner>/<repo>/pull/<n> or …/actions/runs/<id>"),
+        head: z.string().optional().describe("PR only: the full sha of the commit you pushed"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ url, head }) => {
+      const result = await watchClient.add({ url, ...(head === undefined ? {} : { head }) }, watchGate(fleet, local));
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    UNWATCH_TOOL,
+    {
+      title: "Stop a GitHub watch",
+      description:
+        "Stop a watch this session made with watch_github, by the id it answered. Only for one you no longer wait on; a watch ends by itself with its target or this session.",
+      inputSchema: z.strictObject({ id: z.string().describe("the watch id watch_github answered") }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ id }) => {
+      const result = await watchClient.remove(id);
       return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );

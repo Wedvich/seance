@@ -2,11 +2,14 @@ import {
   accountNameIn,
   CAPABILITIES,
   closedAt,
+  creatorTaskTags,
   endedBySignal,
   fleetTraits,
+  formatNotBefore,
   knownAccounts,
   lastHeardAt,
   originLabel,
+  refTags,
   sentence,
   TASK_SPEC_LIMITS,
   taskFailureText,
@@ -30,15 +33,19 @@ import {
   type AccountsState,
   type HeldTask,
   type HistoryView,
+  type LabellingState,
   type OlderState,
   type PersistedForm,
   type PreviewState,
+  type RefDraft,
   type QueueState,
   type AvailabilityState,
   type CustodianControlState,
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type NotBeforeChoice,
+  resolveNotBeforeChoice,
   type AccountOpenAsk,
   type StartNowRefusal,
   type TaskAction,
@@ -190,11 +197,16 @@ export interface ViewModel {
   readonly modelTile: Tile;
   readonly effortTile: Tile;
   readonly autonomyTile: Tile;
+  /** The time before which the task is not placed; "Now" with none. The choice resolves at submit, so this is what it means at this render. */
+  readonly notBeforeTile: Tile;
   /** The authoring tile: the tasks this one waits on. */
   readonly afterTile: Tile;
   /** Null while no machine declares a trait and the form requires none: there is nothing to pick. */
   readonly requiresTile: Tile | null;
   readonly requires: RequiresView;
+  /** Null while the leader takes no task tags and the form carries no ref: there is nothing to enter. */
+  readonly refTile: Tile | null;
+  readonly ref: RefView;
   /**
    * The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities),
    * or no relay can say: a held task is checked when it is sent.
@@ -214,6 +226,8 @@ export interface ViewModel {
   readonly button: PrimaryButton;
   /** The button's chevron and its Start now menu: only while the verified leader answers `run-now`. */
   readonly startNow: boolean;
+  /** Start now lifts a whole-queue pause too (`runNowPaused`). */
+  readonly startNowPastPause: boolean;
   readonly ignoredNote: string | null;
   /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
   readonly machine: Machine | null;
@@ -244,6 +258,12 @@ export interface AppState {
    * unnoticed on later tasks.
    */
   readonly autonomy: AutonomyLevel;
+  /** The next task's not-before choice; transient as `autonomy` is. */
+  readonly notBefore: NotBeforeChoice | null;
+  /** The next task's ref (`creator.ref` and its URL); transient as `autonomy` is. */
+  readonly ref: RefDraft;
+  /** The task whose label dialog is open on the Queue screen, a layer; null when none. */
+  readonly labelling: LabellingState | null;
   /**
    * Text a CLEAR took away, offered back for six seconds. Deliberately outside
    * `form`: a draft you already discarded shouldn't survive a reload.
@@ -509,6 +529,11 @@ export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
 }
 
+/** Whether the verified leader's `run-now` places past a whole-queue pause; an older one answers `unplaceable`. */
+export function deriveRunNowPastPause(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.runNowPaused);
+}
+
 /**
  * A task carrying attachments is written only to a verified leader that advertises
  * `attachments`: an older one holds the record unreadable (the dep sentinel), and
@@ -533,6 +558,16 @@ export function attachmentsWithdrawn(relay: RelayState): boolean {
 export function deriveTraitsAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.traits);
 }
+
+/**
+ * Task tags (`ref`, `label`) are written only to a verified leader that advertises `taskTags`: an older one holds a
+ * tagged record unreadable (the dep sentinel) and refuses an `amend` carrying `ownerTags`.
+ */
+export function deriveTaskTagsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.taskTags);
+}
+
+export const TASK_TAGS_UNAVAILABLE = "The scheduler's leader doesn't take task tags yet. Update seanced on its machine";
 
 export const TRAITS_UNAVAILABLE = "The scheduler's leader can't route on traits yet. Update seanced on its machine";
 
@@ -632,6 +667,14 @@ export interface RequiresChoice {
   readonly disabled: boolean;
 }
 
+/** The Ref sheet: why it can't be written yet (a sentence), and whether the leader would take it. */
+export interface RefView {
+  readonly ref: string;
+  readonly url: string;
+  /** The entry's problem as a sentence, or the leader's lack; null when it is fine or empty. */
+  readonly problem: string | null;
+}
+
 export interface RequiresView {
   readonly choices: readonly RequiresChoice[];
   /** Shown beneath the list: why picking is off, or that a task requires at most N. */
@@ -667,6 +710,33 @@ function deriveRequires(state: AppState): RequiresView {
       ? `A task requires at most ${TASK_SPEC_LIMITS.requires} traits.`
       : null;
   return { choices, note };
+}
+
+/** The ref as the creator tags it would be written, or the sentence saying why not; `{}` for none. */
+export function refTagsOf(
+  draft: RefDraft,
+): { readonly tags: Readonly<Record<string, string>> } | { readonly problem: string } {
+  const ref = draft.ref.trim();
+  const url = draft.url.trim();
+  if (ref === "") {
+    return url === "" ? { tags: {} } : { problem: "A URL needs the ref it belongs to" };
+  }
+  const written = creatorTaskTags(refTags(ref, url === "" ? undefined : url));
+  return written.ok
+    ? { tags: written.tags }
+    : { problem: "The ref is source:id (e.g. linear:ENG-123), and its URL an https: address" };
+}
+
+function deriveRef(state: AppState): RefView {
+  const { ref, relay } = state;
+  const entry = refTagsOf(ref);
+  const problem =
+    "problem" in entry
+      ? entry.problem
+      : Object.keys(entry.tags).length > 0 && !deriveTaskTagsAvailability(relay)
+        ? `${TASK_TAGS_UNAVAILABLE}.`
+        : null;
+  return { ref: ref.ref, url: ref.url, problem };
 }
 
 function requiresValue(requires: PersistedForm["requires"]): string {
@@ -707,9 +777,12 @@ export function scopedRepos(machines: readonly Machine[], pins: Pins): readonly 
     .toSorted((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 
-/** `route-preview` drops a pin (`parseTaskRequest`), so a pinned form would be previewed as an unpinned one: it is not asked. */
-export function previewAsked(form: Pins): boolean {
-  return form.machine === null && form.account === null;
+/**
+ * `route-preview` drops a pin (`parseTaskRequest`), so a pinned form would be previewed as an unpinned one: it is not asked.
+ * Nor is a form with a not-before time: the preview would say where it would start now, which it will not.
+ */
+export function previewAsked(form: Pins, notBefore: NotBeforeChoice | null): boolean {
+  return form.machine === null && form.account === null && notBefore === null;
 }
 
 /** The remembered origin, else the first of those in scope. */
@@ -1110,6 +1183,13 @@ export function deriveView(state: AppState, now: number): ViewModel {
       tag: null,
     },
     autonomyTile: { label: "AUTONOMY", value: AUTONOMY_LABELS[state.autonomy], mono: false, dot: null, tag: null },
+    notBeforeTile: {
+      label: "NOT BEFORE",
+      value: state.notBefore === null ? "Now" : formatNotBefore(resolveNotBeforeChoice(state.notBefore, now)),
+      mono: false,
+      dot: null,
+      tag: null,
+    },
     afterTile: {
       label: "AFTER",
       value: afterValue(form.after),
@@ -1128,6 +1208,17 @@ export function deriveView(state: AppState, now: number): ViewModel {
             tag: null,
           },
     requires: deriveRequires(state),
+    refTile:
+      !deriveTaskTagsAvailability(relay) && state.ref.ref === ""
+        ? null
+        : {
+            label: "REF",
+            value: state.ref.ref.trim() === "" ? "None" : state.ref.ref.trim(),
+            mono: state.ref.ref.trim() !== "",
+            dot: state.ref.ref !== "" && !deriveTaskTagsAvailability(relay) ? "off" : null,
+            tag: null,
+          },
+    ref: deriveRef(state),
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),
     heldDropped: heldDroppedText(state.heldDropped),
@@ -1136,7 +1227,9 @@ export function deriveView(state: AppState, now: number): ViewModel {
     worktreeHint: worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
-    startNow: deriveRunNowAvailability(relay),
+    // A deferred task has no use for the split: Start now would contradict the time just chosen.
+    startNow: deriveRunNowAvailability(relay) && state.notBefore === null,
+    startNowPastPause: deriveRunNowPastPause(relay),
     ignoredNote: deriveIgnoredNote(relay),
     machine,
     account,
@@ -1146,7 +1239,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     autoDot,
     machineChoices: deriveMachineChoices(state, now),
     accountChoices: deriveAccountChoices(state),
-    previewShown: previewAsked(form),
+    previewShown: previewAsked(form, state.notBefore),
     queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),
     attachments: deriveAttachments(state),
   };

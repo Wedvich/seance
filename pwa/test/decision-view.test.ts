@@ -11,9 +11,11 @@ import {
 import {
   describeDecision,
   isPlaced,
+  notBeforeLine,
   pinLine,
   queuedBody,
   requiresLine,
+  sameSummary,
   startNowItem,
   taskHeadline as timedHeadline,
   waitingText,
@@ -199,6 +201,43 @@ describe("describeDecision", () => {
   });
 });
 
+describe("sameSummary", () => {
+  const decision: Decision = {
+    at: NOW,
+    chosen: { deviceId: "mac", exclave: "default", clone: "app" },
+    candidates: [scored("mac", "Mac", 1.5), scored("wsl", "WSL", 2.75), rejected("lxc", "LXC", [{ code: "offline" }])],
+  };
+  const fleet = [machine("mac", "Mac"), machine("wsl", "WSL")];
+  const summary = describeDecision(decision, fleet, NOW, "would");
+
+  test("a re-derived summary of the same record, even a re-asked one, is the same", () => {
+    expect(sameSummary(summary, describeDecision(decision, fleet, NOW, "would"))).toBe(true);
+    expect(sameSummary(summary, describeDecision({ ...decision, at: NOW + 5_000 }, fleet, NOW, "would"))).toBe(true);
+  });
+
+  test("anything the card shows differing is not: a winner, a score, a quota's age, a rename, a trimmed count", () => {
+    const differs = [
+      describeDecision(
+        { ...decision, chosen: { deviceId: "wsl", exclave: "default", clone: "app" } },
+        fleet,
+        NOW,
+        "would",
+      ),
+      describeDecision(
+        { ...decision, candidates: [scored("mac", "Mac", 1.6), ...decision.candidates.slice(1)] },
+        fleet,
+        NOW,
+        "would",
+      ),
+      describeDecision(decision, fleet, NOW + 2 * 60_000, "would"),
+      describeDecision(decision, [machine("mac", "Mac"), machine("wsl", "WSL", false)], NOW, "would"),
+      describeDecision({ ...decision, trimmed: 2 }, fleet, NOW, "would"),
+      describeDecision({ ...decision, candidates: decision.candidates.slice(0, 2) }, fleet, NOW, "would"),
+    ];
+    for (const other of differs) expect(sameSummary(summary, other)).toBe(false);
+  });
+});
+
 describe("taskHeadline on a manual done", () => {
   const task = (fields: Partial<Task>): Task => ({
     id: "t",
@@ -346,6 +385,9 @@ describe("taskHeadline", () => {
       const waiting = (fields: Partial<Task>): string =>
         taskHeadline(task({ state: "needs-input", assignment: at, ...fields }), machines, NOW);
       expect(waiting({ inputReason: "question" })).toBe("It's asking a question on Mac · default.");
+      expect(waiting({ inputReason: "elicitation" })).toBe(
+        "It's waiting for an answer to an MCP server on Mac · default.",
+      );
       expect(waiting({ inputReason: "permission", inputTool: "Bash" })).toBe(
         "It may be waiting for permission to use Bash on Mac · default.",
       );
@@ -628,12 +670,14 @@ describe("waitingText and pinLine", () => {
 describe("startNowItem", () => {
   const GLOBAL: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
   const ACCOUNT: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
+  const PAUSED: Reason = { code: "paused", until: "resume", scope: "queue" };
+  const CLOSED: Reason = { code: "paused", until: "resume", scope: "account" };
   const ok = (chosen: Decision["chosen"], candidates: readonly Candidate[]) =>
     ({ kind: "ok", repo: "app", decision: { at: NOW, chosen, candidates } }) as const;
 
   test("names the machine and account the preview chose", () => {
     const preview = ok({ deviceId: "mac", exclave: "default", clone: "app" }, [scored("mac", "Mac", 1)]);
-    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue — spawn on Mac · default", enabled: true });
+    expect(startNowItem(preview, true)).toEqual({ sub: "Skip the queue — spawn on Mac · default", enabled: true });
   });
 
   test("is disabled when the preview turns every candidate down for more than the caps", () => {
@@ -641,15 +685,15 @@ describe("startNowItem", () => {
       rejected("lxc", "LXC", [{ code: "offline" }]),
       rejected("mac", "Mac", [GLOBAL, { code: "offline" }]),
     ]);
-    expect(startNowItem(preview)).toEqual({ sub: "No machine can take it right now", enabled: false });
-    expect(startNowItem(ok(null, []))).toEqual({ sub: "No machine can take it right now", enabled: false });
+    expect(startNowItem(preview, true)).toEqual({ sub: "No machine can take it right now", enabled: false });
+    expect(startNowItem(ok(null, []), true)).toEqual({ sub: "No machine can take it right now", enabled: false });
   });
 
   test("stays enabled where only the caps hold it, which is what run-now lifts", () => {
     const one = ok(null, [rejected("mac", "Mac", [GLOBAL, ACCOUNT]), rejected("lxc", "LXC", [{ code: "offline" }])]);
-    expect(startNowItem(one)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+    expect(startNowItem(one, true)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
     const two = ok(null, [rejected("mac", "Mac", [GLOBAL]), rejected("wsl", "WSL", [ACCOUNT])]);
-    expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency limit", enabled: true });
+    expect(startNowItem(two, true)).toEqual({ sub: "Skip the queue — past the concurrency limit", enabled: true });
   });
 
   test("a chosen target is not named while a cap-held candidate, unscored, may win run-now; nor are the caps", () => {
@@ -658,13 +702,58 @@ describe("startNowItem", () => {
       rejected("lxc", "LXC", [GLOBAL]),
     ]);
     // Mac would take it with the caps standing: "past the caps" would misdescribe that outcome.
-    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue", enabled: true });
+    expect(startNowItem(preview, true)).toEqual({ sub: "Skip the queue", enabled: true });
   });
 
   test("with no answer to go by it offers a plain skip", () => {
     const plain = { sub: "Skip the queue", enabled: true };
-    expect(startNowItem(null)).toEqual(plain);
-    expect(startNowItem({ kind: "loading", repo: "app" })).toEqual(plain);
-    expect(startNowItem({ kind: "failed", repo: "app", message: "No leader." })).toEqual(plain);
+    expect(startNowItem(null, true)).toEqual(plain);
+    expect(startNowItem({ kind: "loading", repo: "app" }, true)).toEqual(plain);
+    expect(startNowItem({ kind: "failed", repo: "app", message: "No leader." }, true)).toEqual(plain);
+  });
+
+  test("a whole-queue pause is lifted like the limit; an account's pause is not", () => {
+    const one = ok(null, [rejected("mac", "Mac", [PAUSED]), rejected("lxc", "LXC", [PAUSED, CLOSED])]);
+    expect(startNowItem(one, true)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+    const two = ok(null, [rejected("mac", "Mac", [PAUSED, GLOBAL]), rejected("wsl", "WSL", [PAUSED])]);
+    expect(startNowItem(two, true)).toEqual({
+      sub: "Skip the queue — past the pause and the concurrency limit",
+      enabled: true,
+    });
+    const pausedOnly = ok(null, [rejected("mac", "Mac", [PAUSED]), rejected("wsl", "WSL", [PAUSED])]);
+    expect(startNowItem(pausedOnly, true)).toEqual({ sub: "Skip the queue — past the pause", enabled: true });
+    const elsewhere = ok(null, [rejected("mac", "Mac", [PAUSED, { code: "offline" }])]);
+    expect(startNowItem(elsewhere, true)).toEqual({ sub: "No machine can take it right now", enabled: false });
+  });
+
+  test("a leader that keeps the pause greys it, saying the pause holds it", () => {
+    const preview = ok(null, [rejected("mac", "Mac", [PAUSED]), rejected("lxc", "LXC", [{ code: "offline" }])]);
+    expect(startNowItem(preview, false)).toEqual({ sub: "The queue is paused", enabled: false });
+    const capped = ok(null, [rejected("mac", "Mac", [GLOBAL])]);
+    expect(startNowItem(capped, false)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+  });
+});
+
+describe("notBeforeLine", () => {
+  const later = NOW + 3_600_000;
+  const deferred = (state: Task["state"]): Task => ({
+    id: "t-1",
+    state,
+    createdAt: NOW - 1000,
+    spec: { repo: "github.com/acme/app", mode: "worktree", notBefore: later },
+  });
+
+  test("reads until when for a waiting task whose time is ahead of the leader's clock, else null", () => {
+    expect(notBeforeLine(deferred("ready"), NOW)).toMatch(/^until /u);
+    expect(notBeforeLine(deferred("ready"), later)).toBeNull();
+    expect(notBeforeLine(deferred("running"), NOW)).toBeNull();
+    expect(
+      notBeforeLine({ ...deferred("ready"), spec: { repo: "github.com/acme/app", mode: "worktree" } }, NOW),
+    ).toBeNull();
+  });
+
+  test("a deferred ready task's headline is the until line, a blocked one keeps its own", () => {
+    expect(taskHeadline(deferred("ready"), [], NOW)).toMatch(/^Queued — until /u);
+    expect(taskHeadline(deferred("blocked"), [], NOW)).not.toMatch(/until/u);
   });
 });

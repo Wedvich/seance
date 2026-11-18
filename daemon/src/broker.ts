@@ -161,7 +161,7 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * not set `lineage` or `base` (neither client sends them), and its `client` is
  * `mcp` or `cli` — the peer's unverifiable claim, since the daemon cannot tell
  * the two apart, kept in the record and audited as `claimed_client`. It may
- * continue a task (`mode: "continue"` with `continues`, paired by the parser). Never
+ * continue a task (`mode: "continue"` with `continues`, paired by the parser), and defer one (`notBefore`, carried as the parser keeps it). Never
  * `pwa`, `raycast` or `scheduler`. `cancel`, `run-now` and `pass` take a task id alone (a leader
  * without `runNow` or `successor` refuses that op as unknown, so it needs no gate here), `amend` a
  * draft held to the leader's own checks (`parseAmendDraft`), `queue` and `accounts` no payload, and
@@ -188,6 +188,13 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
   if (!isTaskId(taskId)) return { code: "invalid_request", message: "taskId is not a task id" };
   const spec = parseTaskSpec(raw["spec"]);
   if (spec === null) return { code: "invalid_request", message: "malformed task spec" };
+  // The spec parse drops a tag whose key or value fails its parser, so a peer's bad ref would queue the task untagged
+  // and be told it queued: refuse a count that changed (`specError` does the same for the keyed MCP path).
+  const rawSpec = raw["spec"];
+  const rawTags = isRecord(rawSpec) ? rawSpec["tags"] : undefined;
+  if (isRecord(rawTags) && Object.keys(rawTags).length !== Object.keys(spec.tags ?? {}).length) {
+    return { code: "invalid_request", message: "tags: a key is unknown or its value is invalid" };
+  }
   if (spec.lineage !== undefined || spec.base !== undefined) {
     return { code: "invalid_request", message: "lineage and base are not brokered" };
   }
@@ -307,6 +314,21 @@ export function createBroker(opts: BrokerOpts): Broker {
               id,
               "invalid_request",
               "the scheduler's leader does not route on requires yet, or no verified scheduler is leading",
+            );
+          }
+        }
+        // A client's create seals `creator.*` alone (the leader drops anything else from a version-1 record), so refuse
+        // rather than store dead text, and only to a leader that takes tags: an older one holds the record unreadable.
+        if (request.spec.tags !== undefined) {
+          if (Object.keys(request.spec.tags).some((key) => !key.startsWith("creator."))) {
+            return await fail(id, "invalid_request", "a task is created with creator tags only");
+          }
+          const { machines, scheduler } = client.getState();
+          if (!advertises(machines, scheduler, CAPABILITIES.taskTags)) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not take task tags yet, or no verified scheduler is leading",
             );
           }
         }

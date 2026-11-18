@@ -6,7 +6,10 @@ import type { EngineInterface, Register } from "claude-code";
  * the PR it opened. Each report is one `session-event` run of this checkout's
  * daemon CLI (`daemonMain`) with the event as JSON on stdin. The daemon trusts
  * none of it about *which* session this is — it binds the report to a tmux pane
- * by this process tree — so nothing here names a session or a task.
+ * by this process tree — so nothing here names a pane or a task. Every report
+ * also carries `agent` (`agentOf`): this process's conversation id and bridge id
+ * as claims, which the daemon verifies from its own sources and binds nothing by
+ * (DESIGN.md, "Session identity").
  *
  * Engine events only, never `classic.*`: on Team/Enterprise orgs a built-in
  * plugin sits above every installed one on the classic chain and passes each
@@ -40,7 +43,8 @@ import type { EngineInterface, Register } from "claude-code";
  * A plugin above this one may override the verdict this hook read: one that
  * asks over an allow is a missed needs-input; one that turns an ask into an
  * allow or deny is a brief needs-input with no dialog. No hook can see either.
- * Not covered: an MCP server's elicitation, which has no engine event.
+ * Not here: an MCP server's elicitation, which has no engine event, a fresh session's idle, and what a turn end
+ * left running — séance's settings hooks report those (`seance session-event --hook`, DESIGN.md, "Settings hooks").
  *
  * A tool call also reads the Remote Control bridge's session id and reports the
  * unchanged state once when the id is new (`noteBridge`), so the PWA's claude.ai
@@ -61,6 +65,13 @@ interface Report {
   readonly reason?: "question" | "permission";
   /** Only beside `reason: "permission"`: the one open prompt's tool. */
   readonly tool?: string;
+}
+
+/** Who is reporting, as this process sees it at the report: claims the daemon verifies, never trusts (DESIGN.md, "Session identity"). */
+interface Agent {
+  readonly kind: "claude";
+  readonly session?: string;
+  readonly remote?: string;
 }
 
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
@@ -99,11 +110,28 @@ async function report($: EngineInterface, body: Report): Promise<void> {
   // per event. The daemon still decides the binding for every report that goes out.
   const pane = await $.env.get("TMUX_PANE");
   if (pane === undefined || pane === "") return;
+  const agent = await agentOf($);
   // Bun by bare name, as `update.ts` does: resolved at use, never recorded.
   await $.process.run(["bun", daemonMain($.plugin.root), "session-event"], {
-    stdin: JSON.stringify(body),
+    stdin: JSON.stringify({ ...body, agent }),
     timeoutMs: SEND_TIMEOUT_MS,
   });
+}
+
+/**
+ * Read at each report, never cached: `/clear` and `/resume` move the conversation under the same process, and the
+ * bridge connects mid-session. An unreadable one is left out, never guessed; the kind is always known.
+ */
+async function agentOf($: EngineInterface): Promise<Agent> {
+  const [session, remote] = await Promise.all([
+    $.session.id().catch(() => undefined),
+    $.env.get("CLAUDE_CODE_BRIDGE_SESSION_ID").catch(() => undefined),
+  ]);
+  return {
+    kind: "claude",
+    ...(session === undefined || session === "" ? {} : { session }),
+    ...(remote === undefined || remote === "" ? {} : { remote }),
+  };
 }
 
 /**
@@ -148,9 +176,9 @@ interface Tracker {
   /** The main loop is at its prompt: its turn.complete came and no turn.start since. */
   atPrompt: boolean;
   /**
-   * `atPrompt` came from the main loop's turn.complete. A `session.start` also sets `atPrompt`, on a
-   * hooks-worker respawn mid-turn too, so only this says the turn's last message is written: what a
-   * hand-off's close waits for (DESIGN.md, "Session events").
+   * `atPrompt` came from the main loop's turn.complete, so the turn's last message is written: what a
+   * hand-off's close waits for (DESIGN.md, "Session events"). Set and cleared with `atPrompt` now that
+   * no `session.start` sets it, but kept apart since the report's `turnEnded` is the daemon's contract.
    */
   turnEnded: boolean;
   lastState: State | undefined;
@@ -298,16 +326,12 @@ function dropMain(t: Tracker): void {
 // oxlint-disable promise/no-callback-in-promise -- each `.catch` is a hook registration's, not a Promise's
 export const register: Register = (on) => {
   const t = newTracker();
-  // Also raised on an enable, a hooks-worker respawn or a reload, not only a fresh
-  // process, so a restart mid-turn reads idle until the next turn event. Gating on
-  // a first start would take a `$.state` contract and a value this plugin owns:
-  // too much machinery for a report the next turn event corrects.
-  on("session.start", ($, e, next) => {
-    t.atPrompt = true;
-    t.turnEnded = false;
-    sendCurrent($, t);
-    return next(e);
-  }).catch(($, e, next) => next(e));
+  // No `session.start` hook: it is also raised on an enable, a hooks-worker respawn or a reload, so its idle read a
+  // session restarted mid-turn as at its prompt. A fresh session's idle is the settings `SessionStart` hook's
+  // (`seance session-event --hook`), which fires on a real start alone. A respawned module starts at `atPrompt: false`:
+  // until the next turn event it sends nothing on its own, but a background loop's tool call or dialog there reports
+  // busy (or needs-input) for a session that may sit at its prompt. Accepted: busy holds a slot a turn longer, where
+  // the old idle released a working session's.
   // A subagent's turns say nothing about whether the main loop is at its prompt.
   on("turn.start", ($, e, next) => {
     if (e.agentId === undefined) {

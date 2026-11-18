@@ -36,7 +36,9 @@ import {
   deriveLimitsAvailability,
   derivePassAvailability,
   deriveRunNowAvailability,
+  deriveTaskTagsAvailability,
   deriveTraitsAvailability,
+  TASK_TAGS_UNAVAILABLE,
   previewAsked,
   resolveRepo,
   scopedRepos,
@@ -293,7 +295,7 @@ export class SchedulerStore {
     if (reopened) this.#missedHidden = null;
     const refollowed = this.#catchUpQueue(relay.scheduler, reopened);
     if (relay.scheduler.kind === "ready") this.#leaderVerified(refollowed);
-    if (!previewAsked(this.#state.form)) return;
+    if (!previewAsked(this.#state.form, this.#state.notBefore)) return;
     if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
     else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
   }
@@ -657,7 +659,7 @@ export class SchedulerStore {
     this.#previewedLeader = schedulerKey(relay.scheduler);
     this.#previewedFleet = fleetKey(relay.machines);
     const repo = resolveRepo(scopedRepos(relay.machines, form), form);
-    if (!previewAsked(form) || !deriveAutoAvailability(relay).available || repo === null) {
+    if (!previewAsked(form, this.#state.notBefore) || !deriveAutoAvailability(relay).available || repo === null) {
       this.#patch({ preview: null });
       return;
     }
@@ -825,7 +827,11 @@ export class SchedulerStore {
       if (kept && watched) this.#noticeKept = false;
       // Another device's pause or resume, or a reset lifting a hold. A first read has nothing to
       // compare: the preview was asked under whatever holds stood.
-      if (previewAsked(this.#state.form) && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
+      if (
+        previewAsked(this.#state.form, this.#state.notBefore) &&
+        before?.kind === "ok" &&
+        holdsKey(before.holds) !== holdsKey(next.holds)
+      ) {
         this.#askPreviewSoon();
       }
       return;
@@ -923,7 +929,10 @@ export class SchedulerStore {
     };
     const offer = continueOffer(listed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : [], context);
     if (!offer.ok) return sentence(offer.reason);
-    const spec: TaskSpec = { ...offeredSpec(listed, offer), client: "pwa" };
+    const spec: TaskSpec = {
+      ...offeredSpec(listed, offer, undefined, deriveTaskTagsAvailability(this.#state.relay)),
+      client: "pwa",
+    };
     // The target is exact, so no name check: a leader that cannot route on `requires` would drop it and resume anywhere.
     if (spec.requires !== undefined && !deriveTraitsAvailability(this.#state.relay))
       return sentence(TRAITS_UNAVAILABLE);
@@ -933,6 +942,31 @@ export class SchedulerStore {
     if (!reply.ok) return sentence(storeErrorText(reply.code));
     this.#mergeTask(task);
     return null;
+  }
+
+  /**
+   * Sets a task's `owner.label` (blank clears it) through `amend`, taken in any state. Offered only to a verified
+   * leader that takes task tags: an older one refuses the field. The dialog stays open on a refusal, with its reason.
+   */
+  async labelTask(taskId: string, label: string): Promise<boolean> {
+    const { labelling, relay } = this.#state;
+    if (labelling?.taskId !== taskId || labelling.saving) return false;
+    if (!deriveTaskTagsAvailability(relay)) {
+      this.#patch({ labelling: { ...labelling, notice: `${TASK_TAGS_UNAVAILABLE}.` } });
+      return false;
+    }
+    this.#patch({ labelling: { ...labelling, saving: true, notice: null } });
+    let notice: string | null = null;
+    try {
+      const reply = await this.#client.amend({ taskId, ownerTags: { label: label.trim() } });
+      if (reply === null || "ok" in reply) notice = actionReplyText(reply);
+      else this.#mergeTask(reply.task);
+    } catch (err) {
+      notice = this.#actionFailure(err);
+    }
+    const now = this.#state.labelling;
+    if (now?.taskId === taskId) this.#patch({ labelling: { ...now, saving: false, notice } });
+    return notice === null;
   }
 
   async #actOnTask(action: TaskAction): Promise<void> {
@@ -1011,7 +1045,7 @@ export class SchedulerStore {
         }
         // What the limit held, or now holds, shows in each task's decision: read them again.
         void this.refreshQueue();
-        if (previewAsked(this.#state.form)) void this.refreshPreview();
+        if (previewAsked(this.#state.form, this.#state.notBefore)) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);
@@ -1055,7 +1089,7 @@ export class SchedulerStore {
         const view = this.#state.queueView;
         if (view?.kind === "ok") this.#patch({ queueView: { ...view, holds: reply.holds } });
         else void this.refreshQueue();
-        if (previewAsked(this.#state.form)) void this.refreshPreview();
+        if (previewAsked(this.#state.form, this.#state.notBefore)) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);

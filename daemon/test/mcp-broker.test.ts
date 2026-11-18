@@ -22,6 +22,12 @@ import { fakeRelay, machine, type FakeRelay } from "./fake-app-relay.ts";
  */
 
 const LOCAL = machine();
+/** What an app's `sessions` carries for a session: `get_sessions` must cut it to the allowlist. */
+const LOCAL_TAGS = {
+  "agent.kind": { value: "claude", at: 1, scope: "conversation" },
+  "agent.session": { value: "0b3f5e0a-1c2d-4e5f-8a9b-0c1d2e3f4a5b", at: 1, scope: "conversation", verified: true },
+  "agent.remote": { value: "session_01LocalBridge", at: 1, scope: "process" },
+};
 // A build and an update report, so the parity check covers the broker carrying them.
 const ORIGIN = "github.com/m/seance";
 const TASK_ID = "11111111-2222-4333-8444-555555555555";
@@ -69,7 +75,9 @@ const local: LocalMachine = {
     localCalls.push(op);
     // The test names T; this stands in for the op socket's wire.
     const reply =
-      op === "sessions" ? { sessions: [{ id: "%1", window: "here", repo: "seance", path: "/p" }], at: 1 } : {};
+      op === "sessions"
+        ? { sessions: [{ id: "%1", window: "here", repo: "seance", path: "/p", tags: LOCAL_TAGS }], at: 1 }
+        : {};
     return Promise.resolve(reply as T);
   },
   reachable: () => Promise.resolve(true),
@@ -347,7 +355,12 @@ describe("the MCP tools, direct and brokered", () => {
       }),
     );
     localCalls.length = 0;
-    expect(await brokered("get_sessions", { machine: "MacBook Pro" })).toContain('"window": "here"');
+    const listed = await brokered("get_sessions", { machine: "MacBook Pro" });
+    expect(listed).toContain('"window": "here"');
+    // Another agent's context gets the allowlist (DESIGN.md, "Tags and session identity"): never a conversation or a bridge id.
+    expect(listed).toContain('"agent.kind"');
+    expect(listed).not.toContain("agent.session");
+    expect(listed).not.toContain("session_01LocalBridge");
     expect(localCalls).toEqual(["sessions"]);
     expect(brokerOpened).toBe(0);
   });

@@ -65,7 +65,11 @@ describe("DENY", () => {
       expect(denied(cli)).toBe(true);
       expect(denied(`${cli} custodian pause`)).toBe(true);
       expect(denied(`${cli} custodian notes --clear`)).toBe(true);
+      // Named, not only looped: an injected round that could add or restart an adapter would run code as the owner.
+      expect(denied(`${cli} adapter add /tmp/x`)).toBe(true);
+      expect(denied(`${cli} adapter restart`)).toBe(true);
     }
+    expect(COMMANDS).toContain("adapter");
     expect(denied("seance custodian sessions")).toBe(false);
     expect(denied("seance custodian done")).toBe(false);
   });

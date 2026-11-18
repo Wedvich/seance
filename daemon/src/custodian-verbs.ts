@@ -6,6 +6,7 @@ import {
   isFlagReason,
   isTaskId,
   MESSAGE_PUSH_MAX,
+  parseGithubPr,
   type CustodianEvent,
   type FlagReason,
 } from "@seance/shared";
@@ -44,7 +45,6 @@ import { custodianNotesPath, reapRefusalsPath } from "./paths.ts";
 import { ancestorIn, peerPidSupported } from "./peer.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { SAMPLE_INTERVAL_MS, type PaneActivity } from "./pane-activity.ts";
-import { parseGithubPr } from "./pr-status.ts";
 import { DEAD_PANE_MIN_AGE_MS, readReapRefusals } from "./reap.ts";
 import type { EndedTasks } from "./session-events.ts";
 import { classifyPane, listPanes, paneInfo, type PaneInfo, type PaneState } from "./sessions.ts";
@@ -71,6 +71,8 @@ export interface CloseVerdictInput {
   readonly activity: PaneActivity | null;
   /** A hand-off, pass or drain mark (C7). */
   readonly untouchable: boolean;
+  /** Its last turn ended with background work in flight or a session cron pending (`SessionEvents.awaitsWake`). */
+  readonly awaitsWake: boolean;
   readonly now: number;
   readonly closeAfterMs: number;
 }
@@ -106,6 +108,8 @@ export function closeVerdict(o: CloseVerdictInput): CloseAct | CloseRefusal {
       if (seen === "needs-input") return "waiting";
       if (seen === "busy") return "busy";
       if (!activity?.turnEnded) return "unobserved";
+      // At rest only until its background work or cron wakes it: busy, as far as a close goes.
+      if (o.awaitsWake) return "busy";
       if (o.now - (activity.stateSince ?? o.now) < o.closeAfterMs) return "too_soon";
       return "despawn";
     }
@@ -234,6 +238,8 @@ export interface CustodianVerbDeps {
   readonly retainedSince: () => number | null;
   /** A hand-off, pass or drain ask marked it: the same expression the seat's due check gets. */
   readonly untouchable: (pane: string) => boolean;
+  /** Its last turn left background work or a session cron to wake it (`SessionEvents.awaitsWake`); absent, none did. */
+  readonly awaitsWake?: (pane: string, taskId: string | null) => boolean;
   readonly tasks: Pick<EndedTasks, "worktree" | "prUrl" | "closing" | "harvestExits" | "launchedAt">;
   readonly worktree: WorktreeRule;
   readonly despawn: NonNullable<SessionBackend["despawn"]>;
@@ -349,6 +355,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       state,
       activity: info.ours ? deps.activity(info.paneId) : null,
       untouchable: deps.untouchable(info.paneId) || inFlight.has(info.paneId),
+      awaitsWake: deps.awaitsWake?.(info.paneId, info.taskId) === true,
       now: deps.now(),
       closeAfterMs,
     });
@@ -565,6 +572,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
           state,
           activity: deps.activity(pane),
           untouchable: deps.untouchable(pane),
+          awaitsWake: deps.awaitsWake?.(pane, info.taskId) === true,
           now: deps.now(),
           closeAfterMs,
         });

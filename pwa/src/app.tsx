@@ -2,7 +2,7 @@ import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { HeaderMenu } from "./components/header-menu.tsx";
 import { MachinesHeading, MachinesScreen } from "./components/machines.tsx";
-import { QueueHeading, QueueRefresh, QueueScreen, type OlderActions } from "./components/queue.tsx";
+import { QueueHeading, QueueScreen, type OlderActions } from "./components/queue.tsx";
 import { RelaySettings } from "./components/relay-dot.tsx";
 import { Settings } from "./components/settings.tsx";
 import { PromptHeading, SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
@@ -74,6 +74,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         view={view}
         form={state.form}
         autonomy={state.autonomy}
+        notBefore={state.notBefore}
         promptUndo={state.promptUndo}
         sheet={state.sheet}
         machines={state.relay.machines}
@@ -94,14 +95,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         <QueueHeading
           summary={queueView.summary}
           onLimits={queueView.limit === null ? null : () => setLimitsOpen(true)}
-        />
-      ),
-      action: (
-        <QueueRefresh
-          onRefresh={() => {
-            void store.refreshQueue();
-            store.refreshOlder();
-          }}
         />
       ),
       body: (
@@ -128,6 +121,10 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onContinue={(id) => void store.continueTask(id)}
           onPass={(id) => void store.passTask(id)}
           onFollowUp={(id) => store.followUp(id)}
+          labelling={state.labelling}
+          onOpenLabel={(id) => store.openLabel(id)}
+          onCloseLabel={() => store.closeLabel()}
+          onLabel={(id, label) => store.labelTask(id, label)}
           onPause={() => void store.pauseQueue()}
           onResume={(account) => void store.resumeQueue(account)}
           onDiscard={() => void store.discardUnreadable()}
@@ -205,6 +202,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onOpenRename={(accountId) => store.openAccountRename(accountId)}
           onCloseRename={() => store.closeAccountRename()}
           onRename={(accountId, text) => store.renameAccount(accountId, text)}
+          onReadSessions={() => store.readNamedSessions()}
+          onRenameSession={(deviceId, pane, session, text) => store.renameSession(deviceId, pane, session, text)}
         />
       ),
     };
@@ -231,7 +230,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
             {tasks.heading}
             {/* The rightmost column, so the settings pill sits in its header. */}
             <div className="header-actions">
-              {tasks.action}
               <RelaySettings state={view.relayState} onClick={actions.openSettings} />
             </div>
           </header>
@@ -257,7 +255,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
               {pane.heading}
             </div>
             <div className="header-actions">
-              {pane.action}
               <HeaderMenu
                 state={view.relayState}
                 current={screen}
@@ -282,7 +279,6 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
 /** One screen as the app frames it: its header's title block, an optional header control, and the body. */
 interface Pane {
   readonly heading: JSX.Element | null;
-  readonly action?: JSX.Element;
   readonly body: JSX.Element;
 }
 
@@ -361,7 +357,6 @@ function useSpawnActions(store: Store): SpawnActions {
       dismissLayer: () => store.dismissLayer(),
       pickMachine: (deviceId) => store.pickMachine(deviceId),
       pickAccount: (accountId) => store.pickAccount(accountId),
-      refreshPreview: () => void store.refreshPreview(),
       removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
       rescan: (deviceId) => void store.rescan(deviceId),
@@ -372,6 +367,8 @@ function useSpawnActions(store: Store): SpawnActions {
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
       toggleRequires: (trait) => store.toggleRequires(trait),
+      setRef: (ref, url) => store.setRef(ref, url),
+      setNotBefore: (choice) => store.setNotBefore(choice),
       addFiles: (files) => store.addFiles(files),
       removeFile: (key) => store.removeFile(key),
       retryHeld: (taskId) => store.retryHeld(taskId),

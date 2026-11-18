@@ -1,4 +1,4 @@
-import { FLEET_LIMIT_MAX } from "@seance/shared";
+import { FLEET_LIMIT_MAX, TASK_REQUEST_LIMITS } from "@seance/shared";
 import type { ComponentChildren, JSX } from "preact";
 import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
 import {
@@ -15,7 +15,7 @@ import {
 } from "../queue-view.ts";
 import { OLDER_TITLE, type OlderSheetView, type OlderView } from "../older-view.ts";
 import { centeredScrollTop } from "../scroll.ts";
-import type { OlderPick, OlderSheet } from "../state.ts";
+import type { LabellingState, OlderPick, OlderSheet } from "../state.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } from "./menu.tsx";
 import { Sheet, SheetItem, TileButton, useSheetExit } from "./sheet.tsx";
@@ -69,6 +69,76 @@ export function QueueHeading(props: {
  * The fleet limit: how many sessions the queue runs at once, across every machine and account.
  * An empty field is no limit, the default. A form, so Enter saves.
  */
+/** The owner's label for one task: a form like the account rename, staying open on a refusal with the reason. */
+function LabelDialog(props: {
+  title: string;
+  initial: string;
+  saving: boolean;
+  notice: string | null;
+  onSave: (text: string) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const { title, initial, saving, notice, onSave, onClose } = props;
+  const [draft, setDraft] = useState(initial);
+  const input = useRef<HTMLInputElement>(null);
+  const inputId = useId();
+  const noticeId = useId();
+  // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
+  useEffect(() => {
+    if (!saving) input.current?.focus();
+  }, [saving]);
+  const max = TASK_REQUEST_LIMITS.title;
+  return (
+    <Sheet title="Label task" variant="dialog" onClose={onClose}>
+      <form
+        className="rename"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!saving) onSave(draft);
+        }}
+      >
+        <p className="rename-account">{title}</p>
+        <label className="rename-label" htmlFor={inputId}>
+          Label
+        </label>
+        <input
+          ref={input}
+          id={inputId}
+          type="text"
+          className="rename-input"
+          placeholder="Name this task"
+          maxLength={max}
+          value={draft}
+          disabled={saving}
+          aria-invalid={notice !== null}
+          aria-describedby={notice === null ? undefined : noticeId}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        {notice === null ? (
+          <p className="rename-hint">
+            <span>Shown beside the title, and by get_queue to sessions. Leave it empty to remove it.</span>
+            <span className="rename-count">
+              {Array.from(draft).length}/{max}
+            </span>
+          </p>
+        ) : (
+          <p id={noticeId} className="rename-error" role="alert">
+            {notice}
+          </p>
+        )}
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
 function LimitsSheet(props: {
   limit: LimitView;
   saving: boolean;
@@ -137,15 +207,6 @@ function LimitsSheet(props: {
   );
 }
 
-/** The one screen-specific header control: re-reads the queue (and Older's first page). */
-export function QueueRefresh(props: { onRefresh: () => void }): JSX.Element {
-  return (
-    <button type="button" className="queue-refresh" onClick={props.onRefresh} aria-label="Refresh the queue">
-      ↻
-    </button>
-  );
-}
-
 /**
  * Reached from the phone's header menu, or a desk column: what the scheduler holds, by what each
  * task needs from the person, with a way to cancel, mark done, or hold the
@@ -182,6 +243,12 @@ export function QueueScreen(props: {
   onPass: (taskId: string) => void;
   /** Starts a new task that waits on this one: the form opens on `auto` with it in After. */
   onFollowUp: (taskId: string) => void;
+  /** The label dialog's state, a layer: the task being labelled, and whether its save is in flight. */
+  labelling: LabellingState | null;
+  onOpenLabel: (taskId: string) => void;
+  onCloseLabel: () => void;
+  /** Sets the task's `owner.label` (blank clears it); true when it landed. */
+  onLabel: (taskId: string, label: string) => Promise<boolean>;
   onPause: () => void;
   onResume: (account?: string) => void;
   onDiscard: () => void;
@@ -293,6 +360,13 @@ export function QueueScreen(props: {
     props.onDiscard();
   };
 
+  const labelledId = props.labelling?.taskId;
+  const labelled =
+    labelledId === undefined
+      ? undefined
+      : [...view.sections.flatMap((section) => section.rows), ...(props.older?.rows ?? [])].find(
+          (row) => row.id === labelledId,
+        );
   return (
     <>
       <div className="fleet" ref={list}>
@@ -381,6 +455,7 @@ export function QueueScreen(props: {
                     onContinue={props.onContinue}
                     onPass={props.onPass}
                     onFollowUp={props.onFollowUp}
+                    onOpenLabel={props.onOpenLabel}
                     onReveal={reveal}
                   />
                 ))}
@@ -405,6 +480,7 @@ export function QueueScreen(props: {
                 onContinue={props.onContinue}
                 onPass={props.onPass}
                 onFollowUp={props.onFollowUp}
+                onOpenLabel={props.onOpenLabel}
                 onReveal={revealOpening}
               />
             )}
@@ -426,6 +502,17 @@ export function QueueScreen(props: {
         </button>
       </footer>
       <OlderFilterSheet sheet={props.older?.sheet ?? null} actions={props.olderActions} />
+      {labelled !== undefined && props.labelling !== null && (
+        <LabelDialog
+          key={labelled.id}
+          title={labelled.title}
+          initial={labelled.label ?? ""}
+          saving={props.labelling.saving}
+          notice={props.labelling.notice}
+          onSave={(text) => void props.onLabel(labelled.id, text)}
+          onClose={props.onCloseLabel}
+        />
+      )}
       {props.limitsOpen && view.limit !== null && (
         <LimitsSheet
           limit={view.limit}
@@ -544,6 +631,7 @@ function QueueCard(props: {
   onContinue: (taskId: string) => void;
   onPass: (taskId: string) => void;
   onFollowUp: (taskId: string) => void;
+  onOpenLabel: (taskId: string) => void;
   /** Scrolls the queue to another task's card. */
   onReveal: (taskId: string) => void;
   /** The task a notification opened: the card is marked while it fades. */
@@ -561,7 +649,8 @@ function QueueCard(props: {
     },
   };
   const disabled = !props.available || row.busy;
-  const opens = row.canFollowUp || row.startNow !== null || row.canContinue || row.canPass || row.session !== null;
+  const opens =
+    row.canFollowUp || row.startNow !== null || row.canContinue || row.canPass || row.canLabel || row.session !== null;
   const ends = row.canMarkDone || row.canCancel;
   const hasMenu = opens || ends;
   // Removing an open popover fires no `toggle`, so a card that unmounts (a poll moving its task
@@ -652,6 +741,9 @@ function QueueCard(props: {
               )}
               {row.canPass &&
                 armItem("pass", "Pass to successor", "Tap again to pass it on", <PassIcon />, false, PASS_CONFIRM)}
+              {row.canLabel && (
+                <MenuItem label="Label…" icon={<LabelIcon />} onClick={() => props.onOpenLabel(row.id)} />
+              )}
               {row.session !== null && (
                 <MenuItem label="Open on claude.ai" icon={<ExternalIcon />} href={row.session} external />
               )}
@@ -662,6 +754,31 @@ function QueueCard(props: {
           </>
         )}
       </div>
+      {(row.label !== null || row.ref !== null) && (
+        <p className="fleet-card-body queue-tags">
+          {row.label !== null && (
+            <span className="fleet-badge queue-label" title="Label">
+              {row.label}
+            </span>
+          )}
+          {row.ref !== null &&
+            (row.ref.url === null ? (
+              <span className="fleet-badge queue-ref" title="What it is for">
+                {row.ref.text}
+              </span>
+            ) : (
+              <a
+                className="fleet-badge queue-ref"
+                href={row.ref.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="What it is for"
+              >
+                {row.ref.text}
+              </a>
+            ))}
+        </p>
+      )}
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
       {row.stackedOn !== null && <Lineage line={row.stackedOn} onReveal={props.onReveal} />}
@@ -673,18 +790,7 @@ function QueueCard(props: {
           {row.flag.note !== null && <>: {row.flag.note}</>}
         </p>
       )}
-      {continuing !== null && (
-        <p className="fleet-card-body">
-          <button
-            type="button"
-            className="queue-reveal"
-            aria-label={`${continuing.text}, show in queue`}
-            onClick={() => props.onReveal(continuing.id)}
-          >
-            {continuing.text}
-          </button>
-        </p>
-      )}
+      {continuing !== null && <Lineage line={continuing} onReveal={props.onReveal} />}
       {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
       {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
       {row.body !== null && (
@@ -764,6 +870,15 @@ function StartNowIcon(): JSX.Element {
     <MenuGlyph>
       <path d="M3 6l8 6-8 6z" />
       <path d="M12 6l8 6-8 6z" />
+    </MenuGlyph>
+  );
+}
+
+function LabelIcon(): JSX.Element {
+  return (
+    <MenuGlyph>
+      <path d="M3 12V4h8l9 9-8 8z" />
+      <circle cx="7.5" cy="8.5" r="1" />
     </MenuGlyph>
   );
 }

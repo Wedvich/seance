@@ -4,9 +4,11 @@ import {
   continuationSpec,
   continuationUnderway,
   continueOffer,
+  goneContinuation,
   newestLanded,
   offeredSpec,
   waitingContinuation,
+  WORKTREE_AND_BRANCH_GONE,
   type OfferContext,
 } from "./continue-task.ts";
 import { blockedBrief } from "./pr-blocked.ts";
@@ -231,6 +233,28 @@ describe("continueOffer, once", () => {
     expect(continueOffer(old, able, [old, continuation("running", {}, "t-other")]).ok).toBe(true);
   });
 
+  test("one refused because the worktree and branch are both gone withholds it for good, naming itself", () => {
+    const message = `its worktree /r/.claude/worktrees/x ${WORKTREE_AND_BRANCH_GONE} (merged and swept by reap, or deleted)`;
+    const gone = continuation("failed", { failure: { code: "not_continuable", message } }, "t-old", "t-gone");
+    const offer = continueOffer(old, able, [old, gone]);
+    expect(offer).toEqual({
+      ok: false,
+      reason:
+        "task t-gone could not continue it: its worktree and its branch are both gone, so nothing is left to resume",
+    });
+    expect(goneContinuation(old, [old, gone])).toBe(gone);
+    // A refusal that can clear (a lock, an open session) still re-offers; so does the same words under another code.
+    const locked = continuation("failed", { failure: { code: "not_continuable", message: "its worktree is locked" } });
+    const otherCode = continuation("failed", { failure: { code: "continue_expired", message } });
+    for (const y of [locked, otherCode]) {
+      expect(goneContinuation(old, [old, y])).toBeUndefined();
+      expect(continueOffer(old, able, [old, y]).ok).toBe(true);
+    }
+    // Another task's gone continuation says nothing of this one's session.
+    const elsewhere = continuation("failed", { failure: { code: "not_continuable", message } }, "t-other");
+    expect(continueOffer(old, able, [old, elsewhere]).ok).toBe(true);
+  });
+
   test("along a chain the newest landed task holds the offer", () => {
     const y = continuation("failed", { failure: { code: "session_failed", message: "m" }, assignment }, "t-old", "t-y");
     const z = continuation("running", {}, "t-y", "t-z");
@@ -304,6 +328,35 @@ describe("continuationSpec", () => {
       expect(spec).not.toHaveProperty("plan");
       expect(parseTaskSpec(spec)).toEqual(spec);
     }
+  });
+
+  test("copies the creator tags, never the owner's or the scheduler's, and none when there are none", () => {
+    const spec = continuationSpec(
+      failed(
+        {},
+        {
+          tags: {
+            "creator.ref": "linear:ENG-1",
+            "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+            "creator.note": "n",
+            "owner.label": "mine",
+            "scheduler.x": "1",
+          },
+        },
+      ),
+      at,
+    );
+    expect(spec.tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+      "creator.note": "n",
+    });
+    expect(continuationSpec(failed({}, { tags: { "owner.label": "mine" } }), at)).not.toHaveProperty("tags");
+    expect(continuationSpec(failed(), at)).not.toHaveProperty("tags");
+  });
+
+  test("never carries notBefore", () => {
+    expect(continuationSpec(failed({}, { notBefore: 1_900_000_000_000 }), at)).not.toHaveProperty("notBefore");
   });
 
   test("the old prompt is not carried; a note is, trimmed, and a blank one is left out", () => {
@@ -406,6 +459,30 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
       ["the machine lacks continueHandoff", stuck(), able, [], context],
       ["a continuation waits in the list", stuck(), handoffable, [continuationOf("t-c", "queued")], context],
       [
+        "a continuation was refused as gone",
+        stuck(),
+        handoffable,
+        [
+          {
+            ...continuationOf("t-c", "failed"),
+            failure: { code: "not_continuable", message: `its worktree /p ${WORKTREE_AND_BRANCH_GONE}` },
+          },
+        ],
+        context,
+      ],
+      [
+        "a continuation of the pointer's session was refused as gone",
+        stuck({ continuedBy: { task: "t-c1", createdAt: 2 } }),
+        handoffable,
+        [
+          {
+            ...continuationOf("t-c2", "failed", "t-c1"),
+            failure: { code: "not_continuable", message: `its worktree /p ${WORKTREE_AND_BRANCH_GONE}` },
+          },
+        ],
+        context,
+      ],
+      [
         "the pointer says live",
         stuck({ continuedBy: { task: "t-c", createdAt: 2, live: true } }),
         handoffable,
@@ -447,25 +524,45 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
     const task = stuck({ continuedBy: { task: "t-c1", createdAt: 2 } }, { model: "opus" });
     const offer = continueOffer(task, handoffable, [], context);
     if (!offer.ok) throw new Error(offer.reason);
-    const spec = offeredSpec(task, offer, "  mind the lockfile  ");
+    const spec = offeredSpec(task, offer, "  mind the lockfile  ", true);
     expect(spec.continues).toEqual({ task: "t-c1", at: target });
     expect(spec.model).toBe("opus");
     expect(spec.prompt).toBe(`${offer.brief}\n\nmind the lockfile`);
-    expect(offeredSpec(task, offer).prompt).toBe(offer.brief);
+    expect(offeredSpec(task, offer, undefined, true).prompt).toBe(offer.brief);
     const plain = continueOffer(stuck(), handoffable, [], context);
     if (!plain.ok) throw new Error(plain.reason);
-    expect(offeredSpec(stuck(), plain).continues).toEqual({ task: "t-old", at: target });
+    expect(offeredSpec(stuck(), plain, undefined, true).continues).toEqual({ task: "t-old", at: target });
   });
 
   test("offeredSpec names an untitled task's continuation by its PR, not by the brief, and keeps a title it has", () => {
     const untitled = stuck();
     const offer = continueOffer(untitled, handoffable, [], context);
     if (!offer.ok) throw new Error(offer.reason);
-    expect(offeredSpec(untitled, offer).title).toBe("Unblock PR #7");
+    expect(offeredSpec(untitled, offer, undefined, true).title).toBe("Unblock PR #7");
     const titled = stuck({}, { title: "Add export" });
     const again = continueOffer(titled, handoffable, [], context);
     if (!again.ok) throw new Error(again.reason);
-    expect(offeredSpec(titled, again).title).toBe("Add export");
+    expect(offeredSpec(titled, again, undefined, true).title).toBe("Add export");
+  });
+
+  test("offeredSpec copies the creator tags to a leader that takes them and drops them for one that does not", () => {
+    const tagged = stuck(
+      {},
+      {
+        tags: {
+          "creator.ref": "linear:ENG-1",
+          "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+          "owner.label": "mine",
+        },
+      },
+    );
+    const offer = continueOffer(tagged, handoffable, [], context);
+    if (!offer.ok) throw new Error(offer.reason);
+    expect(offeredSpec(tagged, offer, undefined, true).tags).toEqual({
+      "creator.ref": "linear:ENG-1",
+      "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+    });
+    expect(offeredSpec(tagged, offer, undefined, false)).not.toHaveProperty("tags");
   });
 });
 

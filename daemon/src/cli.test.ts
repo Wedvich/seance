@@ -195,6 +195,26 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--requires"])).toThrow("usage:");
   });
 
+  test("--ref and --ref-url take the next word, once each, and a url without a ref is a usage error", () => {
+    expect(parseSpawnArgs(["--ref", "linear:ENG-1", "--ref-url", "https://linear.app/x", "seance", "go"])).toEqual({
+      repo: "seance",
+      here: false,
+      prompt: "go",
+      ref: "linear:ENG-1",
+      refUrl: "https://linear.app/x",
+    });
+    expect(parseSpawnArgs(["seance"])).not.toHaveProperty("ref");
+    expect(() => parseSpawnArgs(["--ref-url", "https://linear.app/x", "seance"])).toThrow("give --ref too");
+    expect(() => parseSpawnArgs(["seance", "--ref"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--ref", "a:1", "--ref", "b:2", "seance"])).toThrow("usage:");
+  });
+
+  test("--ref is refused with --now", () => {
+    expect(() => parseSpawnArgs(["--now", "seance", "--ref", "linear:ENG-1"])).toThrow(
+      "--ref needs the scheduler: --now spawns directly and queues no task to tag",
+    );
+  });
+
   test("--now refuses every pin flag", () => {
     expect(() => parseSpawnArgs(["--now", "seance", "--machine", "x"])).toThrow("--now spawns on this machine now");
     expect(() => parseSpawnArgs(["--now", "seance", "--account", "a"])).toThrow("--now spawns on this machine now");
@@ -206,6 +226,56 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--not"])).toThrow("usage:");
     expect(() => parseSpawnArgs(["seance", "--machine", "a", "--machine", "b"])).toThrow("usage:");
     expect(() => parseSpawnArgs(["seance", "--account", "a", "--account", "b"])).toThrow("usage:");
+  });
+});
+
+describe("parseSpawnArgs, not before", () => {
+  test("--at and --in are collected once each, as strings", () => {
+    expect(parseSpawnArgs(["seance", "--at", "21:30", "fix it"])).toMatchObject({ at: "21:30", prompt: "fix it" });
+    expect(parseSpawnArgs(["seance", "--in", "2h"])).toMatchObject({ in: "2h" });
+    // A bare word `in` is prompt text, not the flag.
+    expect(parseSpawnArgs(["seance", "do", "it", "in", "prod"])).toMatchObject({ prompt: "do it in prod" });
+  });
+
+  test("both together, a repeat, a missing value, or either beside --now or --start is a usage error", () => {
+    expect(() => parseSpawnArgs(["seance", "--at", "21:30", "--in", "2h"])).toThrow("give one");
+    expect(() => parseSpawnArgs(["seance", "--at", "21:30", "--at", "22:00"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--in"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--now", "seance", "--in", "2h"])).toThrow("contradictory");
+    expect(() => parseSpawnArgs(["seance", "--start", "--at", "21:30"])).toThrow("contradictory");
+  });
+});
+
+describe("parseContinueArgs, not before", () => {
+  test("takes --at or --in, never both", () => {
+    expect(parseContinueArgs(["t-1", "--in", "90m"])).toEqual({ taskId: "t-1", in: "90m" });
+    expect(parseContinueArgs(["t-1", "--at", "08:00", "-p", "go"])).toEqual({
+      taskId: "t-1",
+      prompt: "go",
+      at: "08:00",
+    });
+    expect(() => parseContinueArgs(["t-1", "--at", "08:00", "--in", "1h"])).toThrow("give one");
+    expect(() => parseContinueArgs(["t-1", "--at"])).toThrow("usage: seance continue");
+  });
+});
+
+describe("parseAmendArgs, not before", () => {
+  test("--in and --at resolve to an instant; --not-before none clears; alone is a valid amendment", () => {
+    const before = Date.now();
+    const timed = parseAmendArgs(["t-1", "--in", "2h"]);
+    expect(timed.notBefore).toBeGreaterThanOrEqual(before + 7_200_000);
+    expect(timed.notBefore).toBeLessThanOrEqual(Date.now() + 7_200_000);
+    expect(typeof parseAmendArgs(["t-1", "--at", "21:30"]).notBefore).toBe("number");
+    expect(parseAmendArgs(["t-1", "--not-before", "none"])).toEqual({ taskId: "t-1", notBefore: null });
+  });
+
+  test("anything but none after --not-before, two timings, or a bad time is refused", () => {
+    expect(() => parseAmendArgs(["t-1", "--not-before", "tomorrow"])).toThrow("only `none`");
+    expect(() => parseAmendArgs(["t-1", "--in", "2h", "--not-before", "none"])).toThrow("give one of");
+    expect(() => parseAmendArgs(["t-1", "--at", "21:30", "--at", "22:00"])).toThrow("given twice");
+    expect(() => parseAmendArgs(["t-1", "--in", "1h", "--in", "2h"])).toThrow("given twice");
+    expect(() => parseAmendArgs(["t-1", "--in", "soon"])).toThrow("duration");
+    expect(() => parseAmendArgs(["t-1", "--at", "2020-01-01T10:00"])).toThrow("in the past");
   });
 });
 

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   AUTONOMY_LEVELS,
   STANDING_INSTRUCTION,
+  WORKTREE_AND_BRANCH_GONE,
   type AutonomyLevel,
   type RepoEntry,
   type SessionEntry,
@@ -1217,7 +1218,10 @@ describe("spawnSession continuing a failed task's session", () => {
       await git(fixture.repoPath, ["update-ref", `refs/remotes/origin/wt-${wt.name}`, "HEAD"]);
       try {
         const refused = await continuingOn(wt, "Cont Gone", `wt-${wt.name}`).catch((err: unknown) => err);
-        expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("both gone") });
+        expect(refused).toMatchObject({
+          code: "not_continuable",
+          message: expect.stringContaining(WORKTREE_AND_BRANCH_GONE),
+        });
         expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Gone");
         expect(await stat(wt.path).catch(() => null)).toBeNull();
         expect((await git(fixture.repoPath, ["branch", "--list", `wt-${wt.name}`])).stdout).toBe("");

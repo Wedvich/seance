@@ -1,6 +1,7 @@
 import {
   accountNameIn,
   fleetTraits,
+  formatNotBefore,
   knownAccounts,
   lastHeardAt,
   reasonText,
@@ -11,12 +12,13 @@ import {
   type Decision,
   type Machine,
   type QuotaBasis,
+  type Reason,
   type Score,
   type Task,
 } from "@seance/shared";
 import { sleepingMachine } from "./asleep.ts";
 import type { PreviewState } from "./state.ts";
-import { timed, type Timed } from "./timed.ts";
+import { timed, type Moment, type Timed } from "./timed.ts";
 import { failedBody, seen } from "./view.ts";
 
 /**
@@ -43,6 +45,43 @@ export interface DecisionSummary {
   readonly others: readonly DecisionLine[];
   /** Candidates the leader cut from this copy (`Decision.trimmed`): `others` is then partial. */
   readonly omitted: { readonly count: number; readonly text: string } | null;
+}
+
+export function sameMoment(a: Moment | undefined, b: Moment | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined && a.text === b.text && a.at === b.at);
+}
+
+function sameTimed(a: Timed | null, b: Timed | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.length === b.length &&
+    a.every((part, i) => {
+      const other = b[i];
+      return typeof part === "string" || typeof other === "string" ? part === other : sameMoment(part, other);
+    })
+  );
+}
+
+function sameLine(a: DecisionLine | null, b: DecisionLine | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.id === b.id && a.where === b.where && a.outcome === b.outcome && a.why === b.why && sameTimed(a.quota, b.quota)
+  );
+}
+
+/**
+ * Whether two summaries render alike, instants included (a `<time>` carries its own). The app re-derives every
+ * summary on each state change, so a card compares what it shows rather than which object it was handed.
+ */
+export function sameSummary(a: DecisionSummary, b: DecisionSummary): boolean {
+  return (
+    a.headline === b.headline &&
+    sameLine(a.chosen, b.chosen) &&
+    a.others.length === b.others.length &&
+    a.others.every((other, i) => sameLine(other, b.others[i] ?? null)) &&
+    a.omitted?.count === b.omitted?.count &&
+    a.omitted?.text === b.omitted?.text
+  );
 }
 
 function omittedOf(decision: Decision): DecisionSummary["omitted"] {
@@ -209,8 +248,6 @@ export function describeDecision(
   };
 }
 
-const CAPS_ONLY_SUB = "Skip the queue — past the concurrency limit";
-
 /** The Queue button's Start now row: what skipping the queue would do, read off the placement preview. */
 export interface StartNowItem {
   readonly sub: string;
@@ -218,35 +255,52 @@ export interface StartNowItem {
 }
 
 /**
- * The preview routes with the limit applied, so a candidate turned down for
- * `cap_reached` alone is one `run-now` would take; anything else it rejects
- * holds Start now too. No preview to go by (asking, failed, a pinned form) is
- * no reason to block a tap the leader answers for itself.
+ * The preview routes with the limit and the pause applied, so a candidate turned
+ * down for what `run-now` lifts alone (`liftable`) is one it would take; anything
+ * else it rejects holds Start now too. No preview to go by (asking, failed, a
+ * pinned form) is no reason to block a tap the leader answers for itself.
+ * `pastPause`: the verified leader's `run-now` lifts a whole-queue pause
+ * (`CAPABILITIES.runNowPaused`).
  */
-export function startNowItem(preview: PreviewState | null): StartNowItem {
-  return decisionStartNowItem(preview?.kind === "ok" ? preview.decision : null);
+export function startNowItem(preview: PreviewState | null, pastPause: boolean): StartNowItem {
+  return decisionStartNowItem(preview?.kind === "ok" ? preview.decision : null, pastPause);
 }
 
 /** `startNowItem` for a task already queued: its latest decision, if the leader has made one. */
-export function decisionStartNowItem(decision: Decision | null): StartNowItem {
+export function decisionStartNowItem(decision: Decision | null, pastPause: boolean): StartNowItem {
   const plain = { sub: "Skip the queue", enabled: true };
   if (decision === null) return plain;
   const chosen = chosenName(decision);
-  const capped = decision.candidates.filter(heldByCapsAlone);
-  // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
-  if (chosen !== null)
-    return capped.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
-  const [only] = capped;
-  if (only === undefined) return { sub: "No machine can take it right now", enabled: false };
-  return {
-    sub: capped.length === 1 ? `Skip the queue — spawn on ${where(only)}` : CAPS_ONLY_SUB,
-    enabled: true,
-  };
+  const held = decision.candidates.filter((c) => liftable(c, pastPause));
+  // `run-now` weighs the held candidates too, unscored in the preview, so the target it picks is unknown.
+  if (chosen !== null) return held.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
+  const [only] = held;
+  if (only === undefined) {
+    // A leader that keeps the pause: say the pause holds it, not that no machine could take it.
+    const pausedAlone = !pastPause && decision.candidates.some((c) => liftable(c, true));
+    return { sub: pausedAlone ? "The queue is paused" : "No machine can take it right now", enabled: false };
+  }
+  if (held.length === 1) return { sub: `Skip the queue — spawn on ${where(only)}`, enabled: true };
+  const past = [
+    held.some((c) => c.rejected.some(isQueuePause)) ? "the pause" : null,
+    held.some((c) => c.rejected.some((r) => r.code === "cap_reached")) ? "the concurrency limit" : null,
+  ].filter((part) => part !== null);
+  return { sub: `Skip the queue — past ${past.join(" and ")}`, enabled: true };
 }
 
-/** Turned down for `cap_reached` and nothing else: a candidate `run-now`, which lifts the limit, would weigh. */
-export function heldByCapsAlone(candidate: Candidate): boolean {
-  return candidate.rejected.length > 0 && candidate.rejected.every((r) => r.code === "cap_reached");
+function isQueuePause(reason: Reason): boolean {
+  return reason.code === "paused" && reason.scope === "queue";
+}
+
+/**
+ * Turned down only for what `run-now` lifts: the fleet limit, and with `pastPause` a whole-queue
+ * pause. An account's pause is a person closing that account, which `run-now` keeps.
+ */
+function liftable(candidate: Candidate, pastPause: boolean): boolean {
+  return (
+    candidate.rejected.length > 0 &&
+    candidate.rejected.every((r) => r.code === "cap_reached" || (pastPause && isQueuePause(r)))
+  );
 }
 
 /**
@@ -255,6 +309,7 @@ export function heldByCapsAlone(candidate: Candidate): boolean {
  */
 function waitClause(task: Task): { readonly hedged: boolean; readonly text: string } {
   if (task.inputReason === "question") return { hedged: false, text: "asking a question" };
+  if (task.inputReason === "elicitation") return { hedged: false, text: "waiting for an answer to an MCP server" };
   if (task.inputReason !== "permission") return { hedged: false, text: "waiting for input" };
   const text =
     task.inputTool === undefined ? "waiting for permission" : `waiting for permission to use ${task.inputTool}`;
@@ -279,9 +334,25 @@ export function taskHeadline(
   machines: readonly Machine[],
   aliases: Readonly<Record<string, string>>,
   now: number,
+  leaderNow: number = now,
 ): Timed {
+  const deferred = notBeforeLine(task, leaderNow);
+  // A blocked task keeps its "Waiting on" headline: that wait outlasts the time, and the body carries the time.
+  if (deferred !== null && task.state !== "blocked") return [`Queued — ${deferred}.`];
   const headline = headlineOf(task, machines, aliases, now);
   return typeof headline === "string" ? [headline] : headline;
+}
+
+/**
+ * "until Wed 18 Nov, 21:30" while a waiting task's not-before time is still ahead of the leader's clock
+ * (`leaderNow`: the device's plus the skew), else null. It stands in for everything the decision says: a
+ * deferred task is never routed, so a decision on it is from before the time was set or is stale.
+ */
+export function notBeforeLine(task: Task, leaderNow: number): string | null {
+  const at = task.spec.notBefore;
+  if (at === null || at === undefined || leaderNow >= at) return null;
+  if (task.state !== "queued" && task.state !== "blocked" && task.state !== "ready") return null;
+  return `until ${formatNotBefore(at)}`;
 }
 
 /** An exclave by its account's alias, else its own id: never the email, too long for a headline. */

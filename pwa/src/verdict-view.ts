@@ -1,6 +1,7 @@
 import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
-import { pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { notBeforeLine, pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
 import type { FollowEnd, StartNowRefusal, Verdict } from "./state.ts";
+import { taskTagLines } from "./task-tags.ts";
 import { plain } from "./timed.ts";
 
 /**
@@ -20,6 +21,8 @@ export interface VerdictContent {
   readonly headline: string;
   readonly body: string;
   readonly detail: string | null;
+  /** Every task tag with its full key (a queued verdict's task), for a list under the body; empty for any other verdict. */
+  readonly tags: readonly { readonly key: string; readonly value: string }[];
   readonly primary: { readonly label: string; readonly onClick: "retry" | "another" | "back" };
   readonly showBack: boolean;
 }
@@ -75,11 +78,16 @@ export function describeVerdict(
     const settled = isSettled(task.state);
     const pin = pinLine(task, machines, aliases);
     const requires = requiresLine(task, machines, now);
-    const waiting = waitingText(task);
+    // The device clock: the verdict has no skew.
+    const deferred = notBeforeLine(task, now);
+    const waiting = deferred === null ? waitingText(task) : null;
     const parts = [
-      queuedBody(task),
+      deferred !== null && (task.state === "queued" || task.state === "ready")
+        ? "The scheduler holds it. Nothing is running yet."
+        : queuedBody(task),
       pin === null ? null : `${pin}.`,
       requires === null ? null : `${requires}.`,
+      deferred === null ? null : `Not placed ${deferred}.`,
       waiting === null ? null : `Waiting: ${waiting}.`,
       offlinePinNote(task, machines),
       // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.
@@ -103,6 +111,7 @@ export function describeVerdict(
       headline: plain(taskHeadline(task, machines, aliases, now)),
       body: `${parts.join(" ")}${followText(verdict.follow)}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
+      tags: taskTagLines(task).all,
       // The prompt was cleared when it queued, so "Start another" already lands on the form a back would.
       primary: { label: "Start another", onClick: "another" },
       showBack: false,
@@ -118,6 +127,7 @@ export function describeVerdict(
       // No background sync: the page sends it, so the app has to be open when the relay comes back.
       body: "The app isn't connected to the relay right now, so it waits here and is queued as soon as it reconnects. Keep the app open, or come back to it.",
       detail: null,
+      tags: [],
       primary: { label: "Start another", onClick: "another" },
       showBack: true,
     };
@@ -132,6 +142,7 @@ export function describeVerdict(
       ? `${verdict.message} It may have queued anyway — trying again is safe: it re-sends the same task, which can't queue twice.`
       : verdict.message,
     detail: null,
+    tags: [],
     stage: null,
     primary:
       verdict.retry === undefined

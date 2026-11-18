@@ -16,6 +16,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { accountDisplayName } from "./machines-view.ts";
+import { taskTagLines } from "./task-tags.ts";
 import { carriesOnLine, FLAG_LABELS, passedToLine, prNames, stackedOnLine, type QueueRow } from "./queue-view.ts";
 import {
   AUTONOMY_LABELS,
@@ -210,6 +211,10 @@ function archivedRow(
     canFollowUp: false,
     canContinue: false,
     canPass: false,
+    canLabel: false,
+    // The archive keeps the ref and drops the owner's label (DESIGN.md, "Task tags").
+    label: null,
+    ref: taskTagLines(task).ref,
     inlinePrimary: false,
     startNow: null,
     inline: null,

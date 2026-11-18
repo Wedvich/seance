@@ -2,6 +2,7 @@ import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
 import { statesIn } from "./task-phase.ts";
 import { taskPrs } from "./task-prs.ts";
+import { chainTags, displayLine, taskTagEntries } from "./tags.ts";
 import { REPORT_DONE_INSTRUCTION } from "./task-record.ts";
 import {
   CAPABILITIES,
@@ -62,9 +63,12 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
 /**
  * The spec of the task that carries `task`'s work on. Carries what shapes the session (repo, model,
  * effort, skill, autonomy, plan, title), what it needs of a machine (`requires`: the work depends on the
- * capability, so the successor must land where the old task could) and what settles it (`until`, `linear`, `avoid`), and
+ * capability, so the successor must land where the old task could), what settles it (`until`, `linear`, `avoid`) and its
+ * `creator.*` tags (the leader copies `owner.*` at admission, since this create is version 1 and a client's create seals
+ * `creator.*` alone; never `scheduler.*`), and
  * nothing that places or orders it: no `pin` (an account pin is the old account by definition),
- * `deps` (already satisfied), `batch`, `lineage`, `base`, `continues` or `attachments`. The mode is
+ * `deps` (already satisfied), `batch`, `lineage`, `base`, `continues`, `attachments` or `notBefore`
+ * (DESIGN.md, "Not before"). The mode is
  * a plain worktree spawn, so no daemon needs to know about successors to run one. `succeeds` names
  * the predecessor, its account and where it ran (display; nothing routes on its clone).
  *
@@ -82,6 +86,7 @@ export function successorSpec(
 ): TaskSpec {
   const { spec, assignment } = task;
   const steered = autonomyOf(spec) === "steer" && trigger !== "drain";
+  const creator = chainTags(spec.tags, "creator");
   return {
     repo: spec.repo,
     mode: "worktree",
@@ -100,6 +105,7 @@ export function successorSpec(
     ...(spec.requires === undefined ? {} : { requires: spec.requires }),
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
+    ...(creator === undefined ? {} : { tags: creator }),
     succeeds: {
       task: task.id,
       account,
@@ -230,7 +236,8 @@ export function successorPrompt(input: SuccessorPromptInput): SuccessorPrompt {
   const reported = task.spec.until === "reported";
   const bare = reported && prompt.endsWith(reportTail) ? prompt.slice(0, -reportTail.length) : prompt;
   const old = bare === "" ? undefined : bare;
-  const linear = task.spec.linear === undefined ? "" : `\n\nLinear issue: ${task.spec.linear.issue}`;
+  const ref = taskTagEntries(task.spec, 0)["creator.ref"]?.value;
+  const refLine = ref === undefined ? "" : `\n\nRef: ${displayLine(ref)}`;
   const tail = reported ? reportTail : "";
   const room = (fixed: string): { readonly units: number; readonly bytes: number } => ({
     units: Math.max(0, TASK_REQUEST_LIMITS.prompt - fixed.length),
@@ -242,7 +249,7 @@ export function successorPrompt(input: SuccessorPromptInput): SuccessorPrompt {
     preamble +
     (recordText === undefined ? "" : RECORD_HEAD + recordText) +
     (oldText === undefined ? "" : OLD_PROMPT_HEAD + oldText) +
-    linear +
+    refLine +
     tail;
   const whole = compose(record, old);
   if (fits(whole)) return { prompt: whole, recordCut: false };

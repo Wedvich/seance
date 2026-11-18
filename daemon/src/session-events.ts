@@ -3,8 +3,11 @@ import {
   isNeedsInputReason,
   isToolName,
   isRecord,
+  parseIdleNote,
+  type IdleNote,
   isRemoteSessionId,
   isSessionState,
+  parseTagValue,
   isTaskId,
   quote,
   SESSIONS_MAX_PROGRESS,
@@ -20,12 +23,15 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AdapterTaskEvent } from "@seance/shared";
+import { claudeProcessOf } from "./claude-process.ts";
+import type { AgentClaim, Conversations } from "./conversations.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
 import { LaunchLedger, pathOwners, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import type { OomProbe } from "./oom-kill.ts";
-import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
+import { ancestorBelow, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import {
   SESSION_EVENT_KIND,
   SESSION_EVENT_VERSION,
@@ -71,8 +77,18 @@ export interface SessionEventFrame {
   /** Absent only on an older mod's rate-limit report: activity, nothing else. */
   readonly state?: SessionState;
   readonly prUrl?: string;
-  /** `$CLAUDE_CODE_BRIDGE_SESSION_ID` as the session saw it — kept only as `isRemoteSessionId` passes it. */
+  /**
+   * `$CLAUDE_CODE_BRIDGE_SESSION_ID` as the session saw it — kept only as `isRemoteSessionId` passes it. `agent.remote`'s
+   * fallback (DESIGN.md, "Tags and session identity"), read only when the frame carries no `agent.remote`.
+   */
   readonly remoteSession?: string;
+  /**
+   * The agent's own claims about the session it runs in (DESIGN.md, "Session identity", "The claims"), on every report the mod and the settings
+   * hooks send: its kind, its conversation id and Remote Control's id, as bare suffixes, each kept only as its parser
+   * passes it (`parseAgentClaim`). Claims, not facts: the conversation id counts only once the daemon's own sources
+   * verify it (`conversations.ts`). May ride alone, with no state.
+   */
+  readonly agent?: AgentClaim;
   /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
   /** `hand_off_task`'s: close this session at the end of its turn, its PR left to the scheduler. Carries no state. */
@@ -93,6 +109,13 @@ export interface SessionEventFrame {
   readonly reason?: NeedsInputReason;
   /** Only beside `reason: "permission"`: the prompt's tool, kept only as `isToolName` passes it. Display-only. */
   readonly tool?: string;
+  /**
+   * The settings hooks' `Stop`/`StopFailure` (`seance session-event --hook`): what the turn end left running, or
+   * the error that ended it. Carries no state: Claude runs `Stop` before the turn is over, and another `Stop` hook
+   * may yet continue it, so it is never read as a turn end. Held for the pane and joined to its idles, display-only
+   * there; its counts also make the custodian's `close` leave the pane (`awaitsWake`), and nothing else.
+   */
+  readonly stop?: IdleNote;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
@@ -101,6 +124,30 @@ export function isSessionEventFrameKind(raw: unknown): boolean {
 }
 
 const MAX_FIELD = 64;
+
+/** The `agent` suffixes a frame may carry, with the scope each one's key lives at (`shared/src/tags.ts`). */
+const AGENT_KEYS = { kind: "conversation", session: "conversation", remote: "process" } as const;
+
+const isAgentKey = (key: string): key is keyof typeof AGENT_KEYS => Object.hasOwn(AGENT_KEYS, key);
+
+/**
+ * A frame's `agent`: only the bare suffixes `kind`, `session` and `remote`, each kept as its parser passes it and
+ * dropped alone otherwise. Any other key (a full key such as `agent.session` included: never re-homed) drops the whole
+ * field, never the frame. Undefined when nothing is kept.
+ */
+export function parseAgentClaim(raw: unknown): AgentClaim | undefined {
+  if (!isRecord(raw)) return undefined;
+  const kept: { kind?: "claude"; session?: string; remote?: string } = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isAgentKey(key)) return undefined;
+    const parsed = parseTagValue(`agent.${key}`, value, AGENT_KEYS[key]);
+    if (parsed === null || parsed === "") continue;
+    if (key === "kind") {
+      if (parsed === "claude") kept.kind = parsed;
+    } else kept[key] = parsed;
+  }
+  return Object.keys(kept).length === 0 ? undefined : kept;
+}
 
 /**
  * A frame with no `state` is still read when it carries `rateLimits`: a session
@@ -115,8 +162,20 @@ const MAX_FIELD = 64;
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane, handoff, pass, record, turnEnded, reason, tool } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff, pass, record, turnEnded, reason, tool, stop } = raw;
+  const agent = parseAgentClaim(raw["agent"]);
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
+  if (stop !== undefined) {
+    // Alone, as a hand-off is: a note is never a state, so no ingest path can read one as a turn's end.
+    if (!isRecord(stop) || state !== undefined || handoff !== undefined || pass !== undefined) return null;
+    return {
+      v: SESSION_EVENT_VERSION,
+      kind: SESSION_EVENT_KIND,
+      stop: parseIdleNote(stop),
+      ...(pane === undefined ? {} : { pane }),
+      ...(agent === undefined ? {} : { agent }),
+    };
+  }
   if (pass !== undefined) {
     // Alone, as a hand-off is, and never beside one: no ingest path can read a pass as anything else.
     if (pass !== true || handoff !== undefined || state !== undefined) return null;
@@ -143,13 +202,14 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (remoteSession !== undefined && typeof remoteSession !== "string") return null;
   if (turnEnded !== undefined && (turnEnded !== true || state !== "idle")) return null;
-  if (state === undefined && rateLimits === undefined) return null;
+  if (state === undefined && rateLimits === undefined && agent === undefined) return null;
   return {
     v: SESSION_EVENT_VERSION,
     kind: SESSION_EVENT_KIND,
     ...(state === undefined ? {} : { state }),
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(remoteSession === undefined ? {} : { remoteSession }),
+    ...(agent === undefined ? {} : { agent }),
     ...(pane === undefined ? {} : { pane }),
     ...(turnEnded === true ? { turnEnded } : {}),
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
@@ -249,7 +309,12 @@ export const ENDED_MAX = 128;
  */
 export type SettleLaunch = (
   launched: boolean,
-  landed?: { readonly site?: LaunchSite; readonly server?: number },
+  landed?: {
+    readonly site?: LaunchSite;
+    readonly server?: number;
+    /** The task's ref from the scheduler's spawn (`SpawnRequest.ref`): display only, read into an adapter's `Session`. */
+    readonly ref?: { readonly ref: string; readonly url?: string };
+  },
   /**
    * `unknown`: the backend crashed (threw something that is no refusal), so a window may exist untagged. With
    * `launched: true`; the id is then marked `interrupted` rather than cleared, like a launch the process died in.
@@ -311,6 +376,10 @@ export class EndedTasks {
   readonly #holds = new Set<Promise<void>>();
   /** Told on each close and reopen of the gate: a daemon's status carries it (`MachineStatus.drn`). */
   readonly #gateListeners = new Set<(closed: boolean) => void>();
+  /** Told each task event a launch of this ledger's goes through (`onTask`): an adapter's `task` frame. */
+  readonly #taskListeners = new Set<(taskId: string, event: AdapterTaskEvent) => void>();
+  /** Tasks whose `ended` was told, so an `ended` frame and the harvest of its pane tell it once; bounded like `#ended`. */
+  readonly #endedTold = new Set<string>();
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
@@ -411,11 +480,16 @@ export class EndedTasks {
             },
             launches.prUrl,
             landed?.server,
+            landed?.ref,
           );
           sample = true;
         }
       } finally {
         await finish();
+      }
+      if (sample) {
+        this.#endedTold.delete(taskId);
+        this.#tellTask(taskId, "launched");
       }
       // A baseline from the start, not the next pass: a session dying before that would have none. After
       // `finish`, and not awaited: its reads can stall, and neither the launch nor `sessions` waits on them.
@@ -476,6 +550,11 @@ export class EndedTasks {
     if (!this.#final) this.#setClosed(false);
   }
 
+  /** A task launch accepted and not yet over, or its handler's reply not yet out: its pane may not be listed yet. */
+  get launching(): boolean {
+    return this.#inFlight.size + this.#holds.size > 0;
+  }
+
   /** True while task launches are refused (`LaunchesClosed`): what routing reads as draining. */
   get draining(): boolean {
     return this.#closed;
@@ -514,8 +593,51 @@ export class EndedTasks {
    * missed the event reads it on takeover. `refused`: the ledger holds no such
    * launch; `same`: already reported, so already forwarded.
    */
-  noteReported(taskId: string): Promise<NoteOutcome> {
-    return this.#ledger.apply(taskId, { reported: true });
+  async noteReported(taskId: string): Promise<NoteOutcome> {
+    const outcome = await this.#ledger.apply(taskId, { reported: true });
+    if (outcome === "written" || outcome === "unwritten") this.#tellTask(taskId, "done");
+    return outcome;
+  }
+
+  /**
+   * `listener` hears each event of a task this ledger holds a launch of: `launched` once a launch lands, `done` at a
+   * session's first report, `handoff` and `pass` as their closes are set up, `ended` once per launch. Display only
+   * (an adapter's `task` frame); nothing settles by it. Returns its unsubscribe.
+   */
+  onTask(listener: (taskId: string, event: AdapterTaskEvent) => void): () => void {
+    this.#taskListeners.add(listener);
+    return () => {
+      this.#taskListeners.delete(listener);
+    };
+  }
+
+  #tellTask(taskId: string, event: AdapterTaskEvent): void {
+    if (!this.#ledger.ids().includes(taskId)) return;
+    if (event === "ended") {
+      if (this.#endedTold.has(taskId)) return;
+      this.#endedTold.add(taskId);
+      for (const old of this.#endedTold) {
+        if (this.#endedTold.size <= ENDED_MAX) break;
+        this.#endedTold.delete(old);
+      }
+    }
+    for (const listener of this.#taskListeners) {
+      try {
+        listener(taskId, event);
+      } catch (err) {
+        log.warn(`task event listener failed: ${String(err)}`);
+      }
+    }
+  }
+
+  /** A session's pass of this task was handed to the scheduler: told to `onTask`'s listeners. */
+  passed(taskId: string): void {
+    this.#tellTask(taskId, "pass");
+  }
+
+  /** The repo this task's worktree launch was noted under (the scan-set name); undefined for a here-mode launch or none. */
+  taskRepo(taskId: string): string | undefined {
+    return this.#ledger.notes().find((n) => n.taskId === taskId)?.repo;
   }
 
   /**
@@ -565,6 +687,11 @@ export class EndedTasks {
     return this.prUrl(taskId) !== undefined;
   }
 
+  /** The ref the scheduler's spawn of this task carried (`TaskNote.ref`), for an adapter's `Session`. Display only. */
+  ref(taskId: string): { readonly ref: string; readonly url?: string } | undefined {
+    return this.#ledger.notes().find((n) => n.taskId === taskId)?.ref;
+  }
+
   /** The PR URL this launch noted, a continuation's or successor's inherited one included: the one lookup `handoffCheck`, `hasPr` and the custodian's `sessions` share. */
   prUrl(taskId: string): string | undefined {
     const note = this.#ledger.notes().find((n) => n.taskId === taskId);
@@ -578,6 +705,11 @@ export class EndedTasks {
    */
   notedPr(taskId: string): string | undefined {
     return this.#launches.get(taskId)?.prUrl ?? this.#ledger.notes().find((n) => n.taskId === taskId)?.prUrl;
+  }
+
+  /** The conversation id this daemon launched the task under (`--session-id`, or the one it resumed): `agent.session`'s second source. */
+  launchSession(taskId: string): string | undefined {
+    return this.#ledger.notes().find((n) => n.taskId === taskId)?.session;
   }
 
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
@@ -616,6 +748,7 @@ export class EndedTasks {
     } catch (err) {
       log.warn(`launch ledger: could not note that task ${taskId} is being handed off (${String(err)})`);
     }
+    this.#tellTask(taskId, "handoff");
   }
 
   /** Launches harvest may judge, minus any whose spawn is still in flight or registering. */
@@ -637,6 +770,7 @@ export class EndedTasks {
       note: async (taskId, exit, oomKill) => {
         const noted = await this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) });
         await this.#ledger.clearInterrupted([taskId]);
+        this.#tellTask(taskId, "ended");
         return noted;
       },
       closing: (taskId) => this.closing(taskId),
@@ -661,6 +795,7 @@ export class EndedTasks {
     this.#ended.delete(taskId); // re-insert, so insertion order stays age order
     this.#ended.set(taskId, this.#now());
     this.#prune();
+    this.#tellTask(taskId, "ended");
   }
 
   /**
@@ -911,6 +1046,12 @@ export interface SessionEventDeps {
    */
   readonly retain?: (pane: BoundPane, state: TrackedState, turnEnded: boolean) => void;
   /**
+   * Session identity and the process and conversation tags (`conversations.ts`): every bound report's state and
+   * `agent` claims, retained against the peer's `claude` process. Retention, never an act; not awaited, so no reply
+   * depends on it.
+   */
+  readonly conversations?: Conversations;
+  /**
    * A session's own pass (`pass_to_successor`), all of it the host's: the push the pass asks for (audited under
    * its own origin), the report to the scheduler, and the close at a turn's end, which only
    * `armPassClose` lets run. Absent, a pass is answered `unsupported`.
@@ -940,7 +1081,26 @@ export interface SessionEvents {
    * into such a pane (one close per pane; two C-c exit Claude Code).
    */
   readonly marked: (pane: string) => boolean;
+  /**
+   * Whether the pane's last turn ended with background work or a session cron pending, by its settings `Stop` note:
+   * the session will wake by itself, so the custodian's `close` leaves it and no round is due for it. Given a task (the
+   * caller's own read of the pane), a note held for another task is another session's, and reads none.
+   */
+  readonly awaitsWake: (pane: string, taskId?: string | null) => boolean;
   readonly stop: () => void;
+}
+
+/** Panes a `stop` note or a forwarded idle is held for: far above any machine's live sessions, so only a gone pane's entry goes. */
+const NOTES_MAX = 256;
+
+/** Sets `key` as `map`'s newest entry (insertion order is age order), dropping the oldest past `NOTES_MAX`. */
+function setNewest<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key);
+  map.set(key, value);
+  for (const id of map.keys()) {
+    if (map.size <= NOTES_MAX) break;
+    map.delete(id);
+  }
 }
 
 interface Outbox {
@@ -963,6 +1123,32 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   const passes = new Map<string, { readonly taskId: string; confirmed: boolean; turnEnded: boolean }>();
   /** Panes whose hand-off or pass close was started and has not settled. */
   const closing = new Set<string>();
+  /**
+   * Pane → the settings hooks' latest `stop` note, for the process and task it carried then: joined to that pane's
+   * idles until any state but an idle drops it, or a frame finds the pane gone or under another process. Untasked
+   * panes' too, which only `awaitsWake` reads. Memory only; a restart loses it until the next turn end.
+   */
+  const notes = new Map<string, { readonly pid: number; readonly taskId: string | null; readonly note: IdleNote }>();
+  const heldNote = (pane: string, taskId: string | null | undefined): IdleNote | null => {
+    const held = notes.get(pane);
+    if (held === undefined) return null;
+    return taskId === undefined || held.taskId === taskId ? held.note : null;
+  };
+  /** Pane → the task whose idle it last forwarded, until any other state: a note landing then re-sends that idle. */
+  const idleNow = new Map<string, string>();
+  const noteOf = (pane: string, taskId: string): IdleNote => heldNote(pane, taskId) ?? {};
+  /**
+   * Ingest, not an act: held for the pane's own process and task, forwarded only on a tasked idle, which the leader's
+   * clock already reads, and read by the custodian's close.
+   */
+  const takeNote = (pane: BoundPane, exclave: string, note: IdleNote, at: number): SessionEventReply => {
+    if (stopped) return { ok: true };
+    setNewest(notes, pane.id, { pid: pane.pid, taskId: pane.taskId, note });
+    if (pane.taskId !== null && idleNow.get(pane.id) === pane.taskId) {
+      enqueue({ session: pane.id, taskId: pane.taskId, exclave, state: "idle", at, ...note });
+    }
+    return { ok: true };
+  };
   const startClose = (pane: string, run: Promise<void> | undefined): void => {
     if (run === undefined) return;
     closing.add(pane);
@@ -1052,6 +1238,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       passes.delete(pane.id);
       return { ok: false, code: "unsent" };
     }
+    deps.ended.passed(taskId);
     const pass: PassAck = { taskId, remoteBranch: pushed.remoteBranch, tip: pushed.tip, pushed: pushed.pushed };
     return { ok: true, pass };
   };
@@ -1118,12 +1305,45 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
 
   const hostNamesPeers = deps.hostNamesPeers ?? peerPidSupported;
 
-  const bind = async (frame: SessionEventFrame, peer: number | null): Promise<BoundPane | null> => {
+  /** The pane, and the pids from the peer up to it, peer first; `below` is null through the `pane` fallback (no peer). */
+  const bind = async (
+    frame: SessionEventFrame,
+    peer: number | null,
+  ): Promise<{ readonly pane: BoundPane; readonly below: readonly number[] | null } | null> => {
     // Per host, never per connection: a sender the kernel could not name here is refused.
     if (peer === null && hostNamesPeers()) return null;
     const live = (await deps.panes()).filter((pane) => !pane.dead);
-    if (peer === null) return live.find((pane) => pane.id === frame.pane) ?? null;
-    return ancestorIn(peer, new Map(live.map((pane) => [pane.pid, pane])));
+    // A pane gone, or its `%n` under another process (a tmux server restart reuses ids), takes its note with it.
+    const pids = new Map(live.map((pane) => [pane.id, pane.pid]));
+    for (const [id, held] of notes) if (pids.get(id) !== held.pid) notes.delete(id);
+    if (peer === null) {
+      const named = live.find((pane) => pane.id === frame.pane);
+      return named === undefined ? null : { pane: named, below: null };
+    }
+    const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
+    return found === null ? null : { pane: found.hit, below: found.below };
+  };
+
+  /** Retention, never awaited by the reply: against the peer's `claude`, or the pane's own process through the fallback. */
+  const retainClaims = (pane: BoundPane, below: readonly number[] | null, frame: SessionEventFrame): void => {
+    const table = deps.conversations;
+    // A `done` report is a task act, not a state: only its claims are retained.
+    const state = frame.state === "done" ? undefined : frame.state;
+    if (table === undefined || stopped || (state === undefined && frame.agent === undefined)) return;
+    const remote = frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : undefined);
+    const agent: AgentClaim | undefined =
+      frame.agent === undefined && remote === undefined
+        ? undefined
+        : { ...frame.agent, ...(remote === undefined ? {} : { remote }) };
+    void (async (): Promise<void> => {
+      const process = below === null ? null : await claudeProcessOf([...below, pane.pid]);
+      await table.report(pane, process, below === null, {
+        ...(state === undefined ? {} : { state }),
+        ...(frame.turnEnded === true ? { turnEnded: true } : {}),
+        ...(frame.reason === undefined ? {} : { reason: frame.reason }),
+        ...(agent === undefined ? {} : { agent }),
+      });
+    })().catch((err: unknown) => log.warn(`local socket: session identity read failed (${String(err)})`));
   };
 
   return {
@@ -1133,21 +1353,26 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         log.warn("local socket: dropped a malformed session-event frame");
         return { ok: false, code: "invalid" };
       }
-      const pane = await bind(frame, peer);
-      if (pane === null) {
+      const bound = await bind(frame, peer);
+      if (bound === null) {
         // Info: a claude run outside tmux, or a background session, is ordinary.
         log.info(`local socket: session-event from pid=${peer ?? "unknown"} matched no live pane — dropped`);
         return { ok: false, code: "unbound" };
       }
+      const { pane } = bound;
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
       if (frame.handoff === true) return markHandoff(pane);
       if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
+      retainClaims(pane, bound.below, frame);
+      if (frame.stop !== undefined) return takeNote(pane, exclave, frame.stop, at);
       // Before the untasked return: an untasked pane's state is retained too, and goes nowhere else.
       if (!stopped && frame.state !== undefined && frame.state !== "done") {
         deps.retain?.(pane, frame.state, frame.state === "idle" && frame.turnEnded === true);
       }
+      // Any state but an idle is a turn the note was not for; before the untasked return, since `awaitsWake` reads those too.
+      if (frame.state !== undefined && frame.state !== "idle") notes.delete(pane.id);
       if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.
@@ -1175,15 +1400,21 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       // An `ended` the leader cannot match to a PR waits for the exit, and settles `done` if the machine goes
       // first: so it carries the PR this pane's own launch noted, in case the event that carried it was lost.
       const sentPr = prUrl ?? (frame.state === "ended" ? (deps.ended.notedPr(pane.taskId) ?? null) : null);
-      const remoteSession = isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null;
-      if (frame.remoteSession !== undefined && remoteSession === null) {
+      // `agent.remote` first, `remoteSession` its fallback (DESIGN.md, "Tags and session identity"): one rule, `isRemoteSessionId`, for both.
+      const remoteSession =
+        frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null);
+      if (frame.agent?.remote === undefined && frame.remoteSession !== undefined && remoteSession === null) {
         log.warn(
           `local socket: session-event pane=${quote(pane.id)} carried a malformed remote session id — dropped it`,
         );
       }
+      // A pane killed without its `ended` never clears its entry: the cap is what bounds that.
+      if (frame.state === "idle") setNewest(idleNow, pane.id, pane.taskId);
+      else idleNow.delete(pane.id);
       // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
       if (reported !== "same") {
         enqueue({
+          ...(frame.state === "idle" ? noteOf(pane.id, pane.taskId) : {}),
           session: pane.id,
           taskId: pane.taskId,
           exclave,
@@ -1237,11 +1468,17 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     },
     armPassClose,
     marked: (pane): boolean => handoffs.has(pane) || passes.has(pane) || closing.has(pane),
+    awaitsWake: (pane, taskId): boolean => {
+      const work = heldNote(pane, taskId)?.background;
+      return work !== undefined && Object.values(work).some((count) => count > 0);
+    },
     stop: (): void => {
       stopped = true;
       handoffs.clear();
       passes.clear();
       closing.clear();
+      notes.clear();
+      idleNow.clear();
       for (const box of outboxes.values()) if (box.timer !== null) clearTimeout(box.timer);
       outboxes.clear();
     },

@@ -1,4 +1,5 @@
 import { utf8Length } from "./successor.ts";
+import { ownerTagsOf, withOwnerTags, writeTags } from "./tags.ts";
 import {
   ATTACHMENT_LIMITS,
   SUCCESSOR_PROMPT_BYTES,
@@ -40,12 +41,13 @@ export function amendedPromptFits(prompt: string, spec: Pick<TaskSpec, "attachme
   return prompt.length <= units && utf8Length(prompt) <= SUCCESSOR_PROMPT_BYTES;
 }
 
-export type AmendRefusal = "prompt_too_long" | "append_only";
+export type AmendRefusal = "prompt_too_long" | "append_only" | "tags_full";
 
 /**
  * `spec` with `amend` applied, or why not. A successor's prompt is the leader's (its preamble resets
  * the branch), so it takes `append` only. Every other field is kept as it is, sentinel-bearing ones
- * included: the leader's write seals the spec through the one task sealer.
+ * included: the leader's write seals the spec through the one task sealer. `ownerTags` merge into the task's
+ * `owner.*` keys alone (`""` clears one), refused `tags_full` past `TASK_TAG_BUDGET.owner`.
  */
 export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | AmendRefusal {
   let prompt = spec.prompt;
@@ -57,17 +59,37 @@ export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | Amend
   const title = amend.title === undefined ? spec.title : (amend.title ?? undefined);
   const model = amend.model === undefined ? spec.model : (amend.model ?? undefined);
   const effort = amend.effort === undefined ? spec.effort : (amend.effort ?? undefined);
-  const { prompt: _prompt, title: _title, model: _model, effort: _effort, ...rest } = spec;
+  const notBefore = amend.notBefore === undefined ? spec.notBefore : (amend.notBefore ?? undefined);
+  let tags = spec.tags;
+  if (amend.ownerTags !== undefined) {
+    const owner = writeTags("owner", amend.ownerTags, "task", ownerTagsOf(spec.tags));
+    // `parseAmendRequest` held the map to the same rules, so only the budget can refuse here.
+    if (!owner.ok) return "tags_full";
+    tags = withOwnerTags(spec.tags, owner.tags);
+  }
+  const {
+    prompt: _prompt,
+    title: _title,
+    model: _model,
+    effort: _effort,
+    notBefore: _notBefore,
+    tags: _tags,
+    ...rest
+  } = spec;
   return {
     ...rest,
+    ...(tags === undefined ? {} : { tags }),
     ...(prompt === undefined || prompt === "" ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
+    ...(notBefore === undefined ? {} : { notBefore }),
   };
 }
 
 /** The fields an amendment names, for an audit line: names only, never a value. */
 export function amendedFields(amend: AmendRequest): readonly string[] {
-  return (["prompt", "title", "model", "effort"] as const).filter((f) => amend[f] !== undefined);
+  return (["prompt", "title", "model", "effort", "notBefore", "ownerTags"] as const).filter(
+    (f) => amend[f] !== undefined,
+  );
 }

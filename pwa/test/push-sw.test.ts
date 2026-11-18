@@ -336,6 +336,35 @@ describe("push-sw.js", () => {
     });
   });
 
+  test("a GitHub budget alert shows its resource's fixed text and opens the Machines screen; an unknown resource only the fallback", async () => {
+    const worker = boot();
+    await worker.push(
+      JSON.stringify({ v: 1, kind: "github", at: 1, resource: "core", reset: 1_763_000_000, login: "x" }),
+    );
+    expect(worker.shown.at(-1)?.options).toEqual({
+      body: "GitHub's REST API budget is nearly used up.",
+      tag: "github:core",
+      renotify: true,
+      data: { url: "/?screen=machines" },
+    });
+    await worker.push(JSON.stringify({ v: 1, kind: "github", at: 1, resource: "graphql", reset: 1 }));
+    expect(worker.shown.at(-1)?.options).toEqual({
+      body: "GitHub's GraphQL API budget is nearly used up.",
+      tag: "github:graphql",
+      renotify: true,
+      data: { url: "/?screen=machines" },
+    });
+    for (const resource of ["search", "__proto__", "constructor", 7]) {
+      // oxlint-disable-next-line no-await-in-loop -- one push at a time, in order
+      await worker.push(JSON.stringify({ v: 1, kind: "github", at: 1, resource, reset: 1 }));
+      expect(worker.shown.at(-1)?.options).toEqual({
+        body: "Something needs your attention.",
+        tag: "seance",
+        renotify: true,
+      });
+    }
+  });
+
   test("a pass-refused alert shows one fixed text and opens its task", async () => {
     const worker = boot();
     await worker.push(JSON.stringify({ v: 1, kind: "pass-refused", at: 1, taskId: TASK, code: "never shown" }));

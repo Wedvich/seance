@@ -24,3 +24,7 @@ export * from "./drain.ts";
 export * from "./amend.ts";
 export * from "./amend-client.ts";
 export * from "./messages.ts";
+export * from "./not-before.ts";
+export * from "./tags.ts";
+export * from "./adapter-protocol.ts";
+export * from "./watch.ts";

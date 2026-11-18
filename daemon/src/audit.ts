@@ -10,6 +10,9 @@ import {
   quote,
   type AmendRequest,
   type DespawnRequest,
+  type AdapterDeliveryOutcome,
+  type AdapterResultCode,
+  type AdapterResultOutcome,
   type FailureReason,
   type FlagReason,
   type MessageKind,
@@ -17,6 +20,7 @@ import {
   type SpawnRequest,
   type SuccessorTrigger,
   type UpdateOutcome,
+  type WatchNoteBody,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
 import type { BrokerErrorCode, BrokerSchedulerOp } from "./broker-protocol.ts";
@@ -25,6 +29,7 @@ import type { CloseRefusal, CustodianReplyCode, KeptWhy } from "./custodian-fram
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
+import type { WatchReplyCode } from "./watch-frame.ts";
 
 /**
  * The first question when a line looks unfamiliar. `cli` at 2pm is the human at
@@ -318,9 +323,22 @@ export function availabilityAudit(
   };
 }
 
+/**
+ * A `session-tag` request: the owner labelling (or clearing the label of) an untasked conversation. No pane, session
+ * id or label reaches the line, only how many keys the request named (`0` for one that did not parse) and the outcome.
+ */
+export function sessionTagAudit(
+  origin: SpawnOrigin,
+  sink: AuditSink,
+): (parsed: boolean, outcome: string) => Promise<void> {
+  return async (parsed, outcome) => {
+    await sink(`audit session-tag origin=${origin} key-count=${parsed ? 1 : 0} outcome=${outcome}`);
+  };
+}
+
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
-  /** A `run-now` that reserved the task past the concurrency limit. */
+  /** A `run-now` that reserved the task past the concurrency limit and the queue's pause. */
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */
@@ -416,7 +434,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
  * record, which leaves it `ready`, `blocked`, or `failed` at admission. The only
  * line an enqueue leaves on the leader: an app's create is a store write the
  * relay answers, never a request. `client` is the record's own (`TaskSpec.client`),
- * a PSK holder's word; `createdAt` is the app's clock. Never the prompt.
+ * a PSK holder's word; `createdAt` is the app's clock. `notBefore` is a flag, never the time. Never the prompt.
  */
 export function admitAudit(sink: AuditSink): (task: {
   readonly id: string;
@@ -427,11 +445,12 @@ export function admitAudit(sink: AuditSink): (task: {
     readonly avoid?: readonly unknown[];
     readonly requires?: readonly unknown[];
     readonly pin?: unknown;
+    readonly notBefore?: number;
   };
 }) => Promise<void> {
   return async (task) => {
     const client = task.spec.client === undefined ? "" : ` client=${quote(task.spec.client)}`;
-    const counts = `avoid=${task.spec.avoid?.length ?? 0} requires=${task.spec.requires?.length ?? 0} pin=${task.spec.pin === undefined ? 0 : 1}`;
+    const counts = `avoid=${task.spec.avoid?.length ?? 0} requires=${task.spec.requires?.length ?? 0} pin=${task.spec.pin === undefined ? 0 : 1} notBefore=${task.spec.notBefore === undefined ? 0 : 1}`;
     await sink(
       `audit queue origin=leader op=admit task=${quote(task.id)}${client} createdAt=${task.createdAt} state=${task.state} ${counts}`,
     );
@@ -462,7 +481,7 @@ export type EnqueueAuditLine = (
   task: {
     readonly id: string;
     readonly createdAt: number;
-    readonly spec?: { readonly continues?: { readonly task: string } };
+    readonly spec?: { readonly continues?: { readonly task: string }; readonly notBefore?: number };
   },
   outcome: EnqueueOutcome,
 ) => Promise<void>;
@@ -492,8 +511,10 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
     // Only a continuation has one, so every other line is unchanged.
     const continued = task.spec?.continues?.task;
     const continues = continued === undefined ? "" : ` continues=${quote(continued)}`;
+    // A flag, never the time.
+    const deferred = task.spec?.notBefore === undefined ? "" : " notBefore=1";
     await sink(
-      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues} createdAt=${task.createdAt} ${how}`,
+      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues}${deferred} createdAt=${task.createdAt} ${how}`,
     );
   };
 }
@@ -907,6 +928,147 @@ export type MessageAudit = (line: {
   readonly outcome: MessageOutcome;
 }) => Promise<void>;
 
+/** The daemon running an adapter this machine's `config.json` names (`adapter-host.ts`; DESIGN.md, "Adapters"). */
+export type AdapterOrigin = "adapter";
+
+/** What became of a session's message to an adapter. */
+export type AdapterMessageOutcome =
+  | "delivered"
+  | "unknown"
+  | "ended"
+  | "refused"
+  | "too_long"
+  | "rate_limited"
+  | "unbound"
+  | "stopping";
+
+/**
+ * Why an adapter's process went or is held: `exited` on its own, `stopped` with the daemon, `invalid` too many malformed lines, `unread` it stopped
+ * reading its stdin, `handshake` no valid `hello` in time, `spawn` it could not be started, `restarted` the owner's
+ * `seance adapter restart` ended it; `protocol` it speaks no
+ * major this daemon does, `name` its `hello` named another adapter.
+ */
+export type AdapterReason =
+  | "exited"
+  | "stopped"
+  | "invalid"
+  | "unread"
+  | "handshake"
+  | "spawn"
+  | "restarted"
+  | "protocol"
+  | "name";
+
+export interface AdapterAudit {
+  /** A start, with what the argv may say: its word count and `argv[0]`'s basename, never another word. */
+  readonly start: (name: string, argv: readonly string[], pid: number) => Promise<void>;
+  /** The process ended or was ended; `code` its exit code, or the signal's name. */
+  readonly exit: (name: string, code: number | string | null, reason: AdapterReason) => Promise<void>;
+  readonly restart: (name: string, delayMs: number) => Promise<void>;
+  /** Stopped and never restarted: a protocol or name refusal. */
+  readonly refused: (name: string, reason: AdapterReason) => Promise<void>;
+  /** Held after `exits` exits in the window, until the next daemon start or `seance adapter restart`. */
+  readonly failed: (name: string, exits: number) => Promise<void>;
+  readonly stop: (name: string) => Promise<void>;
+  /**
+   * One `deliver` answered, or its later fate (`delivery`): `to` is a task id or the constant `session` or `reply`,
+   * never a conversation or message id; `code` beside `refused` or a listener-less `ended`.
+   */
+  readonly deliver: (
+    name: string,
+    line: {
+      readonly to: string;
+      readonly kind: MessageKind;
+      readonly bytes: number;
+      readonly outcome: AdapterResultOutcome | AdapterDeliveryOutcome;
+      readonly code?: AdapterResultCode;
+    },
+  ) => Promise<void>;
+  /** A session's message to this adapter: its task (null untasked, undefined unbound) and whether it subscribed. */
+  readonly message: (
+    name: string,
+    line: {
+      readonly from: string | null | undefined;
+      readonly kind: MessageKind;
+      readonly bytes: number;
+      readonly outcome: AdapterMessageOutcome;
+      readonly subscribed: boolean;
+    },
+  ) => Promise<void>;
+}
+
+/**
+ * The name (held to `ADAPTER_NAME_PATTERN`, so written bare), a code and a reason for the lifecycle; ids, kind, a byte
+ * count and an outcome for text in and out. Never anything the adapter printed or sent, message text, a `from` label, a
+ * message or conversation id, nor an argv word but `argv[0]`'s basename.
+ */
+export function adapterAudit(sink: AuditSink): AdapterAudit {
+  const origin: AdapterOrigin = "adapter";
+  const emit = async (op: string, name: string, rest = ""): Promise<void> => {
+    await sink(`audit adapter origin=${origin} op=${op} name=${name}${rest === "" ? "" : ` ${rest}`}`);
+  };
+  return {
+    start: (name, argv, pid) =>
+      emit("start", name, `argv=${argv.length} argv0=${quote(basename(argv[0] ?? ""))} pid=${pid}`),
+    exit: (name, code, reason) => emit("exit", name, `code=${code ?? "-"} reason=${reason}`),
+    restart: (name, delayMs) => emit("restart", name, `delay=${delayMs}ms`),
+    refused: (name, reason) => emit("refused", name, `reason=${reason}`),
+    failed: (name, exits) => emit("failed", name, `exits=${exits}`),
+    stop: (name) => emit("stop", name),
+    deliver: (name, line) =>
+      emit(
+        "deliver",
+        name,
+        `dir=in to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes} outcome=${line.outcome}${line.code === undefined ? "" : ` code=${line.code}`}`,
+      ),
+    message: (name, line) => {
+      const from = line.from === undefined ? "-" : line.from === null ? "untasked" : quote(line.from);
+      return emit(
+        "message",
+        name,
+        `dir=out from=${from} kind=${line.kind} bytes=${line.bytes} outcome=${line.outcome} subscribed=${line.subscribed}`,
+      );
+    },
+  };
+}
+
+/**
+ * The owner's `seance adapter add | remove | restart` (`adapter-cli.ts`), under the `cli` origin like every command
+ * typed at this machine: the name, counts and booleans, and `argv[0]`'s basename as the daemon's `op=start` writes it.
+ * Never another argv word, the directory, the commit or anything read from the manifest but its name.
+ */
+export interface AdapterOwnerAudit {
+  readonly add: (
+    name: string,
+    line: {
+      readonly argv: readonly string[];
+      readonly kinds: readonly MessageKind[];
+      readonly repos: number | null;
+      readonly commit: boolean;
+      readonly replaced: boolean;
+    },
+  ) => Promise<void>;
+  readonly remove: (name: string) => Promise<void>;
+  readonly restart: (name: string, outcome: "requested" | "not_running") => Promise<void>;
+}
+
+export function adapterOwnerAudit(sink: AuditSink): AdapterOwnerAudit {
+  const origin: SpawnOrigin = "cli";
+  const emit = async (op: string, name: string, rest = ""): Promise<void> => {
+    await sink(`audit adapter origin=${origin} op=${op} name=${name}${rest === "" ? "" : ` ${rest}`}`);
+  };
+  return {
+    add: (name, line) =>
+      emit(
+        "add",
+        name,
+        `argv=${line.argv.length} argv0=${quote(basename(line.argv[0] ?? ""))} kinds=${line.kinds.join(",")} repos=${line.repos ?? "all"} commit=${line.commit} replaced=${line.replaced}`,
+      ),
+    remove: (name) => emit("remove", name),
+    restart: (name, outcome) => emit("restart", name, `outcome=${outcome}`),
+  };
+}
+
 /** Ids, kind and a byte count, never text, a title, a message id or a pane. */
 export function messageAudit(sink: AuditSink): MessageAudit {
   const origin: MessageOrigin = "message";
@@ -921,6 +1083,47 @@ export function messageAudit(sink: AuditSink): MessageAudit {
             : "custodian";
     await sink(
       `audit message origin=${origin} dir=${line.dir} from=${from} to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes ?? "-"} outcome=${line.outcome}`,
+    );
+  };
+}
+
+export type WatchOrigin = "watch";
+
+/** Why a watch left the table (`watches.ts`), the closed set `op=end` writes. */
+export type WatchEndReason =
+  | "terminal"
+  | "unreadable"
+  | "session"
+  | "task"
+  | "ended"
+  | "expired"
+  | "invalid"
+  | "replaced"
+  | "nolistener"
+  | "dropped"
+  | "restart";
+
+export interface WatchAuditLine {
+  readonly op: "add" | "remove" | "event" | "end";
+  readonly kind?: "pr" | "run";
+  /** A note's kind: a `watch-event` body's, or `no_leader`, `expired`, `invalid`, `fleet_full`. */
+  readonly event?: WatchNoteBody["kind"];
+  readonly reason?: WatchEndReason;
+  /** `ok` or a refusal's code for an add or remove; `delivered` or `sent` for a note. */
+  readonly outcome?: WatchReplyCode | "ok" | "delivered" | "sent";
+}
+
+export type WatchAudit = (line: WatchAuditLine) => Promise<void>;
+
+/**
+ * A watch's lifecycle (DESIGN.md, "Watches"): every value is from a closed set above, so there is nothing to quote and
+ * nothing user-supplied to leak. Never a URL, owner, repo, number, head, check name or watch id.
+ */
+export function watchAudit(sink: AuditSink): WatchAudit {
+  const origin: WatchOrigin = "watch";
+  return async (line) => {
+    await sink(
+      `audit watch origin=${origin} op=${line.op} kind=${line.kind ?? "-"} event=${line.event ?? "-"} reason=${line.reason ?? "-"} outcome=${line.outcome ?? "-"}`,
     );
   };
 }

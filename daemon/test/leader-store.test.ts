@@ -82,6 +82,7 @@ const noLocalOps: LocalOps = {
   passClose: () => Promise.reject(new Error("unexpected local pass-close")),
   deliverMessage: () => Promise.reject(new Error("unexpected local deliver-message")),
   messageReceipt: () => Promise.reject(new Error("unexpected local message-receipt")),
+  watchEvent: () => Promise.reject(new Error("unexpected local watch-event")),
 };
 
 /**
@@ -619,6 +620,38 @@ describe("leader in the daemon", () => {
       const opened = await openTaskRecord(key, { key: "task:x", version: held.version, env: held.env }, Date.now());
       expect(opened).toMatchObject({ version: 2, task: { id: "x", state: "ready" } });
       expect(held.env.from).toBe(SCHEDULER_ID);
+    } finally {
+      await daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("an app's create wearing an owner's label and a scheduler key is read without them, and the leader's next write seals none", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { daemon, deviceId } = await startLeaderDaemon(relay, undefined);
+    try {
+      relay.lead(deviceId, 1);
+      await daemon.leader.settled();
+      await pollUntil(() => relay.storeRecords().has("settings:main"), "the settings record");
+      const tagged = task("x", {
+        spec: {
+          repo: "github.com/acme/app",
+          mode: "worktree",
+          tags: { "creator.ref": "linear:ENG-1", "owner.label": "forged", "owner.other": "x", "scheduler.k": "y" },
+        },
+      });
+      expect(relay.appWrite("task:x", await sealTaskRecord(key, APP_ID, { version: 1, task: tagged }))).toEqual({
+        ok: true,
+        version: 1,
+      });
+      await pollUntil(() => relay.storeRecords().get("task:x")?.version === 2, "the leader to write the admit");
+      const held = relay.storeRecords().get("task:x");
+      if (held === undefined) throw new Error("no record");
+      const opened = await openTaskRecord(key, { key: "task:x", version: held.version, env: held.env }, Date.now());
+      if (typeof opened === "string") throw new Error(`the leader's write is unreadable: ${opened}`);
+      expect(opened).toMatchObject({ version: 2, task: { state: "ready" } });
+      // `toMatchObject` would let the forged keys through: the whole map is what is checked.
+      expect(opened.task.spec.tags).toEqual({ "creator.ref": "linear:ENG-1" });
     } finally {
       await daemon.stop();
       relay.stop();

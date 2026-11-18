@@ -45,10 +45,19 @@ import { peerPidSupported } from "./peer.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
+import { graphqlResetOf, startGithubRate, type GithubRateOpts } from "./github-rate.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
-import { startCapabilities, type CustodianHost } from "./run-capabilities.ts";
+import { createLeadFallback } from "./lead-fallback.ts";
+import {
+  adaptersSettled,
+  paneActivitySettled,
+  startCapabilities,
+  subscriptionsSettled,
+  watchesSettled,
+  type CustodianHost,
+} from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { checkoutRoot, readSource } from "./selfsource.ts";
@@ -135,6 +144,12 @@ export interface RunOpts {
    * child by surprise; main.ts passes `{}`. `keychain` defaults to the config's `authHealth.keychain`.
    */
   readonly authHealth?: Partial<Omit<AuthHealthDeps, "scan" | "home">>;
+  /**
+   * Enables the GitHub budget reader (`github-rate.ts`): this machine's own `gh`'s rate limits, read on a timer, in
+   * the status's `gh`. Off unless supplied, as `authHealth` is — tests must not run the developer's `gh` by surprise;
+   * main.ts passes `{}`.
+   */
+  readonly githubRate?: GithubRateOpts;
   /**
    * Enables the custodian seat's side of this process (`custodian-seat.ts`): with a `custodian` key in the config it
    * advertises the capability and starts rounds, and without one it closes any round a seat left. Off unless supplied, as `authHealth` is — a test daemon must never start a real round in a developer's
@@ -332,6 +347,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           scan: () => exclaveScan,
           home,
         });
+  const githubRate = opts.githubRate === undefined ? null : startGithubRate(opts.githubRate);
+  if (githubRate !== null) void githubRate.readNow();
   const traitProbes = hasProbe(config.traits)
     ? createTraitProbes({
         // Late-bound, as auth health's: the status loop is built after this.
@@ -369,6 +386,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.continueSession,
         CAPABILITIES.continueHandoff,
         CAPABILITIES.runNow,
+        CAPABILITIES.runNowPaused,
         CAPABILITIES.attachments,
         CAPABILITIES.traits,
         CAPABILITIES.successor,
@@ -383,6 +401,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.softClose,
         // Unconditional: any daemon may lead, and receiving a forward binds no peer (the leader checks `messages` too).
         CAPABILITIES.messageRoute,
+        // Unconditional: any daemon may lead and poll watches, and keeps the table of its own sessions' watches
+        // (`watches.ts`: the `watch` frame, the set it states to the leader, the notes it places for a `watch-event`).
+        // It was advertised from step 2, before the frame existed: a daemon of that build closes a `watch` frame as
+        // malformed, which a client reads as `unsupported` (DESIGN.md, "Watches").
+        CAPABILITIES.watches,
+        // Unconditional: any daemon may lead, and any takes `SpawnRequest.ref` (display text, noted in its ledger).
+        CAPABILITIES.taskTags,
         // A host that cannot name a socket's peer, or whose binding fails its probe, refuses every inbox listener,
         // so it could not receive.
         // `messageReply` beside it: the handle tables and the untasked ack bind by the same peer pid, and one gate
@@ -395,6 +420,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
         ...(custodianOn ? [CAPABILITIES.custodian] : []),
+        // Unconditional: session events always run, and a host whose frames cannot bind verifies no conversation,
+        // which is all the PWA offers a rename for.
+        CAPABILITIES.sessionTag,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
@@ -508,11 +536,32 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
   // And the leader's forwarded messages and receipts: the messaging that serves them starts with session events.
   const routedMessages: { current?: NonNullable<HandlerContext["messages"]> } = {};
+  // And the leader's `watch-event`: the watch table that places its notes starts with session events as well.
+  const routedWatches: { current?: NonNullable<HandlerContext["watches"]> } = {};
+  // And the session tags an app's `sessions` carries: the table that holds them starts with session events too.
+  const sessionTags: {
+    current?: NonNullable<HandlerContext["conversations"]> & {
+      readonly label: NonNullable<HandlerContext["sessionTag"]>;
+    };
+  } = {};
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
   // A `now` landing before the wiring is replayed there, since `start()` asks without it.
   const drainAsk = createLateDrainAsk();
   // §12's time to empty, fed by the status loop's own sessions read below.
   const drainEmpty = createDrainEmptyWatch({ now });
+  // §6's "Later": closed and empty, it leads only while no other nominee can. `client` is declared below; a change
+  // can only come from a sessions read, which the status loop starts once the client has registered.
+  const leadFallback = createLeadFallback({
+    launching: () => endedTasks.launching,
+    changed: (active, cl): void => {
+      log.info(
+        active
+          ? `scheduler: closed and empty (cl=${cl}), registering as a fallback leader`
+          : `scheduler: no longer closed at cl=${cl}, claiming the scheduler role plainly`,
+      );
+      void client.reRegister();
+    },
+  });
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
   // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
   let setting: Promise<unknown> = Promise.resolve();
@@ -539,7 +588,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         const result = await setOpen(open, mode);
         const d = drainingOf(state);
         if (!open && mode !== "soft" && d !== null) drainAsk.drain(d.cl, mode === "now");
-        else if (open && result.outcome === "reopened") drainAsk.reopened();
+        else if (open && result.outcome === "reopened") {
+          drainAsk.reopened();
+          // At once, not at the next sessions read (a refresh waits out the status floor).
+          leadFallback.observe(null, 0);
+        }
         return result;
       });
       setting = run.catch(() => {});
@@ -610,6 +663,18 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         routedMessages.current?.receipt(request) ??
         Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no messaging" }),
     },
+    watches: {
+      onEvent: (request) =>
+        routedWatches.current?.onEvent(request) ??
+        Promise.resolve({ ok: false, code: "unsupported", message: "this daemon keeps no watches" }),
+    },
+    conversations: {
+      sweep: () => sessionTags.current?.sweep() ?? Promise.resolve(),
+      tagsFor: (pane) => sessionTags.current?.tagsFor(pane),
+    },
+    // Advertised from register on, so before the table starts it is a retryable failure (`internal_error`), not "unsupported".
+    sessionTag: (pane, id, value) =>
+      sessionTags.current?.label(pane, id, value) ?? Promise.reject(new Error("session events have not started")),
     backend: opts.backend ?? createBackend(config, { home }),
     getRepos: () => state.repos,
     rescan,
@@ -642,7 +707,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sessions: watchedSessions(
         () => handlerCtx.backend.sessions(state.repos),
         () => closedOf(state),
-        drainEmpty,
+        {
+          observe: (cl, panes) => {
+            drainEmpty.observe(cl, panes);
+            leadFallback.observe(cl, panes);
+          },
+        },
       ),
       now,
       httpFetch,
@@ -651,6 +721,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       drainAt: () => drainingOf(state)?.drainAt ?? null,
       custodian: () => custodianSeat.status?.(now()) ?? null,
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
+      ...(githubRate === null ? {} : { github: () => githubRate.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
@@ -695,7 +766,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     httpFetch,
     // The relay's own origin: a contact the push services can show, and no person's address.
     pushSubject: `https://${new URL(config.relayUrl).host}`,
-    prStatus: opts.leader?.prStatus ?? {},
+    prStatus: {
+      // The machine's own budget reading, never a second one: a limited poll's reset when no in-query one is ahead.
+      ...(githubRate === null ? {} : { graphqlReset: () => graphqlResetOf(githubRate.view()) }),
+      ...opts.leader?.prStatus,
+    },
   });
 
   // Over this daemon's own socket, which `quota:` needs registered, not fenced.
@@ -716,6 +791,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     identity,
     key,
     buildInfo,
+    fallback: leadFallback.active,
     handle: createHandler(handlerCtx),
     onLead: (term) => leader.lead(term),
     onFollow: () => leader.follow("the relay moved the role elsewhere"),
@@ -809,6 +885,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     resolved,
     key,
     deviceId: state.deviceId,
+    instance,
     client,
     leader,
     backend: handlerCtx.backend,
@@ -856,6 +933,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   passClose.arm = capabilities.armPassClose;
   routedMessages.current = capabilities.messages;
+  routedWatches.current = capabilities.watches;
+  sessionTags.current = capabilities.conversations;
   if (capabilities.custodianPoke !== undefined) custodianSeat.poke = capabilities.custodianPoke;
   if (capabilities.custodianHost !== undefined) custodianSeat.host = capabilities.custodianHost;
   custodianSeat.status = capabilities.custodianStatus;
@@ -864,6 +943,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
   const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local"), ...capabilities.local });
+  if (!stopped) capabilities.afterLocal();
 
   return {
     client,
@@ -872,6 +952,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       stopped = true;
       stopGateWatch();
       status.stop();
+      githubRate?.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();
       capabilities.stop();
@@ -896,6 +977,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         if (tail !== saving) await drain();
       };
       await drain();
+      // The custodian's seat released the tracker above, which wrote at once whatever was waiting out its delay.
+      await paneActivitySettled();
+      await adaptersSettled();
+      // A restart's reload reads `watches.json`: this process's last writes land first.
+      await watchesSettled();
+      // After the adapters and watches, whose last acts can still change a subscription.
+      await subscriptionsSettled();
       await runtime;
     },
     updater,

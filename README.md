@@ -364,6 +364,14 @@ address, so it is reached only as a reply: it sends a question to a task, and th
 (`inReplyTo`, no `to`), on this machine or another, for an hour, and the answer wakes the session. Allow the tool in
 the exclave the same way, or a send stops at a permission prompt.
 
+`watch_github` (`mcp__seance__watch_github`) lets a session wait on a GitHub pull request or Actions run without
+polling: the scheduler leader reads it in its batched poll, and a note in the session's inbox wakes it when checks pass
+or fail, a conflict appears, the PR is merged or closed, or the run completes. The session ends its turn after the call;
+a watch lasts until the PR is merged or closed or the run completes, its session ends, or 24 h pass, and `unwatch_github` (`mcp__seance__unwatch_github`) stops
+one early. It needs the **inbox** mod in the session's Claude account, and this machine's daemon and the scheduler's
+leader on a build that keeps watches; otherwise it refuses and says how to wait with `gh` instead. Allow both tools in
+the exclave the same way.
+
 ### 7. Optional: spawn from Raycast (macOS)
 
 On a Mac with [Raycast](https://raycast.com) installed:
@@ -404,7 +412,9 @@ place from the checkout, so a `git pull` reaches new sessions with nothing re-ru
 `mcp install`, it reaches every Claude config directory: plugins are per config
 directory, so install, uninstall and doctor run once per exclave (`~/.claude`
 plus each `~/.claude-<name>` listed in `~/.exclaves`), skipping any not set up yet.
-An exclave created later needs `seance mod install` run again.
+An exclave created later needs `seance mod install` run again. Run it from the clone the daemon runs
+from: an install from another clone would repoint every exclave's mods at that clone, so it is refused
+while a daemon runs elsewhere.
 
 The same command installs **session-events**. It tells this machine's daemon what
 each session is doing (busy, idle, waiting on you, ended) and the PR it opened, which
@@ -413,6 +423,14 @@ signed-in account's own cached reading with a `claude -p /usage` run once it is 
 minutes old, checking every minute and whenever a session there reports. It runs this
 checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs no
 `seance link`. A session started outside tmux reports nothing.
+
+Beside the mods it writes a few **settings hooks** into each config directory's
+`settings.json` (`SessionStart`, `Stop`, `StopFailure`, `Elicitation`,
+`ElicitationResult`), running the same command with `--hook`. They fill gaps the mod can't
+see: a fresh session's idle, an MCP server asking you something, and what a turn left
+running when it ended. That last one lets the Queue screen say an idle task is "waiting on
+its background work (1 shell)", such as a CI watch, rather than just sitting at its prompt.
+Only séance's own entries are touched, and `seance mod uninstall` removes them.
 
 It also installs **inbox**, which delivers messages other Séance sessions send to
 this one (`send_message`: a note, a question or a request, addressed by task id, or an answer to something this
@@ -611,8 +629,8 @@ with `machine` the observing daemon's device id and, on quota metrics, `account`
 rolled up from its own samples, and `pull_marks` (`machine`, `step`, `series`, `ts`) is
 the newest point pulled per machine, tier and series. Metrics
 are `cpu_pct`, `mem_pct`, `disk_pct`, `disk_free_mib`, `disk_read_kibs`,
-`disk_write_kibs`, `sessions`, `quota_5h_pct`, `quota_7d_pct`, `quota_7d_model_pct` and
-`quota_credits_pct`.
+`disk_write_kibs`, `sessions`, `quota_5h_pct`, `quota_7d_pct`, `quota_7d_model_pct`,
+`quota_credits_pct` and `github_used_pct` (label `resource`: `core` or `graphql`).
 
 ```sql
 -- Finished tasks per repo and outcome, last 30 days
@@ -639,6 +657,49 @@ The `file:` URI's `?mode=ro` keeps the attached file read-only on its own, whate
 the connection it is attached to was opened with. Run the queries as `archivist` or
 root; the archivist's user is the files' only reader.
 
+### 10. Optional: an adapter for a tool
+
+An adapter is a program, in a repository of its own, that bridges this machine's
+sessions and an outside tool (a chat, a hosted workspace, a notifier): the tool sees
+the sessions and their tasks, and can put notes and questions into them. Séance never
+names a tool; the adapter is the one piece that knows both (DESIGN.md "Adapters" is the
+record). Each machine runs its own, set up on its own:
+
+```bash
+git clone <adapter repo> ~/src/seance-<tool>   # anywhere you keep code
+(cd ~/src/seance-<tool> && bun install)         # plus the tool's own login or key, as its README says
+seance adapter add ~/src/seance-<tool>          # reads its seance-adapter.json, writes adapters.<name> in config.json
+seance adapter status                           # a running daemon reloads config.json and starts it; shows protocol, counts, last exit
+```
+
+**An adapter runs as you, with everything you can reach.** Séance cannot contain it: it
+can read `state.json`, your keychain where it is unlocked and every worktree, and drive
+tmux. Installing one trusts its code as much as an MCP server or a Claude Code plugin
+you install. What séance bounds is what it grants: the adapter sees no prompt,
+attachment, session-to-session message, account id or key; it can deliver only through
+the `inbox` mod, within its `kinds` and rate limits; and nothing it sends is logged. It
+also means:
+
+- **The tool becomes a source of prompt text for every session on the machine.**
+  Anyone who can write into the tool can put a note or a question in a session. A
+  request (act on this) is off unless you add it: `--kinds note,question,request`.
+  `--repo <name>` (repeatable) limits which sessions and tasks it sees and reaches.
+- **What the adapter sees goes to the tool's server**: titles, repos, branches, PR
+  URLs, states, and the text of messages sessions send it. Prompts never do.
+- **A session that messages the adapter subscribes to it**, and the tool can reach that
+  conversation until the session leaves (`send_message` with `leave`), 30 days pass
+  without it running, or the adapter is added again or removed.
+
+`add` records the checkout's commit, and `seance doctor` warns when the checkout has
+moved since: a pulled update is new code running at the next start, so review it and run
+`add` again. A self-update never pulls or rebuilds an adapter. `seance adapter restart
+[<name>]` restarts a running one, and lifts one held after crashing five times in ten
+minutes; `seance adapter remove <name>` takes it out of `config.json` (its own data
+under `~/.local/state/seance/adapters/<name>` stays for you to delete). An adapter's
+contract is a process, newline-delimited JSON on stdin and stdout, and the schema in
+`shared/src/adapter-protocol.schema.json`; `daemon/test/bin/reference-adapter.ts` is the
+template a new one starts from.
+
 ## Usage
 
 ### From the phone
@@ -650,7 +711,10 @@ authoring ones below. **Fresh worktree** is the switch under the repository list
 tile shows a `worktree` tag while it is; off runs the session in the repo as it stands). The form remembers
 the choice per repository, so picking one again brings back what you last chose there. Then queue it — or, from the chevron beside **Queue**,
 **Start now**, which queues it and asks the scheduler to place it at once, past its
-session limit (shown only while the scheduler's leader supports it).
+session limit and a paused queue (shown only while the scheduler's leader supports it; a paused
+account still holds it). The **Not before** tile holds the task back until a time: in 1 or 2 hours,
+tonight (21:00), tomorrow morning (08:00) or a picked date-time. The Queue shows it as waiting
+until that time, and Start now is not offered beside it (it skips the wait from the Queue's card).
 
 A running task's card menu has **Pass to successor**: it pushes the task's branch, ends its
 session and queues a new task that picks the work up (two taps; shown only while the scheduler's
@@ -732,7 +796,9 @@ reading per account, the build its daemon runs, and history charts drawn from ea
 daemon's own store — an asleep machine's history waits until it wakes. Its header
 names who leads the scheduler and under which term, or says no machine does; the
 leader's card carries a **Scheduler** badge, or **Unverified** while its claim to lead
-doesn't check out with your key.
+doesn't check out with your key. Each card lists the machine's sessions by name, and a
+session's **Tags** fold out to show every tag on it by namespace, with who wrote it, its
+scope and its age.
 
 <p align="center">
   <img src="docs/images/machine-sheet.png" width="260"
@@ -752,24 +818,27 @@ seance spawn --account work --not here seance -p "rerun the slow suite"
 #   pinned to an account (alias, email or id) and kept off this machine
 seance spawn --requires atlas seance -p "regenerate the atlas index"
 #   runs only where an exclave declares the trait atlas (repeat --requires for more, up to four)
+seance spawn --in 2h seance -p "run the slow suite"
+#   not placed before 2 hours from now (--at 21:30 or --at 2026-11-18T21:30, local time unless it ends in Z or an offset, instead; one of the two; Start now skips the wait)
 seance spawn --autonomy steer seance -p "plan the queue rewrite"
 #   starts in plan mode and waits for approval; auto decides reversible choices itself
 seance spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seance spawn --now seance --here   # run in the checkout as it stands, no worktree
 seance spawn --start seance -p "fix the flaky spawn test"
-#   queued, then started as soon as the scheduler admits it, past its session limit (the app's Start now)
-seance start 3f2a…           # start a task already waiting in the queue now, past the session limit
+#   queued, then started as soon as the scheduler admits it, past its session limit and a paused queue (the app's Start now)
+seance start 3f2a…           # start a task already waiting in the queue now, past the session limit and a paused queue
 seance continue 3f2a…        # resume a failed (e.g. OOM-killed), cancelled or blocked-awaiting-merge task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seance pass 3f2a…            # push a running task's branch, end its session and hand the work to a new task (a successor) on a fresh account's budget
 seance close [machine] [--drain] [--now] [--wait]  # stop the scheduler placing new work on a machine (default: this one). Soft by default where the machine and the scheduler support it: running tasks keep going until they finish (--wait blocks until they have, and a task idle at its prompt never finishes: once only idle or waiting ones are left it says so, once, and points to --drain). --drain (or a daemon or scheduler too old for the soft close) also drains it, on a fresh or an already-closed machine: its daemon asks each running session to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes (--now, which implies --drain: at once; refused for a daemon that does not ask yet, `seance update` it); a leader that supports it passes what is left to other machines after 10 minutes unless it reopens (--wait blocks until it is empty, exit 2 when only work that can't move is left); otherwise running sessions finish where they are. Over the relay as app-role, so a keyless box refuses: use the PWA
 seance open [machine]        # reopen it
-seance amend 3f2a… "also cover the Windows path"   # add to a waiting task's prompt (--replace to replace it; --title, --model, --effort; --title "" or --model/--effort default clears)
+seance amend 3f2a… "also cover the Windows path"   # add to a waiting task's prompt (--replace to replace it; --title, --model, --effort; --title "" or --model/--effort default clears; --at, --in or --not-before none for the not-before time)
 seance sessions              # running claude windows: id, window, repo, path
 seance despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seance reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
 seance status                # this machine: service, relay, repo count, running vs on-disk sha
 seance doctor                # preflight config, binaries, roots, relay, service
+seance adapter status        # this machine's adapters: running, protocol, counts, last exit (setup step 10)
 seance help                  # every command
 ```
 
@@ -835,7 +904,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seance mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the session limit — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; the close is soft where the machine and the scheduler support it, leaving running tasks to finish, and `drain` also moves them off it, on a fresh or an already-closed machine; `now`, which implies `drain`, skips the 5-minute wait before its sessions are interrupted to pass themselves; `list_machines` shows when one was closed and, under a leader that passes its tasks on, whether it is draining and how that is going, or what still runs there), `set_account_open` (close an account to new scheduled work on every machine, or reopen it; its running sessions keep going), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`, or messaging another session's task (on this machine or, through the scheduler, another; a note, a question or a request; the receiver reads long ones with the inbox mod's `read_messages`), or answering a message by its id, which is how a session with no task is reached, `send_message`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the session limit and a paused queue — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; the close is soft where the machine and the scheduler support it, leaving running tasks to finish, and `drain` also moves them off it, on a fresh or an already-closed machine; `now`, which implies `drain`, skips the 5-minute wait before its sessions are interrupted to pass themselves; `list_machines` shows when one was closed and, under a leader that passes its tasks on, whether it is draining and how that is going, or what still runs there), `set_account_open` (close an account to new scheduled work on every machine, or reopen it; its running sessions keep going), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model, effort or not-before time — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`, or messaging another session's task (on this machine or, through the scheduler, another; a note, a question or a request; the receiver reads long ones with the inbox mod's `read_messages`), or answering a message by its id, which is how a session with no task is reached, `send_message`, or waiting on a GitHub PR or Actions run until a note wakes it, `watch_github` (and `unwatch_github` to stop). The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers

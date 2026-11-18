@@ -20,6 +20,8 @@ export type PauseResult =
 interface Held {
   readonly version: number;
   readonly holds: readonly PauseHold[];
+  /** The whole-queue hold stands in for a record that could not be read: no person's pause, so nobody's to lift. */
+  readonly unread?: true;
 }
 
 /** A reset hold lifts at its `resumeAt` with no write; a resume hold waits for a `resume`. */
@@ -90,6 +92,11 @@ export class PauseRecord {
     return this.#held.holds;
   }
 
+  /** Whether the holds are the fail-closed stand-in for an unreadable record (`#of`); a write ends it. */
+  get unread(): boolean {
+    return this.#held.unread === true;
+  }
+
   /** The holds in force now: a reset hold past its `resumeAt` has lifted, written or not. */
   active(): readonly PauseHold[] {
     return activeHolds(this.#held.holds, this.#now());
@@ -148,6 +155,6 @@ export class PauseRecord {
     this.#onError(
       new Error(`${PAUSE_KEY} is unreadable (${read.reason}): the whole queue is held until a resume overwrites it`),
     );
-    return { version: read.version, holds: [{ until: "resume", at: this.#now() }] };
+    return { version: read.version, holds: [{ until: "resume", at: this.#now() }], unread: true };
   }
 }

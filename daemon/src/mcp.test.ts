@@ -50,7 +50,10 @@ import {
   ACCOUNT_LABEL_DEADLINE_MS,
   type LocalMachine,
   type PassPoll,
+  type WatchClient,
+  watchGate,
 } from "./mcp.ts";
+import type { WatchGate } from "./watch-github.ts";
 
 interface FakeLocal extends LocalMachine {
   requests: { op: RequestOp; payload: unknown }[];
@@ -87,6 +90,7 @@ async function connectedClient(
   passPoll?: PassPoll,
   sendMsg?: typeof sendMessage,
   ownPane: () => string | undefined = () => undefined,
+  watchClient?: WatchClient,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -98,9 +102,11 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane), {
-    transport: serverTransport,
-  });
+  serveStdio(
+    () =>
+      buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane, watchClient),
+    { transport: serverTransport },
+  );
   await client.connect(clientTransport);
   return client;
 }
@@ -1362,7 +1368,9 @@ describe("spawn_session on auto", () => {
       [{ autonomy: "auto", promt: "typo" }, 'Unrecognized key: "promt"'],
       [{ pin: { machine: "Linux Box", acount: "work" } }, 'pin: Unrecognized key: "acount"'],
       [{ after: [{ task: PRED, wehn: "merged" }] }, 'after.0: Unrecognized key: "wehn"'],
-      [{ linear: { issue: "ENG-1", title: "x" } }, 'linear: Unrecognized key: "title"'],
+      // The Linear field `ref` replaced: refused, never stripped into a task with no link.
+      [{ linear: { issue: "ENG-1" } }, 'Unrecognized key: "linear"'],
+      [{ ref: { ref: "linear:ENG-1" } }, "expected string"],
     ];
     for (const [extra, text] of cases) {
       // oxlint-disable-next-line no-await-in-loop -- one call each
@@ -1579,6 +1587,12 @@ function reportingMachines(): Machine[] {
   return [machine({ ...leader, capabilities: [CAPABILITIES.reportedDone] }), ...rest];
 }
 
+/** A leader that reports and takes task tags. */
+function taggingMachines(): Machine[] {
+  const [leader, ...rest] = autoMachines();
+  return [machine({ ...leader, capabilities: [CAPABILITIES.reportedDone, CAPABILITIES.taskTags] }), ...rest];
+}
+
 async function callTool(
   fake: ReturnType<typeof fakeRelay>,
   name: string,
@@ -1598,12 +1612,13 @@ async function callTool(
 const PRED = "3f1c2b7e-9d4a-4c1e-8a55-0b6f2d9e7a10";
 
 describe("spawn_session on auto, authoring fields", () => {
-  test("after, until and linear reach the stored record; reported appends the instruction to the prompt", async () => {
-    const fake = leaderRelay([], reportingMachines());
+  test("after, until and ref reach the stored record; reported appends the instruction to the prompt", async () => {
+    const fake = leaderRelay([], taggingMachines());
     const { error } = await callAuto(fake, {
       after: [{ task: PRED }, { task: PRED, when: "done" }],
       until: "reported",
-      linear: { issue: "ENG-123", url: "https://linear.app/pengefix/issue/ENG-123" },
+      ref: "linear:ENG-123",
+      ref_url: "https://linear.app/pengefix/issue/ENG-123",
     });
     expect(error).toBe(false);
     expect(fake.creates[0]?.spec).toEqual({
@@ -1616,30 +1631,43 @@ describe("spawn_session on auto, authoring fields", () => {
         { task: PRED, after: "done" },
       ],
       until: "reported",
-      linear: { issue: "ENG-123", url: "https://linear.app/pengefix/issue/ENG-123" },
+      tags: { "creator.ref": "linear:ENG-123", "creator.ref-url": "https://linear.app/pengefix/issue/ENG-123" },
     } satisfies TaskSpec);
   });
 
-  test("the default until is not written, and an empty linear url is left off", async () => {
-    const fake = leaderRelay();
-    const { error } = await callAuto(fake, { until: "merged", linear: { issue: "ENG-1", url: "" } });
+  test("the default until is not written, and an empty ref url is left off", async () => {
+    const fake = leaderRelay([], taggingMachines());
+    const { error } = await callAuto(fake, { until: "merged", ref: "linear:ENG-1", ref_url: "" });
     expect(error).toBe(false);
     expect(fake.creates[0]?.spec).toEqual({
       repo: ORIGIN,
       mode: "worktree",
       prompt: "fix it",
       client: "mcp",
-      linear: { issue: "ENG-1" },
+      tags: { "creator.ref": "linear:ENG-1" },
     } satisfies TaskSpec);
   });
 
-  test("a Linear issue is trimmed as the PWA trims it, and a blank one is refused", async () => {
-    const fake = leaderRelay();
-    expect((await callAuto(fake, { linear: { issue: "  ENG-7 " } })).error).toBe(false);
-    expect(fake.creates[0]?.spec.linear).toEqual({ issue: "ENG-7" });
-    const blank = await callAuto(fake, { linear: { issue: "   " } });
-    expect(blank.error).toBe(true);
-    expect(blank.text).toContain("linear.issue is empty");
+  test("a ref is trimmed, a blank one is none, and a url with no ref is refused", async () => {
+    const fake = leaderRelay([], taggingMachines());
+    expect((await callAuto(fake, { ref: "  linear:ENG-7 " })).error).toBe(false);
+    expect(fake.creates[0]?.spec.tags).toEqual({ "creator.ref": "linear:ENG-7" });
+    expect((await callAuto(fake, { ref: "   " })).error).toBe(false);
+    expect(fake.creates[1]?.spec).not.toHaveProperty("tags");
+    const orphan = await callAuto(fake, { ref_url: "https://linear.app/x/issue/ENG-1" });
+    expect(orphan.error).toBe(true);
+    expect(orphan.text).toContain("ref_url needs ref");
+    expect(fake.creates).toHaveLength(2);
+  });
+
+  test("a leader that does not take task tags refuses a ref, by field, and a spawn with none still queues", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const refused = await callAuto(fake, { ref: "linear:ENG-1" });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("does not take task tags yet");
+    expect(refused.text).toContain("retry without ref");
+    expect(fake.creates).toEqual([]);
+    expect((await callAuto(fake, {})).error).toBe(false);
     expect(fake.creates).toHaveLength(1);
   });
 
@@ -1648,9 +1676,10 @@ describe("spawn_session on auto, authoring fields", () => {
     const cases: [Record<string, unknown>, string][] = [
       [{ after: [{ task: "not an id" }] }, 'after: "not an id" is not a task id from get_queue'],
       [{ after: Array.from({ length: 17 }, () => ({ task: PRED })) }, "expected array to have <=16 items"],
-      [{ linear: { issue: "" } }, "linear.issue is empty"],
-      [{ linear: { issue: "E".repeat(65) } }, "linear.issue is 65 characters; at most 64"],
-      [{ linear: { issue: "ENG-1", url: "http://linear.app/x" } }, "linear.url must be an https: URL"],
+      [{ ref: "ENG-1" }, "ref must be source:id"],
+      [{ ref: "linear:" + "E".repeat(65) }, "ref must be source:id"],
+      [{ ref: "linear:ENG-1", ref_url: "http://linear.app/x" }, "ref_url an https: URL"],
+      [{ ref_url: "https://linear.app/x" }, "ref_url needs ref"],
       [{ until: "reported", prompt: "" }, 'until "reported" needs a prompt'],
     ];
     for (const [extra, text] of cases) {
@@ -1769,7 +1798,7 @@ function pinRelay(): FakeRelay {
 function reportingPinRelay(machines: readonly Machine[] = pinMachines()): FakeRelay {
   const withCaps = machines.map((m) =>
     m.deviceId === "device-thad"
-      ? machine({ ...m, capabilities: [CAPABILITIES.pinAccount, CAPABILITIES.reportedDone] })
+      ? machine({ ...m, capabilities: [CAPABILITIES.pinAccount, CAPABILITIES.reportedDone, CAPABILITIES.taskTags] })
       : m,
   );
   const fake = leaderRelay([], withCaps);
@@ -1795,21 +1824,21 @@ describe("spawn_session with a machine", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test("after, until reported and linear reach the record beside a named machine", async () => {
+  test("after, until reported and ref reach the record beside a named machine", async () => {
     const fake = reportingPinRelay();
     const { error } = await callAuto(fake, {
       machine: "wsl",
       repo: "pengefix-hq",
       after: [{ task: PRED }],
       until: "reported",
-      linear: { issue: "ENG-1" },
+      ref: "linear:ENG-1",
     });
     expect(error).toBe(false);
     expect(fake.creates[0]?.spec).toMatchObject({
       pin: { deviceId: "device-wsl" },
       until: "reported",
       deps: [{ task: PRED, after: "opened" }],
-      linear: { issue: "ENG-1" },
+      tags: { "creator.ref": "linear:ENG-1" },
     });
   });
 
@@ -2584,10 +2613,10 @@ describe("queue_batch", () => {
   const member = (extra: Record<string, unknown> = {}) => ({ repo: "seance", prompt: "do it", ...extra });
 
   test("queues the members in order under one batch, resolving refs to the ids it minted", async () => {
-    const fake = leaderRelay([], reportingMachines());
+    const fake = leaderRelay([], taggingMachines());
     const { text, error } = await callTool(fake, "queue_batch", {
       tasks: [
-        member({ ref: "schema", title: "Schema", linear: { issue: "ENG-1" } }),
+        member({ ref: "schema", title: "Schema", external_ref: "linear:ENG-1" }),
         member({ ref: "api", after: [{ ref: "schema" }] }),
         member({ after: [{ ref: "api", when: "merged" }, { task: PRED }] }),
       ],
@@ -2603,7 +2632,8 @@ describe("queue_batch", () => {
       { id: batchId, index: 3 },
     ]);
     expect(first?.spec.deps).toBeUndefined();
-    expect(first?.spec.linear).toEqual({ issue: "ENG-1" });
+    expect(first?.spec.tags).toEqual({ "creator.ref": "linear:ENG-1" });
+    expect(second?.spec).not.toHaveProperty("tags");
     expect(second?.spec.deps).toEqual([{ task: first?.id ?? "", after: "opened" }]);
     expect(third?.spec.deps).toEqual([
       { task: second?.id ?? "", after: "merged" },
@@ -2685,7 +2715,11 @@ describe("queue_batch", () => {
         "task 2: each after entry names exactly one",
       ],
       [[member(), member({ until: "reported", prompt: "" })], 'task 2: until "reported" needs a prompt'],
-      [[member(), member({ linear: { issue: "ENG-1", url: "http://x" } })], "task 2: linear.url must be an https: URL"],
+      [
+        [member(), member({ external_ref: "linear:ENG-1", external_ref_url: "http://x" })],
+        "task 2: external_ref must be source:id",
+      ],
+      [[member(), member({ external_ref_url: "https://x.example/1" })], "task 2: external_ref_url needs external_ref"],
     ];
     for (const [tasks, text] of cases) {
       const fake = leaderRelay([], reportingMachines());
@@ -2696,6 +2730,17 @@ describe("queue_batch", () => {
       expect(fake.creates).toEqual([]);
       expect(fake.started).toBe(0);
     }
+  });
+
+  test("a leader that does not take task tags refuses the batch naming the member that carries one", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { text, error } = await callTool(fake, "queue_batch", {
+      tasks: [member(), member({ external_ref: "linear:ENG-1" })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("task 2 refused: the scheduler's leader does not take task tags yet");
+    expect(text).toContain("retry without external_ref");
+    expect(fake.creates).toEqual([]);
   });
 
   test("an unknown repo on any member refuses the batch before the first create", async () => {
@@ -3082,7 +3127,7 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
-  test("shows a task's dependencies, stack, batch, reported settle and Linear link", async () => {
+  test("shows a task's dependencies, stack, batch, reported settle and ref", async () => {
     const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
@@ -3096,7 +3141,13 @@ describe("get_queue", () => {
               until: "reported",
               batch,
               deps: [{ task: "t-0", after: "done" }],
-              linear: { issue: "ENG-9" },
+              tags: {
+                "creator.ref": "linear:ENG-9",
+                "creator.ref-url": "https://linear.app/x/issue/ENG-9",
+                "creator.secret-note": "SECRET-TAG",
+                "owner.label": "mine",
+                "scheduler.x": "SECRET-SCHED",
+              },
             },
           }),
           task({ id: "t-2", state: "running", merged: true, stack: { task: "t-0", on: "branch" } }),
@@ -3111,8 +3162,12 @@ describe("get_queue", () => {
     expect(tasks[0]).toMatchObject({
       until: "reported",
       after: [{ task: "t-0", when: "done" }],
-      linear: { issue: "ENG-9" },
+      tags: { "creator.ref": "linear:ENG-9", "owner.label": "mine" },
     });
+    // The allowlist alone: no URL, no opaque creator key, no scheduler key, in the serialized answer.
+    const text = JSON.stringify(tasks[0]);
+    for (const hidden of ["ref-url", "linear.app", "SECRET-TAG", "SECRET-SCHED"]) expect(text).not.toContain(hidden);
+    expect(tasks[0]).not.toHaveProperty("linear");
     expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
     // What its worktree started from: the predecessor's branch, or the default branch and why.
@@ -3421,6 +3476,166 @@ describe("send_message", () => {
     } finally {
       stop();
     }
+  });
+});
+
+describe("watch_github and unwatch_github", () => {
+  const PR = "https://github.com/acme/widgets/pull/42";
+  const ID = "5f0c1c1e-8a5f-4d3a-9d6e-0a3f4a2b7c11";
+
+  test("are always offered, and the watch's description says to end the turn, not poll, and what replaces it", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    try {
+      const c = await connectedClient(lazy);
+      const { tools } = await c.listTools();
+      const watch = tools.find((t) => t.name === "watch_github");
+      expect(watch?.annotations?.readOnlyHint).toBe(false);
+      expect(watch?.annotations?.idempotentHint).toBe(false);
+      expect(watch?.description).toContain("end your turn");
+      expect(watch?.description).toContain("Do not poll the same target");
+      expect(watch?.description).toContain("replaces its watch");
+      expect(watch?.description).toContain("after 24 h");
+      expect(watch?.description).toContain("inbox mod");
+      expect(watch?.inputSchema.required).toEqual(["url"]);
+      expect(tools.find((t) => t.name === "unwatch_github")?.inputSchema.required).toEqual(["id"]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("pass their arguments and a gate to the client; a watch is a plain answer and a refusal a tool error", async () => {
+    const adds: unknown[] = [];
+    const gates: WatchGate[] = [];
+    const removes: string[] = [];
+    const client: WatchClient = {
+      add: (request, gate) => {
+        adds.push(request);
+        gates.push(gate);
+        return Promise.resolve(
+          adds.length === 1 ? { ok: true, id: ID, kind: "pr", text: "watching" } : { ok: false, text: "not watched" },
+        );
+      },
+      remove: (id) => {
+        removes.push(id);
+        return Promise.resolve({ ok: false, text: "no such watch" });
+      },
+    };
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    try {
+      const c = await connectedClient(
+        lazy,
+        null,
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        client,
+      );
+      const made = await c.callTool({ name: "watch_github", arguments: { url: PR, head: "a".repeat(40) } });
+      expect(made.isError).not.toBe(true);
+      expect(toolText(made)).toBe("watching");
+      const refused = await c.callTool({ name: "watch_github", arguments: { url: PR } });
+      expect(refused.isError).toBe(true);
+      expect(toolText(refused)).toBe("not watched");
+      expect(adds).toEqual([{ url: PR, head: "a".repeat(40) }, { url: PR }]);
+      // With no daemon state here the tool's gate refuses before it opens the fleet.
+      const gated = await gates[0]?.();
+      expect(gated?.ok).toBe(false);
+      const removed = await c.callTool({ name: "unwatch_github", arguments: { id: ID } });
+      expect(removed.isError).toBe(true);
+      expect(removes).toEqual([ID]);
+      const extra = await c.callTool({ name: "watch_github", arguments: { url: PR, pane: "%1" } });
+      expect(extra.isError).toBe(true);
+      expect(toolText(extra)).toContain("Unrecognized key");
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  describe("watchGate", () => {
+    async function gate(
+      machines: readonly Machine[],
+      leading: boolean,
+      local: LocalMachine | null = fakeLocal(undefined, { deviceId: "device-2" }),
+    ): Promise<Awaited<ReturnType<WatchGate>>> {
+      const fake = fakeRelay(machines, () => new Error("unexpected op"));
+      if (leading) fake.setState({ scheduler: LEADING });
+      const lazy = new LazyRelay({ create: () => fake });
+      try {
+        return await watchGate(relayFleet(lazy), local)();
+      } finally {
+        lazy.stop();
+      }
+    }
+    /** device-1 leads when `leading`; this machine is device-2. */
+    const fleetOf = (leaderWatches: boolean, ownWatches: boolean): Machine[] => {
+      const [leader, box] = autoMachines();
+      return [
+        machine({ ...leader, capabilities: leaderWatches ? [CAPABILITIES.watches] : [] }),
+        machine({ ...box, capabilities: ownWatches ? [CAPABILITIES.watches] : [] }),
+      ];
+    };
+    const refusedWith = async (result: Promise<Awaited<ReturnType<WatchGate>>>, words: string): Promise<void> => {
+      const answer = await result;
+      expect(answer.ok).toBe(false);
+      if (!answer.ok) expect(answer.text).toContain(words);
+    };
+
+    test("passes only when this machine's daemon and the verified leader both advertise watches", async () => {
+      expect(await gate(fleetOf(true, true), true)).toEqual({ ok: true });
+    });
+
+    test("an unverified nominee is refused though its registry entry advertises watches", async () => {
+      const fake = fakeRelay(fleetOf(true, true), () => new Error("unexpected op"));
+      fake.setState({ scheduler: { kind: "unverified", deviceId: "device-1", term: 3 } });
+      const lazy = new LazyRelay({ create: () => fake });
+      try {
+        await refusedWith(
+          watchGate(relayFleet(lazy), fakeLocal(undefined, { deviceId: "device-2" }))(),
+          "no verified scheduler is leading",
+        );
+      } finally {
+        lazy.stop();
+      }
+    });
+
+    test("a leader without the capability is told to update", async () => {
+      await refusedWith(gate(fleetOf(false, true), true), "the scheduler's leader keeps no watches yet");
+    });
+
+    test("no verified leader is its own refusal, whatever the machines advertise", async () => {
+      await refusedWith(gate(fleetOf(true, true), false), "no verified scheduler is leading");
+    });
+
+    test("this machine's daemon must advertise it too, and be in the registry", async () => {
+      await refusedWith(gate(fleetOf(true, false), true), "this machine's daemon keeps no watches yet");
+      await refusedWith(
+        gate(fleetOf(true, true), true, fakeLocal(undefined, { deviceId: "device-9" })),
+        "not in the fleet's registry",
+      );
+    });
+
+    test("no daemon state here refuses without opening the fleet", async () => {
+      const fleet: Fleet = { open: () => Promise.reject(new Error("opened")), stop: () => {} };
+      await refusedWith(watchGate(fleet, null)(), "no daemon state");
+    });
+
+    test("a lease with no scheduler leg (a broker daemon that could not say) cannot confirm a leader", async () => {
+      const fleet: Fleet = {
+        open: () =>
+          Promise.resolve({
+            machines: fleetOf(true, true),
+            request: () => Promise.reject(new Error("unexpected op")),
+            scheduler: null,
+            release: () => {},
+          }),
+        stop: () => {},
+      };
+      await refusedWith(watchGate(fleet, fakeLocal(undefined, { deviceId: "device-2" }))(), "can't confirm");
+    });
   });
 });
 
@@ -3741,6 +3956,94 @@ describe("pass_task", () => {
   });
 });
 
+describe("not_before on spawn_session", () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+
+  test("is stored on the spec and echoed with its offset; the audit line carries a flag, never the time", async () => {
+    const fake = leaderRelay();
+    const { text, error, audited } = await callAuto(fake, { not_before: future });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec.notBefore).toBe(Date.parse(future));
+    expect(text).toMatch(/, not before .*(GMT|UTC)/u);
+    expect(audited).toEqual([
+      `audit enqueue origin=mcp client=mcp task="${fake.creates[0]?.id}" notBefore=1 createdAt=${fake.creates[0]?.createdAt} queued`,
+    ]);
+    expect(audited.join()).not.toContain(future);
+  });
+
+  test("with start, without an offset, malformed or in the past is refused and nothing is stored", async () => {
+    for (const [args, text] of [
+      [{ not_before: future, start: true }, "contradict"],
+      [{ not_before: "2030-01-01T10:00:00" }, "with an offset"],
+      [{ not_before: "tomorrow" }, "with an offset"],
+      [{ not_before: "2020-01-01T10:00:00Z" }, "in the past"],
+    ] as const) {
+      const fake = leaderRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one case at a time keeps each answer readable
+      const result = await callAuto(fake, args);
+      expect(result.error).toBe(true);
+      expect(result.text).toContain(text);
+      expect(fake.creates).toEqual([]);
+    }
+  });
+});
+
+describe("get_queue, not before", () => {
+  test("shows notBefore as ISO 8601 UTC, and nothing for a task without one", async () => {
+    const at = Date.UTC(2030, 0, 2, 3, 4, 5);
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({ id: "t-1", state: "ready", spec: { repo: ORIGIN, mode: "worktree", notBefore: at } }),
+            task({ id: "t-2", state: "ready", spec: { repo: ORIGIN, mode: "worktree" } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      traitMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0].notBefore).toBe("2030-01-02T03:04:05.000Z");
+    expect(tasks[1]).not.toHaveProperty("notBefore");
+    lazy.stop();
+  });
+
+  test("leaves out a waiting task's stale decision while its time is ahead, keeps it after", async () => {
+    const stale = {
+      at: 1_000,
+      chosen: { deviceId: "device-1", exclave: "default", clone: "seance" },
+      candidates: [{ deviceId: "device-1", machine: "m", exclave: "default", rejected: [] }],
+    };
+    const later = Date.now() + 3_600_000;
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({
+              id: "t-1",
+              state: "ready",
+              decision: stale,
+              spec: { repo: ORIGIN, mode: "worktree", notBefore: later },
+            }),
+            task({ id: "t-2", state: "ready", decision, spec: { repo: ORIGIN, mode: "worktree", notBefore: 1_000 } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      traitMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0]).not.toHaveProperty("decision");
+    expect(tasks[1]).toHaveProperty("decision");
+    lazy.stop();
+  });
+});
+
 describe("amend_task", () => {
   const waiting = task({ id: "t-1", state: "queued", spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" } });
 
@@ -3769,6 +4072,13 @@ describe("amend_task", () => {
     }
   }
 
+  test("the owner's tags are not a tool field: amend_task refuses them by name and sends nothing", async () => {
+    const { text, error, fake } = await callAmend({ ownerTags: { label: "x" } }, () => new Error("never asked"));
+    expect(error).toBe(true);
+    expect(text).toContain('Unrecognized key: "ownerTags"');
+    expect(fake.requests).toEqual([]);
+  });
+
   test("an append is sent once, naming the basis of the prompt the store holds, and answers the state", async () => {
     const { text, error, fake } = await callAmend({ append: "also this", title: null }, () => ({
       task: { ...waiting, spec: { ...waiting.spec, prompt: "fix it\n\nalso this" } },
@@ -3787,6 +4097,20 @@ describe("amend_task", () => {
         },
       },
     ]);
+  });
+
+  test("not_before sets a time, or null clears it, with no basis and no store read", async () => {
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const set = await callAmend({ not_before: at }, () => ({ task: waiting }));
+    expect(set.error).toBe(false);
+    expect(set.text).toMatch(/amended \(notBefore\), not before .*(GMT|UTC)/u);
+    expect(set.fake.requests[0]?.payload).toEqual({ taskId: "t-1", notBefore: Date.parse(at) });
+    const cleared = await callAmend({ not_before: null }, () => ({ task: waiting }));
+    expect(cleared.fake.requests[0]?.payload).toEqual({ taskId: "t-1", notBefore: null });
+    expect(cleared.text).toContain("not-before time cleared");
+    const past = await callAmend({ not_before: "2020-01-01T00:00:00Z" }, () => ({ task: waiting }));
+    expect(past.error).toBe(true);
+    expect(past.fake.requests).toEqual([]);
   });
 
   test("a prompt that moved between the read and the send is read again and resent; a lost answer never is", async () => {

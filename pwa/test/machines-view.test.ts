@@ -15,7 +15,7 @@ import {
   type SessionEntry,
   type Task,
 } from "@seance/shared";
-import { accountSeries, chartLines } from "../src/chart.ts";
+import { accountSeries, chartLines, offlineSpans } from "../src/chart.ts";
 import {
   accountDisplayName,
   deriveArchivist,
@@ -913,6 +913,54 @@ describe("chartLines", () => {
   });
 });
 
+describe("offlineSpans", () => {
+  const window = { from: 0, to: 300, step: 30 };
+
+  test("shades a break no gauge measured inside, between the points either side of it", () => {
+    const spans = offlineSpans(
+      [
+        series(METRIC_NAMES.cpu, [
+          [0, 1],
+          [30, 1],
+          [150, 1],
+          [180, 1],
+          [270, 1],
+        ]),
+        // Memory caught a tick cpu missed: no band there, and the 30–150 band narrows to 60–150.
+        series(METRIC_NAMES.mem, [
+          [60, 1],
+          [210, 1],
+          [240, 1],
+        ]),
+      ],
+      window,
+      300,
+    );
+    expect(spans).toEqual([{ x: 60, width: 90 }]);
+  });
+
+  test("no band before the first point, after the last, outside the window or from a quota series", () => {
+    expect(
+      offlineSpans(
+        [
+          series(METRIC_NAMES.cpu, [
+            [-300, 1],
+            [120, 1],
+            [150, 1],
+            [600, 1],
+          ]),
+          series(METRIC_NAMES.h, [
+            [0, 1],
+            [300, 1],
+          ]),
+        ],
+        window,
+        300,
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("accountSeries", () => {
   // A machine with two exclaves signed in as one account reports the same
   // windows twice; the chart draws each window once, labelled by window alone.
@@ -1236,5 +1284,201 @@ describe("the custodian row", () => {
       sending: false,
       roundRequested: false,
     });
+  });
+});
+
+describe("a machine's sessions by name", () => {
+  const conversation = "1a2b3c4d-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+  const tag = (value: string, scope: "conversation" | "process", extra: object = {}) => ({
+    value,
+    at: 1,
+    scope,
+    ...extra,
+  });
+  const verified = { "agent.session": tag(conversation, "conversation", { verified: true }) };
+  const entry = (id: string, fields: Partial<SessionEntry> = {}): SessionEntry => ({
+    id,
+    window: `win-${id}`,
+    repo: "seance",
+    path: "/x",
+    ...fields,
+  });
+  const running: Task = {
+    id: "t1",
+    spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "x", title: "Fix the flake" },
+    state: "running",
+    createdAt: 1,
+    assignment: { deviceId: "dev-1", exclave: "default", clone: "seance" },
+  };
+  const rowsOf = (
+    sessions: readonly SessionEntry[],
+    capabilities: readonly string[] = [CAPABILITIES.sessionTag],
+    relayOpen = true,
+    connected = true,
+  ) =>
+    deriveMachines([machine({ capabilities, connected })], NOW, NO_LEADER, {}, [], undefined, relayOpen, {
+      passes: false,
+      tasks: [running],
+      sessions: { "dev-1": { sessions } },
+    }).cards[0]?.sessions;
+
+  test("each name source: the owner's label, the task's title, the session's own name, the window", () => {
+    const rows = rowsOf([
+      entry("%1", { tags: { ...verified, "owner.label": tag("release notes", "conversation") } }),
+      entry("%2", { taskId: "t1", tags: { "self.name": tag("my own name", "process") } }),
+      entry("%3", { tags: { "self.name": tag("my own name", "process") } }),
+      entry("%4"),
+    ]);
+    expect(rows?.map((row) => [row.name, row.mark])).toEqual([
+      ["release notes", null],
+      ["Fix the flake", null],
+      ["my own name", "(self-named)"],
+      ["win-%4", "(window)"],
+    ]);
+  });
+
+  test("Rename only for an untasked session with a verified conversation, on a sessionTag machine over an open relay", () => {
+    const sessions: readonly SessionEntry[] = [
+      entry("%1", { tags: { ...verified, "owner.label": tag("notes", "conversation") } }),
+      entry("%2", { taskId: "t1", tags: verified }),
+      entry("%3", { tags: { "agent.session": tag(conversation, "conversation") } }),
+      entry("%4"),
+      { window: "old", repo: null, path: "/x", tags: verified },
+    ];
+    expect(rowsOf(sessions)?.map((row) => row.rename)).toEqual([
+      { pane: "%1", session: conversation, label: "notes" },
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(rowsOf(sessions, [])?.every((row) => row.rename === null)).toBe(true);
+    expect(rowsOf(sessions, [CAPABILITIES.sessionTag], false)?.every((row) => row.rename === null)).toBe(true);
+    // Asleep: no rows, since its last read is not what runs there now.
+    expect(rowsOf(sessions, [CAPABILITIES.sessionTag], true, false)).toBeNull();
+  });
+
+  test("a task's owner.label names its session over the title; Rename still only untasked", () => {
+    const labelled: Task = { ...running, spec: { ...running.spec, tags: { "owner.label": "release" } } };
+    const rows = deriveMachines(
+      [machine({ capabilities: [CAPABILITIES.sessionTag] })],
+      NOW,
+      NO_LEADER,
+      {},
+      [],
+      undefined,
+      true,
+      {
+        passes: false,
+        tasks: [labelled],
+        sessions: { "dev-1": { sessions: [entry("%2", { taskId: "t1", tags: verified })] } },
+      },
+    ).cards[0]?.sessions;
+    expect(rows?.map((row) => [row.name, row.mark, row.rename])).toEqual([["release", null, null]]);
+  });
+
+  test("the tag view: by namespace, each with its writer, each tag with scope, age and verified", () => {
+    const at = NOW - 5 * 60_000;
+    const withTask: Task = {
+      ...running,
+      createdAt: NOW - 3 * 3_600_000,
+      spec: {
+        ...running.spec,
+        tags: { "creator.ref": "linear:PEN-1", "creator.ref-url": "https://linear.app/x/PEN-1", "owner.label": "rel" },
+      },
+    };
+    const rows = deriveMachines(
+      [machine({ capabilities: [CAPABILITIES.sessionTag] })],
+      NOW,
+      NO_LEADER,
+      {},
+      [],
+      undefined,
+      true,
+      {
+        passes: false,
+        tasks: [withTask],
+        sessions: {
+          "dev-1": {
+            sessions: [
+              entry("%1", {
+                taskId: "t1",
+                tags: {
+                  "agent.session": { value: conversation, at, scope: "conversation", verified: true },
+                  "agent.kind": { value: "claude", at, scope: "conversation", verified: true },
+                  "self.doing": { value: "a\u0007b  c", at, scope: "process" },
+                  "adapter.slack.thread": { value: "T1", at, scope: "conversation" },
+                  "adapter.jira.issue": { value: "J-2", at, scope: "conversation" },
+                  "bogus.key": { value: "x", at, scope: "conversation" },
+                  "self.mood": { value: "x", at, scope: "process" },
+                },
+              }),
+            ],
+          },
+        },
+      },
+    ).cards[0]?.sessions;
+    const groups = rows?.[0]?.tags ?? [];
+    expect(groups.map((group) => [group.namespace, group.writer])).toEqual([
+      ["agent", "the agent's mod and hooks"],
+      ["self", "the session itself"],
+      ["owner", "the owner"],
+      ["creator", "the task's creator"],
+      ["adapter.jira", "adapter jira"],
+      ["adapter.slack", "adapter slack"],
+    ]);
+    const lines = groups.flatMap((group) =>
+      group.tags.map((line) => [
+        `${group.namespace}.${line.suffix}`,
+        line.value,
+        line.scope,
+        line.verified,
+        plain(line.age),
+        line.url,
+      ]),
+    );
+    expect(lines).toEqual([
+      ["agent.kind", "claude", "conversation", false, "5m ago", null],
+      ["agent.session", conversation, "conversation", true, "5m ago", null],
+      ["self.doing", "a b c", "process", false, "5m ago", null],
+      ["owner.label", "rel", "task", false, "task created 3h ago", null],
+      ["creator.ref", "linear:PEN-1", "task", false, "task created 3h ago", null],
+      [
+        "creator.ref-url",
+        "https://linear.app/x/PEN-1",
+        "task",
+        false,
+        "task created 3h ago",
+        "https://linear.app/x/PEN-1",
+      ],
+      ["adapter.jira.issue", "J-2", "conversation", false, "5m ago", null],
+      ["adapter.slack.thread", "T1", "conversation", false, "5m ago", null],
+    ]);
+  });
+
+  test("the tag view: no link for a non-https ref-url, an unverified session id stays unverified, empty values are dropped, a missing task still shows session tags", () => {
+    const at = NOW - 60_000;
+    const hostile: Task = {
+      ...running,
+      spec: { ...running.spec, tags: { "creator.ref-url": "javascript:alert(1)", "creator.ref": "x" } },
+    };
+    const derive = (tasks: readonly Task[], tags: NonNullable<SessionEntry["tags"]>) =>
+      deriveMachines([machine({ capabilities: [CAPABILITIES.sessionTag] })], NOW, NO_LEADER, {}, [], undefined, true, {
+        passes: false,
+        tasks,
+        sessions: { "dev-1": { sessions: [entry("%1", { taskId: "t1", tags })] } },
+      }).cards[0]?.sessions?.[0]?.tags ?? [];
+    const tags = {
+      "agent.session": { value: conversation, at, scope: "conversation" as const },
+      "self.doing": { value: "\u0007 ", at, scope: "process" as const },
+    };
+    const lines = (groups: ReturnType<typeof derive>) =>
+      groups.flatMap((g) => g.tags.map((l) => [`${g.namespace}.${l.suffix}`, l.url, l.verified]));
+    expect(lines(derive([hostile], tags))).toEqual([
+      ["agent.session", null, false],
+      ["creator.ref", null, false],
+      ["creator.ref-url", null, false],
+    ]);
+    expect(lines(derive([], tags))).toEqual([["agent.session", null, false]]);
   });
 });

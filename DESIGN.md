@@ -303,7 +303,7 @@ Séance's noise is cover for a real intruder.
    in `archive.sqlite` (0600 in that 0700 dir), a plaintext history of finished tasks, accounts,
    fleet events and later metrics — on a box of its choosing, so it is one more place the key
    rests. The history holds no prompt text, no attachment manifest and no raw account id (only
-   the store's HMAC'd key), so a thief of the file alone learns titles, repos, PRs and timings,
+   the store's HMAC'd key), and of a task's tags only its ref, so a thief of the file alone learns titles, repos, PRs, refs and timings,
    not what was asked. Its key is held only the way this item ends: delivered
    by a systemd system unit (`LoadCredentialEncrypted=seance-psk:<blob>`, the name imported from
    `daemon/src/credential.ts`, never restated), read from `$CREDENTIALS_DIRECTORY` and nowhere
@@ -782,6 +782,13 @@ Séance's noise is cover for a real intruder.
    the leader forwards to (never a pane); the leader keeps no table of handles. The new party, a session that is
    answered without being addressable, gets only the answer to what it sent, 1 h at most, and a `wake` only for a
    question it asked itself.
+   A task tag (built 2026-11-18, "Task tags") is display text a PSK holder writes beside a prompt and sealed like a title:
+   it reaches a session only as `get_queue`'s allowlisted `creator.ref` and `owner.label` and an adapter's `task.ref`,
+   never as an instruction, a path or a spawn argument, and nothing binds, routes or places on one. It is held to
+   `parseTagValue` (printable text, bounded: a value past `TAG_VALUE_MAX` is cut, and a ref URL is refused, since a cut
+   URL opens another page) at every write, shown through `displayLine`, linked only when https, and
+   never in a push, a log line or an audit line. A tagged record carries `TAGS_DEP_SENTINEL`, so an older leader cannot
+   rewrite it without the tags, and a client's create seals `creator.*` alone: an app cannot forge an owner's label.
    An attachment (built 2026-10-28) is one more thing a PSK holder hands the
    session, read under the same permission mode as the prompt. Its name reaches the seed only
    as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
@@ -1004,6 +1011,13 @@ nothing checked it. The last is the gap they leave.
   `ExclaveInfo.traits`, and are believed only as that machine's own entry (`from` bound, as every
   `info` blob); no frame, app or other machine sets one. An audit line carries the count of
   names (`requires=<n>`), never a name.
+- **A task record carrying `tags` always carries `TAGS_DEP_SENTINEL`, and `owner.*` is the owner's.** Every such
+  record is sealed through the one task sealer, which appends `{ task: "", after: "tags" }` to its deps; an older
+  parser refuses it and holds the record unreadable instead of sealing it back without the label and the ref. A client
+  writes `tags` or `ownerTags` only to a verified leader advertising `CAPABILITIES.taskTags`; its create seals
+  `creator.*` alone (version 1: `bindTaskRecord` drops the rest) and `owner.*` changes only by the leader's write on an
+  `amend` from the PWA, in any state, never from `amend_task` or the broker. No tag is in a push, a log or an audit
+  line (Task tags).
 - **A trait probe runs only what the machine's own `config.json` names.** `traits.<name>.probe.argv`
   is read from that file alone (`parseTraitProbe`; no frame, app or other machine sets one) and exec'd
   as an argv array, never a shell string, with the environment a session gets (the daemon's, less
@@ -1049,7 +1063,44 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
-- **A daemon reads a forge only for reap's nothing-lost rule** (2026-11-13, Reap, "Nothing lost";
+  Every poll query also selects the constant `rateLimit{ cost remaining resetAt }`; a rate-limited answer
+  (`askGithub`'s `limited`, 2026-11-18) is never a reading: the run it answered writes nothing (the poll's earlier
+  readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
+  poller parsed itself, never `gh`'s words.
+- **A watch's target reaches GitHub only through the leader's poller, and its frames bind nothing** (2026-11-18,
+  Scheduler, "PR status"). A target reaches the leader only as a URL that
+  `parseWatchSet` (`shared/src/watch.ts`) holds to the PR or run pattern, parsed into owner, repo and number or id. It
+  reaches `gh` only as GraphQL variables in an argv array (`-f`, with `-F` only for the regex-held PR number), the
+  query text built from alias indices alone, through `askGithub` with `--hostname github.com`, read-only. A
+  `watch-set` is honoured only sealed from a registered machine's own device id advertising `CAPABILITIES.watches`
+  (never `from: "app"`, never the archivist, which holds the PSK and is no machine), parsed fresh, past the one
+  `schedulerGuard`; a `watch-event` is
+  acted on only sealed from the scheduler, or in process, parsed by `parseWatchEvent`. Neither frame names a pane, a
+  task or a session. A watch never changes a task's record, and a watch-only read never changes the poller's class.
+  The fleet caps (100 PRs, 100 runs), the sanity cap (64 a set) and the reserve for tasks' reads (under 500 points)
+  are the leader's, never a frame's, and no URL, head, check name or watch id is logged. The residual: any registered
+  machine can spend up to the caps of the fleet's GraphQL budget (about 840 points an hour) and learn the states and
+  check names of any repo the operator's token sees, which that session's own `gh` could read anyway (G1).
+- **A daemon's watch table binds a watch to its session's `claude` process and notes it only through messaging's local
+  delivery** (2026-11-18, "Watches"). A watch is made only by the local socket's
+  `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
+  on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
+  came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener
+  serves; the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
+  honoured only from the bound session that made the watch, and a wrong id, another session's id and an unknown id all
+  answer `unknown`. The caps (8 a session, 64 a machine, equal to the leader's per-device cap) are the table's, refused
+  at the add and never an eviction. A `watch-event` is looked up in the table by watch id and delivered only to the
+  pane, pane pid, task and `claude` process that entry names, as a `wake` line or a plain note, rendered by the one
+  `watchNote` formatter from enums, hex, rebuilt URLs and `cleanName`-bounded check names; never `asUser`,
+  `$.prompt.fill` or tmux keys. `watches.json` (0600, atomic rename, one write chain per path per process) holds ids,
+  targets, heads, keys and process identity only, and an entry is reloaded only while its `claude` process still runs
+  with the saved start time and its pane carries the same task. The set goes to the leader only sealed from this
+  daemon's own device id, in process when it leads, never `from: "app"`: the app-role leg that reads who leads is held
+  lazily and sends nothing. A live watch holds its pane from the custodian's `close` (`awaitsWake`) and nothing else:
+  no hand-off, pass, drain or reap waits on it. The audit origin `watch` carries closed enums only (op, kind, event,
+  reason, outcome): never a URL, owner, repo, number, head, check name or watch id, and `watches.ts` imports neither a
+  scheduler module nor `audit.ts`'s other writers.
+- **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
   query whose owner, name and head branch reach it only as GraphQL variables (`-f`, never `-F`, which
@@ -1060,6 +1111,16 @@ nothing checked it. The last is the gap they leave.
   head's object fetched from that origin's `refs/pull/<n>/head`. The residual: a session that rewrites
   `remote.origin.url` can bind the read to another repo, but a pass still needs a commit containing the
   tip to exist there, and a session that can rewrite its clone's config can already lose its own work.
+  Since 2026-11-17 a daemon also reads **its own GitHub budget** (Daemon, "GitHub rate limits"), and nothing else
+  of GitHub, by two constant REST reads beside `askGithub`: `gh api --hostname github.com rate_limit`
+  (`readRateLimit`, free of any limit) on a timer, and `gh api --hostname github.com user --jq .id`
+  (`readGithubUserId`, one request, cached a day) for the user id that tells budgets apart. Argv arrays, constant
+  paths, no variable, nothing from a frame, a session or a config field, a timeout with the group killed, read-only.
+  Only the two budgets' four counts (each checked to its shape) and a 1–16 digit id are kept; stdout and stderr are
+  never logged, a failure is silent, and nothing but `MachineStatus.gh` (counts, reset times, the numeric id: sealed
+  like the rest of the status) leaves the process. The leader's `github` push carries the budget's name and reset
+  time, never the id. The residual: every PSK holder learns the fleet's GitHub user id, which GitHub's own API
+  publishes to anyone who knows the login.
 - **Closing is the owner's act, sealed, and never reachable without the app role** (2026-11-13, Daemon,
   "Closing a machine"). The daemon answers `availability` only when sealed `from: "app"` on the relay leg,
   parsed by `parseAvailabilityRequest`, audited without a payload; neither `LOCAL_OPS` nor `BROKER_OPS`
@@ -1082,6 +1143,18 @@ nothing checked it. The last is the gap they leave.
   request another. A round request is spaced and expires as the
   shell's is, so a holder of the PSK gains at most a round per 15 minutes it could not already ask for at a machine's
   shell; thresholds, the model and on/off stay in `config.json` (C46), out of its reach.
+- **A session's name is the owner's display write, sealed, and never reachable without the app role** (2026-11-18,
+  Presence & identity, "Session identity", "The owner's label"; "Tags and session identity"). The daemon answers
+  `session-tag` only when sealed `from: "app"` on the relay leg, parsed by `parseSessionTagRequest`, audited without a
+  payload (`audit session-tag origin=relay key-count=<0|1> outcome=<…>`, never the label or an id); neither
+  `LOCAL_OPS`, `BROKER_OPS` nor MCP carries it, so a session cannot name itself as the owner (the residual is
+  `set-limits`' and `availability`'s: a process holding the PSK can seal `from: "app"`). It is one of the two things a
+  verified `agent.session` names, beside adapter delivery through a subscription ("Adapters"): re-checked with `atAct` at the act, refused
+  `moved`, `unverified`, `ambiguous`, `ended` or `tasked` otherwise, and binding, routing and authorizing nothing. The
+  label is the one text `conversations.json` holds (0600, the owner's own, under `displayLine` and the title's cap,
+  never logged; beside it the file holds only conversation ids, adapter names, adapter fingerprints and times), and it reaches a reader only while its conversation's one claimant is verified, so a session that
+  claims a labelled id shows its own name, never the owner's. MCP's `get_sessions` prints `owner.label` through
+  `AGENT_VISIBLE_TAG_KEYS`; message wrappers, receipts and the custodian's `sessions` never carry it.
 - **The drain's session ask is constant keys, into ledger-bound panes, while draining** (2026-11-13, Daemon, "The
   drain's session ask"; `CLAUDE.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
@@ -1133,7 +1206,7 @@ nothing checked it. The last is the gap they leave.
   refuses a symlink. An unreadable record reads as none, and a round pane it no longer names is closed as a
   stray.
 - **The custodian's verbs are a frame on the round's own socket, bound to the round and to nothing a frame says**
-  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The sixth frame kind
+  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The custodian frame kind
   widens the local socket family, so any new verb or act for it is a threat-model change like the broker's, and the
   daemon's **main** socket answers the kind `unsupported`: it is served only on the round's own socket
   (`custodian-socket.ts`), which carries nothing else. Its sender is a
@@ -1192,12 +1265,26 @@ nothing checked it. The last is the gap they leave.
     mark a restart recreated has seen no turn end, so a session already idle is closed only by the
     leader's backstop.
 - **An amend** (built 2026-11-12, a threat-model change; Scheduler, "Amending a waiting task"): a
-  waiting task's prompt, title, model and effort change only by the leader's own write, on an `amend`
+  waiting task's prompt, title, model, effort and not-before time change only by the leader's own write, on an `amend`
   sealed `from: "app"`, parsed by `parseAmendRequest` and checked against `schedulerGuard`, and only
   while the task is `queued`, `blocked` or `ready` with no spawn out. A prompt change names the
   `basis` it was read at and is refused `prompt_changed` against any other, so a replayed append
   never lands twice. The amended record goes back through the one task sealer, sentinels and all; no
   log or audit line carries prompt text, the amendment's included.
+- **An adapter is the owner's code at the owner's uid, not contained** (built 2026-11-18, Daemon, "Adapters").
+  It can read whatever the owner can, so these bound what Séance grants it, not what it can
+  do, and are no sandbox:
+  - It is declared only in the machine's own `config.json`, written by hand or by the owner's
+    `seance adapter add` from the checkout's manifest, and run only as that argv. Nothing about adapters crosses the
+    relay, and no frame, app op, MCP tool or local-socket op adds, removes or restarts one.
+  - It is reached only over its own stdin and stdout, never a socket a process could dial.
+  - It gets no prompt, attachment, session-to-session message, account id, absolute path or key, and no
+    `CREDENTIALS_DIRECTORY`; message text only when a session addressed it.
+  - It delivers only by the `inbox` mod's local delivery, under its own wrapper, `kinds` and rate buckets, to a task
+    this machine's launch ledger holds, by reply, or to a conversation subscribed to it and verified at the act.
+  - It writes nothing to the queue, the store, the leader or the relay, and nothing it sends or prints is logged.
+  - A re-added or removed adapter inherits no subscription, and `doctor` warns when its checkout moved since it was
+    added: the owner is told new code runs, never stopped.
 - **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
   Attachments and as requirements in `CLAUDE.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
@@ -1432,7 +1519,8 @@ The Durable Object persists a machine registry:
   disconnected status, `null` where the exclave does not carry the trait, so routing, MCP and the PWA
   cannot disagree. `drn: true` says the daemon's task-launch
   gate is closed ("Restart waits for task launches"), absent otherwise; never trimmed either, and the
-  parser takes `true` alone. Sent every 30s whether or not an app is watching:
+  parser takes `true` alone. `gh` is this machine's own `gh`'s GitHub budget (Daemon, "GitHub rate limits"),
+  never trimmed and dropped alone when malformed. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
   60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
@@ -1564,6 +1652,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `deliver-message` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                                                                                                                | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
 | op `message-receipt` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
 | op `custodian-event` (→`"scheduler"`, built 2026-11-14)                                      | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                                                                                                                   | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
+| op `watch-set` (→`"scheduler"`, built 2026-11-18)                                            | `daemon/src/watches.ts` through `watch-leader.ts` (`RelayClient.sendWatchSet`, or in process through `leader.onWatchSet` when this daemon leads); built 2026-11-18, "Watches"                                                                                                                                                                                                                                                                                                  | `daemon/src/leader.ts` `onEvent` → `onWatchSet` → `daemon/src/watch-registry.ts`                                                                                                                                                                                                                                                                                                                        |
+| op `watch-event` (scheduler→daemon, built 2026-11-18)                                        | the registry through `termWatches` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `LocalOps.watchEvent`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` `handleWatchEvent` → `Watches.onEvent` in `daemon/src/watches.ts` (delivers the note, answers `delivered`)                                                                                                                                                                                                                                                                     |
 | op `queue-changed` (→`"app"`)                                                                | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                                                                                                                  | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                                           | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                                                                                                                          | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                                                     | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                                                                                                                      | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
@@ -1574,6 +1664,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | HTTP `PUT /attachments/<id>`                                                                 | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                                                                                                                    | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
 | HTTP `GET /attachments/<id>`                                                                 | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                                                                                                                           | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                                                                                     |
 | field `attachments`                                                                          | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                                                                                                                 | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                                                                                           |
+| field `ref`                                                                                  | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) from `taskRef(spec.tags)`, only to a daemon advertising `CAPABILITIES.taskTags`                                                                                                                                                                                                                                                                                                              | built: `daemon/src/handlers.ts` `handleSpawn` (`refOf`), only from a spawn sealed from the scheduler with `client: "scheduler"` and a task id, in any mode, noted in the launch ledger's `TaskNote.ref` and sent in the adapter feed as `task.ref`                                                                                                                                                      |
+| field `ownerTags`                                                                            | built: `AmendRequest`, from the PWA's Label dialog (`pwa/src/store.ts`) to a verified leader advertising `taskTags`; `parseAmendDraft` refuses it for every other client                                                                                                                                                                                                                                                                                                       | built: `Scheduler.amend` (`scheduler/src/scheduler.ts`), taken in any task state when no other field is set                                                                                                                                                                                                                                                                                             |
 | field `inheritedPr`                                                                          | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                                                                                                                | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only on a worktree spawn sealed from the scheduler (or the leader in process) with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                     |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -1990,7 +2082,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   machine refused; the task is unchanged), as `cancel` is.
 - `run-now { taskId }` (`TaskRef`) → `{ task }`, the task as reserved: `Scheduler.runNow`
   (2026-10-27; Scheduler, "Routing caps"). Routes one `ready` task at once with neither
-  concurrency cap applied, and reserves and dispatches it as a pass would. Refused
+  concurrency cap applied and ignoring a not-before time ("Not before"), and reserves and dispatches it as a pass would. Refused
   `task_not_found`, `finished`, `dispatching` (`reserved`, or its spawn still out), `not_waiting`
   (not `ready`: waiting on admission or deps, or placed), `unplaceable` (another reason holds it
   from every candidate — nothing is written, and the held decision stays the pass's), and
@@ -2010,7 +2102,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   term ended answers `internal_error`, a transport code, so MCP adds "may have landed anyway". Only to a
   leader advertising `CAPABILITIES.successor`; an older one answers an unknown op `invalid_request`,
   so every client checks the capability first.
-- `amend { taskId, prompt?: { mode: "append" | "replace", text }, basis?, title?, model?, effort? }`
+- `amend { taskId, prompt?: { mode: "append" | "replace", text }, basis?, title?, model?, effort?, notBefore?: number | null }`
   (`AmendRequest`) → `{ task }` (`TaskResponse`), the task as amended (built 2026-11-12; Scheduler,
   "Amending a waiting task"). In `SCHEDULER_OPS`, 10 s timeout (one serialized write). `basis` comes
   exactly with `prompt`: SHA-256 hex of the prompt the client read. A null `title`/`model`/`effort`
@@ -2177,6 +2269,11 @@ an old peer's frames parse as before. Mixed versions:
   alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts` and `authAlerts`
   (Scheduler, "Web Push", "Disk alerts", "Auth alerts"): an older leader's parser drops each at its next write
   of that record, which costs one repeated alert, never a missed one.
+- `SettingsRecord.githubAlerts` and `MachineStatus.gh` (2026-11-17; Daemon, "GitHub rate limits"; Scheduler, "Web
+  Push", "GitHub budget alerts"): an older leader's parser drops `githubAlerts` at its next write, which costs one
+  repeated alert in a window still running, never a missed one; an older reader ignores `gh`, and an older daemon
+  sends none, which alerts nothing. An older service worker shows its generic notification for the `github` kind.
+  No rollout order.
 - `SettingsRecord.archivistSilence` (2026-11-13; Scheduler, "Web Push", "Silence alert"): dropped the
   same way. A later leader re-reads a still-down archivist's kept entry as absent since its `lastSeen`
   and pushes once more; an archivist whose entry has also left the registry reads as never held, so
@@ -2275,6 +2372,20 @@ an old peer's frames parse as before. Mixed versions:
   field, so an older leader rewriting a flagged record loses the flag: a display line, during mixed-version
   leadership only; no sentinel, since sentinels exist where an older leader would _act_ wrongly on a field it drops.
   An older service worker shows the fallback text for the two kinds, as for `quota-exhausted` and `pass-refused`.
+- `TaskSpec.tags`, `AmendRequest.ownerTags`, `SpawnRequest.ref` and `CAPABILITIES.taskTags` (2026-11-18, "Task tags"):
+  a record carrying `tags` carries `TAGS_DEP_SENTINEL`, which an older leader refuses, so it holds the record
+  unreadable. This is deliberately not the rule the entry above states ("sentinels exist where an older leader would
+  _act_ wrongly"): a tag acts on nothing, but an older leader's next write would erase the owner's label and the
+  creator's ref without a trace, and tags, unlike an attachment manifest, stay on finished records. The cost is real
+  while an older daemon leads (mixed-version leadership during an update): every tagged record is unreadable to it,
+  so a running tagged task cannot be moved by its session events, its dependents block, and a labelled finished
+  record cannot be pruned, which pushes the store toward `store_full` until a current daemon leads again. Clients
+  refuse `tags` and `ownerTags` locally until the verified leader advertises `taskTags`; a continuation drops its copied
+  tags instead of refusing. The leader sends `SpawnRequest.ref` only to a daemon advertising it, and an older
+  `isSpawnRequest` ignores the field anyway. An older archivist reads a tagged record as `malformed` and skips it, so a
+  tagged task pruned before the archivist updates is lost from history: update it with the fleet. An older keyless
+  broker daemon drops `tags` from an enqueue (its `parseTaskSpec`), so the task queues untagged: display data only, and
+  no `staleDaemonOf` check guards it.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -2322,6 +2433,13 @@ an old peer's frames parse as before. Mixed versions:
     `deliver-message` carrying `replyTo`; as a leader it forwards one. A client sends a reply to another machine only
     against the verified leader advertising it, and the leader forwards one only to a machine advertising it ("Replies
     by handle"). It needs `messages` (peer binding), and is advertised beside it.
+  - `CAPABILITIES.watches` (2026-11-18): an unknown string to an older reader, which keeps the machine. As a daemon it
+    answers `watch-event` (advertised unconditionally: any daemon may lead and poll watches); as a leader it honours
+    `watch-set` and sends the answers, only to a machine advertising it. It was advertised from step 2, before the
+    daemon had a `watch` frame (step 3 built it): a daemon of the step 2 build closes a `watch` frame as malformed. A
+    client gates a surface on the string and on the frame's own answer, never on the string alone: `seance mcp`'s
+    `watch_github` (step 4) reads a closed or unparseable reply to a `watch` frame as `unsupported`. No second capability string
+    was added for the frame.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -2367,7 +2485,8 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   roleless: the relay never guesses which half of a frame to believe. Roles stay raw strings on
   the wire, bounded like ids (≤8, id charset, so neither separator can appear), because the
   signature covers the list as sent and a role minted later must still verify; the hub keeps only
-  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises `scheduler`.
+  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises `scheduler`; a closed one
+  that emptied adds `fallback` (nomination, below; "Closing a machine").
   A daemon whose v2 register is refused signs its next one v1 and alternates from there
   (`#signV1` in `daemon/src/relay-client.ts`), so a daemon that self-updated ahead of its relay's
   deploy gets in roleless instead of being locked out; any other refusal cause fails both alike.
@@ -2375,7 +2494,9 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
 - **Nomination is a pure function**, `nominate(candidates, current, leaders)`: the connected,
   registered daemons' `{ deviceId, roles, connectedAt }` — one per id, its newest socket's — the
   current leader and the allowlist in, the next leader (or null) out. Eligible is capable _and_
-  listed. A current leader that is still eligible keeps the role, even across its own reconnect;
+  listed. Within the eligible, those that also signed `fallback` count only while no other is
+  connected (built 2026-11-18, "Closing a machine", "A closed, empty machine leads only as a fallback").
+  A current leader that is still eligible keeps the role, even across its own reconnect;
   otherwise the earliest `connectedAt` wins, ties to the lowest `deviceId`. Stickiness matters only in the race where a leader's new socket registers
   before its old one's close is processed — without it the role would move to whoever has sat
   connected longest on every redial. Its suite (`relay/test/leadership.test.ts`) needs no workerd, and
@@ -2962,7 +3083,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   An enqueue is no request — an app's create is a store write the relay answers — so the
   leader's record of one is its admission, the first write after the version-1 create:
   `audit queue origin=leader op=admit task=<task> client=<client> createdAt=<ms>
-  state=ready|blocked|failed avoid=<n> requires=<n> pin=<0|1>` (counts only, never a name, 2026-11-12), `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
+  state=ready|blocked|failed avoid=<n> requires=<n> pin=<0|1> notBefore=<0|1>` (counts only, never a name, 2026-11-12; `notBefore` a flag, never the time), `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
   MCP's `mcp`; absent from older clients), never the prompt (added 2026-10-18, M3 review S5).
 
 - **`queue-changed` tells apps to re-read** (M3 item 6). Every write the term makes to a
@@ -3026,9 +3147,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked"), a running task whose account ran
   out of usage (`quota-exhausted`, _Successor_, "The automatic trigger"), a session's own pass the leader
   refused (`pass-refused`) and, from the leader's own
-  watch, a nearly full disk, an exclave whose login lapsed or is about to, or an archivist absent
-  24 h (_The library_, "Credits spill" and "Needs input"; _Disk alerts_, _Auth alerts_ and
-  _Silence alert_, below). The line names task, account and device ids, never a prompt, title or
+  watch, a nearly full disk, an exclave whose login lapsed or is about to, a GitHub budget nearly spent, or an
+  archivist absent 24 h (_The library_, "Credits spill" and "Needs input"; _Disk alerts_, _Auth alerts_, _GitHub
+  budget alerts_ and _Silence alert_, below). The line names task, account and device ids, never a prompt, title or
   URL; the push payload names a task or device id and state (a login alert, a device and exclave
   id and its state; the silence alert, only when the absence began), and no account. A login's
   lines are `scheduler: login expired:` or `login expiring: device=<id> exclave=<id>`, and, when
@@ -3280,6 +3401,28 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     next write; a later leader then reads a still-down archivist's kept entry as held and absent since its
     `lastSeen`, so it pushes once more (as for `authAlerts`), and one whose entry has left the registry
     altogether reads as never held and is not alerted for that absence. Accepted.
+  - **GitHub budget alerts** (`daemon/src/github-alerts.ts`, scheduler-free like the disk step; built 2026-11-17).
+    The same watch, in the same single write, runs `githubAlertStep` over each fresh, connected status's `gh`
+    (Daemon, "GitHub rate limits"). A budget is a GitHub user's REST (`core`) or GraphQL allowance, keyed by the
+    status's `u`: every machine signed in as one user reports the same budget, so readings are grouped by user and
+    a budget alerts once, not once per machine; a reading without `u` says nothing. Per user and budget the step
+    takes the newest window's (highest `reset` still ahead) lowest `remaining`, and alerts when it is under
+    `GITHUB_ALERT_SHARE` (20%) of `limit`: 1,000 of 5,000, ~3.5 minutes at the 2026-11-17 burn. Once per reset
+    window: the record's `githubAlerts` holds `{u, r, reset, at}` (at most `GITHUB_ALERTS_MAX` = 4, two users'
+    two budgets), a budget with an entry whose `reset` is still ahead is not alerted again whatever its readings
+    do, and an entry goes once its `reset` has passed, which re-arms the next window. Held in the record, not
+    memory, so a new leader does not repeat it inside the window. The cap never evicts (an entry lapses within the
+    hour); a fifth budget waits for a slot. The record's headroom is why the cap is small: at every field's bound
+    it seals to ~40.6 KB of the store's 40 KiB cap (parse.test.ts). A lost write is settled as the disk alert's
+    is, the re-read record holding the entry at the alert's own `at`. One log line, `scheduler: GitHub budget
+    nearly used: resource=<core|graphql> reset=<ISO time>`. The push payload is `{v: 1, kind: "github", at,
+    resource, reset}`: no GitHub user id and no device id (it is one budget, whichever machine read it). The service
+    worker shows one of two fixed texts by `resource` ("GitHub's REST API budget is nearly used up." or "GitHub's
+    GraphQL API budget is nearly used up."), looked up in a null-prototype table, under the tag `github:<resource>`,
+    and a click opens the Machines screen; any other `resource` is the generic notification. No "recovered" push
+    (the window's reset is the recovery). Rejected: alerting from each daemon (no push keys outside the leader, and
+    N machines would push N times) and a threshold on `used` (the same line, one more field to trust). Not built:
+    a PWA surface for the readings or the series.
   - **Not built:** removing another browser's subscription from the PWA (a retired device's
     slot still goes only when its push service answers 404/410), and a recovery path for an
     unreadable record (above).
@@ -3556,7 +3699,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     the peer reads its own daemon's registry entry and, absent `CAPABILITIES.traits`, refuses with "this
     machine's daemon is older than this seanced: restart or update it (seance update)", ahead of the
     unknown-trait check, so the answer is not "no machine declares" for a fleet the old broker never
-    saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1>`), a refusal writes
+    saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1> notBefore=<0|1>`), a refusal writes
     `audit enqueue origin=<surface> client=<surface> refused=<unknown_trait|unreachable_trait>
     requires=<n> unknown=<n>|missing=<n>[ split=1]`, `split=1` when every trait is on some place the task
     could go but none has them all; never a name.
@@ -3567,7 +3710,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   machine that does not advertise both `CAPABILITIES.continueTask` and `continueSession` is
   `continue_unsupported` (so an older daemon, one without the mode or one that would run `--continue`,
   is never routed one), `judge` picks the clone by name rather than by skills and rejects another
-  exclave `continue_elsewhere`, and a clone the machine no longer has is `repo_absent`. Every other filter,
+  exclave `continue_elsewhere`, and a clone the target exclave no longer lists by that name is `continue_clone_gone`
+  (2026-11-17; `repo_absent` before, which read as "no clone of this repo there" on a machine that had one). A
+  candidate already `continue_elsewhere` gets neither: elsewhere is the whole reason, and `repo_absent` beside it
+  claimed every other machine lacked the repo even where it was cloned under another name. Every other filter,
   cap and score applies as to any task. The dispatch adds `continues: <old id>` to the spawn request.
   A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict). A continuation
   that stays unplaceable expires `continue_expired` after `continueExpiryMs` ("Expiry").
@@ -3724,9 +3870,21 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   so would take a wire field on `Reason`.
   **Run now lifts the cap for one task** (2026-10-27; "both caps" until the account cap went,
   2026-11-17). The `run-now` op (`Scheduler.runNow`)
-  routes a `ready` task with `RouteInput.uncapped`, which leaves out
-  `cap_reached` and nothing else: a pause, the quota line and spill, disk, pins, skills and every
-  machine filter still hold it, and then it is refused `unplaceable` with nothing written. Placed,
+  routes a `ready` task with `RouteInput.runNow`, which leaves out
+  `cap_reached`, the whole-queue `paused` and a not-before time, and nothing else: an account's pause, the quota line and
+  spill, disk, pins, skills and every machine filter still hold it, and then it is refused
+  `unplaceable` with nothing written. The queue stays paused: the next pass places nothing else.
+  The fail-closed stand-in for an unreadable `queue:pause` ("Pause" below; `RouteInput.pauseUnread`)
+  is not lifted: no person's pause is there for a tap to override, and a version-regressed or junked
+  record must hold the whole queue on every path.
+  **It lifts the whole-queue pause too** (2026-11-17): a queue pause stops the scheduler from
+  starting work on its own, and a person's tap on one task is the explicit start that pause waits
+  for, as it is past a limit they set; offering it greyed as "No machine can take it" while open
+  machines and accounts sat idle conflated "held by policy" with "nowhere to run". An account's
+  pause is that account being closed (a person's word about where work may run, not when), so it
+  holds. A client offers Start now for a task the pause alone holds only to a verified leader
+  advertising `CAPABILITIES.runNowPaused`; under an older one it greys it as "The queue is paused".
+  The CLI and MCP send `run-now` as before, an older leader answering `unplaceable`. Placed,
   it counts toward the limit like any task, so the fleet runs over it and nothing new is placed
   until the count drains, as when a machine wakes with released slots. One-shot: the record keeps no
   mark of it beyond its decision (with no `cap_reached` on the winner), so a takeover between the
@@ -3736,7 +3894,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   race. Rejected: a lasting flag on the task record (`spec.uncapped`), which would survive a
   takeover but needs the record schema widened and an older leader made to refuse it, for a tap
   that a person can repeat. Deferred: also lifting the quota line, for spending credits on purpose.
-  The Spawn screen's **Start now** is the same op, not a new one: it creates the task as Queue
+  The Spawn screen's **Start now** (hidden while a not-before time is chosen) is the same op, not a new one: it creates the task as Queue
   does, then sends `run-now` once a read shows it `ready` — sent with the create it would race
   admission and be refused `not_waiting`. `dispatching` (a pass is placing it) and `finished`
   (a cancel or an end got there first) need no note; `not_waiting` says the leader still holds
@@ -3794,9 +3952,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   fourteen draw on the caps — handled as a return from sleep is: nothing killed, nothing placed
   until the count falls under. The `queue` reply lists the releases and the Queue screen shows
   them under Idle ("The Queue screen"). (b) `idle` is not always quiet: a main loop whose background
-  subagent or background command is still working reads idle, as does a session restarted
-  mid-turn until its next turn event ("Where the states come from"), so long background work can
-  be released while it runs. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
+  subagent or background command is still working reads idle, so long background work can
+  be released while it runs. Since 2026-11-17 the Queue screen says so (the `Stop` note, Session
+  events, "Settings hooks"); the release itself is unchanged, since a CI watch costs nothing until
+  it wakes the session, and the wake is a `busy` that takes the slot back. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
   a working session released until its next event; `sessions` cannot see busy from idle, so
   nothing else corrects it. A `busy` sent while no leader runs is lost the same way, and that is
   the likeliest case, since it falls around a takeover: the new leader seeds the stamp the old one
@@ -3832,7 +3991,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   a real whole-queue hold, which then stays until a `resume`. A pause is usually about spending, and a term holder can put
   junk there (Threat model, item 3): failing open would let junk lift a pause, failing closed
   lets it stop dispatch, which holding the term already could. After a PSK rotation the cost is
-  one resume.
+  one resume. `run-now`, which lifts a person's whole-queue pause, keeps this one
+  (`PauseRecord.unread`, until a write replaces the record).
 - **Needs input** (`alerts.ts`, M3 item 5; docs/scheduler.md Settled defaults 5). The clock
   rides the write that moves the state: `#update`, the one write path, stamps
   `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on leaving
@@ -3923,7 +4083,39 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   unstamped. A refused or skipped stamp write costs one repeated alert after a leader change, never
   a missed one. **Residual:** the stamp lives on a task, so pruning the stamped task (and its
   tombstone aging out) loses it; the next leader may alert that window once more.
-- **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
+- **Not before** (built 2026-11-17; docs/scheduler.md, M4). `TaskSpec.notBefore` is an epoch-ms
+  instant before which the scheduler places a task. The client resolves what was typed ("in 2h",
+  "21:30", the PWA's quick choices) in its own zone with the shared pure resolver
+  (`shared/src/not-before.ts`, one for the CLI, MCP and PWA; a bare clock time is its next occurrence,
+  an explicit date-time already past is refused by the client); the record holds only the instant, and
+  the leader compares it with its own clock (skew accepted, as for `createdAt`). **It holds at
+  placement, not admission:** the task goes `queued → blocked/ready` on its deps as ever, and
+  `#pass`'s reserve loop skips a `ready` task with `now < notBefore` before `#route`, before the
+  decision is stored and before the trait-held alert, so a long wait costs no store write and no
+  decision (why it waits is read off the spec). No timer: the 30 s tick places it, up to 30 s late.
+  Holding it `queued` would have met `ADMIT_MAX_AGE_MS` for a time past 29 days. Its dependents wait
+  on it as on any unfinished task. `continue_expired` and `pin_expired` run from
+  `max(createdAt, notBefore)` (`expiry.ts`), or a continuation deferred five days would fail before it
+  could start. The clocks no longer sit below the ledger's age for such a task: a continuation deferred past
+  about 7 days reaches its daemon after the ledger evicted the continued launch and fails at dispatch, not
+  at `continue_expired` (accepted: no maximum horizon, owner). A deferred task is an ordinary record
+  meanwhile, so it counts toward `MAX_TASKS` and `QUEUE_MAX_TASKS` like any unfinished task. **`run-now` ignores it**, as it ignores the cap and the pause, one-shot: nothing is
+  written, so a takeover between the route and the write leaves the task waiting for its time. A
+  successor (any trigger) and a continuation never inherit it (a continuation may carry its own).
+  **No sentinel, no `CAPABILITIES` entry, no horizon** (owner): every daemon updates together, and a
+  deferred task queued under an older leader mid-update may start at once (accepted; the owner runs
+  `seance update` right after merge, before using the PWA control). Amendable while waiting (see
+  "Amending a waiting task"). The audit lines carry `notBefore=0|1`, never the time. The PWA shows
+  `until Wed 18 Nov, 21:30` (the viewer's zone, off the leader's clock by the queue's skew) in the
+  row's headline and body and the verdict, in place of what a decision says (a `blocked` task keeps its "Waiting on" headline and takes the time in its body): a deferred task is not
+  routed, so a decision on it is stale, and Start now's label then names no machine. The form's
+  choice is transient (kept as a kind, resolved at the press), hides the Start now split (the two
+  contradict) and asks no route preview. Surfaces: MCP `not_before` (ISO 8601 with an offset) on
+  `spawn_session`, `queue_batch` and `continue_task`, and on `amend_task` (or `null`); CLI `--at` and
+  `--in` on `spawn` and `continue`, and on `amend` with `--not-before none` to clear. Raycast: none.
+  The archivist keeps it on the task row (a time is neither a prompt nor an account id).
+- **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first (one still before its
+  `notBefore` is skipped unrouted: "Not before") and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory
   (`lastDecision`), so the store sees one write per transition and none per tick. **The
@@ -4369,15 +4561,17 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   there, untracked — nothing resurrects it or despawns it (`sessionChange`, `branchChange` and
   `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
   A third arm (2026-10-27): a `ready` task with `spec.continues` more than `continueExpiryMs` (4 days,
-  docs/scheduler.md Settled defaults 19) past `createdAt` fails `continue_expired`, so an unplaceable
+  docs/scheduler.md Settled defaults 19) past `createdAt` (or past its `notBefore`, if later: "Not before") fails `continue_expired`, so an unplaceable
   continuation no longer waits for a hand cancel (a continuation expires pinned or not). Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
   in the leader and leadership moves. It stays below the launch ledger's age, since past it the target
-  daemon would refuse anyway, so failing earlier is never premature. The message names the target
+  daemon would refuse anyway, so failing earlier is never premature — for a task with no `notBefore`; a
+  continuation deferred past about 7 days reaches its daemon after the ledger evicted the continued launch
+  and fails at dispatch instead ("Not before", accepted). The message names the target
   machine's rejection reasons from the leader's last in-memory decision for the task (`lastDecision`,
   else the persisted one), or "its machine never took it"; a queue pause or other fleet-wide hold does not
   stop the clock. Dependents fail `dependency_failed` in the same pass. No alert and no audit line: nothing spawns or despawns, and the record is the trace.
   A fourth arm (2026-10-27): a pinned `ready` task (`pin.deviceId` or `pin.account`, no `continues`) more
-  than `pinExpiryMs` (30 days, docs/scheduler.md Settled defaults 21) past `createdAt` fails `pin_expired`.
+  than `pinExpiryMs` (30 days, docs/scheduler.md Settled defaults 21) past `createdAt` (or its `notBefore`, if later) fails `pin_expired`.
   A pin's target never goes stale the way a continuation's ledger note does, but a machine retired or
   re-keyed, or an account signed out for good, otherwise leaves it `ready` forever: never pruned, counted
   toward `MAX_TASKS`, and ranked with the unfinished ahead of every finished task in the 20-task `queue`
@@ -4983,10 +5177,132 @@ for the lot with its own `gh`.
   stdout that is no GraphQL answer (`failed`), and otherwise ok — including a non-zero exit: one alias GitHub
   cannot resolve (deleted repo, no access) makes `gh` exit 1 with the whole answer on stdout
   and `null` at that alias, so the others still land and the bad one warns once per URL per
-  term with its GraphQL error `type` (`NOT_FOUND`, `FORBIDDEN`). A failing class writes
+  term with its GraphQL error `type` (`NOT_FOUND`, `FORBIDDEN`). A body with no `data` that is GitHub's
+  rate limit is `limited` (below). A failing class writes
   nothing, warns once on entering it with the remedy (never `gh`'s stderr, which can carry a
   token fragment or a URL), backs the next poll off from a minute toward 15 minutes, and says
   so once when it recovers. Nothing to poll means `gh` never runs.
+- **A spent budget is waited out** (2026-11-18, docs/gh-watch.md W8, its build step 1). `askGithub`'s `limited`
+  class is a body with no `data` object whose `errors[]` carries `type: "RATE_LIMITED"`, or whose `message` (top
+  level or in `errors[]`) says "rate limit" or "rate-limit" (also "rate limited") or "abuse detection mechanism"
+  (GitHub's older secondary-limit wording) — after the `Bad credentials` check, so a revoked token stays
+  `unauthenticated` — or an answer whose `errors[]` carries the typed `RATE_LIMITED` beside a `data` object (the
+  wording alone does not count there, so a `NOT_FOUND` alias stays ok). What it matches (spike S3) comes from `gh`'s source (`pkg/cmd/api/api.go`) and GitHub's rate-limit
+  docs, **not from a live spent budget**, which every session on the fleet shares: the primary GraphQL limit answers
+  HTTP 200 with the `RATE_LIMITED` error and no data; the secondary limit (and REST's primary) a 403 or 429 whose
+  message says rate limit; `gh api` prints either body to stdout and exits 1 (its `SilentError`), and prints no
+  header without `-i`, so `Retry-After` and `x-ratelimit-reset` never reach the daemon. A `NOT_FOUND` or `FORBIDDEN`
+  alias beside `data` stays ok, a no-data body of any other kind stays `failed`. Every poll query (`p<i>`, `c<i>`,
+  `b<i>`) also selects `rateLimit{ cost remaining resetAt }`, constant text beside the aliases, and the poller keeps
+  the term's newest `remaining` and `resetAt` (the reserve for tasks reads it: "Reserve for tasks" below). A `limited` answer in any run ends the poll: nothing more is asked, readings already written stay, owed
+  open PRs go out with their base reading. The next poll waits until the reset plus up to a minute's jitter
+  (`limitedDelay`, `LIMIT_JITTER_MS`), the reset being the term's newest in-query `resetAt` while it is ahead, else
+  the machine's own rate reader's GraphQL reset (Daemon, "GitHub rate limits": no second reading of the budget),
+  and the ladder only when neither is ahead. The first one ahead and inside an hour's window (61 minutes) wins; one
+  past it is clamped to the window's end, since a local clock behind GitHub's reads a fresh window's reset as
+  further off than it is. A wait for a reset resets the ladder's count. It warns on entering, naming the reset
+  (its own value, never `gh`'s words) and once more if a stay entered with no reset gains one, and says once when
+  a poll answers again. A limit seen before a rejected write still ends the poll `limited`. A
+  secondary limit with budget left also waits for the hourly reset when one is known: conservative, since `gh`
+  hides `Retry-After` and GitHub warns that requests made under a secondary limit can get the integration banned.
+  Rejected: the ladder for a limit, which would ask an empty budget again at minute 2, 4 and 8.
+- **One clock** (2026-11-18, decided with docs/gh-watch.md open question 2): the poller keeps its single 60 s pace,
+  watched targets included once they exist. A faster pace for them doubles the cost of every task's PR too, or
+  needs a second clock in the poller; a minute's latency on a CI wait of ten is accepted. Nor does a watch get a
+  `quiet` option (open question 1): one note per head is cheap, and a pass is often when /ship merges.
+- **Watched targets** (2026-11-18, docs/gh-watch.md, its build step 2). The poller reads what the leader's watch
+  registry wants beside the tasks' PRs, and hands every poll's readings back to it (`PollerWatches`:
+  `wanted`, `read`, `tick`). Unset (`PrPollerDeps.watches`), a poll reads and writes what it did before.
+  - A PR that is a task's and watched joins that task's chunk (`p<i>`) and, when open or draft, its blocked read
+    (`b<i>`), sharing the aliases. Watch-only PRs are read in their own merge chunks after every task chunk and every
+    task blocked read, with blocked reads of their own. A failure there other than `limited` changes no poller class,
+    owes nothing to a task and logs nothing, as a run chunk's failure: a broken watch must not back off the tasks'
+    reads. The same holds for the blocked read of a task chunk that held no task needing it: the task-facing
+    "blocked reasons are unavailable" warning, and its once-a-term latch, are for a run that held a PR a task reads
+    wide. `limited` is the token's budget, so it ends the poll as anywhere.
+  - A watch never changes a task's `PrStatus`: a task's write carries the blocked fields only when the task itself is
+    read wide (today's rule, `taskWide`). A non-wide task PR that is also watched waits for the blocked read before its
+    unchanged base write (a merge never waits). A draft is read wide for a watch (CI runs on one) and never for a task.
+  - The blocked read gains `totalCount`, `detailsUrl`, `checkSuite{ databaseId }`, `mergeable` and `headRefOid`; the
+    merge query is unchanged. A blocked read that fails leaves its watched PRs unread this poll: no reading is
+    recorded in its place, and the registry's suspension is what says so.
+- **The run query** (2026-11-18). `w<i>: resource(url:$u<i>){ ... on WorkflowRun{ databaseId runAttempt
+  checkSuite{ status conclusion checkRuns(first:20, filterBy:{checkType: LATEST}){ nodes{ __typename name conclusion
+  databaseId detailsUrl } } } } }`, the URL a `URI!` variable (`-f`, rebuilt from the parsed id by `runUrlOf`, never
+  the session's string), 50 to a query. `checkType: LATEST` lists only the newest attempt's jobs; within them, the
+  newest `databaseId` per name. A run is `completed` once its check suite is, with its `runAttempt` and a conclusion
+  from `WATCH_CONCLUSIONS`; anything else is `running`.
+  - **S1 (2026-11-18):** 50 aliases cost 1 point with and without `checkRuns(first:20)` (and with `runAttempt`), so
+    the failing jobs are read in the same query and no fourth query exists; with `filterBy:{checkType: LATEST}` as
+    built, 50 aliases still cost 1 point. A blocked read of 10 PRs costs 1 point with or without `detailsUrl`.
+  - An unseeable or nonexistent run answers a `null` alias with no `errors` entry and `gh` exit 0, unlike a PR's
+    `NOT_FOUND`.
+  - `resource(url:)` is reliable, so the REST and ETag fallback is not needed. A run read that fails is no poll
+    failure.
+- **What a watch's events are** (2026-11-18). One key per event (`watchKeyOf`, `shared/src/watch.ts`): `checks:<head>:
+  <pass|fail>`, `conflict:<head>`, `completed:<attempt>`, `suspended:<reason>`, `merged`, `closed`, `unreadable`. Each
+  is level-triggered: due whenever the latest reading says so and its key is in neither the watch's `seen` nor its
+  acknowledged keys, so a lost answer is sent again at the next poll and nothing is recorded before the daemon's
+  `ok: true`. A reading counts for a watch only if it was read in that same poll.
+  - **S2, what counts (2026-11-18):** the watch's checks are judged over _every_ context of the last commit, required
+    or not, deduped per (check-suite id, name) with the newest `databaseId` winning, so a failure in one workflow is
+    never hidden by a same-named success in another (a task's required rollup, `requiredOf`, still dedupes by name
+    alone, unchanged). `fail` is any failing context. `pass` is a non-empty list that is all passing, with none
+    pending (a CheckRun not completed, `STALE`, an unknown conclusion, a pending or expected status) and not truncated
+    (`totalCount` within the nodes read). Anything else is no reading yet. Not observed in 32 open PRs: a rollup
+    reading `FAILURE` with pending contexts, so fail-fast reads the contexts (`latestRuns`), never
+    `statusCheckRollup.state`.
+  - **The head is `headRefOid`.** The contexts are read from `commits(last:1)`, and a reading whose commit oid differs
+    from `headRefOid` fires no `checks` event that poll. A set that names a head follows it only after
+    `HEAD_GRACE_POLLS` polls of a different one while the set's own head has not been read yet (the head a set names
+    is the session's word, which GitHub may not show yet, so a different one is probably the previous push); once
+    read, a new head is followed at once. One that names none adopts the first head read. `headMoved` marks an event for a head the watch followed to.
+  - **`conflict`** fires on `mergeStateStatus === "DIRTY"` or `mergeable === "CONFLICTING"`, so a draft (whose
+    `mergeStateStatus` is `DRAFT`) gets it too.
+  - **The job link** of a failing context is rebuilt from the two id strings of a `detailsUrl` that names a job of the
+    watched repo (compared case-insensitively) and no other; a context with none is named without a link.
+- **The registry** (2026-11-18; `daemon/src/watch-registry.ts`, one per term, soft state: it asks nothing of the store
+  and a new term starts empty, the daemons resending).
+  - **Generation.** Keyed by device id, whole-set replace. `gen` is the daemon's boot id (`instance`) and a counter
+    it bumps on every `watch-set`: an equal `gen` is re-answered as last computed without replacing, a lower `n` on the
+    same boot is ignored unanswered, a higher `n` or a new boot replaces, and a retired boot stays ignored.
+  - **Who is taken.** A set from a registered machine that does not advertise `CAPABILITIES.watches` is dropped
+    (logged, no answer), as one from an unregistered sealer or the archivist is: it would be polled and counted toward
+    the caps with nobody to hear the answer. Refusals are logged once per change of their counts per device, not on
+    every heartbeat.
+  - **Expiry and caps.** A set not refreshed (by any accepted set, a re-answered one included) for 15 minutes is
+    dropped. The fleet holds at most 100 PRs and 100 runs, with no eviction: a device's already-admitted watches are
+    admitted before its new ones, and refusals are re-evaluated on every replacing set. `fleet_full` means "not polled
+    for now", never "ended". The per-device cap is 64: a 65-entry set is accepted with its 65th entry refused
+    `invalid` in `set.refused`, as is an entry with a good id and a bad body. A set past 256 entries is dropped whole.
+  - **Answers.** Every accepted set is answered by a `watch-event` carrying `set` (its generation and the refusals),
+    repeated until an `ok: true` answer. `seen` and the acknowledged keys are held in memory, and a key is added only
+    for a watch id the daemon's answer lists as delivered; events carry no id of their own, so a listed id
+    acknowledges every event of that watch in the frame, all or nothing. At most one `watch-event` is in flight per
+    device, sent at the end of each poll, at each clock tick (so up to two a poll interval while something stays
+    unacknowledged), on an accepted set and when a send ends with a set still owed. A frame is bounded by
+    `WATCH_EVENT_JSON_MAX` in UTF-8 bytes of JSON (`watchJsonBytes`, as `MESSAGE_ROUTE_MAX`); what does not fit is due
+    again at the next send, which starts at the watch the full frame stopped in, so events an early watch leaves
+    unacknowledged cannot keep the later ones out. Every `watch-event` is also written as an `audit request` line on
+    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: the daemon's
+    table acknowledges or drops what it cannot place ("Watches"). A device is sent to only while it advertises
+    `CAPABILITIES.watches` (or is the leader's own machine), and an answer of `null` (an ended term, an unreachable
+    machine) is no answer. The daemon's side of this contract, `gen.n` on every send, the resend until answered, what
+    `delivered` lists and what `fleet_full` leaves, is "Watches".
+- **Reserve for tasks** (2026-11-18, docs/gh-watch.md W8). A poll that starts with the term's newest `remaining` under
+  500 and its `resetAt` still ahead reads the tasks' PRs only: watched targets are asked for nothing until the budget
+  recovers. A watch on a PR a task reads anyway still takes that merge reading (`merged`, `closed`, `unreadable`):
+  it costs nothing, and no blocked read is made for the watch. Logged once per stay (and once when it ends), naming the reset and no target. The budget is unknown until a
+  poll's first answer, so a term's first poll reads both.
+- **Suspended and unreadable** (2026-11-18). A clock of the poller's own, at its interval, ticks the registry even
+  while a `limited` wait parks the poll chain for up to an hour. A watch that has gone unread for two intervals,
+  whatever the cause, is suspended, though never while a poll is in flight (the clock passes `polling`): a healthy
+  poll longer than an interval leaves every watch unread for longer than two, and its end reads them. The class
+  is the reason when it is not `ok`, `reserve` under the reserve, else `failed`, and `resetAt` only for a limit or
+  the reserve. The key is `suspended:<reason>` and nothing leader-local, so a daemon's `seen` stops a new leader
+  telling it again: once per reason per watch, however often it recovers and stops again. `since` (when this leader
+  last read the watch) is display only. A watch whose
+  PR or run alias answers null on two polls in a row is `unreadable`.
 - **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
   so the write has the per-task serial chain, the term fence and the version floor of every other,
   and apps are nudged. A reading for a URL that is none of the task's PRs writes nothing, one
@@ -6786,7 +7102,11 @@ of this section built.
   was ~20%, and with the long gap that reading became the average outright). It is caught by the
   counted time per core falling short of half the wall time, and its baseline restarts. The
   other is shorter than `MIN_CPU_WINDOW_MS` (5s), like the tick a register forces a second
-  after the last; its baseline stays, so the next tick measures across both. A failed collector drops its field and stores no
+  after the last; its baseline stays, so the next tick measures across both. A status with neither cpu nor mem
+  is `pressure_unknown` to the router, and a fresh daemon's first ones always lack cpu, so where mem fails as well
+  (the macOS exec, under load) the machine took no work until the next beat, up to an interval away: the status that
+  goes out without either is followed by one more `MIN_CPU_WINDOW_MS` later, through the refresh that waits out the
+  relay's floor — once per stretch without pressure, so a host that never reads it sends one status more, not one per floor. A failed collector drops its field and stores no
   sample rather than repeating its average, and the next reading eases from
   that average over the whole gap since the last good one. Rejected for macOS:
   free + inactive + speculative pages
@@ -6988,6 +7308,53 @@ of this section built.
     `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`) stores nothing and reads `unknown`, and a
     session that dies on auth mid-run, which no hook reports. On only through `RunOpts.authHealth`, which
     `main.ts` always passes, like `usageRefresh`.
+- **GitHub rate limits** (`daemon/src/github-rate.ts`, `gh.ts`; added 2026-11-17): this machine's own `gh`'s GitHub
+  API budget, in the status's `gh`. Every Claude session on every machine signs in as one GitHub user, so all of them
+  share one 5,000-an-hour REST budget and one 5,000-point GraphQL one. On 2026-11-17 sessions' own `gh` polling spent
+  the REST budget between 10:23:47 and 10:42:07 UTC with no warning; sessions then failed, and some retried in loops.
+  - **The read** is `gh api --hostname github.com rate_limit` (`readRateLimit`): argv array, a constant path, no
+    variable of any kind, a 15 s timeout with the process group killed past it, `GH_PROMPT_DISABLED`. GitHub counts
+    no `rate_limit` call against any limit ("Rate limits for the REST API"), so the read is free. Only
+    `resources.core` and `resources.graphql` are kept, each checked down to `limit`, `used`, `remaining` and `reset`
+    (non-negative safe integers, `limit` above 0, `remaining` at most `limit`); any other shape, a non-zero exit, a
+    timeout, no `gh` (ENOENT) or no login (exit 4, or a `Bad credentials` body) is no reading, never an error and
+    never a log line (a machine with no `gh` would repeat it forever). A budget past its `reset` drops out of the
+    view, so a reading never outlives its window.
+  - **Telling budgets apart.** Machines signed in as one user report one budget, so the leader must not alert per
+    machine. The status carries `u`, the numeric user id, from `gh api --hostname github.com user --jq .id`
+    (`readGithubUserId`): `gh`'s own jq keeps the profile (name, email) out of this process, and only a 1–16 digit
+    id is taken. Unlike `rate_limit` it costs one REST request, so it is read after the first good budget read,
+    kept, and re-read daily (`GITHUB_USER_TTL_MS`) and after `gh` reports no login, so a re-login as another user
+    is caught; one that fails keeps the id in hand. Rejected: matching readings by their numbers (two machines'
+    reads of one budget differ by every request spent between them, and two users can coincide), and the login
+    name (mutable, and a name is more identifying than an id in a sealed blob for no gain).
+  - **Cadence**: every 5 minutes (`GITHUB_RATE_INTERVAL_MS`) while both budgets have half or more left, every minute
+    (`GITHUB_RATE_LOW_INTERVAL_MS`) once either is under half. The read is free, so the only cost is a process
+    spawn. At the 2026-11-17 burn (~280 requests a minute) half a budget lasts ~9 minutes, so a minute's pace
+    crosses the leader's 20% line with ~3 minutes to spare, where five could step past it; and every machine signed
+    in as the user reads the same budget on its own phase, which only tightens the fleet's pace. The first read is
+    at start. Rejected: a fixed 1-minute pace (twelve spawns an hour per machine for nothing while the budget is
+    full) and reading on each 30 s status beat.
+  - **On the wire**, `MachineStatus.gh` is `{u?, c?, g?}`, `c` and `g` each `[limit, remaining, reset]` (reset in unix
+    seconds), at least one present. Display-only but for the leader's alert (Scheduler, "Web Push", "GitHub budget
+    alerts"), never trimmed by `fitStatus`: it is at most ~150 bytes at every field's widest and ~70 in practice,
+    and a trimmed one would silence the alert; `status.test.ts` holds the worst case beside every other kept field.
+    A reader drops a bad `gh` alone (`parseGithubRate`, strict down to an unknown key), never the status, as it
+    does `cu`. Absent from older daemons, and an older reader ignores it. No capability: absence already means no
+    reading.
+  - **History**: each budget is a `github_used_pct` gauge (label `resource`, `core` or `graphql`) in the metrics
+    tiers, so the Machines charts can show it later; `githubSamples` (`metrics-tiers.ts`) builds it for the daemon's
+    store and the archivist's live import alike. Every machine signed in as the user stores the same series under
+    its own `machine` label; the user id is never a label. No PWA surface yet.
+  - **Beside the PR poller's `limited`** (2026-11-18, Scheduler, "PR status"): the leader's `github` alert is the
+    owner's warning while budget is left (at 20%); `limited` is the poller's own reaction once GitHub refuses it. The
+    poller's reset comes first from its queries' own `rateLimit`, since this reader may still be on its 5-minute pace
+    when the budget empties; it falls back to this reader's GraphQL reset (`graphqlResetOf`, handed to the leader's
+    poller by `run.ts`), never a reading of its own. The budget gauge docs/gh-watch.md's open question 3 asked for
+    is this section; a count of live watches on the Machines row is not built (decided 2026-11-18: not
+    recommended).
+  - On only through `RunOpts.githubRate`, which `main.ts` always passes, like `authHealth`: a test daemon must not
+    run the developer's `gh`. The test runner's `SEANCE_GH_BIN` (a path that never exists) backs that up.
 - **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s
   `traits` map declares what this box's exclaves carry (Scheduler, "Traits filter"). `parseTraits` is
   strict: names pass `isTraitName` (`TRAIT_LIMITS`), values are objects holding only `exclaves` (a
@@ -7763,8 +8130,9 @@ fields carry over), under the same gates.
   waiting" on the old one while the new one waits, and hides the button while a waiting or live
   continuation exists; nothing routes by it, so the old record may be pruned. A
   continuation is an ordinary new task: it counts against the global, account and quota caps, and
-  `until` and `linear` carry over (under `until: "reported"` the resumed conversation already holds the
-  report instruction). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
+  `until`, `linear` and the `creator.*` tags carry over (under `until: "reported"` the resumed conversation already
+  holds the report instruction; the leader copies `owner.*` at admission and a leader that does not take tags gets none,
+  "Task tags"). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
   is exact, and the old task's dependents stay `dependency_failed`.
 - **Blocked PR** (2026-11-12, `CAPABILITIES.continueHandoff`; `blockedOffer`,
   `shared/src/continue-task.ts`). An `awaiting-merge` task whose PR reads blocked (`taskPrBlock`, Scheduler,
@@ -7845,10 +8213,11 @@ fields carry over), under the same gates.
   re-offer X; the loser is refused `not_continuable` all the same), and the daemon's per-path lock and
   live-pane check refuse the second with `not_continuable`. Residuals, each accepted:
   - _A `ready` continuation that is never placed_ (the target re-keyed, the clone gone, a daemon rolled
-    back; reasons `continue_elsewhere`, `repo_absent` or `continue_unsupported`) no longer waits for a hand
+    back; reasons `continue_elsewhere`, `continue_clone_gone` or `continue_unsupported`) no longer waits for a hand
     cancel: past `SchedulerConfig.continueExpiryMs` (4 days, fixed in `DEFAULT_CONFIG`, below the ledger's
-    age, docs/scheduler.md Settled defaults 19) since `createdAt` it fails `continue_expired` (Scheduler,
-    "Expiry"). Meanwhile it withholds the old task's offer, and cancelling it (unplaced) releases it. The old task may then be offered again, while its machine still holds its launch (the ledger
+    age, docs/scheduler.md Settled defaults 19) since `createdAt`, or since its `notBefore` if later, it fails
+    `continue_expired` (Scheduler, "Expiry"; a continuation deferred past the ledger's age fails at dispatch
+    instead, "Not before"). Meanwhile it withholds the old task's offer, and cancelling it (unplaced) releases it. The old task may then be offered again, while its machine still holds its launch (the ledger
     ages from the old launch, so a continuation made over 3 days after it may find it already evicted; the
     config-relation test guards only a continuation made soon after the old launch). Existing stuck continuations fail in the first pass of a
     new leader, which is the clean-up, and visible.
@@ -7877,6 +8246,29 @@ fields carry over), under the same gates.
     so reap (default `minAgeDays`) may remove it while Continue is still offered; its merged-branch sweep
     takes the branch with it, so the daemon then refuses "its worktree … and its branch are both gone", an
     expected refusal (a branch the sweep kept is re-added: "Re-adding a removed worktree").
+
+- **A session refused as gone is not offered again** (2026-11-17). Of the `not_continuable` refusals, "worktree and
+  branch both gone" is the one no retry on that session gets past: the re-add never checks out origin's ref, so
+  nothing brings the worktree back. Before, the refused continuation counted as unlanded and the offer returned, and
+  each tap queued a task that waited for the machine and failed the same way (seen on an Unblock, after its first
+  try had failed so). `continueOffer` now withholds the offer, failed, cancelled and blocked alike, while `tasks`
+  holds a continuation of the session it would resume (`goneContinuation`: the leader's pointer, else the task)
+  failed `not_continuable` with the daemon's words `WORKTREE_AND_BRANCH_GONE` (`shared/src/continue-task.ts`; the
+  daemon builds its message around that constant, and an older daemon's message already carries the same words),
+  naming that task. The Queue card says "Can't continue: its worktree and its branch are gone" in the line that
+  otherwise names a waiting continuation, with no reveal (the refused card may sit in Older); the daemon's message,
+  with the path, stays on the refused card. Every other refusal (a lock, an open session, the reap lock) can clear,
+  so it still re-offers.
+  - _Matched by words, not a code._ A new spawn error code would need a leader that knows it, or an older one's
+    verdict leaves the task reserved; a field on the failure would need a new leader and parser. The words are one
+    exported constant, so they drift only by an edit that a test fails on (`daemon/test/spawn.test.ts` asserts the
+    refusal carries it). A changed constant against an older daemon reads its refusal as passing: one more re-offer,
+    the old behaviour.
+  - _Fallen off the list._ A refused continuation past `QUEUE_MAX_TASKS` is missed and the offer stands, as before.
+  - _Rejected for now: a fresh session on the PR's branch_ in place of an Unblock that cannot resume. A fresh
+    worktree on any machine with the repo, its session checking out the PR head itself as a successor does, is a
+    different act from a continuation (which never checks out origin's ref on the spawn path) and needs leader
+    and state work; left for a later change.
 
 - **Moved out of Rejected:** the daemon refusing any task whose path a newer ledger note owns. The objection
   was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
@@ -7937,28 +8329,29 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 - **Names.** One vocabulary, binding for every PR; no identifier of this feature contains the
   hand-off's names.
 
-  | Concept                                  | Name                                                     |
-  | ---------------------------------------- | -------------------------------------------------------- |
-  | The act                                  | pass (a task to its successor)                           |
-  | Terminal state of the old task           | `superseded` (`TaskState`)                               |
-  | Old task's link forward                  | `Task.successor` (the new task's id)                     |
-  | New task's link back                     | `TaskSpec.succeeds`                                      |
-  | App → leader scheduler op                | `pass` (payload: `TaskRef`)                              |
-  | Scheduler → daemon request op: push      | `push-branch` (payload: `{ taskId, expect? }`)           |
-  | Scheduler → daemon request op: arm close | `pass-close` (payload: `{ taskId }`)                     |
-  | Daemon → leader event op (self path)     | `session-pass`                                           |
-  | Local socket frame (self path)           | `pass: true` and `record` on the frame                   |
-  | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)       |
-  | MCP tool, the session's own task         | `pass_to_successor`                                      |
-  | MCP tool, another task                   | `pass_task`                                              |
-  | CLI                                      | `seance pass <task-id>`                                  |
-  | PWA button                               | "Pass to successor"                                      |
-  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                 |
-  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                             |
-  | Audit origin (self path push and close)  | `successor`                                              |
-  | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "done" }`) |
-  | Failure code of an orphaned successor    | `pass_abandoned`                                         |
-  | Route reason                             | `predecessor_account` (stage 3 only)                     |
+  | Concept                                  | Name                                                             |
+  | ---------------------------------------- | ---------------------------------------------------------------- |
+  | The act                                  | pass (a task to its successor)                                   |
+  | Terminal state of the old task           | `superseded` (`TaskState`)                                       |
+  | Old task's link forward                  | `Task.successor` (the new task's id)                             |
+  | New task's link back                     | `TaskSpec.succeeds`                                              |
+  | App → leader scheduler op                | `pass` (payload: `TaskRef`)                                      |
+  | Scheduler → daemon request op: push      | `push-branch` (payload: `{ taskId, expect? }`)                   |
+  | Scheduler → daemon request op: arm close | `pass-close` (payload: `{ taskId }`)                             |
+  | Daemon → leader event op (self path)     | `session-pass`                                                   |
+  | Local socket frame (self path)           | `pass: true` and `record` on the frame                           |
+  | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)               |
+  | MCP tool, the session's own task         | `pass_to_successor`                                              |
+  | MCP tool, another task                   | `pass_task`                                                      |
+  | CLI                                      | `seance pass <task-id>`                                          |
+  | PWA button                               | "Pass to successor"                                              |
+  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                         |
+  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                                     |
+  | Audit origin (self path push and close)  | `successor`                                                      |
+  | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "done" }`)         |
+  | Forward-compat gate on a carried tag     | `TAGS_DEP_SENTINEL` (`{ task: "", after: "tags" }`), "Task tags" |
+  | Failure code of an orphaned successor    | `pass_abandoned`                                                 |
+  | Route reason                             | `predecessor_account` (stage 3 only)                             |
 
 - **Decided by the owner, 2026-11-12.**
   - **O1: the record is the successor's prompt.** The session writes it through
@@ -8096,7 +8489,8 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   PR-carrying task `pr_unreadable`. The head is validated with `isBranchName` and never logged.
 - **The successor (D7, D8).** `successorSpec(task, account, trigger)` in `shared/src/successor.ts`
   beside `continuationSpec`: it carries `repo`, `mode: "worktree"`, `title`, `model`, `effort`,
-  `until`, `linear`, `skill`, `avoid`, `requires`, `autonomy` and `plan`, the last two as
+  `until`, `linear`, `skill`, `avoid`, `requires`, its `creator.*` tags ("Task tags": the leader copies `owner.*` at
+  admission), `autonomy` and `plan`, the last two as
   `continuationSpec` carries them: `auto` stays `auto` and `checkpoint` stays `checkpoint` (an unattended failover must
   not stop at its first choice), and `steer` becomes `autonomy: "checkpoint"` with `plan` dropped, the
   plan having been approved (`withAutonomy` refuses `plan: true` beside `checkpoint`); `client` is
@@ -8351,17 +8745,290 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   docs/scheduler.md's Later). Not changed: no relay store rule, and Raycast, which is spawn-only and
   reads no task states.
 
+### Tags and session identity — built 2026-11-17 to 2026-11-18 (docs/tags.md, steps 1 to 4)
+
+The model behind four built parts, each recorded where it lives: the vocabulary, the frame's `agent` claims, the
+conversation table and its verification ("Session events", "Session identity"); the owner's label on an untasked
+session (there, "The owner's label"); task tags ("Task tags", below); and the adapter subscription and adapter tags
+("Adapters", "The subscription" and "Tags"). docs/tags.md keeps the open questions and the spikes' evidence (S1–S3,
+macOS and Linux) that `agent.session`'s verification rests on.
+
+**The problem.** Three parties want to hang facts on a session, and each had grown its own field: the person (a
+hand-started session showed as "zsh" or a slug, and a task's session could be renamed only by amending the task's
+title), the session (what it is doing, docs/presence.md's `self.doing`), and a tool (the adapter seam), which wanted its
+own ids on a session and a way to keep reaching it across restarts and `--resume`. The adapter seam as drafted keyed a
+session by `<pid>:<start time>`, which dies with the process and which the session cannot learn, and a reply handle
+lives an hour. Meanwhile `remoteSession`, `TaskSpec.linear` (a field naming a tool, read by nothing) and
+orchestrator.md's proposed `ref` were each one-offs, and the one stable identity every agent has, its conversation id,
+was refused as an address.
+
+**Decided by the owner (2026-11-17).**
+
+- **T1. Tags are key/value, namespaced by writer, and the namespace is the access rule.** `agent.*` is written only by
+  the agent's own mod and hooks, `seance.*` only by the daemon, `self.*` only by the session through MCP (display-only,
+  never keyed on), `adapter.<name>.*` only by that adapter over its stdin, `owner.*` only by the owner, sealed `from:
+  "app"`. **No tag binds, routes or authorizes anything, with one exception:** a verified `agent.session` may address
+  adapter delivery, and is refused when two live processes claim it. (The owner's `session-tag` is the other act a
+  verified id names; it is the owner's own display write, not a tag deciding anything.)
+- **T2. The owner's label may rename a task's session, display-only, separate from the task's title.** A session's
+  name is chosen by precedence **owner label > task title > `self.name` > window**, the source marked whenever it is
+  not the owner's or the task's. Push notifications never show a tag.
+- **T3. Tags were specified together with session identity and the adapter subscription**, in one spec.
+- **T4. Retention covers hand-started sessions**: the gate is a bound `claude` process, not `ours`. The direction is
+  that Séance picks up every session in its tmux server, not only task-backed ones.
+- **Beyond T1** (decided the same day): two task-scope namespaces, `creator.*` (whoever enqueues, at create only) and
+  `scheduler.*` (the leader; no keys in v1, reserved so a leader-made display fact needs no new field). `creator.*` has
+  no single writer: any app-role client that enqueues writes it, so it is trusted as a task's title is, no more.
+  `linear` and orchestrator.md's `ref` became `creator.ref` and `creator.ref-url`. The key count was sized at six
+  (three, two, one) at step 3 ("Task tags", "The bound").
+
+**Three levels and the task.** "Session" had meant three things with different lifetimes, and a fact belongs at the
+level whose lifetime it shares:
+
+| Level            | Identity                                                     | Ends, or is reused                                                                                         | Facts that live here                                                                       |
+| ---------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **pane**         | tmux pane id (`%12`)                                         | outlives processes; tmux reuses the id; a pane can be re-tagged for another task                           | none: a pane is where a process is, never what it is                                       |
+| **process**      | the `claude` process, `<pid>:<start time>` (`Bound.session`) | the process exits; a restart in the same pane is a new process                                             | turn state, `self.*`, `agent.remote` (one bridge per process), reply handles               |
+| **conversation** | the agent's session id, held as `agent.session`              | never ends: survives `--resume`, spans a continue chain, left by `/clear` or `/resume`; a successor is new | `agent.session`, `agent.kind`, adapter tags and subscriptions, an untasked session's label |
+| **task**         | the task id                                                  | finished, pruned; followed by continuations (same conversation) and successors (new conversation)          | `creator.*`, `owner.*`, `scheduler.*`                                                      |
+
+`self.doing` must die with the process (a restarted `claude` has not said what it is doing), an adapter's ticket id
+must not (its ask is still open after `--resume`), and a tracker ref must exist while the task is still queued, before
+any process: one per-pane bag would lose the second at every restart or keep the first past its truth. `/clear` and
+`/resume` move a process to another conversation, so a process carries a current conversation link that the next
+report moves; process tags stay, conversation tags follow the conversation.
+
+**One vocabulary, two stores** (`shared/src/tags.ts`, the record of the grammar, caps and parsers; nothing restates
+it). Session scope (process and conversation) lives in **daemon memory**, re-sent by its writers, never in a task
+record, `MachineStatus`, the store or the archive. Task scope lives in **the task record**, through the one task
+sealer, kept to few writers because each is a path into the sealer. What no writer re-sends (an untasked
+conversation's owner label and its adapter subscriptions) is at rest in the daemon's `conversations.json`.
+
+| Namespace          | Scope                  | Written by, and only over                                             | Accepts                                         |
+| ------------------ | ---------------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
+| `agent.*`          | process / conversation | the agent's own mod and hooks, through `seance session-event`         | `kind`, `session`, `remote` only                |
+| `seance.*`         | process                | the daemon itself                                                     | known keys only; none in v1 (reserved)          |
+| `self.*`           | process                | the session, through MCP `set_self_tag` (docs/presence.md, not built) | `doing`, `name`; any other suffix `unknown_key` |
+| `adapter.<name>.*` | conversation, or task  | that adapter, over its own stdin                                      | any suffix, opaque value                        |
+| `owner.*`          | conversation, or task  | the owner, through the PWA only, sealed `from: "app"`                 | `label` known; any other suffix opaque          |
+| `creator.*`        | task                   | whoever enqueues the task, at create only                             | `ref`, `ref-url` known; any other suffix opaque |
+| `scheduler.*`      | task                   | the leader, through the one task sealer                               | known keys only; none in v1 (reserved)          |
+
+- **Namespace is writer, and writer is path.** No frame names its own namespace: every write carries bare suffixes
+  (the frame's `agent`, `set_self_tag`, the adapter's `tag`, `session-tag`, `creatorTags`, `ownerTags`), and only what
+  a writer builds itself holds full keys (the task record, every read-side view). A full key on a write is refused
+  `invalid`, never re-homed. The parser splits at the last dot, so `adapter.x.y` is namespace `adapter.x`, suffix `y`.
+- **Values** pass `displayLine` (the one printable-text rule) and `TAG_VALUE_MAX` (256 UTF-8 bytes, cut on a code
+  point); empty clears the key. Known keys have strict parsers; an opaque value is display text and nothing else.
+- **Caps.** At session scope `TAGS_PER_WRITER_MAX` (4) per namespace, and `TAGS_PER_PANE_MAX` (16) over a session's
+  tags outside `adapter.*`; each adapter has its own 4 per target on top, so with `ADAPTERS_MAX` adapters a session's
+  worst case is 32 keys. Past a cap a write is refused `full`, never a silent drop of another key. Task scope:
+  "Task tags".
+- **Parsers are strict in shape and lenient in membership** (`parseTags`): a key a reader does not know, or whose value
+  fails its parser, is dropped, never the record, so a newer writer never breaks an older reader.
+
+**What every tag is not** (an invariant, held in the threat model): no tag binds, routes, places, settles, alerts,
+authorizes or moves anything, but for T1's exception. No tag is logged, audited as text (a line may carry a key count),
+put in argv, `progress`, `MachineStatus`, a push payload or a push's text, or read by `closeVerdict`, routing, the
+drain or any custodian verdict.
+
+**Retention for hand-started sessions (T4), and what it costs.** The gate moved from `ours` to "a peer whose chain
+holds a `claude` process", tasked or not, `ours` or not ("Session identity", "Retention"). The daemon keeps per-process
+memory for panes it did not start, bounded by the caps and pruned at its listings, and holds no new act on them: every
+custodian verb and the drain still require `ours` and a launch-ledger task. A same-uid process typing `claude` in the
+daemon's tmux server can put lines on the Machines screen; it could already put a pane and a window title there.
+Sessions outside the daemon's tmux server (an IDE terminal) stay out: the mod skips them (`TMUX_PANE` unset) and no
+pane binds them.
+
+**What verification proves, and what it does not.** It defeats a confused or lying peer in the wrong place: a Bash
+child of session B claiming A's id from B's pane is not verified, because the file for B's `claude` names B's
+conversation. It does not defeat a same-uid process that writes the file, as nothing on the machine defeats the
+owner's uid. Two live processes claiming one id (`claude --resume <id>` in two panes) refuse it until one ends; the
+claims counted are the verified and the unverifiable, never a refuted one or one bound through the `pane` fallback, so
+a misdelivery stays impossible and a Bash child in another pane cannot deny delivery. The settle window and the
+per-platform `procStart` read come from the spikes (docs/tags.md, "Spikes").
+
+**The join and the name.** `joinTags(task?, conversation?, process?)` is the one place precedence lives; a key exists
+at one scope by construction, bar `owner.label`, where the task's wins. `displayName` is used only on the owner's own
+surfaces (the PWA) and in an adapter's `Session`; anything that puts a name in another agent's context (a message
+wrapper, a receipt, the custodian's `sessions`, MCP) keeps the task's title or the window, since `self.name` is
+session-chosen text. The reader joins, since no single process holds both scopes; the daemon gets only a task's ref
+(`SpawnRequest.ref`, for adapters), never `owner.*`, so there is no stale second copy of the owner's label.
+
+| Surface                                  | Gets                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| PWA (Machines, Queue, task details)      | a session's name, rename and joined tags; a task's label and ref      |
+| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included             |
+| `sessions` op sealed from the scheduler  | none                                                                  |
+| MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                 |
+| adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref |
+| custodian `sessions` verb                | no tag                                                                |
+| `MachineStatus`, push, logs, audit, argv | never                                                                 |
+| archive                                  | `creator.ref`, `creator.ref-url` only                                 |
+
+**The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`): each session row on
+the Machines screen folds its joined tags (`SessionEntry.tags` joined with its task's record, `taskTagEntries`) under a
+`Tags` disclosure, grouped by namespace, each group naming its writer from this table and each tag its scope and age,
+`verified` shown on a verified `agent.session`. A task tag's age is its task's creation (a record holds no per-key
+time). Values pass `displayLine`; only `creator.ref-url` is linked, and only as `httpsUrl` passes it. Joining the task
+layer means a task's `owner.label` names its session, over the session's own label and the task's title.
+
+An adapter never sees another adapter's tags: each is a separate third party.
+
+**Another agent's context: by writer, not by reader, and narrow.** `AGENT_VISIBLE_TAG_KEYS` is `agent.kind`,
+`creator.ref` and `owner.label`. Not `creator.ref-url` or an opaque `creator.*` key (when a session enqueued, those are
+session-chosen text), not `agent.session` (no reader needs another session's conversation id, and handing it out only
+helps one claim another's), and never a tag a session or a tool chose (`self.*`, `adapter.*`), for any caller: such
+text reaches another session only inside Séance's fixed wrappers. **Rejected:** an orchestrator role that sees more.
+MCP cannot tell an orchestrator from any other session (both are `seance mcp` sealing `from: "app"`), so a role would
+be a claim.
+
+**`remoteSession` and `agent.remote`.** The concept is renamed, not the wire fields the skew table depends on: the
+local frame sends `agent.remote` and, until the mod's floor moves, `remoteSession` (read as its fallback, through the
+one `isRemoteSessionId`); `SessionEvent.remoteSession` keeps its name on the sealed op an older leader parses;
+`Task.remoteSession` keeps its name and rule, a task field and not a tag, which the PWA falls back to outside the tag
+map; the custodian round's link is unchanged. Codex will supply its own `agent.remote` through the same key.
+
+**The adapter subscription** (amends docs/messaging.md D3; built: "Adapters", "The subscription"). A tool's asks live
+for days, and a session that joined it by messaging `adapter:<name>` was answerable only by reply, for the `sent`
+table's hour, and only while the same `claude` ran: a restart, a `--resume`, a `continue_task` or an hour's silence cut
+it off. So a session's message to `adapter:<name>` subscribes its verified conversation for the conversation's life.
+
+- **Why D3's one-hour bearer reason does not apply.** A reply handle is a bearer: a message id that crossed the wire,
+  valid from any machine through the leader. A subscription's authority is the session's own act, recorded by the
+  daemon against a conversation it verified; it is usable only over that one adapter's stdin, on that machine, and the
+  id it is keyed by grants nothing to anyone else who learns it. The channel bounds what an hour bounded.
+- **Chains.** A continue chain keeps it (same id, same machine). A successor is a new conversation: the adapter learns
+  of it from the `task` event and reaches it by task id, or the successor subscribes itself.
+
+**Rejected:**
+
+- **One per-pane bag of tags** (no levels): it loses conversation facts at every restart or keeps process facts past
+  their truth.
+- **Tags in `MachineStatus`**: 1.5 KiB of ciphertext for the whole machine.
+- **Session tags in the store** (a leader-held map keyed by conversation): every change a term-fenced write and a push
+  to every app, and a leader holding session text.
+- **A free-for-all namespace** (any writer, any key): a session could set `owner.label` and a tool `agent.session`;
+  access rules would have to be per key and would drift.
+- **Trusting the mod's `agent.session` without verification**: a Bash child of one session could claim another's
+  conversation from its own pane.
+- **The pane id or `<pid>:<start time>` as the adapter's key**: neither survives a restart, and the session cannot
+  learn either.
+- **Persisting every session tag**: process tags are false after a restart, and conversation tags other than the
+  owner's label and subscriptions are re-sent by their writers.
+- **A separate `set-task-tags` op, a changeable `creator.*`, and adapter task tags**: each another path into the
+  sealer.
+- **Extending the reply handle's TTL for adapters** instead of a subscription: a longer-lived bearer, still bound to
+  one process, still useless across `--resume`.
+
+**Threat model.** What this adds, and what bounds it (Threat model item 6 and CLAUDE.md carry the invariants):
+
+- **Session-chosen and tool-chosen strings other readers display** (`self.*`, `adapter.*`): scrubbed by
+  `displayLine`, capped, scoped, kept out of MCP and pushes.
+- **Retention for hand-started panes**: memory per bound `claude` process, bounded and pruned, no new act.
+- **A verified conversation id names two acts**: the owner's `session-tag`, and adapter delivery on one machine to a
+  subscribed conversation; both refused when ambiguous, both re-verified at the act. It is read by the daemon from its
+  ledger or the agent's own per-process file, never taken from a frame to bind anything.
+- **A long-lived subscription**: the session's own act, at rest in one 0600 file of conversation ids, adapter names,
+  adapter fingerprints and times, beside the owner's labels (its one text, the owner's own), with one writer.
+- **Task tags**: display text sealed like a title, held to the sentinel, the gate and the archivist's strip.
+
+### Task tags — built 2026-11-18 (tags step 3)
+
+A task carries display tags in `TaskSpec.tags` (full keys, `creator.*`, `owner.*`, `scheduler.*`), the task-scope half
+of the tags model ("Tags and session identity"). They label a task for people and for the adapter feed; nothing routes, binds, places, settles
+or alerts on one.
+
+- **Vocabulary** (`shared/src/tags.ts`). At most `TASK_TAGS_MAX` (6) keys per task, within `TASK_TAG_BUDGET`
+  (`creator` 3, `owner` 2, `scheduler` 1), each value at most `TAG_VALUE_MAX` (256) and held to `parseTagValue`. A
+  `creator.ref-url` is the one key refused past that cap, never cut: it is held to 256 bytes both as typed and as the
+  normalised `href` (non-ASCII and quotes percent-encode and grow), so what is stored is a fixed point of every later
+  parse and a link is never a truncation of another.
+  `creator.ref` (`source:id`, `parseRef`) and `creator.ref-url` (https only) are the two keys a surface writes today; any
+  other `creator.*` key is opaque to the surfaces and shown only on the verdict's list. `owner.label` is the owner's.
+  `scheduler.*` is reserved: it has no known key in v1, so the leader writes none and a client's is refused.
+- **The sentinel.** A record carrying `tags` always carries `TAGS_DEP_SENTINEL`, `{ task: "", after: "tags" }`,
+  appended by the one task sealer (`taskRecordAtRest`). An older leader's dep parser refuses the empty `task` and the
+  unknown `after`, so it holds the record unreadable instead of sealing it back without the label and the ref. This is
+  the one sentinel that guards display data: an older leader's next write would erase the owner's label and the
+  creator's ref silently, and unlike an attachment manifest, tags stay on finished records. It is therefore an
+  exception to "sentinels exist where an older leader would _act_ wrongly on a field it drops" (the skew list, below),
+  and its cost is accepted: while an older daemon leads, every tagged record is unreadable to it, so running tagged
+  tasks cannot be moved by their session events, their dependents block, and labelled finished records cannot be
+  pruned. Its `after` is `tags`, where the attachments, requires and successor sentinels are `merged`, `opened` and
+  `done`, so each stays tied to its own field. The parser drops it only beside `tags` and nulls the spec over the
+  sentinel without them. It guards against leaders that predate tags and no further: a leader of this build drops a key
+  it does not know (`scheduler.*` has none in v1) and re-seals without it, with the sentinel still on the record. A
+  later build that defines a `scheduler.*` key, or any key an older tag-aware leader would drop, needs its own guard (a
+  new sentinel `after`, or a capability gate on its writer) or it is erased by the first leader that takes the term
+  before the update reaches it.
+- **Who writes what.** A client's create seals `creator.*` alone, so the record is version 1 and `bindTaskRecord`
+  strips every other key from it (`onlyCreatorTags`): an app cannot create a task wearing an owner's label or a
+  scheduler key. `owner.*` is written only by the leader, on an `amend` carrying `ownerTags`, and `AmendRequest.
+  ownerTags` is sent only by the PWA: `parseAmendDraft` refuses it, so neither the broker nor MCP's `amend_task` nor the
+  CLI carries it ("Amending a waiting task"). Adapters write none.
+- **The gate.** A client writes `tags` or `ownerTags` only to a verified leader advertising `CAPABILITIES.taskTags`
+  (`taskTagsGateError`, `daemon/src/auto.ts`): the CLI, MCP and the broker refuse a `--ref` / `ref` create with a
+  message naming the flag, and the PWA hides its inputs. A continuation or successor is the exception: display data must
+  not block a resume, so `offeredSpec` drops the copied `creator.*` tags when the leader lacks the capability.
+- **The bound.** Measured at the true worst case (`parse.test.ts`: opaque values of 256 `"`, which JSON-escape to two
+  bytes each, a 256-byte ref URL, a 96-character ref and a 200-character label, beside a full prompt, a full manifest
+  and every other field at its cap): a create with the three creator keys seals to 28252 of the 28672 create cap (420
+  spare; 144 with the legacy `linear` kept beside them, which no writer sets). Six keys do not fit the 40 KiB record
+  cap beside eight candidates, which have 216 bytes spare before any tag, so the leader's `#update` retries a
+  `too_large` write once with the held decision cut to its winner (`winnerOnly`; it does not retry a record that has
+  nothing to cut): the five keys a leader writes then fit with 1420 spare, and 2920 spare with no decision. A store
+  refusal of a label alone answers `tags_full`, never `prompt_too_long`. The key count was kept at six on that basis
+  rather than cut ("Tags and session identity", "Decided by the owner").
+- **Chains.** `continuationSpec` and `successorSpec` copy the predecessor's `creator.*` tags (`chainTags`), never
+  `owner.*` and never `scheduler.*`. The leader copies the predecessor's `owner.*` onto the new task at its first move
+  out of `queued` (`scheduler/src/chain-tags.ts`: the resumed or passed-from task, by `continues` or `succeeds`), so the
+  label follows the work even though the client's create was version 1. It copies only for a record still at store
+  version 1 (the client's create, which the leader has not written): an amend while it waited, a label set and cleared
+  included, leaves no key to show the owner spoke, so any leader write forgoes the copy and the owner's word stands. A
+  task already `blocked` moving on takes none either. The cost is a successor whose prompt was amended before its first
+  move carries no copied label. A successor's preamble carries a `Ref:` line from `creator.ref`
+  where it carried `Linear issue:`.
+- **The reserve compare ignores tags.** `#reserve` declines a reservation whose routed spec differs from the held one
+  (`isDeepStrictEqual`); a label set while the decision was in flight must not cost the task its placement, so both
+  sides pass `withoutTaskTags` first.
+- **`SpawnRequest.ref`** (`{ ref, url? }`). The leader's `#dispatch` sends `taskRef(spec.tags)` only to a daemon
+  advertising `taskTags`. `handleSpawn` takes it only from a spawn sealed from the scheduler with `client:
+  SCHEDULER_CLIENT` and a task id, in any mode (`refOf`), and notes it in the launch ledger (`TaskNote.ref`, re-checked
+  on read as `parseRef`/`httpsUrl` hold it, never in `progress`); any other sender's is ignored, as an older daemon
+  ignores it. The adapter feed sends it as `AdapterSession.task.ref` (`EndedTasks.ref`). Never logged: the audit line
+  for a spawn carries no ref.
+- **The join.** `taskTagEntries(spec, at)` is a task's tags as `TagEntry` records with `at` = the task's `createdAt`
+  (a task has no per-key time, so an amended label shows the task's age), and a legacy `linear` with no `creator.ref`
+  of its own reads as `creator.ref` = `linear:<issue>` (and `creator.ref-url` with a URL): mapped at the join only,
+  never parsed into `tags` and never written back. A writer whose `linear` fails the ref's rules keeps writing
+  `linear`.
+- **Readers.** MCP's `get_queue` carries only the allowlisted keys (`AGENT_VISIBLE_TAG_KEYS`: `creator.ref` and
+  `owner.label`, never `creator.ref-url` or an opaque `creator.*` key) as `tags` in place of the `linear` field it had.
+  The archivist keeps `creator.ref` and `creator.ref-url` and
+  drops every other tag. The PWA shows the label beside the title and the ref linked to its https URL, and the verdict
+  lists every key. A push, a log line or an audit line never carries a tag; an audit line names `fields=ownerTags`.
+
 ### Amending a waiting task — built 2026-11-12
 
 A queued stack learns things as it runs: session 1 finds what sessions 6, 8 and 9 should be told.
 Cancelling and requeuing them loses their ids, so every `after` naming them breaks. `amend` changes a
-waiting task's prompt, title, model and effort in place, under its own id.
+waiting task's prompt, title, model, effort and not-before time in place, under its own id. The
+not-before time takes a number or `null` (clear), needs no `basis` (the last write wins, as for title,
+model and effort), and is audited as `fields=notBefore`, never the time ("Not before").
 
 - **The op.** `amend` (wire spec above), sent `from: "app"`, parsed by `parseAmendRequest` into a fresh
   value, checked against the one `schedulerGuard`, and run by `Scheduler.amend` through `#update`, the
   per-task serialized write path ("One write at a time per task"). The id stays, so dependents' `after`
   links and a held successor's `succeeds` link are untouched. It forgets the task's held decision and
   ticks, since that decision routed the old spec.
+- **Tags-only, in any state** (2026-11-18, "Task tags"). An `amend` carrying `ownerTags` and none of the other fields
+  is taken whatever the task's state, finished included, because a label changes nothing the leader routes: it
+  needs no `basis`, meets no state rule beyond `not_found` and forgets no decision. `ownerTags` holds bare `owner.*`
+  suffixes (`""` clears one); past `TASK_TAG_BUDGET.owner`, or when the store refuses the record as too large with
+  nothing left to cut, the leader answers `tags_full`, which reaches a client as `invalid_request`. Beside another field it meets the rules below. Only the PWA sends it, to a verified leader
+  advertising `taskTags`. Because the record is rewritten through the one sealer, a label on a finished record leaves
+  `TAGS_DEP_SENTINEL` on it, which is why the prune age is unchanged but an older leader cannot read it.
 - **Only before dispatch.** Accepted only while the task is `queued`, `blocked` or `ready` with no spawn
   out. A `reserved` task, or one whose spawn is in `#dispatches`, is `dispatching`; anything placed is
   `placed` (the session already has its prompt; there is no live edit); a finished one is `finished`.
@@ -8387,7 +9054,7 @@ waiting task's prompt, title, model and effort in place, under its own id.
   it means "may have landed".
 - **Sentinels.** The amended record is written through the one task sealer like every leader write, so
   `pin.exclave: ""` and the attachments, requires and successor dep sentinels are emitted again for
-  their fields. `amendSpec` touches the four fields and keeps every other one as it was.
+  their fields. `amendSpec` touches the five fields (`notBefore` is the fifth, with no `basis`) and keeps every other one as it was.
 - **Capability.** `CAPABILITIES.amend`; MCP and the CLI offer amend only to a verified leader
   advertising it, and the broker's gate refuses for a ready leader without it. An older leader answers
   the unknown op `invalid_request`. `OP_TIMEOUT_MS.amend` is 10 s, under the relay's reply window, so
@@ -8404,8 +9071,9 @@ waiting task's prompt, title, model and effort in place, under its own id.
   unchanged), and what runs is still decided at dispatch by the leader. The keyless broker peer gains
   it too ("Fleet broker").
 - **Surfaces.** MCP `amend_task` (`append` by default, `replacePrompt` to replace; `title`, `model` and
-  `effort`, null to clear). `seance amend <task-id> [text…] [--replace] [--title t] [--model m]
-  [--effort e]` (`--title ""` and `default` clear). Raycast is spawn-only and unchanged. **No PWA
+  `effort`, null to clear; `not_before`, ISO 8601 with an offset, null to clear). `seance amend <task-id> [text…] [--replace] [--title t] [--model m]
+  [--effort e] [--at <time> | --in <duration> | --not-before none]` (`--title ""` and `default` clear; a repeated `--at` or `--in`
+  is a usage error, and the success line names the resolved time with its zone). Raycast is spawn-only and unchanged. **No PWA
   surface in V1 (owner, 2026-11-12):** amending is an orchestration act, done from a Claude planning
   or orchestration session that queued the stack and learns what later sessions need, so MCP and the
   CLI are where it is asked for. A Queue-screen editor is deferred until it is wanted.
@@ -8562,8 +9230,9 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
     The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
     `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
     row, `--wait` and `list_machines`' `drain` (below); item 3 adds `now` and the ask's wording.
-- **A closed leader keeps leading** (docs/drain.md §6). The drain's passes need a leader, and moving the term
-  mid-drain only adds a takeover; it stops leading when it leaves. So closing the leader warns that the queue
+- **A closed leader keeps leading until it is empty** (docs/drain.md §6). The drain's passes need a leader, and
+  moving the term mid-drain only adds a takeover; once empty it leads only as a fallback (next bullet). Until then,
+  and after it if no other machine can lead, it stops leading when it leaves. So closing the leader warns that the queue
   goes down with the box: the close sheet ends with, and `seance close` and `set_machine_open` append on a line
   of its own to any close that stands (fresh or already closed; never a reopen), `leaderCloseNote` ("<name> runs
   the queue: while it is down, the queue stops unless another machine can take over"), one text in
@@ -8574,7 +9243,49 @@ outside pass of an uncommitted tree is refused (`dirty_worktree`).
   one nominee, the relay keeps the signed `roles` (every daemon claims `scheduler`) and its `SCHEDULER_LEADERS`
   list, so no client can see a standby. _Rejected:_ counting connected machines as standbys (every one claims the
   role, so it would hide the warning on a fleet with no other allowlisted id — the wrong direction), and a relay
-  push of the standby count (a relay and wire change for one sentence; kept as the way to sharpen it).
+  push of the standby count (a relay and wire change for one sentence; kept as the way to sharpen it). The note is
+  unchanged by the fallback below: it is still true (the queue stops while the box is down unless another machine
+  can lead, the fallback only moving the term earlier when one can), and a client cannot tell whether the relay
+  and the leader both run the fallback.
+- **A closed, empty machine leads only as a fallback** (docs/drain.md §6's "Later"; built 2026-11-18,
+  `daemon/src/lead-fallback.ts`). Once a closed machine is empty, every register it sends signs the role
+  `fallback` beside `scheduler` (`DAEMON_ROLES.fallback`, v2, so the signature covers it), and `nominate` counts a
+  candidate carrying it only while no eligible candidate without it is connected ("Leadership", above): a leader
+  that re-registers so hands the term to the earliest-connected open nominee at once (`lead`/`follow`, a new
+  term), takes it back if the last of them leaves, and loses it again when one returns, each on the relay's own
+  register, close or sweep. A fleet with no other nominee keeps its closed leader, as before.
+  - **Empty is the daemon's own fact:** the status loop's sessions read (the list `drainView` and the `drain:
+    empty` line read; any listed pane counts, a hand-started session too) shows no pane while closed at `cl`, read
+    unchanged around the list (`watchedSessions`), and no task launch is in flight (`EndedTasks.launching`: a
+    launch accepted before the close whose pane is not listed yet). A failed read decides nothing.
+  - **Once per `cl`, never thrashing:** set at the first empty read under a `cl`, it holds until `cl` changes, even
+    if a pane appears again meanwhile (a session started by hand). A reopen drops it at once (the `availability`
+    handler, not the next read) and the next register claims plain `scheduler`; it takes nothing back, since a
+    current leader keeps the role while eligible. A reopen and a new close must empty afresh. Memory only: a
+    restart while closed registers plain `scheduler` and may lead until its first read finds the box empty, a
+    takeover per restart. Logged once each way (`scheduler: closed and empty (cl=…), registering as a fallback
+    leader`, `… claiming the scheduler role plainly`), and the relay's `registered` line carries
+    `(scheduler fallback)`.
+  - **Why the relay decides "another nominee is connected":** the allowlist (`SCHEDULER_LEADERS`) is the relay's
+    secret and no op exposes it, the registry push names only the current nominee, and every daemon claims
+    `scheduler`, so a daemon cannot tell a standby from an unlisted machine. Ranking in `nominate` uses exactly
+    the inputs that decide leadership already, moves the term back if the standby leaves, and needs no new frame,
+    op or capability.
+  - **Skew.** An older relay keeps only the roles it knows (`knownRoles`), so it reads the fallback register as
+    plain `scheduler` and the closed machine keeps leading: today's behaviour. The v2 signature still verifies,
+    since it covers the list as sent. An older daemon never sends the role, which the new relay reads as before.
+    A daemon admitted v1 (its relay a deploy behind) signs no roles at all and is not a candidate anyway. No
+    client reads roles, and no `CAPABILITIES` flag is added: nothing is offered or refused on it.
+  - **Threat model.** The role is only ever a demotion: it can make the relay prefer another listed, verified
+    daemon, never nominate an unlisted one or one without `scheduler`. Only the machine's key signs it (a register
+    moves only its own socket), and it reaches the relay only as signed `roles`; no field of any other frame sets
+    it, and it is on no local op, broker action or MCP tool.
+  - _Rejected:_ registering with no roles (the suggested shape: with no other nominee connected the queue would
+    have no leader until the daemon noticed and re-claimed, and it could never learn that one connected later
+    without re-claiming on every registry change), the daemon deciding from the registry which machines could lead
+    (it cannot see the allowlist), stepping down before empty (moving the term mid-drain only adds a takeover to
+    the drain's passes), persisting the mark (one takeover per restart is cheap, and a mark surviving a missed
+    reopen would hold leadership away from an open box), and a new `CAPABILITIES` flag (no client acts on it).
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
   sealed and replay-guarded, answered only for an app, and audited. A soft close does strictly less than a close.
 - **Skew and rollback (soft close).** Daemons self-update independently and any may lead. An old leader passes on
@@ -9196,7 +9907,9 @@ decision is recorded here.
   **Refused, not run, where that cannot be shown.** A host whose toolchain the masks would break or undo
   (`toolchainProblem`) is refused `op=refused reason=toolchain`: a `main.ts` outside `<checkout>/daemon/`; a bun that is a
   version manager's shim (its real file is a script, or is not named `bun*`), whose target sits under the masked home and
-  outside every allow entry; and an allow entry that is, or contains, any path the fence masks (`sandboxMasks`, the one
+  outside every allow entry (the real file found by following its links, `realpathOfFile`: macOS's realpath names a
+  hard-linked file by whichever of its links any process looked up last, so the test suite's `9.9.9` claude stub, then a
+  hard link of bun, made the seat refuse now and then); and an allow entry that is, or contains, any path the fence masks (`sandboxMasks`, the one
   list the fence is made from: home, the state and config dirs, the tmux socket dir, repo and exclave roots, the
   checkout, and the system roots, before any is dropped as nested; srt lets an allow beat a deny, so `~/bun` would
   re-open the whole home and `<checkout>/bun` the relay's `.dev.vars`). The seat checks at its start (with the tmux
@@ -9295,10 +10008,13 @@ decision is recorded here.
   is what the ask _reads_, and does not say an entry is live; once the prompt is typed, the pane skipped or dropped
   or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
   as the machine stays closed), never counts, since no verb may
-  touch it and it would otherwise keep a round due for ever. **So does every pane no built verb could act on**
+  touch it and it would otherwise keep a round due for ever. Nor does a pane whose last turn left background work or
+  a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"), or one a live watch waits on
+  (`Watches.holds`, "Watches"): `close` answers it `busy`. **So does every pane no built verb could act on**
   (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
-  gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (the mod's `session.start`,
-  raised on a reload, an install or a hooks-worker respawn, leaves a finished session so). `close` answers both
+  gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (a session
+  started, resumed or cleared and never prompted, from the settings `SessionStart` hook; until mod 0.6.0 the
+  mod's `session.start` also left a finished session so on a reload, an install or a hooks-worker respawn). `close` answers both
   `unobserved` (C24), and a round they kept due would run every `everyMinutes` to do nothing. So the due check has
   two terms (`actionable`, `custodian-seat.ts`): a pane idle since its turn ended for `everyMinutes`, and (custodian 8) a pane `busy` whose screen has stood still for `everyMinutes` **and that a verb could act on**
   (`CustodianVerbs.reach`, asked through `SeatDeps.busyReach` for only those panes): `nudge` on a session with a task
@@ -10129,8 +10845,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   breakpoint Prompt, Queue and Machines are peers under one fixed header that `app.tsx` renders outside
   the keyed screen body, so the pill never moves or re-mounts and any screen is two taps from any other;
   Queue and Machines have no back button. Its left holds the screen's title block (`PromptHeading`,
-  `QueueHeading`, `MachinesHeading`, which the desk's column headers render too); its right the pill,
-  with the Queue's ↻ beside it on that screen only. The raised face is a hamburger opening Prompt, Queue,
+  `QueueHeading`, `MachinesHeading`, which the desk's column headers render too); its right the pill
+  alone (the Queue's ↻ and the placement preview's went 2026-11-17: never used, since both re-read on their
+  own). The raised face is a hamburger opening Prompt, Queue,
   Machines and Settings, each with a feather-weight icon (pen, list, server, the cog); the current
   screen's row is tinted in the accent and `aria-current="page"`, and picking it only closes the menu.
   The track and its dot are unchanged; an escalated task puts the queue's attention dot on the closed
@@ -10189,7 +10906,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   so a poll or a keystroke never starts one; Settings outranks a screen change, which
   outranks a verdict change, a verdict replacing a verdict is none, and on a desk only
   Settings and the form column's verdict move. A `switch` moves only what changes: the
-  header's title block cross-fades with a 4px shift, the Queue's ↻ fades, the body
+  header's title block cross-fades with a 4px shift, the body
   cross-fades with a small rise, and the pill is named only to be held still (the rest
   of the header is one panel the same on both sides). A started transition holds the state back
   until its update callback, which runs after the browser captures the old screen; the
@@ -10276,7 +10993,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   routing has dropped. The leader's disk push (Scheduler, "Web Push", "Disk alerts") reads the same figure from the live `status`, not from this history. The chart is inline SVG geometry (`chart.ts`), no charting
   dependency; gauges break their line at a missed tick and bridge the break with a faint
   dotted run (nothing was measured there, but a sleep should read as one gap, not as
-  missing ink), and a point alone between two breaks is a dot — a laptop in clamshell
+  missing ink); a break no gauge measured inside is also shaded full height behind the lines and
+  named Offline in the legend (`offlineSpans`; only between points, never before the first or after the
+  last, where history may just not reach or the next tick not be due), and a point alone between two breaks is a dot — a laptop in clamshell
   sleep leaves exactly that, one tick per dark wake. Quota holds its level between
   observations, since a sample carries the observation's time, not the tick's.
 - **Machines say who leads and what each runs** (2026-10-18). A line above the cards names
@@ -10349,12 +11068,14 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   button — two sibling buttons in one pill, never nested — whose chevron opens the shared menu
   (`components/menu.tsx`) with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
-  in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
+  in `decision-view.ts`, which counts the whole-queue pause beside the caps as lifted while the
+  verified leader advertises `runNowPaused` — "past the pause", "past the pause and the concurrency
+  limit" — and otherwise greys a task the pause alone holds as "The queue is paused"; with a cap-held candidate beside the chosen one it stays generic, since
   `run-now` weighs both and the held one has no score, so it is plain "Skip the queue", naming
   neither a machine nor the caps the chosen one would not need lifted; "past the concurrency
-  caps" is only for no chosen target and several cap-held candidates), and it is disabled when
-  the preview turns every candidate down for more than the caps; a candidate held by
-  `cap_reached` alone keeps it on, since that is what `run-now` lifts, and no preview (asking,
+  limit" is only for no chosen target and several cap-held candidates), and it is disabled when
+  the preview turns every candidate down for more than `run-now` lifts; a candidate held by
+  `cap_reached` alone (or, under `runNowPaused`, beside the whole-queue pause) keeps it on, and no preview (asking,
   failed, a pinned form) leaves it on as plain "Skip the queue".
   A tap enqueues exactly as Queue, then `SchedulerStore` holds one Start now intent: only a new
   successful enqueue (Queue or Start now) replaces it and only the store's `dispose` ends it from
@@ -10509,7 +11230,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
   Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected); while the archivist is connected, Finished continues into a collapsed Older section read from the archive (Archivist, "The PWA's task history"). Idle holds the
   `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
-  action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
+  action's own reply wins), each saying "Idle at its prompt since … — its slot is free", or, when
+  its entry carries the turn's note (Session events, "Settings hooks"), "Idle, waiting on its
+  background work (1 shell, 2 scheduled wake-ups) since …" or "Stopped on an API error (rate limit)
+  since …", and the
   summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).
   Not in Needs you: nothing is owed to a session that finished its turn, and its slot is already free. A row shows the
   task's title (its own, else its session's window name, which tmux and claude.ai show too, else its prompt's first line cut to 80, else its repo), where it is and
@@ -10544,7 +11268,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   refusal (its notice), never a placement the cap-free route would not make.
   Every waiting card (`queued`, `blocked`, `ready`) also has **Start now** in its ⋯ menu, always shown (`QueueRow.startNow`),
   worded and greyed by the Spawn screen's rules (`decisionStartNowItem` over the task's latest decision: greyed only when
-  the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`). A `queued` or `blocked` one is
+  the decision has no winner and no candidate held by the caps alone — or by the caps and the whole-queue pause alone, under a leader advertising `runNowPaused` — or the leader lacks `runNow`). A `queued` or `blocked` one is
   greyed too, its line saying why ("Waiting for the scheduler", "Waiting on the tasks it depends on"): `run-now` takes only
   `ready` and refuses anything earlier `not_waiting`, so offering it there was a tap certain to fail (2026-11-12). A card shown
   `blocked` after its dependencies cleared waits for the next read (a `queue-changed` nudge, or Refresh) to enable it.
@@ -10557,7 +11281,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   in the queue. A waiting one hides the button and puts "Continuing as <its title> · waiting" on the old
   card, a line that scrolls the queue to its card (centred in the list's own scroll container, not
   `scrollIntoView`, which would shift the page on a phone); when it fails unplaced (any failure outside the landed list, e.g. `not_continuable`,
-  `continue_expired`) or is cancelled before placement, the button comes back. The tap re-checks the leader and the offer before
+  `continue_expired`) or is cancelled before placement, the button comes back, unless it was refused because the
+  worktree and branch are both gone (2026-11-17, Daemon, "Continuing a session"): the card then says "Can't
+  continue: its worktree and its branch are gone" and offers nothing. The tap re-checks the leader and the offer before
   writing, since either may have changed since the card was drawn, then writes the continuation spec with
   `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
   a store answer becomes the screen's notice. On an `awaiting-merge` card whose PR is blocked (2026-11-12,
@@ -10614,7 +11340,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   be removed. (A BATCH tile — an open batch the next enqueues joined, numbered from 1, until
   End batch — was removed 2026-10-29: never used by hand, and it cost the form a row. Batches
   stay MCP's `queue_batch`; a persisted form's `batch` is ignored, so an open one ends rather
-  than grouping tasks with no tile left to end it.) Deps and `until` belong to one
+  than grouping tasks with no tile left to end it.) A **REF** tile (2026-11-18, "Task tags") opens a sheet with the ref
+  (`source:id`) and its https URL, written as the creator's tags, and is hidden against a leader that does not advertise
+  `taskTags` unless a ref is already typed (shown off, with the leader's refusal as the problem). On a queue row the
+  card's menu opens the **Label task** dialog (`owner.label`, blank clears it) for any task, finished included, while
+  the verified leader takes tags; the label shows beside the task's title, never in place of it, and the ref links to
+  its URL only when that is https. An archived card shows the ref and no label, and offers no labelling. Deps and `until` belong to one
   task and reset after each enqueue. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task
@@ -10759,6 +11490,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   routing it through the relay like any other target, which is simpler to
   describe and pays Cloudflare's latency for a process on the same box. A spawn for this
   machine gets no such shortcut: it is a queued task, so it needs the key or the broker.
+- **`not_before` on `spawn_session`, `queue_batch` and `continue_task`** (2026-11-17, "Not before"): ISO 8601 with an offset (the model resolves a relative request itself), refused when malformed, in the past, or beside `start` (the two contradict); the answer carries the resolved time with its zone, and `get_queue` shows it as UTC ISO 8601 and leaves out the decision of a task still waiting for it.
 - **`spawn_session` enqueues, and `get_queue`** (added 2026-10-17 as `machine: "auto"`; every spawn
   since 2026-10-25, M4). `machine` is an optional pin: absent or `"auto"` (any case) pins nothing,
   anything else is resolved like `pin.machine` and stored as `pin.deviceId`; giving both a machine
@@ -10821,8 +11553,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   is a `store-put` through the app client, as the PWA's is.
 - **Authoring: `after`, `until`, `linear`, `queue_batch` and `report_task_done`** (2026-10-23, M4 #21).
   `spawn_session` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
-  `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
-  (`{issue}`, trimmed as the PWA's field is; a blank one is refused), with or without a named machine. **`queue_batch
+  `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `ref`
+  (`source:id`, with `ref_url`; a `queue_batch` member's are `external_ref` and `external_ref_url`, since `ref`
+  already names an earlier member there), with or without a named machine. `ref` replaced `linear` on 2026-11-18
+  ("Task tags"): it is written as the creator's tags, only to a verified leader advertising `taskTags`, and `get_queue`
+  shows the task's allowlisted tags where it showed the Linear link. `amend_task` has no `ownerTags`: a session never
+  labels a task. **`queue_batch
   { tasks }`** puts up to 16 members as one batch, a group with no order or limit of its own
   ("Batches"; its `strategy` and `max` went 2026-10-26; the schema still parses them loosely so a
   caller sending `sequential`, `parallel` or any `max` is refused with a pointer to `after`, never
@@ -10845,7 +11581,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   MCP only, with no CLI subcommand (`seance session-event` drops a `done` unsent): a session
   reports from inside Claude, and the tool's description tells it to call when the task's
   prompt says so, or when it opened no PR and its work is finished — for one, handed to a task it
-  queued, which `spawn_session`'s and `queue_batch`'s descriptions say too. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
+  queued, which `spawn_session`'s and `queue_batch`'s descriptions say too. `get_queue` also shows `until`, `merged`, the batch, `after` and the task's tags (`creator.ref` and `owner.label` only: `AGENT_VISIBLE_TAG_KEYS`).
   The session needs the seance MCP server installed in its exclave, which `seance mcp
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
@@ -10875,7 +11611,25 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
   binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
   does, or the call stops at a permission prompt.
-- **`continue_task { taskId, prompt? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
+- **`watch_github { url, head? }` and `unwatch_github { id }`** (built 2026-11-18; "Watches", docs/gh-watch.md W10).
+  One tool for both targets, since the URL says which. `watch_github` checks the URL against the PR and run patterns
+  (`parseGithubPr`, `parseGithubRun`) and `head` (`isWatchHead`, a PR only) before anything is asked, then the gate
+  (`watchGate`, `mcp.ts`): refused unless this box has daemon state, the lease has a scheduler leg, this machine's own
+  registry entry advertises `CAPABILITIES.watches`, and the **verified** leader does (`advertises`), worded apart for no
+  verified leader and a leader that needs `seance update`; never the daemon's word alone, and a refused gate sends
+  nothing. Then one `watch` add frame (`watch-github.ts`, beside `send-message.ts` and like it importing nothing that
+  logs; in `message-layering.test.ts`), 10 s for an answer, since the daemon waits up to 3 s for the leader's. A closed
+  connection or an answer that is no watch reply is `unsupported` (a step 2 daemon); no daemon and no answer keep their
+  own words, and no answer says the watch may exist and that calling again replaces it. No restart grace: a dropped
+  connection must read as a daemon without the frame. Every refusal is worded per code and, where waiting is still the
+  answer, ends with the `gh pr checks <n> -R <owner>/<repo> --watch -i 30` or `gh run watch <id> -R <owner>/<repo> -i 30
+  --exit-status` to run instead, rebuilt from the parsed parts. Success answers the watch id and tells the session to
+  end its turn. `unwatch_github` checks the id (`isMessageId`) and is not gated: removing is the daemon's own table's
+  act and must work with no leader. The description says to end the turn, not to poll the target meanwhile, that the
+  same URL replaces the watch (a new `head` after a fix push), what `head` is for, the 24 h expiry (`WATCH_TTL_MS`, in
+  `watch-frame.ts` with the caps so the words name the table's numbers) and that the inbox mod is needed. Both need
+  `mcp__seance__watch_github` and `mcp__seance__unwatch_github` allowed in the exclave.
+- **`continue_task { taskId, prompt?, not_before? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
   a continuation of a `session_failed` or cancelled (after placement) task, the newest in a chain: the session's conversation is resumed in its worktree, on
   the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
   the task (an id it does not list is "not in the leader's list (pruned, or past the N most relevant)"),
@@ -10909,10 +11663,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   carried it, are the record, as `start_task`'s are. `get_queue` marks `passable`, `passedTo` and
   `succeeds`. Its description says it ends the task's session and pushes its branch, is refused on a
   dirty tree, and is not for the calling session's own task.
-- **`amend_task { taskId, append?, replacePrompt?, title?, model?, effort? }`** (built 2026-11-12;
+- **`amend_task { taskId, append?, replacePrompt?, title?, model?, effort?, not_before? }`** (built 2026-11-12;
   Scheduler, "Amending a waiting task"). Changes a task still waiting in the queue. `append` adds text
   after a blank line; `replacePrompt` replaces the prompt; both together are refused before anything
-  is sent. A null `title`, `model` or `effort` clears it. Gated on `leaderAdvertises(lease,
+  is sent. A null `title`, `model`, `effort` or `not_before` clears it. Gated on `leaderAdvertises(lease,
   CAPABILITIES.amend)`, then `lease.scheduler.amend` (`sendAmend` on the direct path, the broker's
   `amend` when keyless), which names the `basis` from a store read. It sends once; a lost answer says
   it may have landed, since a second append would add the text twice. On success it names the fields
@@ -11153,7 +11907,7 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
 
 ### CLI spawn (`daemon/src/cli-auto.ts`) — queued by default 2026-10-25, scheduler M4
 
-`seance spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
+`seance spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]... [--at <HH:MM|date-time> | --in <duration>]
 <repo> [--here] [-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
 MCP's `spawn_session` (`cli-auto.ts` is only the CLI's wiring; its name is historical): the clone name resolves to its
 origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
@@ -11199,7 +11953,7 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
 - _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
   a direct spawn is not bound by it. MCP has no such escape.
-- _`seance continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a session"):
+- _`seance continue <task-id> [--prompt <text>] [--at <time> | --in <duration>]`_ (2026-10-26, Daemon, "Continuing a session"):
   `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does for a failed or cancelled task, the newest in a chain (leader gate, `queue()` lookup,
   `continueOffer`, `offeredSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
   `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
@@ -11225,8 +11979,8 @@ no envelope, no PSK: listing and ending sessions on the machine you are sitting 
 (Until 2026-10-25, M4, `spawn` took this path too; `spawn_session` is now a scheduler
 enqueue, so `spawn` stays on the allowlist only for a `seance mcp` started before that
 update, and for the app's own `spawn` op, which the daemon keeps answering.)
-Beside the `Plain` ops the socket carries four frame kinds of its own: `broker`, `session-event`, `message` and
-`inbox` (each below). A fifth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
+Beside the `Plain` ops the socket carries five frame kinds of its own: `broker`, `session-event`, `message`, `inbox`
+and `watch` (each below; `watch` is "Watches"). A sixth, `custodian` ("The custodian frame kind", after "Session events"), is parsed by the same
 code but **served only on the round's own socket** (`custodian-socket.ts`): this socket answers it `unsupported`.
 The alternative is an internet round trip to Cloudflare and back down the
 daemon's own websocket, to reach a process a few hundred microseconds away.
@@ -11466,7 +12220,13 @@ daemon restart; nothing is at rest on disk, in the store or in the launch ledger
   or the daemon's own start (a restart treats every pane as just disconnected, so a mod that is reconnecting is
   not told it has no listener). It separates a session still starting, or its mod reconnecting, from an exclave
   with no mod. Too short loses messages to a slow start; too long makes a missing-mod exclave answer `sent` for
-  messages then dropped `nolistener`.
+  messages then dropped `nolistener`. Rejected (2026-11-17, after a session that never loaded the mod lost a
+  message so): holding a live tasked pane's messages past the grace until some listener binds. A session whose mod
+  never loaded binds none, so they would sit to the cap or `ended`, and one that binds late (`/reload-plugins`, a
+  hand-run `seance inbox`) would get text whose sender was already answered `nolistener`. Also rejected: the mod's
+  `turn.start` beginning a listener when `session.start` never ran, which cannot help a mod that never loaded, the
+  cause found. That cause is guarded where it lived (Claude Code mods, `mod install`'s refusal and doctor's
+  `errors` line).
 - **Caps** count UTF-8 bytes of the sender's text. `MESSAGE_PUSH_MAX` (8 KiB): a request over it is refused
   `too_long` at the sender, and a note or question over it is pushed as a stub whose body is pulled by
   `read_messages`. `MESSAGE_MAX` (64 KiB) is the hard cap. The spike found no cap on Claude's side (300 KB
@@ -11721,7 +12481,8 @@ it waited), **in leader memory** (lost on failover or restart, invisible to the 
 become a mailbox) and **at the sender's daemon with retries** (a second queue per machine with its own expiry
 and duplicate rules). A target that is offline is dropped and answered `offline`; a message that landed whose
 reply was lost reads `offline` too, so a retry can duplicate it, and the wrapper names the message id so the
-receiver can tell.
+receiver can tell. Also rejected: **freezing a message at its first target**, with no chain. A pass moves the work
+exactly when one session runs out of usage, which is when a peer most needs to reach whoever carries it on.
 
 #### Replies by handle (built 2026-11-14, docs/messaging.md D3, amended)
 
@@ -11815,15 +12576,667 @@ whose origin is this machine (the leader returned a message to its sender's own 
 through the `sent` table. An old daemon answering a new receipt with no `to` drops it as unparseable, which is the courtesy lost, not the
 message.
 
+**An adapter is the other party a handle can name** (3b, "Adapters"). A session's message to `adapter:<name>` is minted
+into `sent` with that adapter's name, so only that adapter's `deliver { inReplyTo }` answers it, at the asker's pane,
+pid, task and session, with `wake` as for any answer to a question or request. An adapter's delivery is placed into
+`received` with its name, so the session's reply by handle (`inReplyTo`, no `to`) goes back to that adapter as a
+`message` frame carrying `inReplyTo`, never routed; it subscribes nothing. D3 amended again 2026-11-17: **a session
+with no task is reached only as a reply, by the id of a message it sent, or by an adapter on its own machine through
+the subscription it made by messaging that adapter** ("Adapters", "The subscription"; "Tags and session identity",
+"The adapter subscription").
+
 **Rejected** (docs/messaging.md D3, amended): **machine id plus pane id as a general address** (a pane id outlives the
 session in it and names no session, so it is a guess the daemon cannot check, and a hand-started session's pane is
 re-used by the next `claude`); **a synthetic task id, or a queue entry, for a hand-started session** (it would put a
 session Séance never spawned in the leader's record and the Queue screen, with a lifecycle nothing ends); **a
 leader-held reply table** (the leader would keep a map of who talked to whom, a mailbox's worth of metadata, to
-answer a question the asker's own daemon can: it keeps the minting table already); **the Claude session id** (a
-`$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the peer-pid binding
-exists to avoid); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
+answer a question the asker's own daemon can: it keeps the minting table already); **the Claude session id** for
+replies (a `$.session` value only the mod sees: the daemon would trust a claim from a frame, the one thing the
+peer-pid binding exists to avoid; amended 2026-11-17: that reason stands for a claim and falls for an id the daemon
+verified from its own sources ("Session events", "Session identity"), but a reply is still by message id, and a
+verified id names only two acts, the owner's `session-tag` and adapter delivery through a subscription ("Adapters",
+built 2026-11-18; "Tags and session identity")); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
+
+### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md steps 3 and 4
+
+The daemon's side of fleet GitHub watches (docs/gh-watch.md; the leader's side is "PR status", "The registry"). A
+session asks its own daemon, over the local socket, to watch a PR or an Actions run; the daemon owns the watch, states
+the whole table to the leader, and turns each `watch-event` into one note in that session's inbox.
+
+- **The `watch` frame** (`watch-frame.ts`): `{ v: 1, kind: "watch", op: "add" | "remove", url?, head?, id? }`, exactly
+  those fields, a frame kind of the socket's own, routed on `kind` ahead of the `Plain` check and answered by
+  `startLocalSocket`'s `watches` seam (`unsupported` without one, `internal` on a throw, nothing of the frame logged).
+  Bound by the kernel-reported peer pid only (`bindPeer`, `messages.ts`: pane, pane process, innermost `claude`). The
+  reply is `{ ok: true, id, kind }` or one of `invalid`, `unbound`, `nosession`, `nolistener`, `too_many`, `fleet_full`,
+  `no_leader`, `unsupported`, `unknown`, `stopping`, `internal`. Nothing reachable from `seance mcp` imports `log.ts`:
+  `watch-frame.ts` is in `message-layering.test.ts`'s entry list, and the table itself (which logs a warning) is the
+  daemon's.
+- **Add.** In order: `stopping`, the binding (`unbound`, `nosession`), `canListen` (`nolistener`: a pane no inbox
+  listener serves would never read a note), the caps (`too_many`, a replacement not counted), then the leader's
+  verdict (`WatchLeader.check`: `none` is `no_leader`, one that does not advertise `CAPABILITIES.watches` is
+  `unsupported`). The entry is inserted and saved, the whole set sent, and the add waits at most 3 s for the answer to
+  it: a `fleet_full` or `invalid` refusal in that answer removes the entry and is the reply; no answer in the window is
+  `ok` (the watch stays, the tick resends). A send the leader could not be handed (no term in process, a leg that is
+  down) is `no_leader` and removes the entry. A replacement (the same target from the same session) takes the old
+  watch out of the table for the new one's set and puts it back on any refusal or `no_leader`, so a refused add costs
+  the session nothing; the old watch's end (`reason=replaced`) is audited once the add has succeeded. **Adds and
+  removes of one session run one at a time** (a chain per session), so a replacement is made over a finished add and
+  never over one still waiting for its answer, and a `remove` of the old id waits for the add and finds the old watch
+  back (refused add) or gone (`unknown`, replaced), never a table in between. If the new watch itself ends while the add
+  waits (its pane, task or session went: `onEnded`, the sweep), the add is refused `nolistener` and both watches are
+  audited as ended, under that reason, so none leaves without a line. A `stop` while the add waits on its send settles
+  it `ok`: the file already holds the new watch and not the old, and the restart states it, so the add is not
+  answered `no_leader` for a watch the reload brings back. **Accepted:** a refused replacement restores the old watch
+  here, but the leader rebuilt the old watch's state from the set that lacked it, so it is restated as a fresh one (its
+  followed `head`, head grace and acknowledgements start over); `seen` travels with the set, so nothing already told is
+  told again. **Accepted:** during
+  the restart grace `canListen` passes any bound session, one with no inbox mod included (its listener may simply not
+  have reconnected yet); if none comes, the first note is held, its grace runs out, and the watch ends
+  `reason=nolistener` with nothing told to the session.
+- **Who leads, and how the set goes** (`watch-leader.ts`). A daemon that leads (`leader.term() !== null`) hands the
+  set to its own registry in process (`onWatchSet`, parsed fresh like a frame, and answered in process). Otherwise the set
+  goes on the daemon leg (`RelayClient.sendWatchSet`), sealed from this daemon's own device id. Nothing is ever sent
+  `from: "app"`. Which daemon leads is read from an app-role client's `RelayState.scheduler` (a verified nominee, the
+  only place the daemon sees one), and the leader advertises `CAPABILITIES.watches` through the registry the same
+  client reads. The daemon holds no app-role leg of its own, so the table takes a `LazyRelay` (acquire and release
+  counted, released 5 minutes after the last holder): the table holds it while it is non-empty and releases it when
+  the empty set has been sent. The leg sends nothing; it only reads. **Accepted** (the owner's call): a daemon with a
+  key holds an app-role leg while it has a watch, which `seance mcp` and the broker already do for their own reads.
+  A new verified nominee, once the baseline is taken, makes the table restate its set at once (`onNominee`), since a
+  new leader holds none of it (W9).
+- **The set and its generation.** `gen` is `{boot, n}` with `boot` this daemon's `instance` and `n` rising on every
+  send, heartbeat and resend included, so the registry's order holds across a restart. A frame or a tick sends at most
+  one set (the leader's events, the sweep and `onEnded` coalesce); each add sends its own, since it waits on that
+  set's answer, so a burst of adds is a burst of sets, each the whole table, and the higher `n` replaces. A set carries each watch's id, kind, URL, `head` and `seen`, at most 64.
+- **A set nobody answered is resent** (plan review finding 1). The table keeps `answeredGen`, the highest `gen.n` any
+  answer named, and at each 60 s tick restates the table while `answeredGen` is behind the latest `n`, the last send
+  failed, or 5 minutes passed (the heartbeat). `gen.n` keeps rising across resends. `no_leader` is a separate clock:
+  a watch that has seen no answer for 10 minutes since the later of its own creation, the last answer and this
+  process's boot is told once (`noLeaderTold`, a flag of the entry, saved), with wake, and never again however many
+  answers follow. Any answer restarts the clock for every watch not yet told, older ones included; what is once is the
+  note, not the clock. Answers, not sends, keep it quiet.
+- **Answers** (`onEvent`). A `watch-event`'s `set` is the answer to `gen`: it resolves any add waiting on a `gen.n` at or
+  below it. Its refusals act only when `gen.n` is the latest: `fleet_full` leaves the watch in the table and the next
+  set and tells the session once, with wake (`fleet_full` note, `fleetFullTold`, a local flag that is never in `seen`
+  since the leader never sees it; the owner's decision: a late refusal is a note, not an end), and `invalid` tells the
+  session and ends the watch (`reason=invalid`). An answer older than the latest set, or for a set the table has since
+  replaced, refuses nothing.
+- **Events and `delivered`.** Events are grouped by watch id. An id the table does not know is left out of `delivered`
+  and marks the set stale, so one is sent (the leader's registry then loses it). A key already in the entry's `seen` is
+  skipped but its id is still listed, since the leader asked for an acknowledgement. Otherwise one note carries the
+  watch's events of the frame (`watchNote`, one fixed text per kind, `wake` for all but a `suspended` that heals by
+  itself: reason `limited`, or `reserve`), and on `delivered` or `sent` the keys go into `seen` (the last
+  `WATCH_SEEN_MAX`, saved) and the id is listed. A terminal key (`merged`, `closed`, `completed:*`, `unreadable`) ends the
+  watch (`reason=terminal` or `unreadable`) once the note is placed. `delivered` is all or nothing per watch per frame.
+  The local kinds (`no_leader`, `expired`, `invalid`, `fleet_full`) are never in `seen`: the leader never sees them.
+- **A held note** (the listener is reconnecting): `deliverWatchNote` answers `sent` and calls back with the fate. The
+  watch is listed delivered and its keys go into `seen` like a delivered note's (saved, and in the set). If the note is
+  never written the fate is `ended`, `nolistener` or `dropped` and the watch ends under that reason; the note is lost,
+  which is accepted, since the session was not reachable for the whole grace. A restart (memory only) loses a held
+  note too, and that is accepted the same way. _Decided: accept it, because the leader keeps a device's per-watch
+  `seen` and acknowledgements across that daemon's restart (`accept` reuses the device under a new `boot`, `replace`
+  keeps the state of a watch whose id, target and `head` match and only adds to its `seen`), and it had both the key
+  (in every set sent while the note was held) and the acknowledgement (the id was listed delivered), so leaving the key
+  out of `watches.json` changed nothing there and the event was never sent again. Making a restart re-ask means the
+  leader dropping a device's `seen` and acknowledgements on a new `boot` and rebuilding them from the set, a protocol
+  change that also resets the state of every watch (followed `head`, head grace) for a window that is a restart inside
+  the grace of a note held for a reconnecting listener._
+- **A stopped table ends nothing and writes nothing.** `stop()` is a final state: `persist` and the end of a watch
+  (`drop`) are no-ops afterwards, so work that was past its `stopped` check when `stop` ran, a held note's grace timer
+  included, neither audits an end nor appends a snapshot of the old table behind the chain `stop()` returned, which
+  the next instance (a reload in the same process) has read the file after. An event whose note was placed after that
+  point is answered not delivered (its keys and a terminal end could not be saved or acted on): the leader sends it to
+  the next instance, one repeated note instead of a reloaded watch that outlives its target and holds the pane.
+- **A failed pane read ends nothing** (plan review finding 2). `deliverWatchNote` answers `unreadable` when the pane
+  list could not be read (an empty list, as `listPanePids` answers a failed `tmux`): the id is left out of `delivered`,
+  the watch stays and its keys stay out of `seen`, so the leader sends the events again at the next poll. `gone` (the
+  pane is not in a list that was read) ends the watch with `reason=session`, or `reason=task` when the pane is there
+  with the same process but carries another task (read again for the audit line only); `nolistener` with
+  `reason=nolistener`.
+- **The tick** (60 s). First the sweep: a pane missing from the list, a dead `claude` process or a pane pid that changed
+  ends its watches (`reason=session`) and a pane whose task changed ends them (`reason=task`); an empty pane list skips
+  the pane checks (a failed read is not a vanished pane) but a dead `claude` is checked on its own. Then expiry (24 h:
+  an `expired` note with wake, then the end), `no_leader`, and the resend rule above. An empty table skips the tick
+  and the start's sweep, so a machine with no watch reads no panes for it. `onEnded` (session events saw the pane's task
+  end) ends the pane's watches (`reason=ended`).
+- **Persistence** (`watches-store.ts`, `stateDir()/watches.json`). Per watch: id, kind, URL, `head`, `seen`, the pane id,
+  its pane process's pid and start time, the `claude` process's pid and start time, the task id or none, the made and
+  expiry times, `noLeaderTold`, `fleetFullTold`. Written 0600 by atomic rename. A restart (`start`) reloads an entry only
+  while it is unexpired, its `claude` process still runs with that start time, its pane process has the saved start
+  time and the table is under its cap; the others end `reason=restart` and are audited. The first set carries the
+  survivors. **One write chain per path per process** (plan review finding 3): `persist()` snapshots at call time and
+  appends to a module-level chain, `stop()` returns it, `start()` waits on it before reading, and shutdown awaits
+  `watchesSettled()`, so a restart over the same path (and a test that stops without awaiting) reads the last write.
+- **Audit** (`watchAudit`, `audit.ts`): `audit watch origin=watch op=<add|remove|event|end> kind=<pr|run|-> event=<kind|->
+  reason=<reason|-> outcome=<outcome|->`, every value from a closed set, one line per add, remove, event placed and end.
+  The `Watches` table logs nothing else about a watch (a failed save or send is a warning with the error's text and no
+  target).
+- **The custodian.** `awaitsWake` in `run-capabilities.ts` is true for a pane `SessionEvents.awaitsWake` holds or
+  `Watches.holds(pane, taskId)` does, so `close` answers `busy` and the seat counts no round due for it (`paneHolds`,
+  `pane-holds.ts`, one composition for both and the seat's one `seatHolds` expression, tested apart and against a real
+  table in `watches.test.ts`). `untouchable` (hand-off, pass, drain) is not changed: those
+  are the session's or the owner's own acts, and the session's end ends the watch. `holds` matches the pane id and task,
+  not the pane process: a respawned pane keeps `busy` until the next tick's sweep ends its watch (at most a minute),
+  which only ever errs toward not closing.
+- **A check name in a note** is a repo's text on its way to a model: `parseFailing` keeps one that holds only
+  characters other than C0, DEL and C1 (a ZWJ emoji is legitimate and refusing it would drop the whole event), and
+  `watchNote` replaces every control, format (bidi, zero-width), surrogate, line and paragraph separator character with
+  U+FFFD, the class `printable` and `isFlagNote` use, inside the fence.
+- **Step 4: `seance mcp`'s `watch_github` and `unwatch_github`** (built 2026-11-18; "MCP server"). The frame was
+  advertised under `CAPABILITIES.watches` from step 2 on, so a daemon of that build has the capability and no frame: it
+  closes a `watch` frame as malformed. The client (`watch-github.ts`) reads a closed connection or an unparseable reply as
+  `unsupported`, and the session waits on its own (a restart closes it too, rarely; an add it had persisted may still
+  note the session, which only ends that wait early), in addition to the gate (`watchGate`: this machine's daemon and the verified leader). No second
+  capability string.
+- **Rejected: ending a watch on a failed pane read.** A `tmux` failure is transient and the session still waits;
+  ending the watch would drop it for good.
+- **Rejected: a `watch:` store prefix, daemon memory only.** W9, below.
+- **Why a watch, and what it is** (2026-11-17, folded in 2026-11-18 from docs/gh-watch.md, whose W-numbers the
+  bullets below keep). Every session on every machine runs `gh` as one GitHub user, so all share one 5000-request REST
+  budget and one 5000-point GraphQL budget; on 2026-11-17 the REST budget ran out (10:23 to 10:42 UTC) under many
+  sessions' own `gh run watch` (about 3 REST a tick, 3 s), `gh pr checks --watch` (1 point, 10 s) and /ship's merge
+  loop (1 point, 15 s). Slower polling and conditional requests (`gh-run-wait`: a 304 is not counted) cut each
+  watcher's cost but not N sessions watching one thing, nor the next session that forgets the rule. A fleet with one
+  reader of GitHub (the leader) and one way into a session (the inbox) makes waiting cost one read however many wait:
+  the session calls `watch_github` and ends its turn, the leader folds the target into its batched poll, and the
+  session's daemon delivers one fixed note that wakes it. Ten sessions watching one PR cost one alias in one query.
+- **W1, who may watch.** Any bound `claude` session, tasked or hand-started (a peer with no `claude` on its chain is
+  `nosession`). Not tasked sessions only: the hand-started ones run /ship and deploy waits too, and the owner's
+  direction (docs/presence.md, O4) is that Séance serves every session in its tmux server. A pane with no inbox
+  listener is `nolistener` (past the listener grace): a note that can never land would leave the session waiting for
+  good, and the refusal tells it to poll at 30 s or slower.
+- **W2, what may be watched.** A github.com PR (`/pull/<n>`, optional `head`) or Actions run (`/actions/runs/<id>`, an
+  `/attempts/<n>` dropped), any repo (G1, the owner's decision: one GitHub user per fleet, so a watch reveals nothing a
+  session's own `gh` could not; a fleet of machines logged in as different users is unsupported, and supporting
+  several revisits this). A run is named by URL so one parser serves both and the session copies what `gh run list
+  --json url` prints. **Rejected: only the task's own PR** (/ship stacks PRs, a hub opens PRs in sub-repos, a session
+  waits on main's deploy run, a hand-started session holds no task: each would keep polling). **Rejected: only repos
+  some machine clones**: the leader does not know any machine's scan set, and it would buy nothing; a hostile session
+  can only spend budget, which the caps bound.
+- **W3, binding and lifetime.** Ends: a terminal event, the session ending, the pane's task changing,
+  `unwatch_github`, 24 h (`WATCH_TTL_MS`; calling again replaces it). Caps refuse at the add, never evict, so no watch a
+  session relies on vanishes. **Rejected: binding to the task id**: a hand-started session has none, and a task's
+  session can be replaced (continue, successor) by one that never asked.
+- **W4, what an event is.** (Keys and readings: "PR status", "What a watch's events are".) `checks` fires on the first
+  failing context, as `gh pr checks --watch --fail-fast` does, and once more per head on a pass; it covers all checks,
+  not only required ones (a session fixing CI cares about an optional one, and the note marks which failing names are
+  required). A PR watch spans the PR's life, so a push, a failure, a fix, a conflict and the merge are one watch, which
+  is /ship's whole step 8. `head` closes the stale-run race (right after a push the rollup can still be the previous
+  head's). Level-triggered from the first reading: a watch on a PR already merged or a run already completed fires at
+  the first poll, and a watch carried across a leader change is judged afresh against `seen`. **Not events:** `behind`
+  (blocks only under an up-to-date ruleset, and one bit cannot say), `unarmed`, review requests, comments, a draft
+  toggling; the `prBlocked` alert already reaches the owner for a stuck `awaiting-merge` PR, and a watch is for a
+  session waiting on a fact.
+- **W5, what a note carries.** One fixed formatter (`watchNote`), opening "Automated note from séance, not written by
+  the user" as `blockedBrief` does, from: the rebuilt target URL; the event kind and outcome (enums; `merged` with
+  `stacked`; `completed` with GitHub's conclusion lowercased); the head (hex) and `headMoved`; and for a failure at
+  most 10 failing checks, the newest run of each name, each a `cleanName` name (100 characters) with `required` and a
+  job link only when its `detailsUrl` is exactly the watched repo's `/actions/runs/<digits>/job/<digits>`, rebuilt from
+  those ids (a third party's `targetUrl` gets none), in a fenced block. **Never** a title, body, branch, author,
+  comment, review, annotation, log line or check summary: free text a third party writes, which the session can read
+  with its own `gh` as the evidence it is. Check names are repo-owned text already put in a continuation prompt
+  (`blockedBrief`), bounded the same way; accepted. What to do next is fixed words per kind (for a failure, read the
+  job's log with `gh api repos/<o>/<r>/actions/jobs/<id>/logs` to a file), never an echo of anything read.
+- **W6, how it reaches the session.** Only the leader reads GitHub and only the session's own daemon delivers, so the
+  same machine and across machines are one path and no message crosses between sessions' machines. Every event is a
+  `wake` line (the session asked to be woken) except a `suspended` that heals itself; the inbox mod needed no change. A
+  note held for a reconnecting listener is held like a reply, and one dropped `nolistener` ends the watch. **Rejected:
+  an `append` note** (`$.session.append`, no wake): a session waiting on CI has ended its turn and would never read
+  it. **Rejected: delivering through `session-message`**: it routes by task id through the leader's resolver and has no
+  untasked recipient, where a watch event already knows its daemon and table entry.
+- **W7, what is read.** GraphQL for runs, not REST: it is the budget that did not run out, it batches 50 runs into a
+  point where REST costs a request each, and it keeps no per-run state. **Rejected: REST with `If-None-Match`**: a
+  run's ETag changes whenever it is updated, perhaps every poll (unmeasured), each a counted request on the budget that
+  ran out, and the ETag per run is lost at every leader change (a fallback S1 did not need). **Rejected: each
+  session's daemon reading its runs**: the machine may hold no `gh` login (the reason for one PR poller), two machines
+  would read one run twice, and a rate limit would be met by each daemon on its own clock instead of one reader
+  backing off for the fleet. Pace is the poller's one 60 s clock (a note lands within about a minute, against the 30 s
+  the owner's rule allows a session; accepted). Budget at the caps, estimated before S1: 100 PRs (2 merge chunks, up
+  to 10 blocked reads) and 100 runs (2 queries) are about 14 points a minute, 840 an hour, and no REST; each query
+  also selects `rateLimit{ cost remaining resetAt }`, so the cost is measured.
+- **W8, what a watcher is told.** A watch whose reads stop for longer than two intervals gets one `suspended:<reason>`
+  note per reason. For a limit: "GitHub's budget for this fleet's account is spent until HH:MM UTC; this watch resumes
+  then; do not poll GitHub yourself meanwhile", without wake (an `append`: the session waits either way, and waking it
+  to say keep waiting costs a turn). For a login or a missing `gh`: "the fleet cannot read GitHub; this watch is
+  suspended", with wake, since that may never heal and the session should fall back to polling at 30 s or ask its user;
+  the fallback is its call, and a resumption says nothing. An alias that answers `null` on two polls in a row ends the
+  watch `unreadable`, with wake. No leader, or one not advertising `watches`, refuses the add; a leader lost after it
+  is a `no_leader` note after 10 minutes; expiry and a late `fleet_full` are wake notes.
+- **W9, the daemon is the owner of record.** The registry is soft state per term, and the daemon restates its whole
+  set on every change, a 5 minute heartbeat, each tick while an answer is owed and at once on a new verified nominee.
+  **Rejected: a `watch:` store prefix**: durable across a leader change, but a new prefix needs its write policy, the
+  write floor and the version floor and a store write per add and event, to keep state the daemons hold and can
+  restate in one frame. **Rejected: daemon memory only**: self-updates restart daemons often and would silently drop
+  every watch while its sessions wait.
+- **W10, surfaces.** One `watch_github` for both targets (the URL says which; separate `watch_pr` and `watch_run` are
+  one more line in every session's context). No list tool: the ids are in the session's own context and an `unwatch`
+  of an unknown id is harmless. `CAPABILITIES.watches` is advertised by a daemon that serves the frame and, as leader,
+  polls; a client gates on it and the verified leader, since an older leader would drop the unknown op. The `watch`
+  audit line never carries a URL, owner, repo, number, head, check name or watch id; the leader logs no line per
+  watch, reading or event, only a refused set, a failed send and the poller's class changes. Not in the PWA,
+  `get_queue`, `status` or the archivist, and no live-watch count on the Machines row (the budget gauge is
+  `MachineStatus.gh`, #547).
+- **W11, a watch rather than extending `hand_off_task` and `prBlocked`.** The plain alternative is the leader
+  continuing an `awaiting-merge` task by itself when `taskPrBlock` names `checks` or `conflict`. It covers less: only
+  tasked sessions with one PR on main and a merge gate armed (hand-started sessions, stacked PRs, gate-less repos and
+  every Actions run keep polling, a large share of what ran the budget out); it turns a CI cycle into a close and a
+  relaunch (a slot under the account's cap behind the queue, a new process, a cold prompt cache) where a watch leaves
+  the session idle and wakes it into the same context; and it reverses "Continuing a session"'s manual-by-decision
+  continue, an unattended retry on a red check, where the watch leaves the next step to the session, which /ship bounds
+  at three fix attempts. **Decision: build the watch, keep the hand-off for what it is good at**: a PR that waits hours
+  on a review or merge queue should still hand off (an idle session holds a pane, a slot and a session limit for
+  nothing), minutes of CI or a run should watch, and the two compose (watch until checks pass, then hand off). The
+  leader's automatic continue on `checks` is not proposed; it would be its own decision against the manual one.
+- **Rejected alternatives to the whole.** **Webhooks** (the relay is blind and holds no secret worth a GitHub-facing
+  endpoint; per-repo installation the fleet does not own). **GitHub's notifications API** (CI outcomes reach it only as
+  notification settings allow, a thread names no check or job, a session would still read per run to find the failed
+  job). **A caching `gh` shim per machine** (dedups within one machine, cannot change a session's pace, and puts
+  Séance between every session and a `gh` that reads and writes far more than watches).
+- **S4, the wake after a long wait (2026-11-18, live on the Mac, fleet on 6be498d, which holds step 4).** The target
+  was a throwaway Actions run (a push-triggered workflow on a throwaway branch, `sleep 2100` on ubuntu-latest, the
+  branch deleted after; created 14:14:30Z, job completed 14:49:35Z, `success`). A fresh scheduler task session
+  (Sonnet 5.5, bypass permissions, inbox mod installed) called `watch_github` with the run URL (14:14:50Z, audit
+  `op=add kind=run outcome=ok`), wrote a timestamp and ended its turn: idle at its prompt, no background shell,
+  Monitor, sleep or poll. The leader's poller saw the completion and the daemon audited `op=event kind=run
+  event=completed outcome=delivered` and `op=end reason=terminal` at 14:49:53Z, 18 s after the job ended (inside the
+  60 s clock). The `wake` note started a new turn at 14:49:55Z, 35 minutes after the watch, and the session reported
+  it "arrived as an inbox plugin message that began this turn in the user's place"; nothing else started the turn. The
+  model acted on it: it wrote the time and the note to a file, sent a `send_message` note to another task and called
+  `report_task_done`. The note read "Automated note from séance, not written by the user: watch … on <run URL>. The run
+  completed: success (attempt 1). This watch has ended." **Result:** a session idle for 30-plus minutes is woken by a
+  `wake` note into a turn the model acts on, about 20 s after the run's end (the messaging spikes had measured minutes,
+  not a CI's length).
+
+### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`, `adapter-cli.ts`) — built 2026-11-18 (3a, 3b and 3c), docs/messaging.md
+
+An adapter is a program the machine's owner names in that machine's `config.json`, run by the daemon as a supervised
+child that speaks newline-delimited JSON on its stdin and stdout. It is the seam through which a tool (a chat, a hosted
+workspace, a notifier) sees this machine's sessions and talks to them. Séance never names a tool: an adapter
+for one lives in its own repository and vendors the protocol's JSON Schema. 3a is the child and state out: the
+supervisor, the handshake, `snapshot`, `session`, `session-gone` and `task`. 3b is text both ways: `deliver` with its
+`result` and `delivery`, the `message` frame out, replies through the `sent` and `received` tables, the subscription
+and the `tag` frame. 3c is installing: `seance-adapter.json`, `seance adapter add | remove | restart | status` and
+`doctor`'s checks ("Installing", below). The owner's brief, the seam's rejected shapes and its fit against three kinds
+of tool close the section; docs/messaging.md keeps the spike evidence and the open questions.
+
+- **Declared only in `config.json`** (`adapters`, `parseAdapters` in `daemon/src/config.ts`), at most `ADAPTERS_MAX`
+  (4), each name `ADAPTER_NAME_PATTERN`. An entry is `{argv, kinds?, repos?, commit?, dir?, added?}` and nothing else, parsed
+  strictly, as `traits` are: any mistake fails the load, naming `adapters.<name>.<key>`. `argv` is an array of at most
+  32 non-empty, NUL-free words, never a shell string; `argv[0]` is an absolute path or a bare name resolved through
+  `PATH` at each start (`Bun.which`), never a relative path with a slash and never a recorded `process.execPath`.
+  `kinds` (distinct `MESSAGE_KINDS`, default `["note", "question"]`) bounds deliveries in; `request` is the owner's
+  opt-in. `repos` names scan-set repos. `commit` is a full sha (40 or 64 hex) that `doctor` reads, `dir` the
+  absolute checkout `seance adapter add` read the manifest from (display and `doctor` only: nothing runs from it but
+  what `argv` names), and `added` the ISO instant of that add, which joins the subscription fingerprint. A hand-written
+  entry needs only `argv`. Never from a frame, the PWA, MCP or another machine; nothing about adapters crosses the
+  relay, and no capability advertises them.
+- **The protocol** (`shared/src/adapter-protocol.ts`, the schema of record, as `types.ts` is for the wire). One UTF-8
+  frame per line, at most `ADAPTER_LINE_MAX` (256 KiB). `shared/src/adapter-protocol.schema.json` is generated from it
+  (`bun run adapter-schema`, then formatted) and committed beside it; `adapter-protocol.test.ts` holds the two equal.
+  The adapter's lines go through `parseAdapterLine` into a fresh value, exact fields only. A line that does not parse
+  is answered `{kind: "error", code: "invalid"}`, an unknown kind included.
+- **The handshake and versioning.** The daemon writes `hello` first: `{protocol: ADAPTER_PROTOCOLS, features:
+  ADAPTER_FEATURES (["deliver", "tag"]), machine: {deviceId, name}, daemon: {version}}`. The adapter answers `{protocol, name,
+  version, wants, features}` within 10 s, or it is restarted (`reason=handshake`). Nothing else flows before both. A
+  major outside `ADAPTER_PROTOCOLS` is audited `op=refused reason=protocol`, and a `name` other than its config key
+  `op=refused reason=name`; either is stopped and never restarted (until the next daemon start). A frame kind goes out
+  only for what `wants` names (`adapterWants`): `sessions` for `snapshot`, `session` and `session-gone`, `tasks` for
+  `task`, `messages` for `message`; `result` and `delivery`, answers to the adapter's own frames, always go. An adapter
+  whose hello names no `messages` takes none: a session's message to it is `unknown`. Additions inside a major are
+  `features`, as `CAPABILITIES` are on the wire.
+- **The supervisor** (`createAdapterSupervisor`), one per adapter:
+  - **Env.** The one a session gets (`childEnv`, so no `CREDENTIALS_DIRECTORY`) less every `TMUX*` variable, plus
+    `SEANCE_ADAPTER_NAME` and `SEANCE_ADAPTER_DIR`. That is `stateDir()/adapters/<name>`, made 0700 before each start,
+    and also the child's cwd. The adapter's own state lives there; the daemon reads and writes nothing in it.
+  - **Process.** Started `detached`, so it leads its own process group. stdin and stdout are piped, stderr is
+    discarded: an adapter keeps its own log, and nothing it prints reaches the daemon's log or an audit line.
+  - **Restarts.** Each exit is followed by a restart with backoff, 1 s doubling to 60 s. A run of 60 s resets the
+    backoff. Five exits within ten minutes put the adapter in the `failed` hold until the next daemon start
+    (`op=failed exits=<n>`); `seance adapter restart` lifts it ("Installing").
+  - **Malformed lines.** Ten `invalid` lines within a minute restart the adapter (`reason=invalid`).
+  - **The unread cap.** The daemon's writes to stdin are queued, and the bytes the adapter has not drained are counted.
+    Past `ADAPTER_UNREAD_MAX` (2 MiB) the adapter has stopped reading and is restarted (`reason=unread`), never
+    buffered for. Every start begins with a fresh `snapshot`, so nothing is resent from memory.
+  - **Stop with the daemon.** stdin is closed, then SIGTERM goes to the group, then SIGKILL after 5 s
+    (`op=stop`, then `op=exit reason=stopped`). `run.ts` awaits it (`adaptersSettled`).
+  - **Held while draining.** An adapter starts after the local socket is up and the feed has had its first read
+    (`afterLocal`). While the daemon drains for a restart, an adapter is held (state `held`), never started, and it
+    starts when the drain's gate reopens.
+- **The feed** (`createAdapterFeed`), one per daemon, shared by every adapter. A session is a live pane whose process
+  tree holds a `claude`: the process the conversation table bound, or else the shallowest `claude`-named process under
+  the pane's process (`ps`, at most four levels; a name is a hint, as in "Replies by handle", and here it decides only
+  what is reported, never what is bound or reached). Its `key` is that process's `<pid>:<start time>`, the
+  `Bound.session` key. The record (`AdapterSession`) carries:
+  - **`session`** from the conversation table only: `{id, verified, conflict?}`; a refuted claim is never sent.
+  - **`task`** from the pane's tag.
+  - **`exclave`** by name, never an account id (`exclaveOf`).
+  - **`repo`** as the scan set names it (`repoNames`, the mapping `sessions` uses), and **`branch`** read by the
+    hardened git (`symbolic-ref`, memoised 30 s).
+  - **State.** `state`, `turnEnded` and `reason` (beside `needs-input` only) from the table, which keeps them in
+    memory only, so after a daemon restart every session reads `unknown` until it reports. `since` is the time of the
+    state, or the time the feed first saw the process.
+  - **`prUrl`** from the launch ledger (`EndedTasks.prUrl`).
+  - **`name`** from `displayName` (tags, then the window), with its `source`.
+  - **`tags`**: the joined map as `sessions` gives it, less other adapters' `adapter.*` keys (`tagsFor`, per
+    adapter).
+
+  `task.ref` is sent for a task launched from a scheduler-sealed spawn that carried `SpawnRequest.ref` (noted in the
+  launch ledger, "Task tags"; `{ ref, url? }`, display only). Not sent yet: `task.title` (the dispatched record is the
+  leader's; the daemon's ledger notes none) and `task`'s `continues`.
+
+- **Triggers and diffs.** The feed refreshes every 5 s, 50 ms after any conversation-table change (a report, a sweep,
+  a verification), and on task events. Each refresh is diffed against the last: a changed record goes out as one
+  `session` frame, the whole record, never a patch. A `/clear` or `/resume` is one `session` with the new
+  `session.id`, since the process is the same. A record that is gone goes out as `session-gone` with its `reason`:
+  - **`closed`**: Séance closed the pane. `despawnSession` notes the pane in a short-lived registry
+    (`daemon/src/closing-panes.ts`, 60 s, 256 entries) before it acts, which covers a despawn, a hand-off's or a pass's
+    close, a custodian `close` and the drain's. An entry is keyed by pane id and the pane's pid, since a pane id is
+    unique only within one tmux server, which reuses it after a restart. A dead pane is not noted, because its
+    process already ended on its own.
+  - **`exited`**: the process ended on its own, or its `ended` report came in.
+  - **`replaced`**: the same process now carries another task.
+- **`task` frames** come from `EndedTasks` (`onTask`), and only for task ids this machine's launch ledger holds. The
+  events are `launched` when a launch lands, `done` on a recorded `report_task_done`, `handoff` on a taken hand-off,
+  `pass` once a session's own pass has gone to the leader, and `ended` once per launch, from an `ended` report or the
+  harvest note. `prUrl` rides on each when the ledger holds one.
+- **`repos` filters state out already** (`adapter-host.ts`). With `repos` set, a session whose `repo` is not listed,
+  or is absent, is in no `snapshot`, `session` or `session-gone` for that adapter, and a task whose ledger `repo` is not
+  listed is in no `task` frame. A session that leaves the list goes out as `session-gone` with `reason: "replaced"` to an
+  adapter told of it, since what that adapter holds no longer describes anything it may see.
+- **Delivery in** (`deliver`, `Messages.deliverFromAdapter`): the built local delivery with the adapter as the sender,
+  never routed through the leader. The host checks `kinds` first (`refused`, `code: "kind"`). A text over `MESSAGE_MAX`,
+  or a `request` over `MESSAGE_PUSH_MAX`, is `too_long`. Exactly one address:
+  - **`to`**, a task id this machine's launch ledger holds, at a live pane carrying it: else `held` (launched, no pane
+    yet, within the grace), `ended` or `unknown` (not launched here).
+  - **`toSession`**, a conversation subscribed to this adapter (else `unknown`), re-verified at the act (`atAct`):
+    `ambiguous` when two live processes claim it, `unverified` when the daemon's own source now names another
+    conversation, `ended` when no pane is live (nothing held, D2). It reaches that `claude` process only (`only`).
+  - **`inReplyTo`**, a message a session sent this adapter (the `sent` entry names it; any other is `unknown`), at the
+    asker's pane, pid, task and session, waking it ("Replies by handle").
+
+  `repos` bounds every address (`refused`, `code: "repo"`): a task by its ledger repo, a session by its feed record.
+  Two rate buckets, both in memory: one per adapter for all its deliveries (`ADAPTER_RATE`, 60 a minute and 600 an
+  hour), then one per target (`MESSAGE_RATE`, 20 and 200). The text reads in the adapter wrapper
+  (`renderAdapterMessage`, `shared/src/messages.ts`): "the `<name>` adapter on `<machine>` relays a message from
+  "<label>"", `from` only as a display label through `displayTitle`'s scrub, never as the user or a session, and the
+  way to reply. Placed by the same listener write or hold a local message takes (the mod's `$.session.append` or
+  `$.prompt.submit`, never a key); a note submits a turn only with `wake: true`. `result` answers each `deliver`
+  (`delivered`, `sent` for one held for a listener, `held`, `ended` with `code: "nolistener"` past the grace, `unknown`,
+  `too_long`, `rate_limited`, `refused`, `ambiguous`, `unverified`, `unsupported` while stopping), with the message
+  `id` once placed; a delivery answered `sent` gets one `delivery` frame with its fate.
+
+- **Messages out** (`adapter:<name>` in `send_message`'s `to`, `MessageOutFrame`): local only, bound by peer pid like
+  every `message`, the sender tasked or not by the same rule. Refused before the adapter sees it: `unbound` (no
+  `claude` process on the peer's chain, so no key the adapter could know it by), `too_long` (over `MESSAGE_MAX`; an
+  adapter takes no stub, the whole text goes on one line, and a line over `ADAPTER_LINE_MAX` is `too_long` too),
+  `rate_limited` (the sender's own bucket), `unknown` (no such adapter, or one that takes no messages), `refused` (a
+  sender outside `repos`: neither delivered nor subscribed), `ended` (the adapter is not running past its handshake).
+  The frame carries the message `id` (the handle the adapter replies by), its kind and text, `from: {key, session?,
+  task?, title?}` (`session` only when subscribed), `inReplyTo` only when it names that adapter's delivery to this same
+  session (any other is dropped, never passed on), `subscribed`, and `leave`. Text flows out only when a session
+  addressed it to that adapter.
+- **The subscription** ("Tags and session identity", "The adapter subscription"; D3 amended). A session's message to `adapter:<name>` subscribes its
+  conversation when the daemon holds a verified `agent.session` for the sender's bound `claude` process, which that
+  process alone claims (`Conversations.verifiedFor`), never one from the frame; the reply says `subscribed` and names
+  the conversation (`session`), so the session can give the tool the id it holds it under. A sender with no verified
+  conversation still reaches the adapter, `subscribed: false`, answerable by reply for the hour. A reply by handle
+  subscribes nothing. Kept at rest in `stateDir()/conversations.json` (`openSubscriptions`, 0600, written durably on
+  one chain, beside the owner's labels: "The owner's label"): ids, adapter names, fingerprints and times, never text; one the daemon cannot read loads empty. Ended
+  by the session's `leave` (`send_message`'s `leave: true`, no text needed; the frame still goes, with `leave`), by
+  the conversation not live for `CONVERSATION_IDLE_MS` (30 days; a verified, unconflicted session the feed reports
+  touches it, written at most hourly), past `CONVERSATIONS_KEPT_MAX` (256, the least recently live first), and each
+  time the daemon reads its config, for a name no longer configured or configured as another program (`reconcileWith`,
+  at each start and at each reload a `config.json` change makes, with no adapter left configured too: the fingerprint
+  (`adapterFingerprint`) is a hash of `argv`, the recorded `commit` and `added`, the last only when the entry has one,
+  so a hand-written entry keeps the fingerprint it had before 3c), so a replaced program inherits none. **The file has
+  one writer, the daemon**: `subscriptionsFor` keeps one store per path per process, which the session-events
+  capability opens and every reload's capabilities share, so a write still queued from the outgoing daemon and the
+  incoming one's reconcile run on one chain over one memory; `seance adapter add` and `remove` write `config.json`
+  alone, and the daemon ends the subscriptions when it reads that write (a running daemon at once, through the reload;
+  a stopped one at its next start). The daemon's stop awaits that chain (`subscriptionsSettled`, beside the watch
+  table's), since `add`, `leave`, `touch` and `reconcile` write without being awaited and the process exits once stop
+  resolves. A reload that fails after its capabilities started and is rolled back keeps the subscriptions the failed
+  start's reconcile ended (the store is memory shared by both): the rollback restores the adapters' fingerprints, not
+  those subscriptions, and a session messages the adapter again. Not a bearer, unlike a reply handle: usable only by that adapter, over its own
+  stdin, on this machine, to a conversation that messaged it and that the daemon verified at the act.
+- **Tags** (`tag`, "Tags and session identity"): one `adapter.<name>.*` tag, the bare suffix, on a conversation subscribed to it
+  (one live in a session outside `repos` is `refused`) or on a task this ledger holds within `repos`; else `unknown`.
+  Memory only (`Conversations.setAdapterTag`, at most `ADAPTER_TAG_TARGETS_MAX` targets per adapter, the tag caps per
+  target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
+  conversation's tags show on the process whose verified, unconflicted claim it is. They reach an app's `sessions`
+  reply (`SessionEntry.tags`) and that adapter's own records, never another adapter's (`tagsFor`) or MCP
+  (`AGENT_VISIBLE_TAG_KEYS`). The PWA reads `SessionEntry.tags` for a session's name and rename and shows adapter
+  tags, display-only, in its per-namespace view ("Tags and session identity").
+- **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
+  account id, an absolute path, the PSK or anything derived from it.
+- **Audit**, origin `adapter` (`adapterAudit`), the lifecycle lines and one line per message each way:
+
+  ```
+  audit adapter origin=adapter op=start name=<n> argv=<word count> argv0="<basename>" pid=<pid>
+  audit adapter origin=adapter op=exit name=<n> code=<exit code | signal name | -> reason=<exited|stopped|invalid|unread|handshake|spawn|protocol|name>
+  audit adapter origin=adapter op=restart name=<n> delay=<ms>ms
+  audit adapter origin=adapter op=refused name=<n> reason=<protocol|name>
+  audit adapter origin=adapter op=failed name=<n> exits=<n>
+  audit adapter origin=adapter op=stop name=<n>
+  audit adapter origin=adapter op=deliver name=<n> dir=in to="<task id>|session|reply" kind=<kind> bytes=<n> outcome=<outcome> [code=<kind|repo|nolistener>]
+  audit adapter origin=adapter op=message name=<n> dir=out from=<"<task id>"|untasked|-> kind=<kind> bytes=<n> outcome=<outcome> subscribed=<true|false>
+  ```
+
+  Never an argv word but `argv[0]`'s basename, and nothing the adapter wrote: no text, `from` label, message id or
+  conversation id (both are handles), never a `ref`. A delivery's later fate is a second `op=deliver` line. Adapter
+  traffic is audited under origin `adapter` alone, never `message`. The adapter modules load neither `log.ts` nor
+  `audit.ts` at run time (`daemon/test/adapter-layering.test.ts`), so the only text they can audit is what their own
+  constants pass to `AdapterAudit`.
+
+- **Trust: an adapter is third-party code.** It runs as the owner's uid, so Séance cannot contain it: it can read
+  `state.json`, the keychain where it is unlocked and every worktree, and can drive tmux. Installing one trusts its code
+  as much as an MCP server or a Claude Code plugin the owner installs, and the README's setup step and `seance adapter
+  add` say so. These rules bound what Séance grants and audits (no text in a log, no queue write, no relay frame, no key
+  or credential handed over), and a well-behaved adapter's reach is exactly the protocol. They are not a sandbox, and
+  the threat model does not count them as one (its adapter invariant). What follows from that:
+  - **The tool is a new source of prompt text for every session on the machine.** Anyone who can write into the tool
+    (a project member, a bot, a compromised server) can put a note or question in a session and, if allowed, a
+    request. `kinds` bounds it, `["note", "question"]` by default, `request` the owner's opt-in per adapter; `repos`
+    bounds which sessions and tasks it sees and reaches.
+  - **State out is a disclosure to the tool's server**: titles, repos, branches, PR URLs, states, and the text of
+    messages sessions address to it. The owner chooses that by installing it; prompts are never part of it.
+  - **The tool's credentials are the adapter's**, in its own config or keychain entry, never in Séance's `config.json`
+    and never passed by the daemon.
+  - **A subscription outlives the hour a reply handle has.** It is bounded by the channel, not by time: anyone who can
+    write into the tool reaches a subscribed session while the subscription stands, within `kinds` and the rate
+    buckets, and a session that no longer wants it sends `leave`.
+  - **Integrity**: `add` records the checkout's commit, and `doctor` warns when it moved since, a reminder that new
+    code runs, not a refusal. Self-update never pulls or rebuilds an adapter: a daemon update restarts the adapters on
+    the code they have.
+- **Installing** (3c; `daemon/src/adapter-cli.ts`, `adapter-manifest.ts`, `adapter-control.ts`, `adapter-checks.ts`).
+  An adapter's repository carries `seance-adapter.json` at its root, and the owner installs it with four verbs typed at
+  the machine's shell. They are the owner's acts, never a frame, a local-socket op, a broker action, an app op or MCP,
+  and they are in the CLI's one `COMMANDS` table, so the custodian's fence denies `seance adapter` to a round under both
+  names (`custodian-fence.test.ts` names it). Setup is the README's step, with the trust statement below.
+  - **The manifest** (`readAdapterManifest`): exactly `{name, protocol, argv}`, at most 64 KiB, parsed strictly
+    (`parseAdapterManifest`: an unknown key, a bad name, a non-integer protocol or a malformed argv refuses it). A
+    `protocol` outside `ADAPTER_PROTOCOLS` is refused at `add`, before the daemon would refuse its handshake. `argv` is
+    resolved for `config.json`, since the adapter's cwd is its state dir, never the checkout: a bare `argv[0]` stays
+    bare (PATH at each start); a relative one must be an executable file in the checkout and is made absolute; a later
+    word that is a flag stays, one that holds a `/` or names something in the checkout is made absolute and must stay
+    inside it by realpath (a link out is refused), and any other word stays. An absolute word anywhere is refused: a
+    manifest names its own files and programs on PATH, nothing else. The checkout itself is realpath'd and recorded as
+    `dir`.
+  - **`add <dir> [--kinds <k,k>] [--repo <repo>]...`** reads the manifest, then writes `adapters.<name>` into this
+    machine's `config.json` and nothing else of it: `{argv, kinds, repos?, commit?, dir, added}`. The config must load
+    as it stands before the edit, and the new file is written beside it and loaded before it replaces it (`writeDurable`,
+    its mode kept), so a mistake never leaves the daemon a config it refuses. `kinds` defaults to `["note",
+    "question"]`, `request` only by `--kinds`; a re-add keeps the entry's `kinds` and `repos` unless given. A fifth
+    name is refused (`ADAPTERS_MAX`). `commit` is the checkout's `HEAD` through the hardened git (`checkoutCommit`), when
+    it is a git work tree. A `--repo` no scanned repo names is a warning, not a refusal (the scan may not have run).
+    It prints what it wrote, the trust statement and that the running daemon reloads `config.json` (the supervisor watches it) and starts it. It does not touch
+    `conversations.json`: the daemon ends that name's subscriptions when it reads the new entry ("The subscription"),
+    so a replaced program inherits none even under the same name.
+  - **`remove <name>`** deletes the entry and leaves `stateDir()/adapters/<name>` as it is: the adapter's own data,
+    which Séance did not write. The daemon ends its subscriptions when it reads the config, as for `add`.
+  - **Why the CLI writes no subscription.** A running daemon keeps its subscriptions in memory and rewrites
+    `conversations.json` whole, so a second writer's edit is lost at the daemon's next write (an earlier build had the
+    CLI drop them and relied on the `added` stamp to drop them again at the next start). With the daemon the one
+    writer, the end comes from its own reconcile: a re-add's new `added` stamp changes the fingerprint, and a removed
+    name is not configured at all; `remove` needs no stamp.
+  - **`restart [<name>]` and `status`** reach the running daemon through two files in `stateDir()`, never the socket
+    (widening the local op socket is a threat-model change this does not need). The daemon writes
+    `adapter-status.json` (0600, durably, on every supervisor change, coalesced: per adapter the supervisor's state,
+    pid, start time, hello `protocol` and `version`, exits in the window, the last exit's time, code and reason, the
+    entry's fingerprint, and counts of deliveries placed, messages out and owner restarts; never text, argv or a
+    conversation). The CLI believes it only under the pid `runtime.json` shows live. `restart` writes
+    `adapter-restart.json` (names only, honoured within 60 s), which the daemon takes by rename every 2 s
+    (`takeRestartRequest`) and acts on through `supervisor.restart()`: the run is ended (`reason=restarted`, not counted
+    toward the `failed` window), the window and the backoff reset, and the adapter started again; one held `failed` or
+    `refused` starts afresh. The CLI waits up to 10 s for the restart count to rise. A name not in the daemon's view
+    (added since it started, so the reload has not landed) is told to try again. `status` reads `config.json` alone when no daemon runs; the
+    adapter's hello `version` reaches the terminal only through `printable`, as the custodian's summary does, and a
+    fingerprint that differs from the entry's says the daemon runs an older config.
+  - **`doctor`** (`adapterChecks`, its "adapters" section): an absolute `argv[0]` that is missing or not executable
+    fails; a bare one not on the shell's PATH warns (the daemon's PATH may differ); an absolute argv word that is gone
+    warns. For an entry with `dir`: a manifest that is gone, renamed or whose resolved argv changed warns (`add` again);
+    a checkout no longer in git warns; and **a checkout whose `HEAD` moved since `add` warns, naming both commits**
+    ("Trust", Integrity: a reminder that new code runs at the next start, never a refusal). A live
+    adapter held `failed` or `refused` warns, pointing at `seance adapter restart`. An entry with no `dir` was written
+    by hand and has nothing to compare.
+  - **Audit**, origin `cli` (`adapterOwnerAudit`), one line per act, the daemon's own lines staying under `adapter`:
+
+    ```
+    audit adapter origin=cli op=add name=<n> argv=<word count> argv0="<basename>" kinds=<k,k> repos=<n|all> commit=<true|false> replaced=<true|false>
+    audit adapter origin=cli op=remove name=<n>
+    audit adapter origin=cli op=restart name=<n> outcome=<requested|not_running>
+    ```
+
+    No argv word but `argv[0]`'s basename, no path, repo name or sha. A refused `add` writes and audits nothing.
+- **The reference adapter** (`daemon/test/bin/reference-adapter.ts`) is the tests' stub, linked and exec'd once in
+  `beforeAll`, and the template a new adapter starts from. It is standalone and imports nothing from Séance.
+- **Tested by** `daemon/test/adapter-supervisor.test.ts`, which covers:
+  - the handshake, its ordering and `wants`, and a `resync`;
+  - each refusal, and the handshake timeout;
+  - a malformed line, and the restart after ten;
+  - the unread cap, the backoff, and the `failed` hold;
+  - a spawn failure, and the stop by group with SIGKILL;
+  - the hold while draining, and the env and 0700 dir.
+
+  `daemon/test/adapters.test.ts` uses real `session-event` frames on a private tmux and covers:
+  - a hand-started session;
+  - state, and a `/clear` as one record;
+  - each `session-gone` `reason`;
+  - `unknown` after a restart;
+  - `task` events;
+  - the host's snapshot and its `repos` filter;
+  - `tagsFor`.
+
+  `daemon/test/adapter-messages.test.ts` drives 3b through the reference adapter's outbox, with real panes, verified
+  conversations and inbox listeners:
+  - delivery by task with the wrapper and `wake`, a kind outside `kinds`, a held delivery and its `delivery` frame;
+  - `unknown`, `too_long`, a task outside `repos`, and the per-target rate;
+  - a question answered by the adapter's reply (waking the asker), and the adapter's question answered by the
+    session's reply by handle; a stray `inReplyTo` dropped;
+  - an unverified sender (`subscribed: false`, its reply still back), an unknown adapter, one that takes no
+    messages, a sender outside `repos`;
+  - a subscription across a `--resume` in another process and a daemon restart, `ambiguous`, `unverified` after a
+    `/clear`, ended by `leave` and by the name configured as another program;
+  - a tag refused on an unsubscribed conversation, and never seen by another adapter;
+  - `toSession` answering `ended` with no live claimant and `refused` for a session outside `repos`;
+  - a tag on a task launched here within `repos`, `refused` outside it, and `full` past the writer's cap;
+  - tags cleared at the adapter's handshake and on the session's `leave`.
+
+  `daemon/src/adapter-subscriptions.test.ts` covers the file (mode, reopen, `reconcile`, `reconcileWith` for a re-add
+  and for no adapter left, the idle prune, the cap, an unreadable file, no argv at rest);
+  `daemon/test/config-reload.test.ts` a label written just before a reload surviving it (one store across the reload).
+
+  3c: `daemon/test/adapter-cli.test.ts` runs the real CLI as a subprocess on a throwaway config and state dir, the test
+  process playing the daemon where one matters:
+  - `add` writing the entry (absolute argv, commit, dir, other keys and the file's mode kept) and its audit line;
+  - `add` under a name already there leaving `conversations.json` untouched, the daemon's reconcile (a fresh start,
+    and a live store) then ending that name's subscriptions and no other's, keeping `kinds` and `repos`, and changing
+    the fingerprint at the same commit;
+  - a refused manifest (an argv word out of the checkout, an unknown protocol, no checkout) writing and auditing
+    nothing; the fifth adapter; usage errors;
+  - `remove`, the file untouched and the subscriptions ended by the daemon's reconcile, and the adapter's own
+    directory left in place;
+  - `status` with no daemon and with one, the hello version scrubbed;
+  - `restart` with no daemon (`not_running`) and through the request file.
+
+  `daemon/test/adapter-supervisor.test.ts` adds the owner's restart (not counted, `reason=restarted`, no backoff) and
+  the restart lifting `failed` and `refused`; `daemon/src/adapter-manifest.test.ts` the manifest's parse and
+  resolution (a link out, `..`, an absolute word, a non-executable `argv[0]`); `daemon/src/adapter-checks.test.ts`
+  `doctor`'s checks.
+
+  The parsers and the schema are tested in `shared/src/adapter-protocol.test.ts` and `daemon/src/config.test.ts`, and
+  the audit lines in `daemon/src/audit.test.ts`.
+
+**The owner's brief (2026-11-14).** Séance owns a generic, tool-agnostic interface and never names a tool, in code,
+specs, names or tests; an adapter for a tool lives in its own repository (`seance-<tool>`), and that tool's code does
+not know Séance either. The seam is two-way: a tool delivers messages into sessions, and sessions, tasks and messages
+flow out. The same pattern is meant to serve work tracking later (docs/orchestrator.md §1), a different seam this one
+does not foreclose. An adapter may not spawn, despawn, enqueue, cancel, amend or pass (decided 2026-11-17: work a tool
+wants started goes through an orchestrator session it delivers to, which may be the tool's own coordinator); send
+cross-machine or reach the relay or the leader; read an inbox, a prompt, a transcript, a screen or a message not
+addressed to it; write a task tag or any tag outside its own namespace; send a key or deliver as the user; or be
+declared from anywhere but `config.json`.
+
+**Checked against three kinds of tool** (2026-11-17):
+
+| Need                                                            | A hosted workspace agents attach to  | A team chat bridge | A work tracker             |
+| --------------------------------------------------------------- | ------------------------------------ | ------------------ | -------------------------- |
+| Turn state of each session (busy, idle, needs input), lifecycle | `session`, `task`                    | `session`          | `task`                     |
+| A stable key per session                                        | `session.id` (conversation), task id | `session.id`       | task id                    |
+| Its own id and state on the session                             | `adapter.<name>.*` tags (`tag`)      | same               | —                          |
+| Text into a session, held while idle or waking it               | `deliver`, note or `wake`            | `deliver`          | —                          |
+| Whether and when it landed                                      | `result`, `delivery`                 | `result`           | —                          |
+| A session talking to the tool, and the tool answering           | `adapter:<name>`, `toSession`        | same               | —                          |
+| Inbox lifecycle (seen, deferred, declined, done, options)       | the tool's own CLI, by `session.id`  | same               | —                          |
+| PR URL and done                                                 | `session.prUrl`, `task` `done`       | —                  | `task`                     |
+| Start or resume a session for an item nobody holds              | **no**                               | —                  | **no**                     |
+| Create, amend or settle tasks                                   | —                                    | —                  | **no**: orchestrator.md §1 |
+| Tasks queued but not yet placed on any machine                  | —                                    | —                  | **no**                     |
+
+The first two fit the seam. A tracker's core needs (create and amend tasks, see the whole queue) are the queue's,
+which this seam is forbidden on purpose; it gets state out here and writes through an orchestrator session. An
+output-only tool (a notifier, a time log) is `wants: ["sessions"]` and nothing else. A tool that designates a
+coordinator session needs no second session on Séance's side: one session holds Séance's MCP and is the tool's
+coordinator, reached by `deliver` like any other, keyed by the `session.id` `send_message` returned it.
+
+**Rejected:**
+
+- **An adapter dialing the local socket and naming itself.** Any process of the same user could claim the name;
+  peer-pid binding names a pane, not a program.
+- **An inherited socketpair on fd 3.** It removes the rendezvous, but so do stdin and stdout, which every runtime has
+  with no fd plumbing, as MCP's stdio transport does. An adapter that prints to its stdout breaks its own stream; that
+  is its bug, answered `invalid` and restarted.
+- **An adapter loaded into the daemon (`import()`).** Third-party code inside the process that holds the PSK and a
+  service-delivered credential.
+- **An adapter as an MCP client of `seance mcp`, or as its own app-role relay client.** Both are fleet-wide and need
+  the PSK: the opposite of a local program trusted with this machine's sessions.
+- **The daemon calling the tool itself** (a webhook, a tool URL in Séance's config). Séance would hold a tool's
+  address and credentials, the coupling the brief forbids.
+- **One adapter for the fleet, on the leader.** Leadership moves, delivery happens on the machine with the pane, and
+  the leader keeps nothing a message carries.
+- **The adapter installing its own Claude mod.** Two mods would deliver into one session with no shared rule for
+  wake, and Séance would lose its say over what reaches a session.
+- **A `boundary` delivery mode, and an opaque `data` field passed through unread.** Kept out until a tool needs one; a
+  `data` field read by the model is prompt text Séance's wrappers would no longer frame. Structured acts go through the
+  tool's own CLI, keyed by the conversation id.
+- **Keeping the reply hour for adapter replies, or lengthening it.** A longer-lived bearer, still useless across
+  `--resume`; replaced by the subscription.
+- **`restart` and `status` as local-socket ops.** The socket's allowlist is a threat-model boundary, and the two need
+  nothing a file under the 0700 state dir cannot carry; the custodian's owner verbs set the pattern.
+- **`remove` deleting the adapter's own directory.** It holds the adapter's data and maybe its credentials, written by
+  the adapter, not Séance; the owner deletes it.
+- **Refusing a moved checkout, or pinning `argv` to the commit.** The owner updates an adapter by pulling it; `doctor`
+  says new code runs, `add` records it again, and an unreviewed pull is the same trust as installing.
+- **Containing the adapter** (the custodian round's masks with a network allowlist for the tool's host). Not in PR 3
+  (docs/messaging.md, open question 10): revisit before an adapter the owner did not write is installed, and drill it
+  as the custodian's was before claiming it.
+- **Sending only titled (tasked) panes.** A hand-started session is the common case for a tool that mirrors a
+  machine.
+- **Reading `closed` from the despawn's audit line.** That is a log, not a signal, and the custodian's and the
+  drain's closes go through the same `despawnSession` anyway.
+- **Holding `repos` until 3b.** Leaving it for 3b would make a config written for 3b disclose the out-of-scope
+  sessions it means to hide, for as long as 3a runs.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
@@ -11899,7 +13312,7 @@ app-role relay client with the key it imported at start.
   says this box's tmux was touched, and a brokered spawn touches someone else's. A
   scheduler frame logs `action=scheduler op="enqueue|queue|cancel|run-now|pass|amend|accounts"` with the task id
   and, for an enqueue, `claimed_client` (and `continues=<old id>` on a continue spec); `fleet` logs `action=fleet`. An enqueue also writes
-  `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" createdAt=<ms> queued`
+  `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" [notBefore=1] createdAt=<ms> queued`
   (or `queued landedEarlier=true`, `refused code="…"`, `unanswered`), one per try the relay
   answered or lost, because the surface's own `audit enqueue origin=mcp|cli` line records the
   surface's view and only the daemon saw the store answer. The transport is not a surface:
@@ -11985,11 +13398,11 @@ app-role relay client with the key it imported at start.
   `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them
   in the broker — any app can write those fields anyway, and the record's `PIN_SENTINEL`
   already keeps an older leader from misreading a pin.
-- **`batch`, `deps`, `linear` and `until` pass through, on purpose.** They are the spec's own
+- **`batch`, `deps`, `linear`, `until` and `notBefore` pass through, on purpose.** They are the spec's own
   authoring fields, bounded by `parseTaskSpec` like the rest, and any app-role client can already
   set every one of them on a task it creates. Filtering them would make the broker a second
   authority on what a task may say, drifting from the leader's, and buy nothing: it grants a
-  keyless local process nothing a keyed one could not already do.
+  keyless local process nothing a keyed one could not already do. `notBefore` is one of them, on an enqueue and on an `amend` draft (`parseAmendDraft`).
 - **Account names resolve in the client.** The broker serves the account listing, and the client
   runs the same `resolvePlacement`, so there is one implementation. The daemon keeps one
   `AccountCache` per app-role client, so every keyless process on the box together stays under
@@ -12066,7 +13479,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, agent?, pane?, turnEnded?, reason?}` (`agent` alone too, below), or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), or `{v, kind, stop, agent?, pane?}` ("Settings hooks", below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -12090,11 +13503,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   mod 0.2.0). On Team/Enterprise orgs Claude Code 2.1.308's built-in
   `cc-plugin-sec-default` sits first on the classic chain and passes every classic event
   past the plugins a person installs, so the first mod's `classic.*` hooks never ran there.
-  Now: `session.start` is idle (not raised for `/clear` or a compaction, but also raised
-  on an enable, a hooks-worker respawn or a reload, so a restart mid-turn reads idle until
-  the next turn event; gating on a first start would take a `$.state` contract for a
-  report the next turn event corrects, and why only `turn.complete` marks an idle with
-  `turnEnded: true`, mod 0.3.0, the one thing a hand-off's close waits for, below); the main
+  Now: the main
   loop's `turn.start` and `turn.complete`
   (`agentId` unset — a subagent's turns say nothing about whether the main loop is at
   its prompt) clear and set `atPrompt`. A `tool.check` whose verdict beneath the mod is
@@ -12144,8 +13553,61 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   debounce, "Needs input"), so only a tool running past it alerts anyone; it costs two task-record writes per such call.
   Rejected: delaying the report (the fault is the late close, not the open) and reading
   `ToolUse`/`ToolProgress` renders (`isRunning` is true while asked too, and only a drawn
-  surface raises them). **Not covered**: an MCP server's elicitation, which
-  has no engine event (only the skipped `classic.Elicitation`).
+  surface raises them). **Not covered by the mod**: an MCP server's elicitation, which
+  has no engine event (only the skipped `classic.Elicitation`), a fresh session's first idle, and
+  what a turn left running; the settings hooks below report those.
+  Until mod 0.6.0 `session.start` reported idle too, but it is also raised on an enable, a
+  hooks-worker respawn or a reload, so a restart mid-turn read idle until the next turn event; it
+  now reports nothing, and a respawned module starts at `atPrompt: false`, which the next turn
+  event corrects. This is why only `turn.complete` marks an idle with `turnEnded: true` (mod 0.3.0,
+  the one thing a hand-off's close waits for, below).
+- **Settings hooks** (added 2026-11-17). A plugin's `classic.*` hooks are skipped (above), but
+  hooks in a Claude settings file still run, and a few carry what no engine event does. `seance mod
+  install` writes one command group per event in `SETTINGS_HOOK_EVENTS` (`session-event-frame.ts`)
+  into each config dir's `settings.json` (`settings-hooks.ts`), beside the mods, and `uninstall`
+  removes them, so every hook séance installs comes and goes with that one command. The command is
+  `bun '<checkout>/daemon/src/main.ts' session-event --hook`, bare `bun` as the mod runs it, for the
+  same reason; an entry naming any checkout's CLI counts as ours, so a moved clone's is replaced, not
+  doubled, and the person's own hooks in the file are never touched. A file that is not a JSON
+  object, or whose `hooks` is not one, is left alone and the install fails for that dir. Doctor warns
+  for a missing event or another checkout's command. `--hook` reads the hook's stdin through
+  `hookFrame` (`session-event-cli.ts`) and passes on only the state, counts and enum it maps to,
+  never a command, description or prompt, and prints nothing (a `Stop` hook's stdout is a decision
+  to Claude). Outside tmux it sends nothing, as the mod does. The events:
+  - `SessionStart` with source `startup`, `resume` or `clear` is `idle` without `turnEnded`: the
+    session at its prompt. `compact` is not one (it can fall mid-turn), and a hooks-worker respawn
+    raises no `SessionStart`, which is what it improves on over the mod's `session.start`.
+  - `Elicitation` is `needs-input` with `reason: "elicitation"` and `ElicitationResult` is `busy`:
+    an MCP server asks inside a tool call, which the mod reports nothing of.
+  - `Stop` and `StopFailure` are a **note**, never a state (`{v, kind, stop, pane?}` alone): Claude
+    runs them before the turn is over, and another `Stop` hook may continue it, so the turn's end
+    stays the mod's `turn.complete`. `Stop`'s note is `background`, the turn's background work
+    counted by `BACKGROUND_KINDS` (Claude's `background_tasks` by type, `subagent` as `agent`, any
+    unknown type `other`, and each of `session_crons` a `wakeup`), each count 1–99; `StopFailure`'s
+    is `stopError`, the API error that ended the turn, one of `STOP_ERRORS` or `unknown`. The daemon
+    keeps the latest note per pane, in memory, bound to the pane's pid and task (an untasked pane's
+    too, forwarded nowhere; a frame that finds the pane gone or under another pid drops it), and joins
+    it to a tasked pane's `idle` events
+    (`parseIdleNote` at ingest and at `parseSessionEvent`, each field dropped alone); one landing
+    after the idle re-sends that idle with it, and any other state drops it, so a note never
+    outlives its turn. The leader keeps it beside its idle clock (`#idleSince`), replaced by each
+    idle, never on the task record and never stamped, and the `queue` reply's idle entries
+    (`IdleTaskRef`) carry it for the Queue screen. Display-only: it binds, moves, settles and
+    releases nothing; the idle release counts the same with or without it ("A session idle at its
+    prompt past a grace holds no slot", limitation (b)). A same-uid process can make its own idle
+    task's row say it is waiting on background work.
+    One act reads it, on the daemon alone (added 2026-11-17, from PR #502's command hooks): a held
+    note with any count is `awaitsWake`, which makes the custodian's `close` answer `busy` and the
+    seat count no round due for that pane. The custodian acts without the session's word, so it must
+    not kill work that will wake the session; there is no age cap and crons count, and the pane still
+    lists in `sessions`, so a round can flag or nudge it. The hand-off and pass closes ignore it: each
+    is the session's own word that it is done, and a never-ending job (a Monitor, a dev server) would
+    hold the pane for good. A same-uid process can keep its own pane from the custodian's close,
+    which it could already do by never reporting a turn's end.
+    Rejected: `PermissionRequest`, which fires only when the dialog shows (none in auto mode for an
+    allowed call) and gives no event when it is approved, so it cannot close what it opens; the
+    mod's `tool.check` already covers the open. Rejected: launching each session with `--settings`,
+    which covers only sessions séance spawns and is invisible to `seance mod uninstall`.
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
@@ -12230,7 +13692,10 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   the spawn's `inheritedPr`, taken only from a worktree spawn sealed from the scheduler with `client: "scheduler"` and
   a task id, never from a session-event frame. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
-  "PR hand-off").
+  "PR hand-off"). The same spawn may carry `ref` (2026-11-18, "Task tags"): `handleSpawn` notes it in the same
+  launch note (`TaskNote.ref`, `{ ref, url? }`, kept only as `parseRef` and `httpsUrl` hold it, outside `progress`),
+  taken only from a spawn sealed from the scheduler with `client: "scheduler"` and a task id, in any mode; it reaches
+  only an adapter's `Session` (`task.ref`) and is never used to bind, route or move anything.
 - **`pass`** (built 2026-11-12; the fifth act past ingest, a threat-model change; Scheduler,
   "Passing to a successor"). A session running out of usage commits its work and passes the task to
   a successor. `pass_to_successor` (MCP) sends `{pass: true, record}` and nothing else: no state, so no
@@ -12314,7 +13779,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   retention on, and stopping it undoes both, so a machine with no seat keeps and samples nothing.
   The custodian decides when a round is due (C14) and what its `sessions` verb reports (C23, C24) from facts the
   daemon keeps per pane séance started (`ours`, the `--remote-control` start-command match, now also a field of
-  the binding's own `list-panes` read, `BoundPane.ours`), tasked or not, **in memory only**:
+  the binding's own `list-panes` read, `BoundPane.ours`), tasked or not, in memory and, from 2026-11-17, in a file the
+  daemon writes so a restart can take them back (below):
   - **The last state.** Every bound frame carrying a state, untasked panes' included (before this they were
     dropped after the `/usage` poke), is handed to the tracker (`retain`) before the untasked return and before
     any reply is chosen: the state, when the current run of it began, and whether the frame was an `idle`
@@ -12323,8 +13789,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     never retained**, tasked or not: it is a report the session sends mid-turn, not a state it rests in, and an
     untasked one is refused `untasked` anyway. Hand-off and pass frames carry no state and are not retained.
     Nothing is retained once ingest has stopped. The tracker is one per process, like `endedTasksFor`: a config
-    reload's stop and start keeps the facts, only a process restart loses them. A pane with
-    no frame since this process started reads `state: null`: C24's `unobserved`, never closed on the screen alone.
+    reload's stop and start keeps the facts, and a process restart takes back only what the file below confirms. A
+    pane with no frame since this process started, and none taken back, reads `state: null`: C24's `unobserved`,
+    never closed on the screen alone.
   - **When the screen last changed.** Once a minute, one `list-panes` (the binding's format, through
     `readPanePids`, which unlike `listPanePids` throws on a failed read) and one `capture-pane` of the visible
     screen, no history, per live `ours` pane, one capture at a time; none when there is none. A capture
@@ -12332,8 +13799,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     normalised (below), hashed (`Bun.hash`) at once and the text dropped: `screenSince` moves when the hash differs from the last
     one, and `sampledAt` says when it was last captured, so a reader can tell a stalled sampler from a still
     screen. The first sample of a pane counts as a change, so `screenSince` is how long the screen has been
-    still as far as this process has seen, never longer: after a daemon restart nothing looks at rest earlier
-    than it is. A pass asked for while one runs joins it, so a slow tmux never stacks passes.
+    still as far as this process has seen, never longer, bar an entry taken back across a restart (below), whose
+    unchanged hash is what shows the screen stood still through the gap. A pass asked for while one runs joins it,
+    so a slow tmux never stacks passes.
   - **What counts as unchanged** (`normaliseScreen`). A busy Claude repaints its own chrome with no work
     behind it, and a session hung inside a command is a ticking spinner, so hashing the screen verbatim would
     never read it as still (C14's "unchanged for `everyMinutes`", C27's interrupt). The hash is of the screen
@@ -12351,6 +13819,32 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     list as a live `ours` pane, or lists under another pid (a reused `%n` must not show the old pane's state) (so a dead pane's entry goes too: C24 closes a dead pane without these facts),
     except one made after the listing began, which may be a pane newer than it. A failed listing prunes nothing.
     A failed capture leaves the entry as it was.
+  - **Across a restart** (`custodian/activity.json`, `daemon/src/pane-activity-store.ts`; built 2026-11-17). An
+    idle session sends no frame, so with memory alone every session already at rest when the daemon restarted
+    read `unobserved` until its next turn, which a finished one never takes: a day of fleet auto-updates left
+    finished, merged sessions piling up that no round could close. The daemon, not the round (sandboxed and
+    read-only), writes each entry that has a state and a screen hash: pane id, the pane process's pid **and start
+    time** (`processStart`), state, `stateSince`, `turnEnded`, the normalised screen's hash and `screenSince`; never
+    screen text. One write at a time, 0600 in the 0700 `custodian/` dir through `writeAtomic`, debounced
+    (`SAVE_DELAY_MS`) after a frame or a pass changes them; a seat's stop writes at once what was waiting and the
+    daemon's `stop` waits for it, as it does for state.json's (#525). The file is read once per process, at the
+    seat's first pass or write, so no write replaces it before it was read. A frame since this process began beats
+    the file's entry for that pane. A reloaded entry is **provisional**, hidden from every reader (`activity` null,
+    left out of `all`, so `close` answers `unobserved` and the due check passes it over), until a sample: the
+    daemon was down for seconds and may have missed a whole turn, `busy` frame and all. It is dropped when its pane
+    is gone or not `ours`, under another pid, or under the same pid with another start time (tmux reuses `%n` after
+    a server restart, the kernel reuses pids; a start time that cannot be read matches nothing); a capture whose hash
+    differs from the saved one drops it too and the pane starts afresh, and only an equal hash makes it an ordinary
+    entry again, keeping its original `stateSince`, `turnEnded` and `screenSince`, so C24's grace counts from when
+    the session really went idle. A frame for a provisional pane starts a fresh entry. `forgetStates` (the first
+    seat's take) leaves provisional entries alone: the confirming sample is what covers their gap. A missing file
+    is an empty start; an unreadable or corrupt one is the same, warned once, and never fails the start; a
+    malformed entry is dropped alone. `retainedSince` reaches back to the oldest confirmed entry's `stateSince`
+    (`restoredSince`). Rejected: the round writing it (it cannot, and must not, write the state dir); keying by pane
+    id and pid alone (a reused pid after a reboot would hand an old session's idle to a new one); trusting a
+    reloaded state outright (a turn missed in the gap would read as rest, and `close` would end a session that just
+    did work); having the `session-events` mod re-announce its state when the daemon reconnects (a possible later
+    cross-check; it needs a mod change in every exclave, where this needs none).
   - **Read API:** `activity(paneId)` → `{state, stateSince, turnEnded, screenSince, sampledAt}`, or null for a
     pane not tracked (foreign, gone, or neither sampled nor heard from). Its readers are the seat's due check
     (`roundDue`) and, from custodian 4, the `sessions` and `close` verbs (the same facts, through the seat's tracker).
@@ -12358,8 +13852,10 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     (the frame names nothing, except on a host with no peer pid, where its `pane` decides, as above), only the state and `turnEnded` are kept, nothing is run, sent, forwarded or
     persisted, and no reply, forward, coalescing, hand-off, pass or drain behaviour depends on it (`onState`
     still sees tasked frames only). The sampler's subprocesses are fixed-argv tmux reads with a validated `%n`
-    target. The screen's text is never kept, logged or sent; what stays is a 64-bit hash and timestamps in this
-    process's memory. A same-uid process can make a pane's facts say what it likes (it can send frames from
+    target. The screen's text is never kept, written, logged or sent; what stays is a 64-bit hash and timestamps,
+    in memory and in the daemon's own 0600 `custodian/activity.json` (the state dir a round's sandbox masks), which
+    only the daemon reads, and only into these facts. A same-uid process could write that file, which buys no more
+    than sending frames does (below), and a reloaded entry still has to match the pane's live process and screen. A same-uid process can make a pane's facts say what it likes (it can send frames from
     that pane, or type into it), which is the residual already accepted above, and those facts will bound only
     what the custodian's own verbs allow (docs/custodian.md, C19).
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
@@ -12452,9 +13948,101 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   another claude.ai session the same account owns. Not covered: the spawn verdict (above,
   "Out of scope for v1"), and sessions with no task, whose events go nowhere. The custodian's round is such a session
   and its id reaches the Machines row another way (custodian 5, "the live link").
+- **Session identity: the `agent` claims and the conversation table** (built 2026-11-17, tags step 1; the model and
+  its rationale: "Tags and session identity";
+  `daemon/src/conversations.ts`, `daemon/src/agent-session-file.ts`, the vocabulary in `shared/src/tags.ts`).
+  - **The claims.** Every report carries `agent: {kind, session?, remote?}`. The mod reads `$.session.id` and
+    `$CLAUDE_CODE_BRIDGE_SESSION_ID` at each report, never cached, since `/clear` and `/resume` move the conversation
+    under one process. The settings hooks add the hook input's `session_id` (`hookFrame`), so the `SessionStart` that
+    follows a `/clear` or `/resume` is the report naming the new conversation. Each key is held by its own parser
+    (`parseTagValue`: `agent.kind` one of `AGENT_KINDS`, `agent.session` a lowercase UUID, `agent.remote`
+    `isRemoteSessionId`). A bad value drops that key, an unknown key drops the whole `agent`, and neither drops the
+    frame. A frame may carry `agent` with no state. `agent.remote` is read first and `remoteSession` is its fallback
+    ("Tags and session identity", "`remoteSession` and `agent.remote`"). The leader's `SessionEvent.remoteSession` keeps its name, and the PWA's claude.ai link prefers
+    the live session's `agent.remote` from its machine's last `sessions` read over `Task.remoteSession`.
+  - **Retention, keyed on the bound `claude` process.** The key is `<pid>:<start time>` of the innermost
+    `claude`-named process on the peer's chain (`claudeProcessOf`, `daemon/src/claude-process.ts`, the one
+    `Bound.session` messaging uses), never the pane. A hand-started pane's process is the shell, which outlives a
+    restarted `claude`, so a pane key would carry one `claude`'s facts onto the next. It holds the process's last
+    state, `reason`, `agent.remote`, `agent.kind` and its conversation claim. This applies to any pane whose peer
+    resolves to such a process, tasked or not, `ours` or not. A peer with none retains nothing. A frame bound through
+    `pane` (a host that names no peer) is retained on the pane's own process and never verified or counted. It is kept
+    in memory only, with at most 256 conversations remembered. `ended` drops a process. So does a process gone, moved
+    out of its pane or under another task, at the next report in that pane or the next `sweep` (each app `sessions`
+    read). This is retention, not an act: nothing is run or sent from it, and no reply depends on it.
+  - **Verification.** An `agent.session` claim is verified only from the daemon's own sources, never the frame:
+    - **The file.** The process's own `sessions/<pid>.json` in any exclave's config dir (`readAgentSession`) decides
+      whenever exactly one exists. It is opened `O_NOFOLLOW | O_NONBLOCK` and must be a regular file of at most 64 KiB
+      whose `pid` matches. Its `procStart` is read per platform: on Linux it must equal `processStart`'s tick string;
+      on macOS it is a zone-less UTC `ctime` that must equal the seconds of `sec.usec`. A file left behind for a
+      reused pid is no match.
+    - **The ledger.** With no file, the launch ledger's session id for the pane's task (`EndedTasks.launchSession`)
+      verifies an equal claim and refutes any other at once.
+    - **Settling and refutation.** A file naming another id is re-read every 25 ms for `SETTLE_MS` (500 ms, ten times
+      the slowest lag S1 saw), and only then refutes. A refuted claim is dropped: not shown, not counted.
+    - **Unverifiable.** Two config dirs' matching files, or neither source, leave the claim unverifiable.
+    - **Conflicts.** Two live claimants of one id (verified, unverifiable or still settling) are a conflict.
+    - **At each act.** `atAct` re-reads the source before any act a verified id names, demotes the claim on a
+      mismatch and answers `ambiguous` on a conflict. The owner's `session-tag` (below) is its first act; adapter
+      delivery through a subscription ("Adapters", "The subscription") the second.
+  - **The daemon's own read.** At start and at each `sweep`, a live pane with no report since this process began is
+    matched to a `sessions/<pid>.json` whose pid is the innermost `claude` on its own chain, exactly one under that
+    pane. That conversation is linked verified, with the file's `bridgeSessionId` as `agent.remote`. An idle session
+    is known after a daemon restart without waiting for its next turn.
+  - **Where tags go.** `SessionEntry.tags` carries the newest live process's `agent.remote` (process scope) and its
+    `agent.kind` and `agent.session` (conversation scope, `verified` when it is), each with `{value, at, scope}`.
+    They go on an app's `sessions` only, never a scheduler-sealed one, and are read only through
+    `parseTags(…, { scope: "session" })`. MCP's `get_sessions` prints only `AGENT_VISIBLE_TAG_KEYS` ("Tags and
+    session identity", "Another agent's context"), so another session never sees a conversation id or a bridge id. No tag is logged or audited:
+    `message-layering.test.ts` holds the three modules that keep them off both sinks, type-only imports included.
+  - **Rejected:** the custodian's per-pane tracker (`pane-activity.ts`) as the store. It is `ours`-only and keyed by
+    pane for the custodian's own reads, so it would have had to change both to serve this.
+  - **The owner's label** (built 2026-11-18, tags step 2; `daemon/src/adapter-subscriptions.ts`,
+    `Conversations.label`, `handleSessionTag` in `daemon/src/handlers.ts`). The owner names an **untasked**
+    conversation; a tasked session's `owner.label` lives on its task ("Task tags"), so it survives the queue and its
+    chain, and the op answers `tasked` for one.
+    - **The op.** `session-tag` (`SessionTagRequest`: `{ pane, session, key: "label", value }`, `""` clears),
+      answered only when sealed `from: "app"` on the relay leg (`refused` otherwise), parsed by
+      `parseSessionTagRequest` (`invalid_request`: an unknown field, a key other than `label`, a value
+      `parseTagValue("owner.label", …)` refuses), and `unsupported` from a daemon running no conversation table. The
+      act sweeps, then takes the pane's newest live process: none is `ended`, one carrying a task `tasked`, one
+      claiming another conversation `moved`; then `atAct` re-reads its source (`unverified`, `ambiguous`), and a
+      claimant on another pane or pid is `moved` too. Only then is the label written. The reply is `{ ok: true, value }`
+      (the label now held) or `{ ok: false, code, message }`; a value that would not fit whole (past the title's
+      character cap, or `displayLine`'s 256 bytes, which multibyte text reaches first) is `invalid_request`, never
+      shortened; a write that throws, or a call before the table starts, is `internal_error`, holding nothing new. Audited `audit session-tag
+      origin=relay key-count=<0|1> outcome=<set|cleared|code>`. `CAPABILITIES.sessionTag` advertises it,
+      unconditionally: session events always run, so every daemon of this build has the table.
+    - **At rest.** `stateDir()/conversations.json`, 0600, the adapter subscriptions' file ("Adapters"), with one
+      owner: one `openSubscriptions` store per path per process (`subscriptionsFor`, `daemon/src/run-capabilities.ts`),
+      taken by the session-events capability and handed to the adapter host, and the same store across a config
+      reload's two daemons, so no second writer of another shape, and no second store over the same file, erases its
+      entries (each loading the other's as empty, or writing back what it read before the other's write). The adapter
+      CLI never writes it ("Adapters", "Installing"). Written whole through
+      `writeDurable` (temp, fsync, rename) on one chain: `{ v: 1, adapters, conversations }`, each conversation
+      `{ ownerLabel?: { value, at }, subscriptions: [{ adapter, since }], lastLive }`. At most `CONVERSATIONS_KEPT_MAX`
+      (256), the least recently live dropped first; an entry not live for `CONVERSATION_IDLE_MS` (30 days), or holding
+      neither a label nor a subscription, dropped. `lastLive` is touched on every report and reaches the disk at most
+      hourly, since only the prune reads it. A file the daemon cannot read loads empty: labels are lost, never invented;
+      a malformed label drops the label, never the entry's subscriptions. A label write awaits its own write and puts
+      the label back when it fails; a subscription's end keeps the label, and a label's clear keeps the subscriptions.
+    - **The join.** `tagsFor` adds `owner.label` (conversation scope) only to an untasked process, while its
+      conversation's claim is verified, not through the `pane` fallback, and has exactly one claimant (a tasked
+      process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
+      of a labelled id shows its own name. A restart keeps the label and reattaches it at the next verified claim.
+    - **The name, in the PWA.** The Machines card lists an awake machine's sessions by `displayName` over
+      `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (taken as docs/tags.md's open
+      question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
+      then the window, marked "(self-named)" or "(window)" for the last two. Rename is offered only for a connected
+      machine advertising `CAPABILITIES.sessionTag`, on an untasked row whose `agent.session` is verified; a refusal
+      shows a fixed text by its code. Sessions are read for every connected machine when the screen opens, on wake, when a
+      `sessionTag` machine's reported session counts move, and after a rename or a refusal that says the row is stale
+      (`ended`, `moved`, `tasked`). The dialog refuses a name past the daemon's byte cap before sending.
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
-  `question` and `permission`, and `tool` rides beside `permission` only. Closed kinds plus a
+  `question`, `permission` and (2026-11-17, from the settings `Elicitation` hook) `elicitation`, an MCP
+  server's question, and `tool` rides beside `permission` only. `elicitation` is treated as `permission`
+  is (debounced, no early alert, no early drain Escape): it is display-only too. Closed kinds plus a
   bounded name and never the command or the verdict's message: a command line may carry secrets,
   and prompt text is never logged. `isToolName` (`[A-Za-z0-9_-]{1,64}`, the Claude API's own
   tool-name alphabet, so every real name passes) holds it at ingest, at `parseSessionEvent` and
@@ -12641,7 +14229,7 @@ the binding with real panes.
 
 ### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4, 6 and 8), served on the round's own socket since custodian 4b
 
-The sixth frame kind, beside `Plain`, `broker`, `session-event`, `message` and `inbox`: the custodian round's nine
+The custodian frame kind, beside `Plain`, `broker`, `session-event`, `message`, `inbox` and `watch`: the round's nine
 verbs, `sessions`, `close <pane>`, `capture <pane>`, `pr <pane>`, `flag <pane> <reason> [note]`, `nudge <pane>` (text on
 stdin), `interrupt <pane>`, `notes` and `done` (C22–C34, C37–C40, C42; `capture` and `pr` are 4b's).
 `seance custodian <verb>` (`custodian-cli.ts`) sends one frame and prints the reply as JSON.
@@ -12685,7 +14273,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   (`"ok"` or its refusal code), and **the session's counts** (`nudges`, `interrupted`: C30, below; zero for a
   session with none). It first prunes the flags file and the counts against the panes in the tmux server (below). It adds the
   time retention began (`retainedSince`: a pane with no state before it is "unobserved after a restart", not a
-  hung one) and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
+  hung one; from 2026-11-17 it reaches back to the oldest entry a restart took back from `custodian/activity.json`
+  and a sample confirmed, and a provisional one reads as no state until then: "Per-pane retention and the screen
+  sampler") and the reap refusals file as read (DESIGN.md, "Nothing lost"), so a report says what holds disk. No
   screen text is returned: a screen is read in memory to judge a close and dropped. Classification runs four at a
   time.
 - **`capture` (4b)** answers the bottom of one pane's visible screen as plain text (`capture-pane` with no attributes: the
@@ -12719,7 +14309,8 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   `shell` or `starting` pane is `unobserved`; a `background-prompt` is `waiting`; an `exit-prompt` is despawned
   (someone already asked, and the despawn's Keep answers it); a `live` pane is `unobserved` with no retained state
   or an `ended` one, `waiting` on `needs-input`, `busy` on `busy`, `unobserved` on an `idle` that is not a turn's
-  own end, `too_soon` before it has stood `closeAfterMinutes`, and otherwise despawned through the graceful path
+  own end, `busy` when that turn's settings `Stop` note left background work or a cron pending (`awaitsWake`,
+  "Settings hooks"), `too_soon` before it has stood `closeAfterMinutes`, and otherwise despawned through the graceful path
   (`despawnSession`, `force: false`, audited `origin=custodian`). The pane is **re-read at the moment of the act**
   (`paneInfo`, then the classification), never trusted from an earlier `sessions`, and a pane id the frame names
   that is gone is `gone`. A close holds its pane while it runs, so a second for it is `marked`.
@@ -12942,7 +14533,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   daemon it cannot reach (`the daemon is not running`).
 - **The agent's checklist (`daemon/custodian/agent.md`)** is the real one: `sessions`, judge each pane from its
   facts and, where it must, its screen through `seance custodian capture` and its PR through `pr` (it has no tmux,
-  no `gh` and no network), `close` the finished ones, and for a `busy`
+  no `gh` and no network), `close` the finished ones, for an idle session whose PR has a failed check and that is not on it
+  one `nudge` naming the failed checks and asking it to fix them and push to the same PR, never to merge it (that
+  session is not finished, so it is never closed while the check is red), and for a `busy`
   session that is stuck the stuck path (C26–C28): `nudge` it with what it observed, `interrupt` only one hung inside a
   command and then nudge it in the same round, and once its nudges are spent (`limit`) `flag` it `stuck` and leave it;
   write `notes` as `## <pane or task id>` sections plus `## standing`, `flag` a session it leaves that needs its owner
@@ -13452,8 +15045,17 @@ The bullets below are tmux-rename's, except where they say mods.
   removal, deliberately. The marketplace is named `seance`, not `Séance`: plugin ids
   (`<mod>@<marketplace>`) are ASCII-only, and Claude refuses to install from a
   marketplace whose name breaks that; lowercase matches the repo, the CLI and
-  the MCP server name. `doctor` warns when a mod is missing, disabled, or read
-  from a different checkout. Rejected: `CLAUDE_CODE_PLUGIN_DIRS` in
+  the MCP server name. `doctor` warns when a mod is missing, disabled, read
+  from a different checkout, or enabled but unloadable (`list`'s `errors`, e.g. "not found in
+  marketplace"). Since the marketplace is one per exclave, an install repoints every exclave at the
+  clone it ran from, so `mod install` refuses, before touching any, while a live daemon runs from
+  another clone (runtime.json's `root`, realpath'd as doctor compares it): on 2026-11-17 a `--here`
+  task in a months-old second clone ran that clone's `mod install`, which listed no `inbox`, and
+  `inbox@seance` stayed enabled in each exclave yet loaded in no session started after it (no listener, so
+  every message to those tasks ended `nolistener`), with nothing anywhere saying so. The refusal guards
+  only from clones that carry it; doctor's `errors` line catches the rest. Rejected: refusing an
+  install that would drop an installed mod (one more `plugin list` per exclave, and it blocks a mod's
+  deliberate removal; the daemon's clone is the stated invariant, `daemonMain` above). Rejected: `CLAUDE_CODE_PLUGIN_DIRS` in
   `~/.claude/settings.json` (Claude's development path — hot-reloads on every
   save), installing from GitHub (`<owner>/<repo>`; a copy that only `claude plugin
   update` refreshes, and the checkout already on the machine is the version the
@@ -13756,7 +15358,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
   (a title-less task's window and worktree branch are slugged from the prompt's first words),
   `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its
-  column too) and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
+  column too), every task tag but `creator.ref` and `creator.ref-url` (an owner's label is a person's own words, an
+  opaque creator key is a tool's; "Task tags") and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
   placement stays in `assignment`). The store prunes these with the task; the archive would keep
   them for good. A row is
   written when the archive holds none or holds it at a lower store version (`ON CONFLICT … WHERE

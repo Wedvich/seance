@@ -18,6 +18,7 @@ import {
   deriveAfterSheet,
   deriveQueue,
   disarmRow,
+  idleClause,
   LIMITS_UNREADABLE,
   parseLimitDraft,
   primaryAction,
@@ -32,7 +33,7 @@ import {
   RESCAN_IDLE,
   type QueueState,
 } from "../src/state.ts";
-import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText } from "@seance/shared";
+import { CAPABILITIES, FLEET_LIMIT_MAX, reasonText, WORKTREE_AND_BRANCH_GONE, type SessionEntry } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -75,6 +76,9 @@ function state(
     },
     form: DEFAULT_FORM,
     autonomy: "checkpoint",
+    notBefore: null,
+    ref: { ref: "", url: "" },
+    labelling: null,
     promptUndo: null,
     sheet: null,
     settings: false,
@@ -454,6 +458,44 @@ describe("deriveQueue", () => {
     expect(sessionOf()).toBeNull();
   });
 
+  test("the live session's `agent.remote` wins over the task's `remoteSession`, which stays the fallback", () => {
+    const live = "session_01LiveLiveLiveLiveLiveLive";
+    const stored = "session_01TuECqfR7Twko9QJm98sWAw";
+    const linkOf = (tags: SessionEntry["tags"], sessions?: AppState["sessions"]) =>
+      deriveQueue(
+        state(ok([task("a", { state: "running", assignment: placedAt, remoteSession: stored })]), {
+          sessions: sessions ?? {
+            [placedAt.deviceId]: {
+              at: NOW,
+              sessions: [
+                {
+                  id: "%1",
+                  window: "w",
+                  repo: "app",
+                  path: "/w",
+                  taskId: "a",
+                  ...(tags === undefined ? {} : { tags }),
+                },
+              ],
+            },
+          },
+        }),
+        NOW,
+      ).sections[0]?.rows[0]?.session;
+    expect(linkOf({ "agent.remote": { value: live, at: NOW, scope: "process" } })).toBe(
+      `https://claude.ai/code/${live}`,
+    );
+    // A malformed id, or one at a scope `agent.remote` does not live at, is dropped at parse.
+    expect(linkOf({ "agent.remote": { value: "session_../x", at: NOW, scope: "process" } })).toBe(
+      `https://claude.ai/code/${stored}`,
+    );
+    expect(linkOf({ "agent.remote": { value: live, at: NOW, scope: "conversation" } })).toBe(
+      `https://claude.ai/code/${stored}`,
+    );
+    expect(linkOf(undefined, { [placedAt.deviceId]: "unknown" })).toBe(`https://claude.ai/code/${stored}`);
+    expect(linkOf(undefined, {})).toBe(`https://claude.ai/code/${stored}`);
+  });
+
   test("Answer in Claude is offered only on a task waiting for input with a session link", () => {
     const SESSION = "session_01TuECqfR7Twko9QJm98sWAw";
     const answerOf = (fields: Partial<Task>) =>
@@ -784,6 +826,22 @@ describe("deriveQueue", () => {
     expect(deriveQueue(state(ok([busy])), NOW).summary).toBe("1 running · 0 waiting");
   });
 
+  test("an idle task says what its last turn left: its background work by kind, else the API error that ended it", () => {
+    const at = { deviceId: "dev-a", exclave: "main", clone: "app" };
+    const watching = task("idle", { state: "running", assignment: at });
+    const released = [{ taskId: "idle", since: NOW - 5 * 60_000, background: { shell: 1, wakeup: 2 } }];
+    const row = deriveQueue(state(ok([watching], [], 0, released)), NOW).sections.find((s) => s.title === "Idle")
+      ?.rows[0];
+    expect(lineText(row?.body ?? [])).toBe(
+      "Idle, waiting on its background work (1 shell, 2 scheduled wake-ups) since 5m ago — its slot is free",
+    );
+    expect(idleClause({ taskId: "t", since: 0, background: { agent: 2, monitor: 1, other: 1 } })).toBe(
+      "Idle, waiting on its background work (2 subagents, 1 monitor, 1 other task)",
+    );
+    expect(idleClause({ taskId: "t", since: 0, stopError: "rate_limit" })).toBe("Stopped on an API error (rate limit)");
+    expect(idleClause({ taskId: "t", since: 0, background: {} })).toBe("Idle at its prompt");
+  });
+
   test("unreadable records get a line of their own, counted, and none gets none", () => {
     const listing = (count: number): QueueState => ({
       kind: "ok",
@@ -1051,8 +1109,8 @@ describe("continuing a failed task", () => {
     });
     for (const held of ["queued", "blocked", "ready"] as const) {
       expect(rowOf([failed, { ...waiting, state: held }], "f", CAN)?.continuing, held).toEqual({
-        id: "c",
         text: "Continuing as Fix the thing again · waiting",
+        reveal: "c",
       });
     }
     expect(rowOf([failed, waiting], "c", CAN)?.continuing).toBeNull();
@@ -1071,6 +1129,20 @@ describe("continuing a failed task", () => {
     expect(rowOf([failed, taker, waiting], "f", CAN)?.continuing).toBeNull();
     // Past QUEUE_MAX_TASKS the continuation isn't listed: nothing to name, and the offer stands.
     expect(rowOf([failed], "f", CAN)?.continuing).toBeNull();
+  });
+
+  test("a continuation refused because the worktree and branch are gone withdraws it for good, and says so", () => {
+    const gone = continuation({
+      state: "failed",
+      failure: {
+        code: "not_continuable",
+        message: `its worktree /r/.claude/worktrees/x ${WORKTREE_AND_BRANCH_GONE} (merged and swept by reap, or deleted)`,
+      },
+    });
+    const row = rowOf([failed, gone], "f", CAN);
+    expect(row?.canContinue).toBe(false);
+    // No reveal: a failed card may sit in Older, where a tap would scroll to nothing.
+    expect(row?.continuing).toEqual({ text: "Can't continue: its worktree and its branch are gone", reveal: null });
   });
 
   test("a cancelled task with an assignment is continuable only on a machine advertising continueCancelled", () => {
@@ -1144,7 +1216,20 @@ describe("continuing an awaiting-merge task whose PR is blocked", () => {
     )
       .sections.flatMap((section) => section.rows)
       .find((r) => r.id === "w");
-    expect(row?.continuing).toEqual({ id: "c2", text: "Continuing as Unblock PR #7 · waiting" });
+    expect(row?.continuing).toEqual({ text: "Continuing as Unblock PR #7 · waiting", reveal: "c2" });
+  });
+
+  test("Unblock is withdrawn once a continuation of the session it would resume was refused as gone", () => {
+    const gone = task("c1", {
+      state: "failed",
+      failure: { code: "not_continuable", message: `its worktree /p ${WORKTREE_AND_BRANCH_GONE}` },
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "w", at: placedAt } },
+    });
+    const row = deriveQueue(state(ok([blocked, gone]), {}, { machines: [machine({ capabilities: HANDOFF })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((r) => r.id === "w");
+    expect(row).toMatchObject({ canContinue: false, inlinePrimary: false });
+    expect(row?.continuing?.text).toBe("Can't continue: its worktree and its branch are gone");
   });
 
   test("a failed task's Continue stays the quiet one", () => {
@@ -1463,6 +1548,15 @@ describe("the Start now menu item", () => {
     expect(item(task("w"))?.enabled).toBe(true);
   });
 
+  test("a task the queue's pause alone holds: enabled when the leader lifts the pause, else greyed saying so", () => {
+    const paused: Reason = { code: "paused", until: "resume", scope: "queue" };
+    expect(item(rejecting(paused), [...CAN, CAPABILITIES.runNowPaused])).toEqual({
+      sub: "Skip the queue — spawn on m · main",
+      enabled: true,
+    });
+    expect(item(rejecting(paused))).toEqual({ sub: "The queue is paused", enabled: false });
+  });
+
   test("shown but disabled where nothing could take it, or the leader lacks runNow", () => {
     expect(item(rejecting(disk))?.enabled).toBe(false);
     expect(item(rejecting(capped), [])?.enabled).toBe(false);
@@ -1536,6 +1630,7 @@ describe("the screen debounce on needs-input", () => {
       "May be waiting for permission to use Bash since 31m ago",
     );
     expect(body({ inputReason: "question" })).toBe("Asking a question since 31m ago");
+    expect(body({ inputReason: "elicitation" })).toBe("Waiting for an answer to an MCP server since 31m ago");
     expect(body({})).toBe("Waiting for input since 31m ago");
   });
 
@@ -1564,5 +1659,110 @@ describe("the screen debounce on needs-input", () => {
       nextReveal([waiting({ inputReason: "question" }, skew), task("r", { state: "running" })], NOW, skew),
     ).toBeNull();
     expect(nextReveal([], NOW, 0)).toBeNull();
+  });
+});
+
+describe("a task deferred by its not-before time", () => {
+  const LATER = NOW + 3_600_000;
+  const stale = (): Task =>
+    task("w", {
+      spec: { repo: ORIGIN, mode: "worktree", notBefore: LATER },
+      decision: {
+        at: NOW - 1000,
+        chosen: { deviceId: "dev-a", exclave: "default", clone: "app" },
+        candidates: [{ deviceId: "dev-a", machine: "m", exclave: "default", rejected: [] }],
+      },
+    });
+  const rowAt = (t: Task, skew = 0) =>
+    deriveQueue(state(ok([t], [], skew), {}, { machines: [machine({ capabilities: [CAPABILITIES.runNow] })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id);
+
+  test("says until when, in place of the decision's headline and body, and Start now names no machine", () => {
+    const row = rowAt(stale());
+    expect(lineText(row?.headline ?? [])).toMatch(/^Queued — until /u);
+    expect(lineText(row?.body ?? [])).toMatch(/^Not placed before /u);
+    expect(row?.startNow).toEqual({ sub: "Skip the queue", enabled: true });
+  });
+
+  test("a blocked task keeps its dependency headline and still shows the time in its body", () => {
+    const blocked = task("b", { state: "blocked", spec: { repo: ORIGIN, mode: "worktree", notBefore: LATER } });
+    const row = rowAt(blocked);
+    expect(lineText(row?.headline ?? [])).not.toMatch(/^Queued — until /u);
+    expect(lineText(row?.body ?? [])).toMatch(/^Not placed before /u);
+  });
+
+  test("says nothing once the leader's clock, by the skew, is past it", () => {
+    const row = rowAt(stale(), 3_600_001);
+    expect(lineText(row?.headline ?? [])).not.toContain("until");
+    expect(lineText(row?.body ?? [])).not.toContain("Not placed before");
+  });
+});
+
+describe("a task's tags on its row", () => {
+  const rowOf = (t: Task, capabilities: readonly string[] = [CAPABILITIES.taskTags]) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id);
+
+  const tagged = task("t", {
+    spec: {
+      repo: ORIGIN,
+      mode: "worktree",
+      title: "Fix the thing",
+      tags: {
+        "creator.ref": "linear:ENG-1",
+        "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+        "owner.label": "Mine",
+      },
+    },
+  });
+
+  test("the label sits beside the title, never in place of it, and the ref links to its https URL", () => {
+    expect(rowOf(tagged)).toMatchObject({
+      title: "Fix the thing",
+      label: "Mine",
+      ref: { text: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" },
+    });
+  });
+
+  test("a task with no tags has no label and no ref", () => {
+    expect(rowOf(task("t"))).toMatchObject({ label: null, ref: null });
+  });
+
+  test("a ref URL that is not https is text only, and control characters are cut from every value", () => {
+    const hostile = task("t", {
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        tags: { "creator.ref": "linear:ENG-1", "creator.ref-url": "javascript:alert(1)", "owner.label": "a\nb" },
+      },
+    });
+    const row = rowOf(hostile);
+    expect(row?.ref).toEqual({ text: "linear:ENG-1", url: null });
+    expect(row?.label).not.toContain("\n");
+  });
+
+  test("a legacy `linear` reads as the ref, and a ref of its own wins over it", () => {
+    const legacy = task("t", {
+      spec: { repo: ORIGIN, mode: "worktree", linear: { issue: "ENG-9", url: "https://linear.app/x/issue/ENG-9" } },
+    });
+    expect(rowOf(legacy)?.ref).toEqual({ text: "linear:ENG-9", url: "https://linear.app/x/issue/ENG-9" });
+    const both = task("t", {
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        linear: { issue: "ENG-9" },
+        tags: { "creator.ref": "gh:42" },
+      },
+    });
+    expect(rowOf(both)?.ref).toEqual({ text: "gh:42", url: null });
+  });
+
+  test("labelling is offered on any task, finished included, only while the verified leader takes task tags", () => {
+    for (const s of ["queued", "running", "done", "failed"] as const) {
+      expect(rowOf(task("t", { state: s, assignment: placedAt }))?.canLabel, s).toBe(true);
+      expect(rowOf(task("t", { state: s, assignment: placedAt }), [])?.canLabel, s).toBe(false);
+    }
   });
 });

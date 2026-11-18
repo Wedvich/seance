@@ -11,7 +11,7 @@ import {
   type MetricsStep,
   type RelayState,
 } from "@seance/shared";
-import { M5_KEEP_S, quotaSamples, RAW_KEEP_S, type Sample } from "../../daemon/src/metrics-tiers.ts";
+import { githubSamples, M5_KEEP_S, quotaSamples, RAW_KEEP_S, type Sample } from "../../daemon/src/metrics-tiers.ts";
 import type { IngestClock } from "./ingest-clock.ts";
 import { OBSERVER_LABEL, type MetricsArchive } from "./metrics-archive.ts";
 
@@ -122,6 +122,7 @@ export async function statusSamples(
     const account = exclave.accountId === null ? null : await keyOf(exclave.accountId);
     samples.push(...quotaSamples(q, { ...observer, exclave: exclave.id, ...(account === null ? {} : { account }) }));
   }
+  if (status.gh !== undefined) samples.push(...githubSamples(status.gh, observer, status.at));
   return samples;
 }
 

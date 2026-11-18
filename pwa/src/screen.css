@@ -2592,6 +2592,111 @@
   color: var(--warn);
 }
 
+/* A machine's sessions by name, under its exclaves: the name gives way, the mark and Rename keep their width. */
+.fleet-sessions {
+  margin: 0;
+  padding: 10px 0 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.fleet-session {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+
+/* flex-basis 0: the name ellipsizes instead of pushing Rename onto the wrapped line. */
+.fleet-session-name {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.fleet-session-mark {
+  flex: none;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
+.fleet-session-rename {
+  flex: none;
+  margin-left: auto;
+}
+
+/* Folded under the row, on its own full-width line. */
+.fleet-session-tags {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.fleet-session-tags > summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.session-tag-group {
+  padding: 4px 0 6px 12px;
+}
+
+.session-tag-head {
+  margin: 0 0 2px;
+  color: var(--fg2);
+}
+
+.session-tag-list {
+  margin: 0;
+}
+
+.session-tag {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-tag dt {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow-wrap: anywhere;
+  color: var(--fg2);
+}
+
+.session-tag dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  min-width: 0;
+  margin: 0;
+}
+
+.session-tag-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.session-tag-verified {
+  color: var(--ok);
+}
+
+.session-tag-meta {
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
 /* ---- history chart ---- */
 
 .chart {
@@ -2657,6 +2762,18 @@
   stroke-linecap: round;
   opacity: 0.45;
   vector-effect: non-scaling-stroke;
+}
+
+/* Spans no gauge measured (asleep, daemon down), full height behind the lines. */
+.chart-offline {
+  fill: var(--fg2);
+  opacity: 0.1;
+}
+
+.chart-offline-swatch {
+  height: 10px;
+  background: var(--fg2);
+  opacity: 0.3;
 }
 
 .chart-axis {
@@ -2735,8 +2852,8 @@
   background: var(--bg);
 }
 
-/* Top-aligned so a subtitle that wraps (Machines') grows the title block alone: the pill and the
-   Queue's ↻ keep one position across the three screens. The title block is at least the pill's
+/* Top-aligned so a subtitle that wraps (Machines') grows the title block alone: the pill
+   keeps one position across the three screens. The title block is at least the pill's
    height (44px), centred in it, so a short title sits where it did when the header centred. */
 .phone-header {
   align-items: flex-start;
@@ -2778,14 +2895,10 @@
 }
 
 /* A switch between the phone's peer screens moves only what changes: the
-   header's title block, the Queue's ↻ and the body. The pill is named so it
+   header's title block and the body. The pill is named so it
    is held still rather than cross-faded with the header around it. */
 :root:active-view-transition-type(switch) .phone-heading {
   view-transition-name: head-title;
-}
-
-:root:active-view-transition-type(switch) .phone-header .queue-refresh {
-  view-transition-name: head-action;
 }
 
 :root:active-view-transition-type(switch) .phone-header .relay-group {
@@ -2823,14 +2936,6 @@
 
 :root:active-view-transition-type(switch)::view-transition-new(head-title) {
   animation: vt-head-in 0.2s ease-out both;
-}
-
-:root:active-view-transition-type(switch)::view-transition-old(head-action) {
-  animation: vt-fade-out 0.2s ease-in both;
-}
-
-:root:active-view-transition-type(switch)::view-transition-new(head-action) {
-  animation: vt-fade-in 0.2s ease-out both;
 }
 
 :root:active-view-transition-type(switch)::view-transition-old(screen-body) {
@@ -3054,38 +3159,10 @@
 
 /* ---- decision record: the `auto` preview and a queued task's verdict ---- */
 
-.preview {
-  position: relative;
-}
-
-/* Sits in the card's label row, so it costs the card no height. */
-.preview-refresh {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 44px;
-  height: 44px;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  font-size: 17px;
-  cursor: pointer;
-}
-
+/* Delayed: a re-ask the leader answers quickly, usually with the same placement, should not flash the card. */
 .preview-pending .decision {
   opacity: 0.55;
-  transition: opacity 120ms;
-}
-
-.preview-pending .preview-refresh {
-  animation: preview-spin 0.9s linear infinite;
-  cursor: default;
-}
-
-@keyframes preview-spin {
-  to {
-    transform: rotate(1turn);
-  }
+  transition: opacity 120ms 300ms;
 }
 
 .decision {
@@ -3251,6 +3328,43 @@
 /* Inline in the mono meta line, after the age; back to the body face for `.fleet-badge`'s reason.
    `.fleet-badge` is styled as a flex item, so here it needs its own box: an inline span's padding
    and border overlap the line above when the pill wraps onto a line by itself. */
+.queue-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.queue-label,
+.queue-ref {
+  font-family: var(--sans);
+  overflow-wrap: anywhere;
+}
+
+.queue-ref {
+  text-decoration: none;
+}
+
+.verdict-tags {
+  margin: 12px 0 0;
+  font-size: 0.8125rem;
+}
+
+.verdict-tag {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.verdict-tag dt {
+  font-family: var(--mono);
+  color: var(--fg2);
+}
+
+.verdict-tag dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .queue-autonomy {
   display: inline-block;
   margin-left: 6px;
@@ -3416,18 +3530,6 @@
 .queue-pr-stale .queue-pr-blocked {
   color: inherit;
   opacity: 0.5;
-}
-
-.queue-refresh {
-  width: 44px;
-  height: 44px;
-  margin: -8px -8px -8px 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg2);
-  font-size: 17px;
-  cursor: pointer;
-  flex: none;
 }
 
 .queue-resume {
@@ -3770,6 +3872,15 @@
   border-left: 1px solid var(--line);
 }
 
+/* Only the Queue's header carries the 44px settings pill; without this it is taller than the
+   other two and centres its title lower. Every title block is the pill's height, as .phone-heading is. */
+.desk-col > .header > :first-child {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 44px;
+}
+
 /* Spawn is the one call to action on screen; pausing steps down to an outline. */
 .desk .queue-pause {
   padding: 13.5px;
@@ -3852,9 +3963,6 @@
   border-radius: 3px;
   text-decoration: underline dotted transparent;
   text-underline-offset: 3px;
-  transition:
-    color 0.14s ease,
-    text-decoration-color 0.14s ease;
 }
 
 @media (hover: hover) {

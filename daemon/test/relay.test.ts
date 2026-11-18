@@ -882,6 +882,7 @@ describe("daemon ↔ relay integration", () => {
         "continueSession",
         "continueHandoff",
         "runNow",
+        "runNowPaused",
         "attachments",
         "traits",
         "successor",
@@ -894,9 +895,12 @@ describe("daemon ↔ relay integration", () => {
         "drainPass",
         "softClose",
         "messageRoute",
+        "watches",
+        "taskTags",
         "messages",
         "messageReply",
         "drainAsk",
+        "sessionTag",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.

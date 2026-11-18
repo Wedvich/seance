@@ -421,6 +421,37 @@ export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<r
   return attribute(panes, repos, { paneCommonDirs, repoCommonDirs });
 }
 
+const feedPaneMemo = new Map<string, Promise<string | null>>();
+const feedRepoMemo = new Map<string, Promise<string | null>>();
+
+/**
+ * Each path's repo by the session list's one rule (`repoFor`), for a reader that lists panes itself (the adapter feed,
+ * `adapter-feed.ts`). Its own memos: `resolveLive` prunes a memo to each call's keys, and sharing the listing's would
+ * evict its entries at every call.
+ */
+export async function repoNames(
+  paths: readonly string[],
+  repos: readonly RepoEntry[],
+): Promise<ReadonlyMap<string, string>> {
+  const [paneCommonDirs, repoCommonDirs] = await Promise.all([
+    resolveLive(feedPaneMemo, paths, async (path) => {
+      const { commonDir, definitive } = await enclosingWorktreeCommonDir(path);
+      return { value: commonDir, keep: definitive };
+    }),
+    resolveLive(
+      feedRepoMemo,
+      repos.map((repo) => repo.path),
+      async (path) => ({ value: await resolveCommonDir(path), keep: true }),
+    ),
+  ]);
+  const names = new Map<string, string>();
+  for (const path of paths) {
+    const name = repoFor(path, repos, { paneCommonDirs, repoCommonDirs });
+    if (name !== null) names.set(path, name);
+  }
+  return names;
+}
+
 /**
  * The session list is rebuilt on every listing, and neither a path's worktree
  * nor a repo's common dir changes under it, so each key resolves once; keys no

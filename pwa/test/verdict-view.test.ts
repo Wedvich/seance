@@ -161,3 +161,46 @@ describe("a held verdict", () => {
     expect(content.primary).toEqual({ label: "Start another", onClick: "another" });
   });
 });
+
+describe("a deferred task's verdict", () => {
+  const deferred = task("ready", { spec: { repo: "github.com/acme/app", mode: "worktree", notBefore: NOW + 60_000 } });
+
+  test("says until when, and stops once the time has passed", () => {
+    const shown = verdictOf(deferred);
+    expect(shown.headline).toMatch(/^Queued — until /u);
+    expect(shown.body).toMatch(/Not placed until /u);
+    expect(shown.body).not.toContain("as soon as");
+    const past = describeVerdict({ kind: "queued", task: deferred }, [], {}, NOW + 60_000, null);
+    expect(past.headline).not.toContain("until");
+    expect(past.body).not.toContain("Not placed");
+  });
+});
+
+describe("a queued verdict's tags", () => {
+  test("lists every task tag with its full key, sorted, and a legacy `linear` as the ref", () => {
+    const tagged = verdictOf(
+      task("queued", {
+        spec: {
+          repo: "github.com/acme/app",
+          mode: "worktree",
+          tags: { "owner.label": "Mine", "creator.ref": "linear:ENG-1" },
+        },
+      }),
+    );
+    expect(tagged.tags).toEqual([
+      { key: "creator.ref", value: "linear:ENG-1" },
+      { key: "owner.label", value: "Mine" },
+    ]);
+    const legacy = verdictOf(
+      task("queued", { spec: { repo: "github.com/acme/app", mode: "worktree", linear: { issue: "ENG-9" } } }),
+    );
+    expect(legacy.tags).toEqual([{ key: "creator.ref", value: "linear:ENG-9" }]);
+  });
+
+  test("an untagged task and every other verdict list none", () => {
+    expect(verdictOf(task("queued")).tags).toEqual([]);
+    expect(
+      describeVerdict({ kind: "unqueued", message: "no answer.", mayHaveLanded: false }, [], {}, NOW, null).tags,
+    ).toEqual([]);
+  });
+});

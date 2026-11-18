@@ -8,6 +8,7 @@ import {
   type DespawnRequest,
   type DespawnResponse,
   type Machine,
+  type IdleNote,
   type SessionState,
 } from "@seance/shared";
 import {
@@ -926,6 +927,23 @@ describe("a session idle past idleReleaseAfterMs", () => {
     expect(idleChanges).toEqual([first.id, first.id]);
   });
 
+  test("an idle's note rides the release, replaced by the next idle's, its clock kept; never on the record", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, first } = env;
+    const pane = scheduler.task(first.id)?.assignment?.pane ?? "";
+    const idleWith = (note?: IdleNote) =>
+      scheduler.onSession(first.id, "idle", { deviceId: "a", pane, ...(note === undefined ? {} : { note }) });
+    await idleWith({ background: { shell: 1, wakeup: 1 } });
+    await at(env, NOW + GRACE);
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW, background: { shell: 1, wakeup: 1 } }]);
+
+    await idleWith({ stopError: "overloaded" });
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW, stopError: "overloaded" }]);
+    await idleWith();
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW }]);
+    expect(JSON.stringify(scheduler.task(first.id))).not.toContain("overloaded");
+  });
+
   test("a repeated idle keeps its deadline", async () => {
     const env = await holdingTheSlot();
     const { scheduler, second, report } = env;
@@ -1623,14 +1641,31 @@ describe("run now", () => {
     });
   });
 
-  test("every other filter still holds: a paused queue is unplaceable and nothing is written or sent", async () => {
+  test("places past a whole-queue pause, which still holds every other task", async () => {
     const { fleet, scheduler, store, second } = await capped();
     expect(await scheduler.pause({ until: "resume" })).toMatchObject({ ok: true });
+    const third = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.runNow(second.id)).toMatchObject({ ok: true, task: { state: "reserved" } });
+    await scheduler.drain();
+    expect(fleet.spawns).toHaveLength(2);
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("ready");
+    expect(scheduler.lastDecision(third.id)?.candidates.flatMap((c) => c.rejected)).toContainEqual({
+      code: "paused",
+      until: "resume",
+      scope: "queue",
+    });
+  });
+
+  test("every other filter still holds: a paused account is unplaceable and nothing is written or sent", async () => {
+    const { fleet, scheduler, store, second } = await capped();
+    expect(await scheduler.pause({ until: "resume", account: "org:a" })).toMatchObject({ ok: true });
     const before = await stored(store, second.id);
     expect(await scheduler.runNow(second.id)).toEqual({ ok: false, code: "unplaceable" });
     expect(await stored(store, second.id)).toEqual(before);
     expect(fleet.spawns).toHaveLength(1);
-    // The held decision is still the pass's, not the uncapped one.
+    // The held decision is still the pass's, not run-now's.
     expect(scheduler.lastDecision(second.id)?.candidates.flatMap((c) => c.rejected)).toContainEqual(
       expect.objectContaining({ code: "cap_reached" }),
     );
@@ -2683,5 +2718,68 @@ describe("traits", () => {
     ]);
     scheduler.preview(spec({ requires: ["nope"] }));
     expect(held).toEqual([]);
+  });
+});
+
+describe("not before", () => {
+  // Short: a machine's status goes stale on the fake clock a while after NOW.
+  const LATER = NOW + 10_000;
+
+  test("a ready task before its time is held: no decision, no write, no spawn; placed once the time comes", async () => {
+    const { store, fleet, clock, scheduler } = setup();
+    const task = await enqueue(store, scheduler, spec({ notBefore: LATER }));
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("ready");
+    expect(scheduler.lastDecision(task.id)).toBeUndefined();
+    const version = (await stored(store, task.id))?.version;
+    await pass(scheduler);
+    expect((await stored(store, task.id))?.version).toBe(version);
+    expect(fleet.spawns).toEqual([]);
+
+    clock.now = LATER;
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the spawn");
+    expect(scheduler.task(task.id)?.state).not.toBe("ready");
+  });
+
+  test("a deferred task does not hold up a newer one, and is placed in its turn once due", async () => {
+    const { store, fleet, clock, scheduler } = setup();
+    const older = await enqueue(store, scheduler, spec({ notBefore: LATER, title: "older" }));
+    const newer = await enqueue(store, scheduler, spec({ title: "newer" }));
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the newer's spawn");
+    expect(fleet.spawns[0]?.request.taskId).toBe(newer.id);
+    expect(scheduler.task(older.id)?.state).toBe("ready");
+
+    clock.now = LATER;
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 2, "the older's spawn");
+    expect(fleet.spawns[1]?.request.taskId).toBe(older.id);
+  });
+
+  test("run-now places a deferred task at once and writes nothing about the deferral", async () => {
+    const { store, fleet, scheduler } = setup();
+    const task = await enqueue(store, scheduler, spec({ notBefore: LATER }));
+    await pass(scheduler);
+    expect(await scheduler.runNow(task.id)).toMatchObject({ ok: true, task: { state: "reserved" } });
+    await until(() => fleet.spawns.length === 1, "the spawn");
+    expect((await stored(store, task.id))?.body.spec.notBefore).toBe(LATER);
+  });
+
+  test("a dependent of a deferred task stays blocked", async () => {
+    const { store, fleet, scheduler } = setup();
+    const first = await enqueue(store, scheduler, spec({ notBefore: LATER }));
+    const second = await enqueue(store, scheduler, spec({ deps: [{ task: first.id, after: "done" }] }));
+    await pass(scheduler);
+    await pass(scheduler);
+    expect(scheduler.task(second.id)?.state).toBe("blocked");
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("a past notBefore is placed on the first pass", async () => {
+    const { store, fleet, scheduler } = setup();
+    await enqueue(store, scheduler, spec({ notBefore: NOW - 1 }));
+    await pass(scheduler);
+    await until(() => fleet.spawns.length === 1, "the spawn");
   });
 });

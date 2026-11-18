@@ -95,6 +95,24 @@ describe("spawnAuto", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("--in and --at reach the spec and the echo names the zone; one that cannot resolve queues nothing", async () => {
+    const fake = scheduledRelay();
+    const before = Date.now();
+    const { ok, text } = await run(fake, { in: "2h" });
+    expect(ok).toBe(true);
+    const notBefore = fake.creates[0]?.spec.notBefore;
+    expect(notBefore).toBeGreaterThanOrEqual(before + 7_200_000);
+    expect(text).toMatch(/, not before \w{3} \d{1,2} \w{3}, \d{2}:\d{2} (GMT|UTC)/u);
+    for (const bad of [{ in: "soon" }, { at: "2020-01-01T10:00" }, { in: "100000000d" }]) {
+      const refused = scheduledRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one case at a time keeps each answer readable
+      const result = await run(refused, bad);
+      expect(result.ok).toBe(false);
+      expect(result.text).toStartWith("spawn refused: ");
+      expect(refused.creates).toEqual([]);
+    }
+  });
+
   test("--autonomy reaches the task; steer is sealed with plan for a leader that drops the level", async () => {
     const auto = scheduledRelay();
     expect((await run(auto, { autonomy: "auto" })).ok).toBe(true);
@@ -549,6 +567,56 @@ describe("spawnAuto's placement flags", () => {
     });
   });
 
+  describe("--ref", () => {
+    const tagging = (leaderCaps: readonly Capability[] = [CAPABILITIES.taskTags]) => {
+      const fake = fakeRelay([
+        machine({
+          repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: ORIGIN }],
+          capabilities: leaderCaps,
+        }),
+      ]);
+      fake.setState({ scheduler: LEADING });
+      return fake;
+    };
+
+    test("is stored as the creator's ref and URL on a leader that takes task tags, and the audit never names it", async () => {
+      const fake = tagging();
+      const { ok, audited } = await run(fake, { ref: "linear:ENG-1", refUrl: "https://linear.app/x/issue/ENG-1" });
+      expect(ok).toBe(true);
+      expect(fake.creates[0]?.spec.tags).toEqual({
+        "creator.ref": "linear:ENG-1",
+        "creator.ref-url": "https://linear.app/x/issue/ENG-1",
+      });
+      expect(audited.join("\n")).not.toContain("ENG-1");
+    });
+
+    test("a spawn with no ref writes no tags, and needs no capability", async () => {
+      const fake = tagging([]);
+      expect((await run(fake)).ok).toBe(true);
+      expect(fake.creates[0]?.spec).not.toHaveProperty("tags");
+    });
+
+    test("is refused, before anything is created, by a leader that does not take tags", async () => {
+      const fake = tagging([]);
+      const { ok, text } = await run(fake, { ref: "linear:ENG-1" });
+      expect(ok).toBe(false);
+      expect(text).toContain("does not take task tags yet");
+      expect(text).toContain("retry without --ref");
+      expect(fake.creates).toEqual([]);
+    });
+
+    test("a ref that is no source:id, or a URL that is no https one, is refused naming the flags", async () => {
+      for (const bad of [{ ref: "ENG-1" }, { ref: "linear:ENG-1", refUrl: "http://linear.app/x" }]) {
+        const fake = tagging();
+        // oxlint-disable-next-line no-await-in-loop -- one case at a time keeps each answer readable
+        const { ok, text } = await run(fake, bad);
+        expect(ok).toBe(false);
+        expect(text).toContain("--ref must be source:id");
+        expect(fake.creates).toEqual([]);
+      }
+    });
+  });
+
   test("here without a state file is refused before the relay is dialled", async () => {
     const fake = placingRelay();
     const { ok, text } = await run(fake, { not: ["here"] }, async () => null);
@@ -613,6 +681,17 @@ describe("continueTaskAuto", () => {
     expect(audited).toEqual([
       `audit enqueue origin=cli client=cli task="${created?.id}" continues="t-1" createdAt=${created?.createdAt} queued`,
     ]);
+  });
+
+  test("--in reaches the continuation's spec; an unresolvable time queues nothing", async () => {
+    const timed = await runContinue([failedTask], machines(), { taskId: "t-1", in: "1h" });
+    expect(timed.ok).toBe(true);
+    expect(timed.fake.creates[0]?.spec.notBefore).toBeGreaterThan(Date.now());
+    expect(timed.text).toMatch(/, not before .*(GMT|UTC)/u);
+    const bad = await runContinue([failedTask], machines(), { taskId: "t-1", in: "soon" });
+    expect(bad.ok).toBe(false);
+    expect(bad.text).toStartWith("continue refused: ");
+    expect(bad.fake.creates).toEqual([]);
   });
 
   test("refuses a task nobody lists, one that is not a failed session, and a leader that cannot continue; nothing is queued", async () => {

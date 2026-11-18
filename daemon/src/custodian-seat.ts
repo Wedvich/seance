@@ -258,7 +258,10 @@ export interface SeatDeps {
   /** Tests: the round's deadline in ms, in place of `roundTimeoutMinutes`. */
   readonly roundTimeoutMs?: number;
   readonly activity: () => readonly TrackedActivity[];
-  /** A pane a hand-off, pass or drain ask marked: C7 keeps the custodian off it. */
+  /**
+   * A pane a hand-off, pass or drain ask marked (C7 keeps the custodian off it), or whose last turn left background
+   * work or a cron to wake it (`close` would refuse it `busy`): no round is due for it.
+   */
   readonly untouchable: (pane: string) => boolean;
   /** `CustodianVerbs.reach`: whether a verb could act on a `busy` pane still for `stillMs`. Absent, every one could. */
   readonly busyReach?: (pane: string, stillMs: number) => Promise<boolean>;
