@@ -654,8 +654,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sweep: () => sessionTags.current?.sweep() ?? Promise.resolve(),
       tagsFor: (pane) => sessionTags.current?.tagsFor(pane),
     },
+    // Advertised from register on, so before the table starts it is a retryable failure (`internal_error`), not "unsupported".
     sessionTag: (pane, id, value) =>
-      sessionTags.current?.label(pane, id, value) ?? Promise.resolve({ ok: false, code: "unsupported" }),
+      sessionTags.current?.label(pane, id, value) ?? Promise.reject(new Error("session events have not started")),
     backend: opts.backend ?? createBackend(config, { home }),
     getRepos: () => state.repos,
     rescan,
