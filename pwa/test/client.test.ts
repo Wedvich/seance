@@ -2342,6 +2342,7 @@ describe("store", () => {
     const tagged: unknown[] = [];
     let reads = 0;
     let refuse = false;
+    let tagCode = "tasked";
     const daemon = await startFakeDaemon(
       relay,
       key,
@@ -2354,7 +2355,7 @@ describe("store", () => {
         },
         "session-tag": (payload) => {
           tagged.push(payload);
-          if (refuse) return { ok: false, code: "tasked", message: "daemon text, never shown" };
+          if (refuse) return { ok: false, code: tagCode, message: "daemon text, never shown" };
           return { ok: true, value: "release notes" };
         },
         custodian: (payload) => {
@@ -2394,10 +2395,19 @@ describe("store", () => {
       expect(await store.renameSession(seated, "%3", conversation, "x")).toBe(
         "This session now runs a task, which names it",
       );
+      // The row it was offered from is stale, so the machine's sessions are read again.
+      expect(reads).toBe(before + 2);
+      tagCode = "ended";
+      expect(await store.renameSession(seated, "%3", conversation, "x")).toBe("This session has ended");
+      expect(reads).toBe(before + 3);
+      // A refusal that says nothing of the list leaves it be.
+      tagCode = "invalid_request";
+      expect(await store.renameSession(seated, "%3", conversation, "x")).toBe("That name is too long or can't be used");
+      expect(reads).toBe(before + 3);
       expect(await store.renameSession(plain, "%3", conversation, "x")).toBe(
         "This machine can't rename sessions right now",
       );
-      expect(tagged).toHaveLength(2);
+      expect(tagged).toHaveLength(4);
     } finally {
       stop();
       daemon.close();

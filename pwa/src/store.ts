@@ -229,7 +229,7 @@ function enqueueFailureText(failure: RequestFailure): string {
 const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that settle on a done report yet.";
 
 const SESSION_TAG_TEXTS: Readonly<Record<SessionTagErrorCode, string>> = {
-  invalid_request: "That name can't be used",
+  invalid_request: "That name is too long or can't be used",
   refused: "This machine refused the rename",
   unsupported: "This machine can't rename sessions yet",
   tasked: "This session now runs a task, which names it",
@@ -240,6 +240,9 @@ const SESSION_TAG_TEXTS: Readonly<Record<SessionTagErrorCode, string>> = {
   internal_error: "This machine couldn't save the name",
   too_large: "That name is too long",
 };
+
+/** Refusals that say the list the rename was offered from is out of date. */
+const SESSION_GONE_CODES: ReadonlySet<SessionTagErrorCode> = new Set(["ended", "moved", "tasked"]);
 
 /** A rename refusal as the dialog says it: fixed text per code, never the daemon's message; unparsed reads as not reached. */
 export function sessionTagRefusalText(reply: SessionTagResponse | null, name: string): string {
@@ -606,14 +609,18 @@ export class Store {
     this.#nudgeTimer = null;
   }
 
-  /** On a relay change: the closed machines whose reported session counts moved since last seen. */
+  /**
+   * On a relay change: the machines whose reported session counts moved since last seen: a closed one under a drain
+   * leader (its drain row counts them), and any that names its sessions (`sessionTag`: the Machines card lists them).
+   */
   #readMovedSessions(woken: readonly { readonly deviceId: string }[]): void {
     const { relay } = this.#state;
-    if (!deriveDrainAvailability(relay)) return;
+    const drains = deriveDrainAvailability(relay);
     const justRead = new Set(woken.map((machine) => machine.deviceId));
     const due: string[] = [];
     for (const machine of relay.machines) {
-      if (!machine.connected || closedAt(machine) === null) {
+      const named = machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
+      if (!machine.connected || !((drains && closedAt(machine) !== null) || named)) {
         this.#closedSess.delete(machine.deviceId);
         continue;
       }
@@ -632,13 +639,14 @@ export class Store {
     void this.#fetchSessions([deviceId]);
   }
 
-  /** The Machines screen names each session: read afresh, as it opens, every connected machine that can rename one. */
+  /**
+   * The Machines screen lists each session: read afresh, as it opens, every connected machine (an older daemon answers
+   * `sessions` too, its rows just offer no rename).
+   */
   readNamedSessions(): void {
     const { relay } = this.#state;
     if (relay.status !== "open") return;
-    const due = relay.machines
-      .filter((machine) => machine.connected && machine.capabilities?.includes(CAPABILITIES.sessionTag) === true)
-      .map((machine) => machine.deviceId);
+    const due = relay.machines.filter((machine) => machine.connected).map((machine) => machine.deviceId);
     if (due.length > 0) void this.#fetchSessions(due);
   }
 
@@ -1374,9 +1382,13 @@ export class Store {
     } catch {
       parsed = null;
     }
-    if (parsed === null || !parsed.ok) return sessionTagRefusalText(parsed, machine.name);
-    await this.#fetchSessions([deviceId]);
-    return null;
+    if (parsed !== null && parsed.ok) {
+      await this.#fetchSessions([deviceId]);
+      return null;
+    }
+    // The row is stale: its session ended, moved on or now runs a task. Read again so the card stops offering the rename.
+    if (parsed !== null && SESSION_GONE_CODES.has(parsed.code)) await this.#fetchSessions([deviceId]);
+    return sessionTagRefusalText(parsed, machine.name);
   }
 
   /**
