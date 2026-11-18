@@ -20,6 +20,7 @@ import {
   parsePassCloseResponse,
   parsePushBranchResponse,
   parseTaskProgressList,
+  parseWatchEventResponse,
   quote,
   RequestFailure,
   type DeliverMessageRequest,
@@ -32,6 +33,8 @@ import {
   type SessionsResponse,
   type SpawnResponse,
   type Task,
+  type WatchEventRequest,
+  type WatchEventResponse,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
 import type { LocalOps } from "./handlers.ts";
@@ -281,6 +284,34 @@ export function termMessages(o: TermFleetOpts): TermMessages {
           message: "malformed message-receipt reply",
         }
       );
+    },
+  };
+}
+
+export interface TermWatches {
+  /** `null`: no answer (an ended term, a machine that never replied); the registry resends what is still due. */
+  readonly watchEvent: (deviceId: string, request: WatchEventRequest) => Promise<WatchEventResponse | null>;
+}
+
+/**
+ * The leader's `watch-event` over the same leg and rules as `termMessages`, on an object of its own. A reply, local or
+ * remote, is a daemon's payload and is trusted only once parsed. The answer to a machine that never replied is `null`:
+ * a watch event is level-triggered and sent again at the next poll, so nothing here needs `NoAnswer`'s distinction.
+ */
+export function termWatches(o: TermFleetOpts): TermWatches {
+  const malformed: WatchEventResponse = { ok: false, code: "internal_error", message: "malformed watch-event reply" };
+  return {
+    watchEvent: async (deviceId, request) => {
+      if (!o.live()) return null;
+      if (deviceId === o.selfDeviceId) return parseWatchEventResponse(await o.local.watchEvent(request)) ?? malformed;
+      try {
+        const reply = await o.relay.request<unknown>(deviceId, "watch-event", request);
+        return parseWatchEventResponse(reply) ?? malformed;
+      } catch (err) {
+        if (!(err instanceof RequestFailure)) throw err;
+        if (err.reason === "not_leader") o.demote(`the relay refused watch-event to ${quote(deviceId)} as not_leader`);
+        return null;
+      }
     },
   };
 }

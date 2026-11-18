@@ -24,6 +24,7 @@ import type {
   SpawnResponse,
   TaskProgress,
   UpdateAvailable,
+  WatchEventResponse,
 } from "@seance/shared";
 import {
   isMetricsRequest,
@@ -35,6 +36,7 @@ import {
   parseAttachmentManifest,
   parseDeliverMessageRequest,
   parseMessageReceiptRequest,
+  parseWatchEvent,
   parsePassCloseRequest,
   parseAvailabilityRequest,
   parseCustodianRequest,
@@ -795,6 +797,19 @@ async function handleMessageReceipt(
 }
 
 /**
+ * `watch-event`: only the scheduler tells a daemon what became of a GitHub target one of its sessions watches. Step 2's
+ * stub: it checks the sender and the shape, delivers nothing and binds nothing, so the leader's events are answered and
+ * dropped until the daemon's own watch table (step 3) replaces the last line.
+ */
+async function handleWatchEvent(payload: unknown, scheduler: boolean): Promise<WatchEventResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler sends watch events" };
+  if (parseWatchEvent(payload) === null) {
+    return { ok: false, code: "invalid_request", message: "malformed watch-event request" };
+  }
+  return { ok: true, delivered: [] };
+}
+
+/**
  * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
  * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
  * machine's own sticky `closed` and refreshes `status`. A plain close starts the drain; `soft` closes without one (a later
@@ -1004,12 +1019,13 @@ export interface LocalOps {
   readonly passClose: (payload: unknown) => Promise<PassCloseResponse | ErrorResponse>;
   readonly deliverMessage: (payload: unknown) => Promise<DeliverMessageResponse | ErrorResponse>;
   readonly messageReceipt: (payload: unknown) => Promise<MessageReceiptResponse | ErrorResponse>;
+  readonly watchEvent: (payload: unknown) => Promise<WatchEventResponse | ErrorResponse>;
 }
 
 /**
  * The leader reaching its own machine (`termFleet` in `leader-adapters.ts`): the same validation,
  * backend and audit lines as `createHandler`, under the caller's origin. No
- * `Plain` goes in, so nothing but these ops (spawn, despawn, push-branch, pass-close, deliver-message, message-receipt)
+ * `Plain` goes in, so nothing but these ops (spawn, despawn, push-branch, pass-close, deliver-message, message-receipt, watch-event)
  * can be asked for.
  */
 export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalOps {
@@ -1043,6 +1059,7 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
       run("deliver-message", crypto.randomUUID(), () => handleDeliverMessage(ctx, payload, true)),
     messageReceipt: (payload) =>
       run("message-receipt", crypto.randomUUID(), () => handleMessageReceipt(ctx, payload, true)),
+    watchEvent: (payload) => run("watch-event", crypto.randomUUID(), () => handleWatchEvent(payload, true)),
   };
 }
 
@@ -1102,6 +1119,8 @@ export function createHandler(
           return { payload: await handleDeliverMessage(ctx, plain.payload, from === SCHEDULER_ID) };
         case "message-receipt":
           return { payload: await handleMessageReceipt(ctx, plain.payload, from === SCHEDULER_ID) };
+        case "watch-event":
+          return { payload: await handleWatchEvent(plain.payload, from === SCHEDULER_ID) };
         case "availability":
           return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
         case "custodian":

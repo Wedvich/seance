@@ -27,3 +27,4 @@ export * from "./messages.ts";
 export * from "./not-before.ts";
 export * from "./tags.ts";
 export * from "./adapter-protocol.ts";
+export * from "./watch.ts";

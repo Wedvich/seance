@@ -10,12 +10,14 @@ import {
 } from "@seance/scheduler";
 import {
   APP_ID,
+  CAPABILITIES,
   isSchedulerOp,
   parseBranchState,
   parseCustodianEvent,
   parseSessionEvent,
   parseSessionMessage,
   parseSessionPass,
+  parseWatchSet,
   QUEUE_MAX_TASKS,
   QUOTA_KEY,
   quote,
@@ -23,6 +25,7 @@ import {
   type BranchState,
   type CustodianEvent,
   type Envelope,
+  type ParsedWatchSet,
   type Plain,
   type PushAlert,
   type QueueChanged,
@@ -35,17 +38,25 @@ import type { AppRelay } from "./app-relay.ts";
 import { admitAudit, daemonSink } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
 import { createMachineAlertWatch } from "./machine-alerts.ts";
-import { fencedStore, successorCreate, termFleet, termMessages, type TermFleetOpts } from "./leader-adapters.ts";
+import {
+  fencedStore,
+  successorCreate,
+  termFleet,
+  termMessages,
+  termWatches,
+  type TermFleetOpts,
+} from "./leader-adapters.ts";
 import { createMessageRouter, type MessageRouter } from "./leader-messages.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
-import { readPrHead, startPrPoller, type PrPollerOpts } from "./pr-status.ts";
+import { DEFAULT_INTERVAL_MS, readPrHead, startPrPoller, type PrPollerOpts } from "./pr-status.ts";
 import { createPushSender, type PushSender } from "./push-sender.ts";
 import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
 import type { Fetch } from "./seams.ts";
 import { createTermSettings, type SettingsState, type TermSettings } from "./settings.ts";
 import { createSettingsStore, type SettingsStore } from "./settings-store.ts";
 import type { VersionFloor } from "./version-floor.ts";
+import { createWatchRegistry, type WatchRegistry } from "./watch-registry.ts";
 
 /**
  * The scheduler role (docs/scheduler.md, "`leader.ts`"; DESIGN.md, Scheduler):
@@ -238,6 +249,14 @@ export interface Leader {
    */
   readonly onCustodianEvent: (event: CustodianEvent, from: string) => Promise<boolean>;
   /**
+   * A daemon's whole `watch-set`, already parsed, from this machine in process (step 3's table) as `onCustodianEvent`
+   * is; other machines' arrive through the term's leg. True when taken or dropped for good (a sender that is no
+   * registered machine, which resending would not change); false when the sender should resend (no running term, no
+   * registry push yet) or the set was ignored as an older generation. Logged at info or warn without the set: its
+   * URLs are a session's word.
+   */
+  readonly onWatchSet: (set: ParsedWatchSet, from: string) => boolean;
+  /**
    * The relay's nudge after an app-leg write to the store (`store-changed`;
    * `RelayClient`'s `onStoreChanged`): refreshes that one task, then ticks.
    * Buffered while the term is taking over, so a create landing between
@@ -261,6 +280,7 @@ interface TermRun {
   readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
   readonly onSessionMessage: (message: SessionMessage, from: string) => boolean;
   readonly onCustodianEvent: (event: CustodianEvent, from: string) => Promise<boolean>;
+  readonly onWatchSet: (set: ParsedWatchSet, from: string) => boolean;
   readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
 }
@@ -500,6 +520,36 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     }
     return messageRouter.onSessionMessage(message, from);
   };
+  // The registry is built after the scheduler, as the router is; it reads `relay` only once a term is running.
+  let watches: WatchRegistry | undefined;
+  const onWatchSet = (set: ParsedWatchSet, from: string): boolean => {
+    if (!live || !running || watches === undefined) {
+      log.info(`scheduler: watch-set from=${quote(from)} dropped — no running term`);
+      return false;
+    }
+    // Only a machine's own sealed set: the archivist holds the PSK and is no machine, and an unregistered id has no
+    // `watches` to hear an answer. This machine itself is the leader and needs no registry entry.
+    if (from !== opts.selfDeviceId) {
+      const state = relay.getState();
+      // Before the first registry push nothing is known yet, not unregistered: leave it with the sender to retry.
+      if (state.registrySize === 0) {
+        log.info(`scheduler: watch-set from=${quote(from)} held — no registry yet`);
+        return false;
+      }
+      const machine = state.archivist?.deviceId === from ? undefined : state.machines.find((m) => m.deviceId === from);
+      if (machine === undefined) {
+        log.warn(`scheduler: watch-set from=${quote(from)} dropped — not a registered machine`);
+        return true;
+      }
+      // A machine that cannot hear an answer would cost the fleet caps and the budget for nothing; its next set,
+      // once it advertises `watches`, is taken.
+      if (machine.capabilities?.includes(CAPABILITIES.watches) !== true) {
+        log.warn(`scheduler: watch-set from=${quote(from)} dropped — the machine does not advertise watches`);
+        return true;
+      }
+    }
+    return watches.accept(from, set, now());
+  };
   // Task ids a `store-changed` named while the term was still taking over, or
   // whose refresh failed: takeover's `load` replaces the held view, so a refresh
   // before it ends would be overwritten, and one that failed must not be lost —
@@ -578,7 +628,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       plain.op !== "session-event" &&
       plain.op !== "session-pass" &&
       plain.op !== "session-message" &&
-      plain.op !== "custodian-event"
+      plain.op !== "custodian-event" &&
+      plain.op !== "watch-set"
     ) {
       log.warn(`scheduler: refused op=${quote(plain.op)} from=${quote(from)} — not an op this leader handles`);
       void opts.reply(from, {
@@ -627,6 +678,16 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         return;
       }
       void onCustodianEvent(custodianEvent, from);
+      return;
+    }
+    // Only a daemon's, as `custodian-event`: an app's would let any PSK holder spend the fleet's GitHub budget as a machine.
+    if (plain.op === "watch-set" && from !== APP_ID) {
+      const set = parseWatchSet(plain.payload);
+      if (set === null) {
+        log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a watch set`);
+        return;
+      }
+      onWatchSet(set, from);
       return;
     }
     const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
@@ -794,6 +855,19 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
   const messageOps = termMessages(termFleetOpts);
+  const watchOps = termWatches(termFleetOpts);
+  watches = createWatchRegistry({
+    send: (deviceId, request) => watchOps.watchEvent(deviceId, request),
+    canReceive: (deviceId) =>
+      deviceId === opts.selfDeviceId ||
+      relay
+        .getState()
+        .machines.some(
+          (machine) => machine.deviceId === deviceId && machine.capabilities?.includes(CAPABILITIES.watches) === true,
+        ),
+    intervalMs: opts.prStatus?.intervalMs ?? DEFAULT_INTERVAL_MS,
+    log,
+  });
   messageRouter = createMessageRouter({
     resolve: (to) => scheduler.resolveMessage(to),
     sentFrom: (taskId, deviceId) => scheduler.sentFrom(taskId, deviceId),
@@ -922,6 +996,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         live && running ? scheduler.onPrStatus(id, url, status).catch(fail) : Promise.resolve(),
       now,
       log,
+      watches,
     });
     log.info(
       `scheduler: term ${term} took over ${scheduler.tasks().length} tasks (${scheduler.unreadable().length} unreadable) — dispatching`,
@@ -940,6 +1015,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     onSessionPass,
     onSessionMessage,
     onCustodianEvent,
+    onWatchSet,
     onStoreChanged,
     end: () => {
       live = false;
@@ -1015,6 +1091,11 @@ export function createLeader(options: LeaderOpts): Leader {
       if (current !== null) return current.onCustodianEvent(event, from);
       log.info(`scheduler: custodian-event kind=${event.kind} from=${quote(from)} dropped — no running term`);
       return Promise.resolve(false);
+    },
+    onWatchSet: (set, from) => {
+      if (current !== null) return current.onWatchSet(set, from);
+      log.info(`scheduler: watch-set from=${quote(from)} dropped — no running term`);
+      return false;
     },
     onStoreChanged: (key, version) => current?.onStoreChanged(key, version),
     term: () => current?.term ?? null,

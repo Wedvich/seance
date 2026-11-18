@@ -1053,6 +1053,20 @@ nothing checked it. The last is the gap they leave.
   (`askGithub`'s `limited`, 2026-11-18) is never a reading: the run it answered writes nothing (the poll's earlier
   readings stay, owed open PRs go out with their base reading), and the warning names the class and a reset time the
   poller parsed itself, never `gh`'s words.
+- **A watch's target reaches GitHub only through the leader's poller, and its frames bind nothing** (2026-11-18,
+  Scheduler, "PR status"; docs/gh-watch.md invariants 2, 4, 5). A target reaches the leader only as a URL that
+  `parseWatchSet` (`shared/src/watch.ts`) holds to the PR or run pattern, parsed into owner, repo and number or id. It
+  reaches `gh` only as GraphQL variables in an argv array (`-f`, with `-F` only for the regex-held PR number), the
+  query text built from alias indices alone, through `askGithub` with `--hostname github.com`, read-only. A
+  `watch-set` is honoured only sealed from a registered machine's own device id advertising `CAPABILITIES.watches`
+  (never `from: "app"`, never the archivist, which holds the PSK and is no machine), parsed fresh, past the one
+  `schedulerGuard`; a `watch-event` is
+  acted on only sealed from the scheduler, or in process, parsed by `parseWatchEvent`. Neither frame names a pane, a
+  task or a session. A watch never changes a task's record, and a watch-only read never changes the poller's class.
+  The fleet caps (100 PRs, 100 runs), the sanity cap (64 a set) and the reserve for tasks' reads (under 500 points)
+  are the leader's, never a frame's, and no URL, head, check name or watch id is logged. The residual: any registered
+  machine can spend up to the caps of the fleet's GraphQL budget (about 840 points an hour) and learn the states and
+  check names of any repo the operator's token sees, which that session's own `gh` could read anyway (G1).
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
@@ -1579,6 +1593,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `deliver-message` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                                                                                                                | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `deliverRouted`                                                                                                                                                                                                                                                                                                                                     |
 | op `message-receipt` (scheduler→daemon, built 2026-11-14)                                    | the leader's `termMessages`, to the machine that sealed the `session-message`, once a message is resolved and forwarded                                                                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/messages.ts` `receipt`                                                                                                                                                                                                                                                                                                                                           |
 | op `custodian-event` (→`"scheduler"`, built 2026-11-14)                                      | `daemon/src/custodian-verbs.ts` (flag, a kept worktree's own flag, unflag) and `custodian-seat.ts` through `run-capabilities.ts` (`failing`)                                                                                                                                                                                                                                                                                                                                   | `daemon/src/leader.ts` `onCustodianEvent` → `Scheduler.onFlag`, or the `custodian-failing` push                                                                                                                                                                                                                                                                                                         |
+| op `watch-set` (→`"scheduler"`, built 2026-11-18)                                            | `RelayClient.sendWatchSet`; nothing sends it until gh-watch step 3 (the daemon's table); in process through `leader.onWatchSet` on the leader's own machine                                                                                                                                                                                                                                                                                                                    | `daemon/src/leader.ts` `onEvent` → `onWatchSet` → `daemon/src/watch-registry.ts`                                                                                                                                                                                                                                                                                                                        |
+| op `watch-event` (scheduler→daemon, built 2026-11-18)                                        | the registry through `termWatches` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `LocalOps.watchEvent`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` `handleWatchEvent` (step 2: parsed, answered `delivered: []`)                                                                                                                                                                                                                                                                                                                  |
 | op `queue-changed` (→`"app"`)                                                                | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                                                                                                                  | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                                           | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                                                                                                                          | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                                                     | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                                                                                                                      | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
@@ -2342,6 +2358,11 @@ an old peer's frames parse as before. Mixed versions:
     `deliver-message` carrying `replyTo`; as a leader it forwards one. A client sends a reply to another machine only
     against the verified leader advertising it, and the leader forwards one only to a machine advertising it ("Replies
     by handle"). It needs `messages` (peer binding), and is advertised beside it.
+  - `CAPABILITIES.watches` (2026-11-18): an unknown string to an older reader, which keeps the machine. As a daemon it
+    answers `watch-event` (advertised unconditionally: any daemon may lead and poll watches); as a leader it honours
+    `watch-set` and sends the answers, only to a machine advertising it. Step 2's daemon side parses and delivers
+    nothing, so nothing sends a `watch-set` until gh-watch step 3's table: a client must not gate a surface on the
+    string alone before then.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -5093,8 +5114,7 @@ for the lot with its own `gh`.
   header without `-i`, so `Retry-After` and `x-ratelimit-reset` never reach the daemon. A `NOT_FOUND` or `FORBIDDEN`
   alias beside `data` stays ok, a no-data body of any other kind stays `failed`. Every poll query (`p<i>`, `c<i>`,
   `b<i>`) also selects `rateLimit{ cost remaining resetAt }`, constant text beside the aliases, and the poller keeps
-  the term's newest `remaining` and `resetAt` (W8's reserve for tasks reads it once watched targets exist, gh-watch
-  step 2). A `limited` answer in any run ends the poll: nothing more is asked, readings already written stay, owed
+  the term's newest `remaining` and `resetAt` (the reserve for tasks reads it: "Reserve for tasks" below). A `limited` answer in any run ends the poll: nothing more is asked, readings already written stay, owed
   open PRs go out with their base reading. The next poll waits until the reset plus up to a minute's jitter
   (`limitedDelay`, `LIMIT_JITTER_MS`), the reset being the term's newest in-query `resetAt` while it is ahead, else
   the machine's own rate reader's GraphQL reset (Daemon, "GitHub rate limits": no second reading of the budget),
@@ -5110,6 +5130,97 @@ for the lot with its own `gh`.
   watched targets included once they exist. A faster pace for them doubles the cost of every task's PR too, or
   needs a second clock in the poller; a minute's latency on a CI wait of ten is accepted. Nor does a watch get a
   `quiet` option (open question 1): one note per head is cheap, and a pass is often when /ship merges.
+- **Watched targets** (2026-11-18, docs/gh-watch.md, its build step 2). The poller reads what the leader's watch
+  registry wants beside the tasks' PRs, and hands every poll's readings back to it (`PollerWatches`:
+  `wanted`, `read`, `tick`). Unset (`PrPollerDeps.watches`), a poll reads and writes what it did before.
+  - A PR that is a task's and watched joins that task's chunk (`p<i>`) and, when open or draft, its blocked read
+    (`b<i>`), sharing the aliases. Watch-only PRs are read in their own merge chunks after every task chunk and every
+    task blocked read, with blocked reads of their own. A failure there other than `limited` changes no poller class,
+    owes nothing to a task and logs nothing, as a run chunk's failure: a broken watch must not back off the tasks'
+    reads. The same holds for the blocked read of a task chunk that held no task needing it: the task-facing
+    "blocked reasons are unavailable" warning, and its once-a-term latch, are for a run that held a PR a task reads
+    wide. `limited` is the token's budget, so it ends the poll as anywhere.
+  - A watch never changes a task's `PrStatus`: a task's write carries the blocked fields only when the task itself is
+    read wide (today's rule, `taskWide`). A non-wide task PR that is also watched waits for the blocked read before its
+    unchanged base write (a merge never waits). A draft is read wide for a watch (CI runs on one) and never for a task.
+  - The blocked read gains `totalCount`, `detailsUrl`, `checkSuite{ databaseId }`, `mergeable` and `headRefOid`; the
+    merge query is unchanged. A blocked read that fails leaves its watched PRs unread this poll: no reading is
+    recorded in its place, and the registry's suspension is what says so.
+- **The run query** (2026-11-18). `w<i>: resource(url:$u<i>){ ... on WorkflowRun{ databaseId runAttempt
+  checkSuite{ status conclusion checkRuns(first:20, filterBy:{checkType: LATEST}){ nodes{ __typename name conclusion
+  databaseId detailsUrl } } } } }`, the URL a `URI!` variable (`-f`, rebuilt from the parsed id by `runUrlOf`, never
+  the session's string), 50 to a query. `checkType: LATEST` lists only the newest attempt's jobs; within them, the
+  newest `databaseId` per name. A run is `completed` once its check suite is, with its `runAttempt` and a conclusion
+  from `WATCH_CONCLUSIONS`; anything else is `running`.
+  - **S1 (2026-11-18):** 50 aliases cost 1 point with and without `checkRuns(first:20)` (and with `runAttempt`), so
+    the failing jobs are read in the same query and no fourth query exists; with `filterBy:{checkType: LATEST}` as
+    built, 50 aliases still cost 1 point. A blocked read of 10 PRs costs 1 point with or without `detailsUrl`.
+  - An unseeable or nonexistent run answers a `null` alias with no `errors` entry and `gh` exit 0, unlike a PR's
+    `NOT_FOUND`.
+  - `resource(url:)` is reliable, so the REST and ETag fallback is not needed. A run read that fails is no poll
+    failure.
+- **What a watch's events are** (2026-11-18). One key per event (`watchKeyOf`, `shared/src/watch.ts`): `checks:<head>:
+  <pass|fail>`, `conflict:<head>`, `completed:<attempt>`, `suspended:<reason>`, `merged`, `closed`, `unreadable`. Each
+  is level-triggered: due whenever the latest reading says so and its key is in neither the watch's `seen` nor its
+  acknowledged keys, so a lost answer is sent again at the next poll and nothing is recorded before the daemon's
+  `ok: true`. A reading counts for a watch only if it was read in that same poll.
+  - **S2, what counts (2026-11-18):** the watch's checks are judged over _every_ context of the last commit, required
+    or not, deduped per (check-suite id, name) with the newest `databaseId` winning, so a failure in one workflow is
+    never hidden by a same-named success in another (a task's required rollup, `requiredOf`, still dedupes by name
+    alone, unchanged). `fail` is any failing context. `pass` is a non-empty list that is all passing, with none
+    pending (a CheckRun not completed, `STALE`, an unknown conclusion, a pending or expected status) and not truncated
+    (`totalCount` within the nodes read). Anything else is no reading yet. Not observed in 32 open PRs: a rollup
+    reading `FAILURE` with pending contexts, so fail-fast reads the contexts (`latestRuns`), never
+    `statusCheckRollup.state`.
+  - **The head is `headRefOid`.** The contexts are read from `commits(last:1)`, and a reading whose commit oid differs
+    from `headRefOid` fires no `checks` event that poll. A set that names a head follows it only after
+    `HEAD_GRACE_POLLS` polls of a different one while the set's own head has not been read yet (the head a set names
+    is the session's word, which GitHub may not show yet, so a different one is probably the previous push); once
+    read, a new head is followed at once. One that names none adopts the first head read. `headMoved` marks an event for a head the watch followed to.
+  - **`conflict`** fires on `mergeStateStatus === "DIRTY"` or `mergeable === "CONFLICTING"`, so a draft (whose
+    `mergeStateStatus` is `DRAFT`) gets it too.
+  - **The job link** of a failing context is rebuilt from the two id strings of a `detailsUrl` that names a job of the
+    watched repo (compared case-insensitively) and no other; a context with none is named without a link.
+- **The registry** (2026-11-18; `daemon/src/watch-registry.ts`, one per term, soft state: it asks nothing of the store
+  and a new term starts empty, the daemons resending).
+  - **Generation.** Keyed by device id, whole-set replace. `gen` is the daemon's boot id (`instance`) and a counter
+    it bumps on every `watch-set`: an equal `gen` is re-answered as last computed without replacing, a lower `n` on the
+    same boot is ignored unanswered, a higher `n` or a new boot replaces, and a retired boot stays ignored.
+  - **Who is taken.** A set from a registered machine that does not advertise `CAPABILITIES.watches` is dropped
+    (logged, no answer), as one from an unregistered sealer or the archivist is: it would be polled and counted toward
+    the caps with nobody to hear the answer. Refusals are logged once per change of their counts per device, not on
+    every heartbeat.
+  - **Expiry and caps.** A set not refreshed (by any accepted set, a re-answered one included) for 15 minutes is
+    dropped. The fleet holds at most 100 PRs and 100 runs, with no eviction: a device's already-admitted watches are
+    admitted before its new ones, and refusals are re-evaluated on every replacing set. `fleet_full` means "not polled
+    for now", never "ended". The per-device cap is 64: a 65-entry set is accepted with its 65th entry refused
+    `invalid` in `set.refused`, as is an entry with a good id and a bad body. A set past 256 entries is dropped whole.
+  - **Answers.** Every accepted set is answered by a `watch-event` carrying `set` (its generation and the refusals),
+    repeated until an `ok: true` answer. `seen` and the acknowledged keys are held in memory, and a key is added only
+    for a watch id the daemon's answer lists as delivered; events carry no id of their own, so a listed id
+    acknowledges every event of that watch in the frame, all or nothing. At most one `watch-event` is in flight per
+    device, sent at the end of each poll, at each clock tick (so up to two a poll interval while something stays
+    unacknowledged), on an accepted set and when a send ends with a set still owed. A frame is bounded by
+    `WATCH_EVENT_JSON_MAX` in UTF-8 bytes of JSON (`watchJsonBytes`, as `MESSAGE_ROUTE_MAX`); what does not fit is due
+    again at the next send, which starts at the watch the full frame stopped in, so events an early watch leaves
+    unacknowledged cannot keep the later ones out. Every `watch-event` is also written as an `audit request` line on
+    the receiving machine, like any op, so a watch whose events are never acknowledged adds two a minute: step 3's
+    daemon must acknowledge or drop what it cannot place, and its `watch` origin may replace that line. A device is sent to only while it advertises `CAPABILITIES.watches` (or is the leader's own
+    machine), and an answer of `null` (an ended term, an unreachable machine) is no answer.
+- **Reserve for tasks** (2026-11-18, docs/gh-watch.md W8). A poll that starts with the term's newest `remaining` under
+  500 and its `resetAt` still ahead reads the tasks' PRs only: watched targets are asked for nothing until the budget
+  recovers. A watch on a PR a task reads anyway still takes that merge reading (`merged`, `closed`, `unreadable`):
+  it costs nothing, and no blocked read is made for the watch. Logged once per stay (and once when it ends), naming the reset and no target. The budget is unknown until a
+  poll's first answer, so a term's first poll reads both.
+- **Suspended and unreadable** (2026-11-18). A clock of the poller's own, at its interval, ticks the registry even
+  while a `limited` wait parks the poll chain for up to an hour. A watch that has gone unread for two intervals,
+  whatever the cause, is suspended, though never while a poll is in flight (the clock passes `polling`): a healthy
+  poll longer than an interval leaves every watch unread for longer than two, and its end reads them. The class
+  is the reason when it is not `ok`, `reserve` under the reserve, else `failed`, and `resetAt` only for a limit or
+  the reserve. The key is `suspended:<reason>` and nothing leader-local, so a daemon's `seen` stops a new leader
+  telling it again: once per reason per watch, however often it recovers and stops again. `since` (when this leader
+  last read the watch) is display only. A watch whose
+  PR or run alias answers null on two polls in a row is `unreadable`.
 - **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
   so the write has the per-task serial chain, the term fence and the version floor of every other,
   and apps are nudged. A reading for a URL that is none of the task's PRs writes nothing, one
