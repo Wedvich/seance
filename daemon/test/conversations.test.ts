@@ -503,6 +503,18 @@ describe("the owner's label (session-tag)", () => {
     expect(fresh.table.tagsFor(twin.pane)?.["owner.label"]).toBeUndefined();
   });
 
+  test("a tasked process claiming a labelled id carries no label: its name is its task's", async () => {
+    const on = labelled();
+    await loadConversationStore(on.path).setLabel(id(40), "scratch");
+    const fresh = boot({ store: on.path });
+    launches.set("t-resumed", id(40));
+    const tasked = await claudePane("t-resumed");
+    await report(tasked.pid, claim(id(40)), fresh.events);
+    await pollUntil(() => sessionOf(tasked.pane, fresh.table)?.verified === true, "the ledger's verification");
+    expect(fresh.table.tagsFor(tasked.pane)?.["agent.session"]?.verified).toBe(true);
+    expect(fresh.table.tagsFor(tasked.pane)?.["owner.label"]).toBeUndefined();
+  });
+
   test("a daemon restart keeps the label", async () => {
     const on = labelled();
     const { pane: p } = await verified(on, id(37));

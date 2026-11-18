@@ -468,10 +468,19 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     return { ok: false, code: "unverified" };
   };
 
-  /** The owner's label for the entry's conversation, only while its claim is verified and no other live process claims it. */
+  /**
+   * The owner's label for the entry's conversation, only while its claim is verified and no other live process claims
+   * it, and never on a tasked process: its name is its task's (docs/tags.md §3.1; the act refuses `tasked` the same).
+   */
   const ownerLabel = (entry: ProcessEntry): SessionTag | null => {
     const claim = entry.claim;
-    if (claim?.verdict !== "verified" || entry.fallback || claimants(claim.session).length !== 1) return null;
+    if (
+      entry.taskId !== null ||
+      claim?.verdict !== "verified" ||
+      entry.fallback ||
+      claimants(claim.session).length !== 1
+    )
+      return null;
     const label = deps.store?.label(claim.session);
     return label === undefined ? null : { ...label, scope: "conversation" };
   };
