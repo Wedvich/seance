@@ -375,25 +375,21 @@ function MachineCardView(props: {
         </p>
       )}
 
-      {card.connected && card.exclaves.length > 0 && (
+      {card.connected && card.exclaves.some((row) => row.auth !== null || row.probes !== null) && (
         <ul className="exclaves">
-          {card.exclaves.map((row) => (
-            <li key={row.id} className="exclave">
-              <span className="exclave-id">{row.id}</span>
-              <span className="exclave-account" title={row.account}>
-                {row.account}
-              </span>
-              <span className="exclave-sessions">
-                {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
-              </span>
-              {row.auth !== null && (
-                <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
-              )}
-              {row.probes !== null && (
-                <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
-              )}
-            </li>
-          ))}
+          {card.exclaves
+            .filter((row) => row.auth !== null || row.probes !== null)
+            .map((row) => (
+              <li key={row.id} className="exclave">
+                <span className="exclave-id">{row.id}</span>
+                {row.auth !== null && (
+                  <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
+                )}
+                {row.probes !== null && (
+                  <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
+                )}
+              </li>
+            ))}
         </ul>
       )}
 
@@ -861,17 +857,6 @@ function PencilIcon(): JSX.Element {
       <path d="M4 20h4L19 9l-4-4L4 16v4z" />
       <path d="M13.5 6.5l4 4" />
     </StrokeIcon>
-  );
-}
-
-/** The count carries the weight; its unit stays muted, so a column of rows scans by number. */
-function SessionCount(props: { count: number }): JSX.Element {
-  const { count } = props;
-  return (
-    <>
-      <b>{count}</b>
-      <span>{count === 1 ? "session" : "sessions"}</span>
-    </>
   );
 }
 
