@@ -1231,7 +1231,20 @@ export function SpawnScreen(props: {
 
   return (
     <>
-      <div className="column column-last">
+      <div
+        className="column column-last"
+        onKeyDown={(event) => {
+          // Cmd/Ctrl+Enter starts from any control on the page (prompt, tile, button), not only the
+          // prompt. An open sheet or menu is its own context, so the key stays theirs there.
+          if (event.defaultPrevented || event.isComposing) return;
+          if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+          if (renderedSheet !== null) return;
+          if (event.target instanceof Element && event.target.closest("[popover]") !== null) return;
+          if (!view.button.enabled) return;
+          event.preventDefault();
+          actions.spawn();
+        }}
+      >
         <div
           className={dropping ? "prompt-card card prompt-card-drop" : "prompt-card card"}
           onDragOver={(event) => {
@@ -1321,14 +1334,7 @@ export function SpawnScreen(props: {
               onPointerUp={readCaret}
               onSelect={readCaret}
               onKeyDown={(event) => {
-                if (pickerKey(event)) {
-                  event.preventDefault();
-                  return;
-                }
-                if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
-                if (!view.button.enabled) return;
-                event.preventDefault();
-                actions.spawn();
+                if (pickerKey(event)) event.preventDefault();
               }}
             />
           </div>
