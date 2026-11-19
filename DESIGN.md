@@ -4780,7 +4780,7 @@ error.
   account's rename is saving, and a failure for another account never shows in it; without the account key the item is `aria-disabled` (still reachable, not activatable) and its
   sub-line says to re-enter the PSK. Cards whose titles would repeat gain the exclave ids, then the machines, then the account id (`<alias> (<exclaves>)`). An alias is the account card's title, and the exclave ids it replaces lead the meta line
   (`<exclaves> · <email> · on <machines>`); an unnamed card is titled by its exclave ids. Names show
-  on a machine card's exclave rows and the Queue screen's pause holds as alias, else email, else
+  on the Queue screen's pause holds as alias, else email, else
   `acct` and the first eight characters of the account half.
   One person on a personal plan and a Team org has one email and one account half under two org
   halves, so where another account the registry reports would read the same, the email or short id
@@ -14654,9 +14654,13 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
   (`closed 3 · nudged 1 · flagged 2`, `closed 0` reading `nothing closed`), `failing` in the warn colour, and, while
   running with a valid `rc`, an `Open round` link. Each part is one unbreakable span, so a 390px card wraps between parts.
   A connected machine advertising the capability whose status has no `cu` (not in yet, an older daemon) shows
-  `no report yet`. An asleep machine's card shows no custodian row at all, and no exclave list (the divider and its rows):
-  its last status is stale, and a `—` per row or a row that can only say `no report yet` is noise on a card that already
+  `no report yet`. An asleep machine's card shows no custodian row at all, and no exclave list:
+  its last status is stale, and a row that can only say `no report yet` is noise on a card that already
   says asleep.
+  2026-11-19: the owner took the exclave list (id, account, session count) off the machine card: it took vertical space
+  and the Accounts cards say the same. A connected card lists an exclave, by id, only while its login is lapsed or
+  expiring or a probe fails, the one place those warnings show. `ExclaveRow` keeps `account` and `sessions` for the
+  view-model tests; nothing renders them.
 - **The live link.** The round runs with `--setting-sources project`, so the session-events mod never runs in it, its pane
   is skipped by every pane reader, and C24 keeps session ids off the custodian frame: no session event can carry the id
   (the one "The remote session id" above describes). The daemon reads it instead (`roundRemoteId`): from
