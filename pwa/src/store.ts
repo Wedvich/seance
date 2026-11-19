@@ -618,18 +618,14 @@ export class Store {
     this.#nudgeTimer = null;
   }
 
-  /**
-   * On a relay change: the machines whose reported session counts moved since last seen: a closed one under a drain
-   * leader (its drain row counts them), and any that names its sessions (`sessionTag`: the Machines card lists them).
-   */
+  /** On a relay change: the closed machines whose reported session counts moved since last seen. */
   #readMovedSessions(woken: readonly { readonly deviceId: string }[]): void {
     const { relay } = this.#state;
-    const drains = deriveDrainAvailability(relay);
+    if (!deriveDrainAvailability(relay)) return;
     const justRead = new Set(woken.map((machine) => machine.deviceId));
     const due: string[] = [];
     for (const machine of relay.machines) {
-      const named = machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
-      if (!machine.connected || !((drains && closedAt(machine) !== null) || named)) {
+      if (!machine.connected || closedAt(machine) === null) {
         this.#closedSess.delete(machine.deviceId);
         continue;
       }
@@ -646,17 +642,6 @@ export class Store {
     if (!deriveDrainAvailability(this.#state.relay)) return;
     void this.refreshQueue();
     void this.#fetchSessions([deviceId]);
-  }
-
-  /**
-   * The Machines screen lists each session: read afresh, as it opens, every connected machine (an older daemon answers
-   * `sessions` too, its rows just offer no rename).
-   */
-  readNamedSessions(): void {
-    const { relay } = this.#state;
-    if (relay.status !== "open") return;
-    const due = relay.machines.filter((machine) => machine.connected).map((machine) => machine.deviceId);
-    if (due.length > 0) void this.#fetchSessions(due);
   }
 
   async #fetchSessions(deviceIds: readonly string[]): Promise<void> {

@@ -8857,7 +8857,7 @@ session-chosen text. The reader joins, since no single process holds both scopes
 
 | Surface                                  | Gets                                                                  |
 | ---------------------------------------- | --------------------------------------------------------------------- |
-| PWA (Machines, Queue, task details)      | a session's name, rename and joined tags; a task's label and ref      |
+| PWA (Queue, task details)                | a task's label and ref                                                |
 | `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included             |
 | `sessions` op sealed from the scheduler  | none                                                                  |
 | MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                 |
@@ -8866,8 +8866,9 @@ session-chosen text. The reader joins, since no single process holds both scopes
 | `MachineStatus`, push, logs, audit, argv | never                                                                 |
 | archive                                  | `creator.ref`, `creator.ref-url` only                                 |
 
-**The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`): each session row on
-the Machines screen folds its joined tags (`SessionEntry.tags` joined with its task's record, `taskTagEntries`) under a
+**The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`; not shown since
+2026-11-19: the owner took the session list off the Machines card until its place is decided, and `sessionRows`, the
+`SessionRow` model and `Store.renameSession` stay for whatever surface takes it): each session row folds its joined tags (`SessionEntry.tags` joined with its task's record, `taskTagEntries`) under a
 `Tags` disclosure, grouped by namespace, each group naming its writer from this table and each tag its scope and age,
 `verified` shown on a verified `agent.session`. A task tag's age is its task's creation (a record holds no per-key
 time). Values pass `displayLine`; only `creator.ref-url` is linked, and only as `httpsUrl` passes it. Joining the task
@@ -13006,8 +13007,8 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
   conversation's tags show on the process whose verified, unconflicted claim it is. They reach an app's `sessions`
   reply (`SessionEntry.tags`) and that adapter's own records, never another adapter's (`tagsFor`) or MCP
-  (`AGENT_VISIBLE_TAG_KEYS`). The PWA reads `SessionEntry.tags` for a session's name and rename and shows adapter
-  tags, display-only, in its per-namespace view ("Tags and session identity").
+  (`AGENT_VISIBLE_TAG_KEYS`). The PWA's per-namespace view, which would show them display-only, is not on screen
+  ("Tags and session identity").
 - **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
   account id, an absolute path, the PSK or anything derived from it.
 - **Audit**, origin `adapter` (`adapterAudit`), the lifecycle lines and one line per message each way:
@@ -14030,14 +14031,16 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       conversation's claim is verified, not through the `pane` fallback, and has exactly one claimant (a tasked
       process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
       of a labelled id shows its own name. A restart keeps the label and reattaches it at the next verified claim.
-    - **The name, in the PWA.** The Machines card lists an awake machine's sessions by `displayName` over
+    - **The name, in the PWA.** Not on screen since 2026-11-19: the owner took the session list off the Machines card
+      until its place is decided, so no surface offers Rename and the screen reads no sessions for it (only the drain's
+      reads remain). The model below (`sessionRows`, `Store.renameSession`) is kept for the surface that takes it.
+      A session row is named by `displayName` over
       `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (taken as docs/tags.md's open
       question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
       then the window, marked "(self-named)" or "(window)" for the last two. Rename is offered only for a connected
       machine advertising `CAPABILITIES.sessionTag`, on an untasked row whose `agent.session` is verified; a refusal
-      shows a fixed text by its code. Sessions are read for every connected machine when the screen opens, on wake, when a
-      `sessionTag` machine's reported session counts move, and after a rename or a refusal that says the row is stale
-      (`ended`, `moved`, `tasked`). The dialog refuses a name past the daemon's byte cap before sending.
+      shows a fixed text by its code. A rename, and a refusal that says the row is stale (`ended`, `moved`, `tasked`),
+      reads that machine's sessions again.
 - **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
   `question`, `permission` and (2026-11-17, from the settings `Elicitation` hook) `elicitation`, an MCP
