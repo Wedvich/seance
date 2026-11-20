@@ -41,7 +41,7 @@ import {
   type MessageFrameRoute,
   type MessageReply,
 } from "./message-frame.ts";
-import { claudeProcessOf, sessionAlive, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
+import { claudeProcessOf, nestedClaude, sessionAlive, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
 import { ancestorBelow, peerPidSupported } from "./peer.ts";
 import type { Conversations } from "./conversations.ts";
 import type { BoundPane } from "./session-events.ts";
@@ -114,6 +114,8 @@ export interface MessagesDeps {
   readonly route?: (message: SessionMessage) => Promise<boolean>;
   /** Session identity: what subscribes a sender to an adapter, and what a `toSession` delivery resolves through. */
   readonly conversations?: Pick<Conversations, "verifiedFor" | "atAct">;
+  /** Every exclave's config dir, where a `claude` process's `sessions/<pid>.json` says it is a session (`nestedClaude`). */
+  readonly configDirs?: () => readonly string[];
 }
 
 /** A session's message to an adapter, as messages hands it to the adapter host (`adapter-host.ts`). */
@@ -303,6 +305,8 @@ interface Bound {
    * holds no handle, and nothing that needs one is done for it.
    */
   readonly session: SessionKey | null;
+  /** The peer's ancestry, peer first, the pane process last. */
+  readonly chain: readonly number[];
 }
 
 /** A message this daemon minted for a session: its id is the handle an answer carries. */
@@ -490,7 +494,9 @@ export function createMessages(deps: MessagesDeps): Messages {
 
   const bind = async (peer: number | null, panes: readonly BoundPane[]): Promise<Bound | null> => {
     const bound = await bindPeer(peer, panes, hostNamesPeers);
-    return bound === null ? null : { pane: bound.pane, session: bound.session?.key ?? null };
+    return bound === null
+      ? null
+      : { pane: bound.pane, session: bound.session?.key ?? null, chain: [...bound.below, bound.pane.pid] };
   };
 
   /** A message written to a listener can be answered by handle, from the session that read it. */
@@ -773,6 +779,14 @@ export function createMessages(deps: MessagesDeps): Messages {
       return refuse("unbound");
     }
     const { pane, session } = bound;
+    // A `claude -p` a tool ran loads the pane's mods too, and its listener would take the pane's one listener from the
+    // pane's own session, which then misses what arrives. Refused as unbindable, which the mod waits out.
+    if (deps.configDirs !== undefined && (await nestedClaude(bound.chain, deps.configDirs()))) {
+      log.info(
+        `local socket: inbox listener from pid=${peer ?? "unknown"} was started by another claude in its pane — refused`,
+      );
+      return refuse("unbound");
+    }
     // No `claude` above the peer: no handle can be bound, so it listens only where a task id reaches it, as in Part A.
     if (session === null && (pane.taskId === null || deps.launchedAt(pane.taskId) === undefined)) {
       log.info(

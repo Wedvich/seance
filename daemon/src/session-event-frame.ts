@@ -24,6 +24,8 @@ export const SESSION_EVENT_REPLY_CODES = [
   "invalid",
   /** The sender runs in no live tmux pane this daemon can see. */
   "unbound",
+  /** The sender's `claude` was started by another `claude` in its pane (a `claude -p` a tool ran): not the pane's session. */
+  "nested",
   /** This daemon runs no session-event ingest. */
   "unsupported",
   /** A `done` report or hand-off from a pane that carries no scheduler task: there is nothing to settle. */

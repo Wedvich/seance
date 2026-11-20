@@ -341,6 +341,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   const messages = createMessages({
     panes: listPanePids,
     conversations,
+    configDirs: () => ctx.exclaveScan().exclaves.map((exclave) => exclave.configDir),
     windowName: paneWindowName,
     launchedAt: (taskId) => ctx.endedTasks.launchedAt(taskId),
     machine: ctx.config.name,

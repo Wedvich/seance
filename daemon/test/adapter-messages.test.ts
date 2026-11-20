@@ -6,7 +6,6 @@ import { isRecord, MESSAGE_MAX, MESSAGE_RATE, TAGS_PER_WRITER_MAX, type RepoEntr
 import { createAdapterFeed, type AdapterFeed } from "../src/adapter-feed.ts";
 import { startAdapterHost, type AdapterHost } from "../src/adapter-host.ts";
 import { openSubscriptions, type Subscriptions } from "../src/adapter-subscriptions.ts";
-import { ctimeUtcSeconds } from "../src/agent-session-file.ts";
 import { adapterAudit, messageAudit } from "../src/audit.ts";
 import { createConversations, type Conversations } from "../src/conversations.ts";
 import { exec } from "../src/exec.ts";
@@ -22,6 +21,7 @@ import {
   bunNamed,
   linkReferenceAdapter,
   pollUntil,
+  procStartOf,
   underClaude,
   usePrivateTmux,
   type PrivateTmux,
@@ -55,19 +55,6 @@ let tasks = 0;
 const taskId = (): string => `task-am-${++tasks}`;
 
 /** `ps`'s `lstart` for a pid, as Claude Code writes `procStart` (Linux: `/proc`'s start ticks). */
-function procStartOf(pid: number): string {
-  const start = processStart(pid);
-  if (start === null) throw new Error(`no start time for ${pid}`);
-  if (process.platform === "linux") return start;
-  const d = new Date(Number(start.split(".")[0]) * 1000);
-  const two = (n: number): string => String(n).padStart(2, "0");
-  const text = `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()]} ${
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]
-  } ${String(d.getUTCDate()).padStart(2, " ")} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
-  if (ctimeUtcSeconds(text) === null) throw new Error(`unparseable ctime ${text}`);
-  return text;
-}
-
 /** What Claude Code writes for its process: the conversation it is in, and so the source that verifies a claim. */
 async function writeSessionFile(pid: number, sessionId: string): Promise<void> {
   await writeFile(

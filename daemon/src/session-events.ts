@@ -24,7 +24,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterTaskEvent } from "@seance/shared";
-import { claudeProcessOf } from "./claude-process.ts";
+import { claudeProcessOf, nestedClaude } from "./claude-process.ts";
 import type { AgentClaim, Conversations } from "./conversations.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
@@ -1360,6 +1360,18 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         return { ok: false, code: "unbound" };
       }
       const { pane } = bound;
+      // A `claude -p` a tool ran in this pane reports its own start, turns and exit: the outer task read idle mid-turn,
+      // and settled `done` when the inner one exited. Its claims are still retained, under its own process.
+      if (
+        bound.below !== null &&
+        (await nestedClaude(
+          [...bound.below, pane.pid],
+          deps.exclaves().map((e) => e.configDir),
+        ))
+      ) {
+        if (frame.handoff !== true && frame.pass !== true) retainClaims(pane, bound.below, frame);
+        return { ok: false, code: "nested" };
+      }
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);

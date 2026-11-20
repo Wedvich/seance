@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import {
   type SessionEvent,
   type SessionPass,
 } from "@seance/shared";
-import { pollUntil } from "../test/fixtures.ts";
+import { bunNamed, pollUntil, underClaude, writeAgentSessionFile } from "../test/fixtures.ts";
 import { LaunchLedger, LEDGER_MAX } from "./launch-ledger.ts";
 import { parseProcStatPpid, parsePsParents } from "./peer.ts";
 import {
@@ -340,6 +340,100 @@ describe("idle notes (the settings Stop hook)", () => {
       events.stop();
     }
   });
+});
+
+describe("a claude another claude started in the pane", () => {
+  let base: string;
+  let claude: string;
+  const groups: number[] = [];
+
+  beforeAll(async () => {
+    base = await mkdtemp(join(tmpdir(), "seance-nested-"));
+    claude = await bunNamed("claude");
+    // Its first exec outside any timed window (CLAUDE.md, Testing).
+    await Bun.spawn([claude, "-e", ""]).exited;
+  });
+
+  afterAll(async () => {
+    for (const group of groups) {
+      try {
+        process.kill(-group, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    await rm(base, { recursive: true, force: true });
+  });
+
+  /**
+   * A pane-shaped tree from `sh`, the pane's process, down to a `sleep` standing in for the hook's `bun`: its pid. The
+   * leaf's own `claude` runs alone (`own`), under a `claude` that is a session by its own file (`nested`, as under a
+   * `claude -p` a tool ran), or under one with no file (`wrapped`, a wrapper script called `claude`).
+   */
+  async function tree(
+    name: string,
+    shape: "own" | "nested" | "wrapped",
+  ): Promise<{ readonly pane: number; readonly peer: number }> {
+    const pidFile = join(base, `${name}.pid`);
+    const outerFile = join(base, `${name}.outer`);
+    const leaf = `echo $$ > '${pidFile}'; exec sleep 600`;
+    const inner = underClaude(claude, { body: leaf });
+    const command = shape === "own" ? inner : underClaude(claude, { body: inner, pidFile: outerFile });
+    const child = Bun.spawn(["sh", "-c", command], { detached: true });
+    groups.push(child.pid);
+    const written = async (file: string): Promise<number> => {
+      await pollUntil(async () => (await readFile(file, "utf8").catch(() => "")).trim() !== "", `${file} written`);
+      return Number((await readFile(file, "utf8")).trim());
+    };
+    const peer = await written(pidFile);
+    if (shape === "nested") await writeAgentSessionFile(join(base, "config"), await written(outerFile));
+    return { pane: child.pid, peer };
+  }
+
+  function setup(pane: number) {
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve([{ id: "%9", pid: pane, dead: false, taskId: "t1", ours: true, path: "/home" }]),
+      exclaves: () => [{ id: "default", root: "/home", configDir: join(base, "config"), configFile: "/x" }],
+      forward: (event) => void forwarded.push(event),
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => true,
+    });
+    return { events, forwarded };
+  }
+
+  test("its start, turns and exit are refused `nested` and never reach the leader as the pane's task", async () => {
+    const { pane, peer } = await tree("nested", "nested");
+    const { events, forwarded } = setup(pane);
+    try {
+      expect(await events.handle(frame({ state: "idle" }), peer)).toEqual({ ok: false, code: "nested" });
+      expect(await events.handle(frame({ state: "ended" }), peer)).toEqual({ ok: false, code: "nested" });
+      expect(await events.handle(frame({ state: "done" }), peer)).toEqual({ ok: false, code: "nested" });
+      expect(await events.handle(frame({ stop: { background: { shell: 1 } } }), peer)).toEqual({
+        ok: false,
+        code: "nested",
+      });
+      expect(events.awaitsWake("%9")).toBe(false);
+      expect(forwarded).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  for (const shape of ["own", "wrapped"] as const) {
+    test(`the pane's own claude still reports (${shape})`, async () => {
+      const { pane, peer } = await tree(shape, shape);
+      const { events, forwarded } = setup(pane);
+      try {
+        expect(await events.handle(frame({ state: "busy" }), peer)).toEqual({ ok: true });
+        await pollUntil(() => forwarded.length === 1, "the busy");
+        expect(forwarded[0]).toMatchObject({ session: "%9", taskId: "t1", state: "busy" });
+      } finally {
+        events.stop();
+      }
+    });
+  }
 });
 
 describe("EndedTasks", () => {

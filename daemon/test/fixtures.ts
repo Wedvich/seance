@@ -2,8 +2,10 @@ import { watch } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { ctimeUtcSeconds } from "../src/agent-session-file.ts";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec, execFailure } from "../src/exec.ts";
+import { processStart } from "../src/peer.ts";
 import { listPanes } from "../src/sessions.ts";
 import { FIELD_SEP, tmux } from "../src/tmux.ts";
 import { TEST_RUN_DIR_ENV } from "../../scripts/test-run-dir.ts";
@@ -791,3 +793,31 @@ export async function captureLog(body: () => Promise<void>): Promise<string[]> {
 // runs them again: add each new broken release, and drop the list once one fixes it.
 const BUN_FRAGMENTED_FRAME_BROKEN: readonly string[] = ["1.4.4", "1.4.5"];
 export const bunFragmentedFrameBroken: boolean = BUN_FRAGMENTED_FRAME_BROKEN.includes(Bun.version);
+
+/** `procStart` as Claude Code writes it on this platform (S3): Linux's tick string, macOS's start second as UTC ctime. */
+export function procStartOf(pid: number): string {
+  const start = processStart(pid);
+  if (start === null) throw new Error(`no start time for ${pid}`);
+  if (process.platform === "linux") return start;
+  const d = new Date(Number(start.split(".")[0]) * 1000);
+  const two = (n: number): string => String(n).padStart(2, "0");
+  const text = `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()]} ${
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]
+  } ${String(d.getUTCDate()).padStart(2, " ")} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+  if (ctimeUtcSeconds(text) === null) throw new Error(`unparseable ctime ${text}`);
+  return text;
+}
+
+/** The `<configDir>/sessions/<pid>.json` Claude Code writes for a live `claude` process, its `sessions/` made if missing. */
+export async function writeAgentSessionFile(
+  configDir: string,
+  pid: number,
+  sessionId: string = crypto.randomUUID(),
+  extra: Readonly<Record<string, unknown>> = {},
+): Promise<void> {
+  await mkdir(join(configDir, "sessions"), { recursive: true });
+  await writeFile(
+    join(configDir, "sessions", `${pid}.json`),
+    JSON.stringify({ pid, sessionId, procStart: procStartOf(pid), ...extra }),
+  );
+}

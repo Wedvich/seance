@@ -12153,7 +12153,10 @@ their fields and no `pane`.
   connection closes it. **One listener per pane**: a later `inbox` frame bound to the same pane replaces the
   first, whose child exits 0 (the `claude --resume` in the same pane case). The daemon closes a listener whose
   pane is gone, dead, re-tagged or whose pid changed (`sweep`, lazily at every send and listen, not on a
-  timer).
+  timer). A listener from a `claude` that another `claude` in the pane started (a `claude -p` a tool ran,
+  `nestedClaude`, as Session events reads it) is refused `unbound`, which the mod waits out, and replaces
+  nothing (added 2026-11-20): it loads the pane's mods too, and used to take the pane's one listener from the
+  session that owns the pane until it exited.
 
 **The ack** is `{ ok: true, keep: { messages, bytes } }`, for **every bound pane** (amended 2026-11-14, D3). It was
 only for a pane that carried a task this machine's ledger held a launch of, since nothing was addressed to any
@@ -13609,6 +13612,22 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
     allowed call) and gives no event when it is approved, so it cannot close what it opens; the
     mod's `tool.check` already covers the open. Rejected: launching each session with `--settings`,
     which covers only sessions séance spawns and is invisible to `seance mod uninstall`.
+- **A `claude` another `claude` started is not the pane's session** (added 2026-11-20). A `claude -p`
+  that a tool or script runs in a task's pane (a frame reader shelling out to it, a skill's eval) loads
+  the same exclave's mods and settings hooks, and its start, turns and exit bound to the pane: the outer
+  task read idle mid-turn from the inner one's `SessionStart` and turn end, and settled `done` ("ended
+  clean, no PR") when it exited, both observed. So every frame whose peer's chain holds, above the
+  innermost `claude` (`sessionOf`), a `claude`-named process that has its own session file
+  (`<configDir>/sessions/<pid>.json` in any exclave's config dir, matched on pid and start time by
+  `readAgentSession`; `nestedClaude`, `claude-process.ts`) is answered `nested` and acted on in no way: no
+  state, note, `done`, hand-off or pass. Its claims are still retained under its own process (Session
+  identity). The file is the proof because Claude Code writes one for every running `claude`, `-p`
+  included, and a wrapper script called `claude` never does: a wrapper above the session still lets it
+  speak for the pane, however many processes stand between them. Rejected: reading only the names on the
+  chain (a `claude` above another, past a process without the name), which also mutes a wrapper whose
+  shell sits between it and the real `claude` (`claude "$@"; claude --continue`), a shape the messages
+  suite holds. Only on a host that names peers: the `pane` fallback has no chain to read. The inbox
+  refuses such a listener too (Session messages, `inbox`).
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
