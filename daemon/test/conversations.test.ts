@@ -3,17 +3,15 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord, parseTags, SCHEDULER_ID, type Plain, type SessionEntry } from "@seance/shared";
-import { ctimeUtcSeconds } from "../src/agent-session-file.ts";
 import type { SessionBackend } from "../src/backend.ts";
 import { openSubscriptions } from "../src/adapter-subscriptions.ts";
 import { createConversations, SETTLE_MS, type Conversations } from "../src/conversations.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import { createHandler, type HandlerContext } from "../src/handlers.ts";
-import { processStart } from "../src/peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { bunNamed, pollUntil, procStartOf, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
  * Session identity with real processes (DESIGN.md, "Session identity"): `claude`-named processes in panes of a private tmux server,
@@ -124,20 +122,6 @@ async function claudePane(taskId?: string): Promise<{ readonly pane: string; rea
   const pidFile = join(base, `claude-${++windows}.pid`);
   const paneId = await pane(underClaude(claude, { pidFile }), taskId);
   return { pane: paneId, pid: await pidIn(pidFile) };
-}
-
-/** `procStart` as Claude Code writes it on this platform (S3): Linux's tick string, macOS's start second as UTC ctime. */
-function procStartOf(pid: number): string {
-  const start = processStart(pid);
-  if (start === null) throw new Error(`no start time for ${pid}`);
-  if (process.platform === "linux") return start;
-  const d = new Date(Number(start.split(".")[0]) * 1000);
-  const two = (n: number): string => String(n).padStart(2, "0");
-  const text = `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()]} ${
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]
-  } ${String(d.getUTCDate()).padStart(2, " ")} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
-  if (ctimeUtcSeconds(text) === null) throw new Error(`unparseable ctime ${text}`);
-  return text;
 }
 
 async function writeSessionFile(pid: number, sessionId: string, opts: { dir?: string; bridge?: string } = {}) {

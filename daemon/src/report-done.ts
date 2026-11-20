@@ -70,6 +70,8 @@ type Refusals = Record<Exclude<ReplyCode, PassOnlyCode>, string>;
 
 const COMMON = {
   unbound: "this session is not in a tmux pane this machine's daemon can see",
+  nested:
+    "this session was started by another Claude session in its tmux pane (a `claude -p` run from a tool), so it cannot speak for that pane's task",
   unsupported: "this machine's daemon runs no session-event ingest",
 } as const;
 
@@ -91,6 +93,7 @@ const KEEP_WATCHING = "; keep watching the PR yourself";
 
 const HANDOFF_REFUSED = {
   unbound: COMMON.unbound + KEEP_WATCHING,
+  nested: COMMON.nested + KEEP_WATCHING,
   unsupported: COMMON.unsupported + KEEP_WATCHING,
   invalid: "this machine's daemon predates hand-offs (run `seance update`)" + KEEP_WATCHING,
   untasked: "this session runs no scheduler task, so nothing would watch the PR" + KEEP_WATCHING,
@@ -107,6 +110,7 @@ const HANDOFF_REFUSED = {
 
 const PASS_REFUSED = {
   unbound: COMMON.unbound,
+  nested: COMMON.nested,
   unsupported: COMMON.unsupported,
   invalid: "this machine's daemon predates passing; restart seanced (`seance update`)",
   untasked: "this session runs no scheduler task, so there is nothing to pass",

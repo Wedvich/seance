@@ -1,3 +1,4 @@
+import { readAgentSession } from "./agent-session-file.ts";
 import { processNames, processStart } from "./peer.ts";
 import { CLAUDE_COMMAND } from "./sessions.ts";
 
@@ -43,4 +44,25 @@ export async function claudeProcessOf(chain: readonly number[]): Promise<ClaudeP
     return start === null ? null : { pid, start, key: sessionKey(pid, start) };
   }
   return null;
+}
+
+/**
+ * Whether the peer's `claude` was started by another `claude` in the pane: a `claude -p` a tool or a script ran. Its
+ * mods and settings hooks are the pane's exclave's, so it reports its own start, turns and exit, which are never the
+ * pane's session's. True when a process above the peer's own `claude` (`claudeProcessOf`) on the chain (peer first,
+ * the pane process last) carries the name and has its own `sessions/<pid>.json` (`readAgentSession`): Claude Code
+ * writes one for every process past the trust dialog, `-p` included, and a wrapper script called `claude` never does,
+ * so a wrapper above the session still lets it speak for the pane, however many hops sit between them.
+ */
+export async function nestedClaude(chain: readonly number[], configDirs: readonly string[]): Promise<boolean> {
+  const own = await claudeProcessOf(chain);
+  if (own === null) return false;
+  for (const pid of chain.slice(chain.indexOf(own.pid) + 1)) {
+    // oxlint-disable-next-line no-await-in-loop -- a handful of hops, each its own read
+    if (!(await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name))) continue;
+    const start = processStart(pid);
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    if (start !== null && (await readAgentSession(pid, start, configDirs)).kind !== "none") return true;
+  }
+  return false;
 }
