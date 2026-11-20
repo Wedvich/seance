@@ -88,10 +88,12 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   `seance custodian` verbs the daemon checks, served only on the round's own socket. Read it, and those DESIGN.md
   sections, before touching despawn, reap's merged check, a pane's tracked state, or anything that reads a live
   session's screen.
-- **docs/agents.md** — analysis, nothing decided: what spawning agents other than Claude Code
-  (Codex first) would touch — the agent as a task field, launch, accounts, quota, session events,
-  MCP, clients — the two risks (Codex's remote control, binding by peer pid) and a spike-first
-  order. Read it before adding a second agent or making the launch path agent-neutral.
+- **docs/agents.md** — analysis, nothing built: what spawning agents other than Claude Code
+  (Codex first, then Antigravity CLI `agy`, which replaced Gemini CLI) would touch — the agent as a
+  task field, launch, accounts, quota, session events, MCP, clients — the two risks (Codex's remote
+  control, binding by peer pid), `agy`'s hook and status-line mapping, the owner's two decisions
+  (`agy` next; one account per machine for V1) and a spike-first order. Read it before adding a
+  second agent or making the launch path agent-neutral.
 - **docs/orchestrator.md** — draft, nothing decided or built: queueing a whole tracker project as
   a living task graph, tended by long-lived orchestrator sessions that are not tasks, with the
   tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
