@@ -116,6 +116,7 @@ describe("loadConfig", () => {
       roundTimeoutMinutes: 5,
       maxNudges: 0,
       interruptAfterMinutes: 60,
+      remoteControl: true,
     };
     expect((await load("all", all)).custodian).toEqual(all);
     expect((await load("some", { everyMinutes: 1440, maxNudges: 20 })).custodian).toEqual({
@@ -134,6 +135,10 @@ describe("loadConfig", () => {
     for (const bad of [-1, 21, 1.5, "3"]) {
       // oxlint-disable-next-line no-await-in-loop
       await expect(load(`nudges-${bad}`, { maxNudges: bad })).rejects.toThrow('"custodian.maxNudges"');
+    }
+    for (const bad of ["true", 1, null]) {
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(load(`remote-${String(bad)}`, { remoteControl: bad })).rejects.toThrow('"custodian.remoteControl"');
     }
     await expect(load("effort", { effort: "turbo" })).rejects.toThrow('"custodian.effort"');
     await expect(load("model-empty", { model: "" })).rejects.toThrow('"custodian.model"');

@@ -672,6 +672,21 @@ const PROXY_URLS = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as
  * whole command runs under an outer `bwrap --seccomp` reading that filter file on fd 3 (`vsockFilter`): it binds `/`
  * whole, so the round sees the host as before, and the filter outlives every exec under it, srt's bwrap included.
  */
+/** `claude`'s arguments for a round, every value through `shq`; `--` last, so the seed on stdin is the first turn. */
+export function roundArgs(o: {
+  readonly settings: Pick<CustodianConfig, "model" | "effort" | "remoteControl">;
+  readonly agents: string;
+  readonly fencePath: string;
+  readonly machineTag?: string | undefined;
+}): string {
+  return (
+    `-n ${shq(sessionName("custodian", o.machineTag))} ${o.settings.remoteControl ? "--remote-control " : ""}` +
+    `--agents ${shq(o.agents)} --agent custodian --settings ${shq(o.fencePath)} --setting-sources project ` +
+    `--permission-mode dontAsk --strict-mcp-config --model ${shq(o.settings.model)} --effort ${shq(o.settings.effort)} ` +
+    `--`
+  );
+}
+
 export function roundScript(o: {
   readonly claude: string;
   readonly caffeinate: boolean;
@@ -855,11 +870,7 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
         ...(seccompPath === undefined ? {} : { seccomp: seccompPath }),
         env: roundEnv({ home, user: loginName(), tmpDir, socket: o.custodianSocket, exclave: o.exclave }),
         binDir,
-        args:
-          `-n ${shq(sessionName("custodian", o.machineTag))} --remote-control ` +
-          `--agents ${shq(o.agents)} --agent custodian --settings ${shq(fencePath)} --setting-sources project ` +
-          `--permission-mode dontAsk --strict-mcp-config --model ${shq(o.settings.model)} --effort ${shq(o.settings.effort)} ` +
-          `--`,
+        args: roundArgs({ settings: o.settings, agents: o.agents, fencePath, machineTag: o.machineTag }),
         seed: seedPath,
       }),
       { mode: 0o700 },

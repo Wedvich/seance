@@ -894,6 +894,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       peekRoundRequest: (now) => peekRoundRequest(now),
       dropRoundRequest: () => dropRoundRequest(),
       remoteId: async (round) => {
+        if (!settings.remoteControl) return null;
         const exclave = ctx.exclaveScan().exclaves.find((entry) => entry.id === round.exclave);
         if (exclave === undefined || round.pane === null) return null;
         const pids = await listRoundPanePids().catch(() => null);
