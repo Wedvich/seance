@@ -372,6 +372,11 @@ export interface CustodianConfig {
   readonly maxNudges: number;
   /** A busy session with an unchanged screen this long may be interrupted (read by `interrupt`). */
   readonly interruptAfterMinutes: number;
+  /**
+   * `--remote-control` on a round: what the Machines row's `Open round` link needs. Off by default, since each round
+   * would otherwise push Remote Control's "ready" note to the owner's phone every `everyMinutes`.
+   */
+  readonly remoteControl: boolean;
 }
 
 export const CUSTODIAN_DEFAULTS: CustodianConfig = {
@@ -382,6 +387,7 @@ export const CUSTODIAN_DEFAULTS: CustodianConfig = {
   roundTimeoutMinutes: 10,
   maxNudges: 3,
   interruptAfterMinutes: 30,
+  remoteControl: false,
 };
 
 export const CUSTODIAN_LIMITS = {
@@ -405,6 +411,7 @@ const CUSTODIAN_KEYS = [
   "roundTimeoutMinutes",
   "maxNudges",
   "interruptAfterMinutes",
+  "remoteControl",
 ];
 
 /** The key's fields are read here; an unknown key or a bad value throws, naming it. */
@@ -422,7 +429,9 @@ function parseCustodian(raw: unknown, path: string): CustodianConfig | undefined
   }
   const effort = "effort" in raw ? raw["effort"] : CUSTODIAN_DEFAULTS.effort;
   if (!isEffort(effort)) throw new TypeError(`${at}effort" must be one of ${EFFORTS.join(", ")}`);
-  const whole = (key: keyof CustodianConfig, min: number, max: number): number => {
+  const remoteControl = "remoteControl" in raw ? raw["remoteControl"] : CUSTODIAN_DEFAULTS.remoteControl;
+  if (typeof remoteControl !== "boolean") throw new TypeError(`${at}remoteControl" must be true or false`);
+  const whole = (key: (typeof CUSTODIAN_MINUTE_FIELDS)[number] | "maxNudges", min: number, max: number): number => {
     const value = key in raw ? raw[key] : CUSTODIAN_DEFAULTS[key];
     if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
       throw new TypeError(`${at}${key}" must be a whole number, ${min}–${max}`);
@@ -439,6 +448,7 @@ function parseCustodian(raw: unknown, path: string): CustodianConfig | undefined
     roundTimeoutMinutes: minutes("roundTimeoutMinutes"),
     maxNudges: whole("maxNudges", CUSTODIAN_LIMITS.minNudges, CUSTODIAN_LIMITS.maxNudges),
     interruptAfterMinutes: minutes("interruptAfterMinutes"),
+    remoteControl,
   };
 }
 

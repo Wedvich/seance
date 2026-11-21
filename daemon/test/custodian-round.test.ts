@@ -265,7 +265,8 @@ describe("a round, with the stubs for claude", () => {
 
     const argv = await stub.argv();
     const at = (flag: string): number => argv.indexOf(flag);
-    expect(argv.slice(at("-n"), at("-n") + 3)).toEqual(["-n", "custodian", "--remote-control"]);
+    expect(argv.slice(at("-n"), at("-n") + 3)).toEqual(["-n", "custodian", "--agents"]);
+    expect(argv).not.toContain("--remote-control");
     expect(JSON.parse(argv[at("--agents") + 1] ?? "")).toHaveProperty("custodian");
     expect(argv.slice(at("--agent"), at("--agent") + 2)).toEqual(["--agent", "custodian"]);
     const fencePath = argv[at("--settings") + 1] ?? "";

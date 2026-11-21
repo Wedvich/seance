@@ -198,8 +198,10 @@ Edit `~/.config/seance/config.json`:
   config carries a `custodian` key (docs/custodian.md) defaults instead to every 6 hours and
   one day; any field set here still wins.
 - `custodian` — optional: `{ "model": "haiku", "effort": "low", "everyMinutes": 15,
-  "closeAfterMinutes": 15, "roundTimeoutMinutes": 10, "maxNudges": 3, "interruptAfterMinutes": 30 }`
-  (the defaults; every field optional, whole minutes 1 to 1440) turns on this machine's custodian seat
+  "closeAfterMinutes": 15, "roundTimeoutMinutes": 10, "maxNudges": 3, "interruptAfterMinutes": 30,
+  "remoteControl": false }` (the defaults; every field optional, whole minutes 1 to 1440; `remoteControl: true` starts
+  each round with Remote Control, for the Machines card's `Open round` link, at the price of its "ready" push to your
+  phone every round) turns on this machine's custodian seat
   (docs/custodian.md): a fresh, fenced Claude session per round that closes finished sessions and removes their
   worktrees when nothing would be lost (a worktree with unpushed or uncommitted work is kept), nudges a stuck task
   session with a message (at most `maxNudges` per session, one per round), sends one Escape to a session hung in a

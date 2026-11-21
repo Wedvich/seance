@@ -9998,8 +9998,15 @@ decision is recorded here.
   `shared/src/types.ts` with `isEffort`, so the PWA, Raycast and the daemon validate against one list; Claude
   Code falls back to `medium` with user settings off, so a round always passes one), `everyMinutes` (15),
   `closeAfterMinutes` (15), `roundTimeoutMinutes` (10), `maxNudges` (3), `interruptAfterMinutes` (30), each a
-  whole number of 1–1440 (`maxNudges`: 0–20, `CUSTODIAN_LIMITS`). Anything else is refused at load, naming the allowed keys (`parseCustodian`,
+  whole number of 1–1440 (`maxNudges`: 0–20, `CUSTODIAN_LIMITS`), and `remoteControl` (`false`, a boolean). Anything else is refused at load, naming the allowed keys (`parseCustodian`,
   `daemon/src/config.ts`). `closeAfterMinutes` is read by `close` (custodian 4); `maxNudges` and `interruptAfterMinutes` by `nudge` and `interrupt` (custodian 8).
+  `remoteControl` decides `--remote-control` on the round's argv (`roundArgs`) and, with it, whether the seat reads an
+  `rc` at all. 2026-11-21: the owner made it a key, off by default: with Remote Control on, every round pushed Claude's
+  "Remote Control is ready" note to the owner's phone, every `everyMinutes`, for a session nobody drives. The owner's
+  own `remoteControlAtStartup` never reaches a round (`--setting-sources project`), so the flag was the only source,
+  and Claude Code has no flag to turn it off, only one to turn it on. Dropping a word from argv changes no mask, fence,
+  built environment or round socket, so the drills stand. Rejected: keeping it always on and muting the push (no
+  setting mutes that one push alone).
 - **When a round is due (C14, `roundDue`).** Once a minute (`CHECK_INTERVAL_MS`), over the per-pane facts
   `pane-activity.ts` keeps: some `ours` pane has stood `idle` since its turn ended for `everyMinutes`; the
   last round ended at least that long ago; none is running; the daemon is not restarting (`EndedTasks.draining`).
@@ -10088,7 +10095,7 @@ decision is recorded here.
   apostrophes survive one level of quoting and not two), under `env -i` with the built environment, "The round's
   environment" below, instead of the former `export`:
   `exec [caffeinate -is] /usr/bin/env -i <built env> PATH=<tmp>/bin:"$PATH" TERM=… <passed env> claude -n custodian[-<tag>]
-  --remote-control --agents '<agent JSON>' --agent custodian --settings <fence file> --setting-sources project
+  [--remote-control] --agents '<agent JSON>' --agent custodian --settings <fence file> --setting-sources project
   --permission-mode dontAsk --strict-mcp-config --model <model> --effort <effort> -- < <seed file>`, in a detached
   window (`new-window -d`, so a round every quarter hour never takes the owner's terminal's focus) named
   `custodian` and started `-c <round dir>`.
@@ -14622,7 +14629,7 @@ push (below); custodian 7 the `custodian` app op and the card's menu (C45, C47).
 
 - **`cu` on the wire** (`CustodianStatus`, `shared/src/types.ts`): `s` (`idle`, `running`, `paused`, `failing`), `e` (the last
   round's end, unix seconds like `at`), `n` (`[closed, nudged, flagged]`, each capped at 999) and `rc`, the running
-  round's Remote Control id. It is display-only and is never trimmed by `fitStatus`, like `drn`, `cl` and `dr`. **A bad `cu` is
+  round's Remote Control id (only under the config's `remoteControl`, else never sent). It is display-only and is never trimmed by `fitStatus`, like `drn`, `cl` and `dr`. **A bad `cu` is
   dropped alone** (`parseCustodianStatus`): the status around it stays, since a card row is not worth a status's
   scheduling fields (`drn` and `cl` reject the whole status because they gate routing). `rc` is kept only beside
   `running` and only as `isRemoteSessionId` passes it. `p` (`true` only, custodian 7) says a pause holds behind `running`

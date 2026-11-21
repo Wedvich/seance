@@ -22,6 +22,7 @@ import {
   PROTECTED_DIRS,
   PROTECTED_NAMES,
   realpathOfFile,
+  roundArgs,
   roundCommand,
   roundDirPlanted,
   roundEnv,
@@ -33,6 +34,7 @@ import {
   toolchainProblem,
   type RoundToolchain,
 } from "./custodian-launch.ts";
+import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import { DEFAULT_EXCLAVE } from "./exclaves.ts";
 import { shq } from "./spawn.ts";
 import { scriptStub } from "../test/fixtures.ts";
@@ -345,6 +347,19 @@ describe("roundEnv", () => {
     expect(env.get("CLAUDE_CONFIG_DIR")).toBe("/home/u/.claude-work");
     expect(env.has("USER")).toBe(false);
     expect(env.has("LOGNAME")).toBe(false);
+  });
+});
+
+describe("roundArgs", () => {
+  const fixed = { agents: "{}", fencePath: "/tmp/seance-cu-x/fence.json", machineTag: "box" } as const;
+
+  test("Remote Control only when configured, after the session name it would otherwise take as its value", () => {
+    const off = roundArgs({ ...fixed, settings: CUSTODIAN_DEFAULTS });
+    expect(off).not.toContain("--remote-control");
+    expect(off.startsWith(`-n ${shq("custodian (box)")} --agents `)).toBe(true);
+    const on = roundArgs({ ...fixed, settings: { ...CUSTODIAN_DEFAULTS, remoteControl: true } });
+    expect(on.startsWith(`-n ${shq("custodian (box)")} --remote-control --agents `)).toBe(true);
+    expect(on.endsWith(" --")).toBe(true);
   });
 });
 
