@@ -515,39 +515,46 @@ To land in DESIGN.md's threat model with the code that makes them true:
 
 ## Build order
 
-Each is one PR, with DESIGN.md, CLAUDE.md and the docs it touches in the same commit.
+Each is one PR, with DESIGN.md, CLAUDE.md and the docs it touches in the same commit, and each is queued as one Séance
+task (2026-11-23) after the ones it names.
 
 **Phase 1: the account.** No Codex task runs, but the ChatGPT account is named, measured and watched.
 
 1. **Daemon:** the `codex` config block, the home and its generated config, `seance codex login | logout | status`, the
    version floor, the probe, `MachineInfo.logins`, `MachineStatus.lq`/`lx`/`lu`/`lb` with their parsers and the status
-   budget.
-2. **Readers:** `newestQuotaByAccount` and the fleet quota writer fold `lq`; the PWA's account card (an agent badge,
-   the windows, the credits state, rename, the "Open for work" switch through the existing account hold) and the
-   Machines card's login row; MCP `list_machines`; the archivist's quota series; the leader's login alert.
+   budget. Its PR lists the owner's steps to try it: a `codex` block in a machine's `config.json`, then
+   `seance codex login`.
+2. **Fleet readers** (after 1): `newestQuotaByAccount` and the fleet quota writer fold `lq`; `knownAccounts` reads
+   `logins`; MCP `list_machines`; the archivist's quota series; the leader's login alert and its `authAlerts` key.
+3. **The PWA** (after 2): the account card (an agent badge, the windows, the credits state, rename, the "Open for work"
+   switch through the existing account hold) and the Machines card's login row.
 
-**Phase 2: auto tasks run.** Checks S1's and S4's rest and S8's macOS half first.
+**Phase 2: auto tasks run.** Checks S1's and S4's rest and S8's macOS half first; they need the owner, and decide
+nothing.
 
-3. **The field:** `TaskRequest.agent`, `AGENT_DEP_SENTINEL`, `CAPABILITIES.codex`'s leader half, the route filters,
-   account-by-agent counting and the spill, the V1 refusals. Nothing places a Codex task yet: no daemon launches one.
-4. **The driver seam, no behaviour change:** Claude's argv, pane recognition, graceful close, trust and resume move
-   behind an `AgentDriver` interface (`daemon/src/agents/claude.ts`), the command line byte-identical under test.
-   (Named driver, not adapter: "adapter" is messaging's.)
-5. **The Codex driver:** the run dir and script, the connection, `thread/start`, the ledger's thread id, the seed, the
-   TUI's late join, notifications into the pipeline, the graceful close, reconnect at start, pane recognition; the daemon
-   advertises `codex` while a login is configured.
-6. **Clients:** the PWA's model picker grouped by agent (picking a GPT model sets `agent`), effort per agent, an agent
-   badge on the Queue; MCP `spawn_session` and `queue_batch` take `agent`; `seance spawn --agent codex`.
+4. **The field** (after 2): `TaskRequest.agent`, `SpawnRequest.agent`, `AGENT_DEP_SENTINEL`, `CAPABILITIES.codex`'s
+   leader half, the route filters, account-by-agent counting and the spill, the V1 refusals, `CODEX_MODELS`. Nothing
+   places a Codex task yet: no daemon launches one.
+5. **The driver seam, no behaviour change** (at once, beside 1): Claude's argv, pane recognition, graceful close, trust
+   and resume move behind an `AgentDriver` interface (`daemon/src/agents/claude.ts`), the command line byte-identical
+   under test. (Named driver, not adapter: "adapter" is messaging's.)
+6. **The Codex launch** (after 1, 4 and 5): the run dir and script, the connection, `thread/start`, the ledger's thread
+   id, the seed, the TUI's late join, pane recognition. Not advertised: a wire spawn of `agent: "codex"` is refused.
+7. **The Codex session** (after 6): notifications into the pipeline, the graceful close, reconnect at start, the tools'
+   binding, the custodian's view; then the daemon advertises `codex` while a login is configured.
+8. **Clients** (after 4): the PWA's model picker grouped by agent (picking a GPT model sets `agent`), effort per agent,
+   an agent badge on the Queue; MCP `spawn_session` and `queue_batch` take `agent`; `seance spawn --agent codex`.
 
 **Phase 3: parity.** Checks S5 and S7 first.
 
-7. Remote control: `seance codex pair | unpair`, `paired`, the slot's hand-over, `agent.remote` if S7 finds a link;
-   opens `checkpoint`.
-8. Continue.
-9. Pass to a successor, the quota trigger, the drain ask and the custodian's `interrupt` over the connection.
-10. Messages into a Codex session (O4).
+9. Remote control (after 7 and 8): `seance codex pair | unpair`, `paired`, the slot's hand-over, `agent.remote` if S7
+   finds a link; opens `checkpoint`.
+10. Continue (after 7).
+11. Pass to a successor, the quota trigger, the drain ask and the custodian's `interrupt` over the connection (after 7).
+12. Messages into a Codex session (O4) (after 7).
 
-**Phase 4:** the leader's `auto` choosing the agent as well as the account, a policy the owner sets.
+**Phase 4** (after 3 and 9 to 12): the leader's `auto` choosing the agent as well as the account, a policy the owner
+sets.
 
 ## Spikes
 
