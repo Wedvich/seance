@@ -1953,6 +1953,7 @@ describe("a reply by handle, on one machine", () => {
     expect(nested.lines).toEqual([JSON.stringify({ ok: false, code: "unbound" })]);
     expect(nested.closed()).toBe(true);
     expect(first.closed()).toBe(false);
+    expect(await messages.send(replyFrame(r, "note", "not mine"), innerPeer)).toEqual({ ok: false, code: "unknown" });
 
     expect(await messages.send(replyFrame(r, "note", "thanks"), outerPeer)).toMatchObject({
       ok: true,

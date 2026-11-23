@@ -54,7 +54,6 @@ const shq = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 let tasks = 0;
 const taskId = (): string => `task-am-${++tasks}`;
 
-/** `ps`'s `lstart` for a pid, as Claude Code writes `procStart` (Linux: `/proc`'s start ticks). */
 /** What Claude Code writes for its process: the conversation it is in, and so the source that verifies a claim. */
 async function writeSessionFile(pid: number, sessionId: string): Promise<void> {
   await writeFile(
