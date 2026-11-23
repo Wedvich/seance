@@ -1167,7 +1167,7 @@ nothing checked it. The last is the gap they leave.
   only while its machine is closed, and the leader writes `trigger: "drain"` for it only while that machine's
   status carries `cl`. Audited `origin=drain` with the task id and outcome, never the text.
 - **The custodian's round is a reader of untrusted text behind a fenced shell** (2026-11-13, Daemon, "The
-  custodian's seat"; `CLAUDE.md` carries the requirement). A round reads other sessions' screens and PR text, so
+  custodian's seat"; `.claude/rules/custodian.md` carries the requirement). A round reads other sessions' screens and PR text, so
   it is injectable by construction. Nothing it does is trusted: its `Bash` is sandboxed to one scratch
   directory and a short host list, its tools are `Bash` and `Read`, and `--permission-mode dontAsk` refuses what
   no rule allows instead of asking. The deny list (`custodian-fence.ts`) is generated from constants and the
@@ -1206,7 +1206,7 @@ nothing checked it. The last is the gap they leave.
   refuses a symlink. An unreadable record reads as none, and a round pane it no longer names is closed as a
   stray.
 - **The custodian's verbs are a frame on the round's own socket, bound to the round and to nothing a frame says**
-  (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md` carries the requirement). The custodian frame kind
+  (2026-11-14, Local op socket, "The custodian frame kind"; `.claude/rules/custodian.md` carries the requirement). The custodian frame kind
   widens the local socket family, so any new verb or act for it is a threat-model change like the broker's, and the
   daemon's **main** socket answers the kind `unsupported`: it is served only on the round's own socket
   (`custodian-socket.ts`), which carries nothing else. Its sender is a
@@ -1222,7 +1222,7 @@ nothing checked it. The last is the gap they leave.
   `.claude/worktrees/`, never touched since the turn ended (where a live session's turn end was observed: a dead or
   exit-prompt pane has none), never locked by anyone but a dead Claude, never with a pane in it. A frame carries no path, branch, task or session id. Nothing read from a pane, the notes or the
   summary is logged or audited; the summary goes only into `rounds.jsonl`, and the notes into their 0600 file.
-- **A custodian flag is display-only and bounded** (2026-11-14, Local op socket, "The custodian frame kind"; `CLAUDE.md`
+- **A custodian flag is display-only and bounded** (2026-11-14, Local op socket, "The custodian frame kind"; `.claude/rules/custodian.md`
   carries the requirement). The round's fifth verb and the daemon's own flag after a kept worktree travel as a
   sealed `custodian-event` from the daemon to the leader, which honours one only from a daemon and only for a task
   whose assignment is the machine that sealed it, never one sealed `from: "app"`. `Task.flag` is written only by the
@@ -8922,7 +8922,7 @@ it off. So a session's message to `adapter:<name>` subscribes its verified conve
 - **Extending the reply handle's TTL for adapters** instead of a subscription: a longer-lived bearer, still bound to
   one process, still useless across `--resume`.
 
-**Threat model.** What this adds, and what bounds it (Threat model item 6 and CLAUDE.md carry the invariants):
+**Threat model.** What this adds, and what bounds it (Threat model item 6 and `.claude/rules/adapters.md` carry the invariants):
 
 - **Session-chosen and tool-chosen strings other readers display** (`self.*`, `adapter.*`): scrubbed by
   `displayLine`, capped, scoped, kept out of MCP and pushes.
