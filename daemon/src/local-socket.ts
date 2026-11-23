@@ -74,14 +74,16 @@ import { isWatchFrameKind, type WatchReply } from "./watch-frame.ts";
  * an MCP session ending a session on its own box must not need the relay, which
  * on a credential-delivered machine is unreachable by construction — and it is
  * the same kind of op, an action on this box's own tmux, audited `origin=local`.
- * `rescan` is out of scope, and
+ * `rescan` is here so `seance scan` can refresh a running daemon's set rather
+ * than scan beside it: no payload, the daemon's own roots, one scan at a time,
+ * nothing a same-uid process could not get by `seance restart`.
  * `update-available` is broadcast-shaped — it is fire-and-forget, unauthenticated
  * by construction, and drives the self-updater, so it must not be reachable from
  * a surface whose whole premise is that it skips the envelope. Same posture as
  * the broadcast allowlist in `relay-client.ts`, and for the same reason: the
  * refusal is structural, not a policy check someone can forget to apply.
  */
-const LOCAL_OPS: ReadonlySet<string> = new Set<OpName>(["sessions", "spawn", "despawn"]);
+const LOCAL_OPS: ReadonlySet<string> = new Set<OpName>(["sessions", "spawn", "despawn", "rescan"]);
 
 /**
  * A spawn payload carries a free-text prompt, so the cap is generous; it exists

@@ -266,7 +266,8 @@ edits need no restart — including ones made by a Claude Code session on the
 box. A bad edit is refused with the reason in the log and the previous config
 keeps running, so the machine never drops offline over a typo. Only a code
 change still needs `seance restart`. A repo added _inside_ an existing root
-needs nothing at all — the hourly rescan, or the app's refresh, picks it up.
+needs nothing at all — the hourly rescan, the app's refresh, or `seance scan` on that machine
+picks it up.
 
 ```sh
 bun daemon/src/main.ts doctor    # preflight: config, tmux/git/claude, relay reachability
