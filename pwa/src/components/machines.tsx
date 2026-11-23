@@ -266,7 +266,7 @@ function MachineCardView(props: {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
-            <span className={card.connected ? "dot dot-ok" : "dot dot-off"} aria-hidden="true" />
+            <span className={`dot dot-${!card.connected ? "off" : closed ? "closed" : "ok"}`} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
             {card.role !== null && (
               <span className={card.role === "leader" ? "fleet-badge" : "fleet-badge fleet-badge-unverified"}>

@@ -67,11 +67,12 @@ export type Tone = "fg2" | "err";
 export type ConnectionState = "connected" | "connecting" | "offline";
 
 /**
- * A status dot: green online, blue for `auto`, a hollow grey ring otherwise — on the tile and its sheet row alike.
+ * A status dot: green online, amber online but closed to scheduled work (the Closed badge's colour), blue for
+ * `auto`, a hollow grey ring otherwise — on the tile and its sheet row alike.
  * `unreachable` is the relay's own hollow red, worn while the relay is unreachable: the registry
  * then is the last one heard, so a green dot would claim a presence nobody can see.
  */
-export type Dot = "ok" | "off" | "auto" | "unreachable";
+export type Dot = "ok" | "closed" | "off" | "auto" | "unreachable";
 
 export interface Tile {
   readonly label: string;
@@ -363,6 +364,12 @@ function sessionCount(state: AppState, deviceId: string): number | null {
 /** `relayState`'s `offline`, not a settling re-dial, overrides the dot. */
 function presenceDot(relay: RelayState, dot: Dot): Dot {
   return relay.status !== "open" && !relay.settling ? "unreachable" : dot;
+}
+
+/** Offline outranks closed: a machine nobody can see has no state worth colouring. */
+function machineDot(machine: Machine | null): Dot {
+  if (machine?.connected !== true) return "off";
+  return closedAt(machine) !== null ? "closed" : "ok";
 }
 
 function deriveRelayLine(relay: RelayState): string {
@@ -895,7 +902,7 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         canRescan: machine.connected,
         rescanDisabled: rescan.kind === "scanning",
         rescan: here,
-        dot: presenceDot(relay, machine.connected ? "ok" : "off"),
+        dot: presenceDot(relay, machineDot(machine)),
       };
     });
 }
@@ -1142,7 +1149,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
             label: "MACHINE",
             value: machine?.name ?? "Unknown machine",
             mono: false,
-            dot: presenceDot(relay, machine?.connected === true ? "ok" : "off"),
+            dot: presenceDot(relay, machineDot(machine)),
             tag: null,
           },
     accountTile:

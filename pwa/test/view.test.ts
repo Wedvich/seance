@@ -345,6 +345,15 @@ describe("banner and button", () => {
     expect(view.button.enabled).toBe(true);
     expect(view.formStatus).toBe("MacBook Pro is closed: this waits until it reopens");
     expect(view.machineChoices[0]?.sub.startsWith("closed to scheduled work · ")).toBe(true);
+    expect(view.machineChoices[0]?.dot).toBe("closed");
+    expect(view.machineTile.dot).toBe("closed");
+
+    const asleep = deriveView(
+      state({ relay: relay({ machines: [{ ...closed, connected: false }] }) }, { machine: "dev-1" }),
+      NOW,
+    );
+    expect(asleep.machineChoices[0]?.dot).toBe("off");
+    expect(asleep.machineTile.dot).toBe("off");
     expect(view.machineChoices[0]?.disabled).toBe(false);
   });
 
