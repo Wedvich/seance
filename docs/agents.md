@@ -58,7 +58,8 @@ sessions are recognised by `--remote-control` in `pane_start_command`; the trust
 in `.claude.json`; `.claude/worktrees` is where worktrees live. `daemon/src/backend.ts` is a seam,
 but for the whole backend (a fork swaps tmux out), not per agent: it splits into an agent adapter
 — build argv, recognise a pane, close gracefully, answer trust, resume — beside the tmux backend.
-Autonomy maps onto `-a`/`-s`. Open: whether codex takes a non-tty stdin as its opening prompt
+(Built 2026-11-23 as `AgentDriver`, `daemon/src/agents/`: named driver, since "adapter" is messaging's.
+DESIGN.md, Daemon, "Agent drivers".) Autonomy maps onto `-a`/`-s`. Open: whether codex takes a non-tty stdin as its opening prompt
 (the seed must never be argv), and whether the daemon can choose the session id up front — the
 continue invariant resumes "the Claude session id this daemon chose at that launch", never one
 from a frame; without an id flag the daemon reads it after launch from its own `CODEX_HOME`.

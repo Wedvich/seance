@@ -1,22 +1,14 @@
-import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { lstat, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import {
-  autonomyOf,
-  DEFAULT_EFFORT,
-  DEFAULT_MODEL,
-  isTaskId,
-  STANDING_INSTRUCTION,
-  WORKTREE_AND_BRANCH_GONE,
-  type RepoEntry,
-  type SpawnRequest,
-} from "@seance/shared";
+import { autonomyOf, isTaskId, WORKTREE_AND_BRANCH_GONE, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { claudeDriver } from "./agents/claude.ts";
+import type { AgentDriver, AgentLaunch } from "./agents/driver.ts";
 import { autonomyNote } from "./autonomy.ts";
 import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
 import { fetchBase, freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
-import { DEFAULT_EXCLAVE, exclaveConfigFile, exclaveSettingsFile } from "./exclaves.ts";
+import { DEFAULT_EXCLAVE } from "./exclaves.ts";
 import { canonical } from "./gitdir.ts";
 import { hardenedGit, repoConfigRefusal } from "./git-hardened.ts";
 import { log } from "./log.ts";
@@ -36,7 +28,6 @@ import {
   tmuxOk,
   TmuxError,
 } from "./tmux.ts";
-import { ensureAttachmentsTrusted, ensureRepoTrusted } from "./trust.ts";
 
 function slugCore(src: string): string {
   return src
@@ -119,34 +110,16 @@ async function freeWorktreeName(repo: RepoEntry, slug: string): Promise<string> 
   throw new SpawnFailure("internal_error", `too many worktrees named ${slug}-* — clean some up`);
 }
 
-export function shq(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
-
+/** Where a session works and what it is told about it: the agent-neutral half of a launch (`LaunchSpec`). */
 interface Prepared {
-  readonly launchDir: string;
-  readonly resultPath: string;
-  readonly worktreeFlag: readonly string[];
+  /** Where the session works, and the outcome's `path`. */
+  readonly cwd: string;
+  /** A fresh worktree's clone and name (`LaunchSpec.worktree`). */
+  readonly worktree?: { readonly clone: string; readonly name: string };
+  /** A continuation's session id, as this machine's ledger noted it (`LaunchSpec.resume`). */
+  readonly resume?: string;
   readonly preamble: string;
-  /**
-   * The Claude session id: a task's new one (`--session-id`), or the one a continuation resumes
-   * (`--resume`, `resume: true`). Always a `crypto.randomUUID()` this daemon made — for a resume, the
-   * one its ledger noted at that launch — never a wire value. Absent for an untracked spawn.
-   */
-  readonly session?: { readonly id: string; readonly resume: boolean };
-  /** Extra `NAME=value` pairs for the window's environment (tmux `-e`), literals only. */
-  readonly env: readonly string[];
 }
-
-/**
- * Past these claude 2.1.310 stops a resume of a session this old and this big on a "Resume from
- * summary / full session" dialog no remote can answer (the typical OOM'd session). An initial
- * message, which a continuation always has, is what skips it; these are defence in depth.
- */
-const RESUME_NEVER_ASKS = [
-  "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=99999999",
-  "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=99999999",
-] as const;
 
 /**
  * A session this daemon closed for its hand-off (`handedOff`, from the old task's ledger note) ended
@@ -214,14 +187,11 @@ export function continuePreamble(
  * another branch told the phone something untrue. Don't restore it — a remote
  * spawn has no business moving a local HEAD.
  */
-function prepareWorktree(repo: RepoEntry, worktreeName: string, session: string | undefined): Prepared {
+function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
   const worktreePath = join(repo.path, ".claude", "worktrees", worktreeName);
   return {
-    launchDir: repo.path,
-    resultPath: worktreePath,
-    worktreeFlag: ["--worktree", worktreeName],
-    ...(session === undefined ? {} : { session: { id: session, resume: false } }),
-    env: [],
+    cwd: worktreePath,
+    worktree: { clone: repo.path, name: worktreeName },
     preamble:
       `You are a new independent Claude session in a FRESH git worktree at ${worktreePath}, ` +
       `on branch worktree-${worktreeName}. Before starting the task, set this worktree up per ` +
@@ -237,8 +207,8 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string, session: string 
  * `base` passed `isBranchName`; the seed is a file, never the shell string, and the session is told its PR's
  * base, since a PR against the default branch of a squash-merging repo carries the predecessor's commits.
  */
-function prepareStacked(repo: RepoEntry, worktreeName: string, base: string, session: string | undefined): Prepared {
-  const worktree = prepareWorktree(repo, worktreeName, session);
+function prepareStacked(repo: RepoEntry, worktreeName: string, base: string): Prepared {
+  const worktree = prepareWorktree(repo, worktreeName);
   return {
     ...worktree,
     preamble:
@@ -257,8 +227,8 @@ function prepareStacked(repo: RepoEntry, worktreeName: string, base: string, ses
  * A task that would have stacked on a predecessor that left nothing to stack on (`SpawnRequest.noBase`, decided
  * #4): a plain worktree spawn, from the default branch, whose preamble says why. A constant: no wire text.
  */
-function prepareUnstacked(repo: RepoEntry, worktreeName: string, session: string | undefined): Prepared {
-  const worktree = prepareWorktree(repo, worktreeName, session);
+function prepareUnstacked(repo: RepoEntry, worktreeName: string): Prepared {
+  const worktree = prepareWorktree(repo, worktreeName);
   return {
     ...worktree,
     preamble:
@@ -268,13 +238,9 @@ function prepareUnstacked(repo: RepoEntry, worktreeName: string, session: string
   };
 }
 
-function prepareHere(repo: RepoEntry, session: string | undefined): Prepared {
+function prepareHere(repo: RepoEntry): Prepared {
   return {
-    launchDir: repo.path,
-    resultPath: repo.path,
-    worktreeFlag: [],
-    ...(session === undefined ? {} : { session: { id: session, resume: false } }),
-    env: [],
+    cwd: repo.path,
     preamble: `You are a new independent Claude session running in the CURRENT worktree at ${repo.path}.`,
   };
 }
@@ -282,29 +248,7 @@ function prepareHere(repo: RepoEntry, session: string | undefined): Prepared {
 /** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`); `session` the id it noted there. */
 function prepareContinue(continuation: Continuation): Prepared {
   const { path, session, exit, vanished, handedOff } = continuation;
-  return {
-    launchDir: path,
-    resultPath: path,
-    worktreeFlag: [],
-    session: { id: session, resume: true },
-    env: RESUME_NEVER_ASKS,
-    preamble: continuePreamble(path, exit, vanished, handedOff),
-  };
-}
-
-interface InnerCommand {
-  readonly command: string;
-  /**
-   * Temp dir holding the seed prompt; deleted by the caller after the alive
-   * check. The shell opens the redirect before `exec`, so the unlink drops the
-   * name, never the fd claude is reading — cleanup cannot race the read.
-   */
-  readonly seedDir: string | null;
-}
-
-function sessionFlag(session: Prepared["session"]): string {
-  if (session === undefined) return "";
-  return ` ${session.resume ? "--resume" : "--session-id"} ${shq(session.id)}`;
+  return { cwd: path, resume: session, preamble: continuePreamble(path, exit, vanished, handedOff) };
 }
 
 /**
@@ -320,100 +264,51 @@ function attachmentsBlock(attachments: SessionAttachments | undefined): string {
 }
 
 /**
- * Whether the exclave's user settings.json defaults to `bypassPermissions`. Read per spawn, uncached;
- * anything unreadable or misshapen answers false — the flag fails closed, the spawn never fails on it.
- * Managed/policy settings are not read: claude itself refuses bypass when policy disables it, so the flag
- * cannot override one. A settings.json that is a FIFO or huge is the machine owner's own doing.
- * User settings only: a repo's `.claude/settings.json` is whoever committed it, so it unlocks nothing.
+ * The opening message, or undefined for none. A resume always gets one, even with no prompt: the preamble tells the
+ * model what happened, and an initial message is what keeps claude off its blocking stale-resume dialog. So do
+ * fetched files: the seed is the only place their paths are listed. The level rides every seed, a resume's too: a
+ * continuation may come back after a compaction or days later, and the note is what restates it. A seedless spawn
+ * still has `SEANCE_AUTONOMY`.
  */
-async function userDefaultsToBypass(home: string, exclave: string): Promise<boolean> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(exclaveSettingsFile(home, exclave), "utf8"));
-    if (typeof parsed !== "object" || parsed === null || !("permissions" in parsed)) return false;
-    const { permissions } = parsed;
-    if (typeof permissions !== "object" || permissions === null || !("defaultMode" in permissions)) return false;
-    return permissions.defaultMode === "bypassPermissions";
-  } catch {
-    return false;
-  }
-}
-
-/** Only a plan (`steer`) spawn reads settings, so every other command line stays byte-identical. */
-async function planAllowsBypass(request: SpawnRequest, repo: RepoEntry, opts: SpawnOptions): Promise<boolean> {
-  return autonomyOf(request) === "steer" && (await userDefaultsToBypass(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
-}
-
-async function buildInnerCommand(
-  prepared: Prepared,
-  session: string,
-  request: SpawnRequest,
-  allowBypass: boolean,
-  attachments?: SessionAttachments,
-): Promise<InnerCommand> {
-  const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
-  const level = autonomyOf(request);
-  const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
-  // `exec` keeps the pane's process-group-leader pid on claude itself — a
-  // forked child under a compound command leaves pane_current_command as the
-  // shell, hiding the window from session detection.
-  //
-  // `--permission-mode` is omitted unless the caller asked for plan mode (`plan`, or the `steer`
-  // level): passing one unconditionally would override whatever the machine's settings.json
-  // chose, so by default the session inherits the same mode an in-terminal `claude` gets on that
-  // box. `plan` is the one exception, and only ever a tightening the caller opted into: no
-  // autonomy level loosens the mode (DESIGN.md, "Autonomy level").
-  // Any mode flag drops bypass out of the shift+tab cycle unless it started there, so on a
-  // machine whose own user settings default to bypass, plan adds `--allow-dangerously-skip-permissions`
-  // to keep it reachable — nothing an unflagged spawn there doesn't already start in.
-  //
-  // `--remote-control [name]` takes an optional value, so it sits before the
-  // other flags: trailing, it swallowed a here-mode seed prompt as the session
-  // name and the session started idle. The seed is off argv entirely now (see
-  // below), so `--` guards nothing today — it stays as the standing terminator
-  // for whatever lands at the tail next.
-  // `--add-dir <directories...>` is variadic, so it sits directly before `--model`, which ends it.
-  // Daemon paths, never wire values, quoted like every path.
-  const addDirs = (attachments?.dirs ?? []).map((dir) => `--add-dir ${shq(dir)} `).join("");
-  const base =
-    `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ${addDirs}` +
-    `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
-    // A constant, never wire text (docs/messaging.md, the standing instruction's second layer); only a task's
-    // session is addressable, so an untracked spawn's command line stays byte-identical.
-    `${request.taskId === undefined ? "" : ` --append-system-prompt ${shq(STANDING_INSTRUCTION)}`}` +
-    // literal value, so nothing wire-supplied reaches the command line — no shq() needed
-    `${level === "steer" ? " --permission-mode plan" : ""}` +
-    `${level === "steer" && allowBypass ? " --allow-dangerously-skip-permissions" : ""}` +
-    `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}` +
-    // A daemon-made UUID, never a wire value (`continues` is a ledger key and never reaches the command line).
-    // `--resume <id>`, not `--continue`: claude files a `--worktree` session under the project it started
-    // in, which may be the clone's, and `--continue` looks only in the cwd's (DESIGN.md, "Continuing a session").
-    `${sessionFlag(prepared.session)}`;
-  const resume = prepared.session?.resume === true;
+function seedText(prepared: Prepared, request: SpawnRequest, attachments?: SessionAttachments): string | undefined {
+  const resume = prepared.resume !== undefined;
   const prompt = request.prompt === undefined || request.prompt === "" ? undefined : request.prompt;
-  // A resume always gets a seed, even with no prompt: the preamble tells the model what happened, and
-  // an initial message is what keeps claude off its blocking stale-resume dialog (`RESUME_NEVER_ASKS`).
-  // So do fetched files: the seed is the only place their paths are listed.
   const listed = attachmentsBlock(attachments);
-  if (prompt === undefined && !resume && listed === "") {
-    return { command: base, seedDir: null };
-  }
-
-  const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
-  const seedFile = join(seedDir, "seed.txt");
-  // The level rides every seed, a resume's too: a continuation may come back after a compaction or
-  // days later, and the note is what restates it. A seedless spawn still has `SEANCE_AUTONOMY`.
-  const header = `${prepared.preamble}\n${autonomyNote(level)}`;
-  const seed = resume
+  if (prompt === undefined && !resume && listed === "") return undefined;
+  const header = `${prepared.preamble}\n${autonomyNote(autonomyOf(request))}`;
+  return resume
     ? `${header}${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
     : `${header}${prompt === undefined ? "" : `\nTask: ${prompt}\n`}${listed}`;
-  await Bun.write(seedFile, seed);
-  // Redirect, not an operand: an argv operand would be the expanded prompt in
-  // every local process list for the session's whole life — the same text the
-  // audit log deliberately reduces to a length and a hash. claude takes
-  // non-tty stdin as its opening prompt and reopens /dev/tty for the UI, so
-  // the pane stays interactive. `--` still terminates option parsing, and on
-  // macOS `caffeinate -is` passes the fd through to claude unchanged.
-  return { command: `${base} -- < ${shq(seedFile)}`, seedDir };
+}
+
+/**
+ * The driver a spawn runs. Claude alone until a task carries its agent (docs/codex.md, "Build order" item 6).
+ */
+function driverFor(_request: SpawnRequest): AgentDriver {
+  return claudeDriver;
+}
+
+/** Hands the agent-neutral half of a launch to its driver. */
+function launchAgent(
+  prepared: Prepared,
+  name: string,
+  request: SpawnRequest,
+  repo: RepoEntry,
+  opts: SpawnOptions,
+  attachments?: SessionAttachments,
+): Promise<AgentLaunch> {
+  const seed = seedText(prepared, request, attachments);
+  return driverFor(request).launch({
+    request,
+    name,
+    cwd: prepared.cwd,
+    ...(prepared.worktree === undefined ? {} : { worktree: prepared.worktree }),
+    ...(prepared.resume === undefined ? {} : { resume: prepared.resume }),
+    ...(seed === undefined ? {} : { seed }),
+    readDirs: attachments?.dirs ?? [],
+    home: opts.home,
+    exclave: repo.exclave ?? DEFAULT_EXCLAVE,
+  });
 }
 
 /**
@@ -916,23 +811,12 @@ async function continueLocked(
   }
   await releaseStaleLock(repo, path);
 
-  // The worktree, not the clone root, is where claude starts, so trust is asked for the worktree's own path.
-  const configFile = exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE);
-  await ensureRepoTrusted(path, configFile);
-  await ensureAttachmentsTrusted(attachments?.dirs ?? [], configFile);
-
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
   const prepared = prepareContinue(continuation);
-  const allowBypass = await planAllowsBypass(request, repo, opts);
-  const inner = await buildInnerCommand(
-    prepared,
-    sessionName(name, opts.machineTag),
-    request,
-    allowBypass,
-    attachments,
-  );
-  const outcome = await launchWindow(prepared, inner, windowName, request, opts);
+  // The worktree, not the clone root, is where the session starts, so the driver trusts the worktree's own path.
+  const launch = await launchAgent(prepared, sessionName(name, opts.machineTag), request, repo, opts, attachments);
+  const outcome = await launchWindow(prepared, launch, windowName, request, opts);
   return present ? outcome : { ...outcome, readded: true };
 }
 
@@ -971,41 +855,34 @@ async function spawnUntracked(
     stacked = await addStackedWorktree(repo, slug, tip.sha);
   }
 
-  // answer claude's trust dialog before it can block the session (fails open — see trust.ts)
-  const configFile = exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE);
-  await ensureRepoTrusted(repo.path, configFile);
-  await ensureAttachmentsTrusted(attachments?.dirs ?? [], configFile);
-
   const worktreeName = stacked?.name ?? (request.mode === "here" ? slug : await freeWorktreeName(repo, slug));
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
-  // Every task gets an id of the daemon's own, so a continuation can name the conversation it resumes.
-  const session = request.taskId === undefined ? undefined : crypto.randomUUID();
   const prepared =
     request.mode === "here"
-      ? prepareHere(repo, session)
+      ? prepareHere(repo)
       : base !== undefined
-        ? prepareStacked(repo, worktreeName, base, session)
+        ? prepareStacked(repo, worktreeName, base)
         : request.noBase === true
-          ? prepareUnstacked(repo, worktreeName, session)
-          : prepareWorktree(repo, worktreeName, session);
-  const allowBypass = await planAllowsBypass(request, repo, opts);
-  const inner = await buildInnerCommand(
+          ? prepareUnstacked(repo, worktreeName)
+          : prepareWorktree(repo, worktreeName);
+  const launch = await launchAgent(
     prepared,
     sessionName(worktreeName, opts.machineTag),
     request,
-    allowBypass,
+    repo,
+    opts,
     attachments,
   );
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
-  const outcome = await launchWindow(prepared, inner, windowName, request, opts, note);
+  const outcome = await launchWindow(prepared, launch, windowName, request, opts, note);
   return stacked === undefined ? outcome : { ...outcome, stackedOn: stacked.sha };
 }
 
 async function launchWindow(
   prepared: Prepared,
-  inner: InnerCommand,
+  launch: AgentLaunch,
   windowName: string,
   request: SpawnRequest,
   opts: SpawnOptions,
@@ -1022,11 +899,12 @@ async function launchWindow(
   // Always passed, for the same reason as the tag: a server started inside a séance session
   // would hand that session's level to every window. A literal of `AUTONOMY_LEVELS`, never a wire string.
   const autonomyEnv = ["-e", `SEANCE_AUTONOMY=${autonomyOf(request)}`];
-  const extraEnv = prepared.env.flatMap((pair) => ["-e", pair]);
+  const extraEnv = launch.env.flatMap((pair) => ["-e", pair]);
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
   let registered: boolean;
   let server: number | undefined;
+  let session: string | undefined;
   try {
     try {
       windowId = (
@@ -1038,13 +916,13 @@ async function launchWindow(
           "-t",
           `${target}:`,
           "-c",
-          prepared.launchDir,
+          launch.dir,
           "-n",
           windowName,
           ...tagEnv,
           ...autonomyEnv,
           ...extraEnv,
-          inner.command,
+          launch.command,
         ])
       ).trim();
     } catch (err) {
@@ -1053,21 +931,36 @@ async function launchWindow(
     if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
     registered = await whileRegistering(windowId, async () => {
+      session = await agentStarted(launch, windowId);
       const titled = await awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined);
       if (request.taskId !== undefined) server = await armTask(windowId, request.taskId);
       return titled;
     });
   } finally {
-    if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
+    await launch.dispose();
   }
 
   return {
     window: windowName,
-    path: prepared.resultPath,
+    path: prepared.cwd,
     registered,
     handle: windowId,
     ...(note === undefined ? {} : { note }),
     ...(server === undefined ? {} : { server }),
-    ...(prepared.session === undefined ? {} : { session: prepared.session.id }),
+    ...(session === undefined ? {} : { session }),
   };
+}
+
+/** `AgentLaunch.started`, with the window killed when it throws: a session whose start failed is never left running. */
+async function agentStarted(launch: AgentLaunch, windowId: string): Promise<string | undefined> {
+  try {
+    return await launch.started(windowId);
+  } catch (err) {
+    await tmux(["kill-window", "-t", windowId]);
+    if (err instanceof SpawnFailure) throw err;
+    throw new SpawnFailure(
+      "launch_error",
+      `the session did not start: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }

@@ -23,7 +23,12 @@ const ENTRIES = [
   "custodian-control.ts",
 ] as const;
 
-const IMPORT = /(?:from|import)\s*\(?\s*["'](\.\/[^"']+)["']/gu;
+const IMPORT = /(?:from|import)\s*\(?\s*["'](\.\.?\/[^"']+)["']/gu;
+
+/** A relative import, keyed by its path under `daemon/src` (`agents/claude.ts`, `log.ts`) wherever it was written. */
+function under(file: string, target: string): string {
+  return relative(SRC, resolve(SRC, dirname(file), target));
+}
 
 async function closure(entry: string): Promise<ReadonlySet<string>> {
   const seen = new Set<string>();
@@ -34,8 +39,8 @@ async function closure(entry: string): Promise<ReadonlySet<string>> {
     // oxlint-disable-next-line no-await-in-loop -- a walk
     const source = await readFile(join(SRC, file), "utf8");
     for (const match of source.matchAll(IMPORT)) {
-      const target = match[1]?.replace(/^\.\//u, "");
-      if (target !== undefined) queue.push(target);
+      const target = match[1];
+      if (target !== undefined) queue.push(under(file, target));
     }
   }
   return seen;
@@ -73,7 +78,7 @@ describe("the modules that hold session tags", () => {
  * keys or the precedence that reads them. Run, not load: `messages.ts` and `custodian-verbs.ts` take a type from
  * `session-events.ts`, which erases, so this walk follows only imports that are not `import type`.
  */
-const VALUE_IMPORT = /^\s*(?:import|export)\s(type\s)?(?:[^;]*?\sfrom\s*)?["'](\.\/[^"']+)["']/gmu;
+const VALUE_IMPORT = /^\s*(?:import|export)\s(type\s)?(?:[^;]*?\sfrom\s*)?["'](\.\.?\/[^"']+)["']/gmu;
 
 async function valueClosure(entry: string): Promise<ReadonlySet<string>> {
   const seen = new Set<string>();
@@ -84,8 +89,8 @@ async function valueClosure(entry: string): Promise<ReadonlySet<string>> {
     // oxlint-disable-next-line no-await-in-loop -- a walk
     const source = await readFile(join(SRC, file), "utf8");
     for (const match of source.matchAll(VALUE_IMPORT)) {
-      const target = match[2]?.replace(/^\.\//u, "");
-      if (match[1] === undefined && target !== undefined) queue.push(target);
+      const target = match[2];
+      if (match[1] === undefined && target !== undefined) queue.push(under(file, target));
     }
   }
   return seen;

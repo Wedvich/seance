@@ -1,6 +1,6 @@
+import { CLAUDE_PANES } from "./agents/panes.ts";
 import { readAgentSession } from "./agent-session-file.ts";
 import { processNames, processStart } from "./peer.ts";
-import { CLAUDE_COMMAND } from "./sessions.ts";
 
 /**
  * A session's `claude` process, `<pid>:<start>` (DESIGN.md, "Replies by handle", `Bound.session`). The start time is
@@ -26,7 +26,7 @@ export interface ClaudeProcess {
 
 /**
  * The `claude` process a peer belongs to: the innermost process on its chain (peer first, the pane process last) whose
- * name `CLAUDE_COMMAND` accepts, with its start time. Innermost, because the peer is the child of the `claude` that
+ * name `CLAUDE_PANES.command` accepts, with its start time. Innermost, because the peer is the child of the `claude` that
  * started it (`seance inbox`, `seance mcp`, `seance session-event`): a wrapper above it that carries the name (a shell
  * script called `claude` that runs `claude` twice) or a `claude` that started another in a tool is never the peer's
  * session, and the wrapper, which outlives every `claude` it runs, never holds its facts. A pane that `exec`s `claude`
@@ -39,7 +39,7 @@ export interface ClaudeProcess {
 export async function claudeProcessOf(chain: readonly number[]): Promise<ClaudeProcess | null> {
   for (const pid of chain) {
     // oxlint-disable-next-line no-await-in-loop -- nearest the peer first, and a handful of hops
-    if (!(await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name))) continue;
+    if (!(await processNames(pid)).some((name) => CLAUDE_PANES.command.test(name))) continue;
     const start = processStart(pid);
     return start === null ? null : { pid, start, key: sessionKey(pid, start) };
   }
@@ -59,7 +59,7 @@ export async function nestedClaude(chain: readonly number[], configDirs: readonl
   if (own === null) return false;
   for (const pid of chain.slice(chain.indexOf(own.pid) + 1)) {
     // oxlint-disable-next-line no-await-in-loop -- a handful of hops, each its own read
-    if (!(await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name))) continue;
+    if (!(await processNames(pid)).some((name) => CLAUDE_PANES.command.test(name))) continue;
     const start = processStart(pid);
     // oxlint-disable-next-line no-await-in-loop -- as above
     if (start !== null && (await readAgentSession(pid, start, configDirs)).kind !== "none") return true;

@@ -246,7 +246,7 @@ export async function ancestorBelow<T>(
 }
 
 /**
- * What a process is called to tmux and `ps`, as `CLAUDE_COMMAND` (`sessions.ts`) expects it. Linux: argv[0]'s basename
+ * What a process is called to tmux and `ps`, as `CLAUDE_PANES.command` (`agents/panes.ts`) expects it. Linux: argv[0]'s basename
  * (the symlink name `claude`) and the kernel's comm (the versioned filename, or a script's own name). macOS: the
  * kernel's `pbi_comm` and `pbi_name` from `proc_pidinfo`, exec-free, else (libproc will not load, or the process is
  * another user's) `ps -o comm=`, which prints argv[0] as exec'd. Either way a name is something the process or its exec
