@@ -2510,7 +2510,9 @@ describe("M4 shapes", () => {
   });
 
   test("a status carries agent logins' quota and health: lq bounded, lx/lu/lb disjoint and bounded together", () => {
-    const lq = [{ x: 0, h: 3, d: 40, hr: 1_760_000_000, dr: 1_760_500_000, c: 0, s: "cache" as const, at: 1_759_999_000 }];
+    const lq = [
+      { x: 0, h: 3, d: 40, hr: 1_760_000_000, dr: 1_760_500_000, c: 0, s: "cache" as const, at: 1_759_999_000 },
+    ];
     const status = { at: 1, scan: 2, lq, lb: [0], lx: [1], lu: [2] };
     expect(parseMachineStatus(status)).toEqual(status);
     const plain = parseMachineStatus({ at: 1, scan: 2 });

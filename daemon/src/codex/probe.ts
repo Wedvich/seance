@@ -1,10 +1,4 @@
-import {
-  AGENT_LOGIN_TEXT_MAX,
-  isRecord,
-  TASK_SPEC_LIMITS,
-  type QuotaReading,
-  type ScopedWindow,
-} from "@seance/shared";
+import { AGENT_LOGIN_TEXT_MAX, isRecord, TASK_SPEC_LIMITS, type QuotaReading, type ScopedWindow } from "@seance/shared";
 import { childEnv, exec } from "../exec.ts";
 
 /**

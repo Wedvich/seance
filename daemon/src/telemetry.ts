@@ -1,6 +1,13 @@
 import { readFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import type { AgentLogin, AgentLoginKind, CustodianStatus, GithubRate, MachineStatus, SessionEntry } from "@seance/shared";
+import type {
+  AgentLogin,
+  AgentLoginKind,
+  CustodianStatus,
+  GithubRate,
+  MachineStatus,
+  SessionEntry,
+} from "@seance/shared";
 import type { AuthView } from "./auth-health.ts";
 import type { LoginView } from "./codex/account.ts";
 import type { TraitLists } from "./trait-probes.ts";

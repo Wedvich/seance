@@ -286,7 +286,9 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
           const id = queued.shift();
           if (id === undefined || stopped) return;
           // oxlint-disable-next-line no-await-in-loop -- one run at a time is the point
-          await inRefreshLane(() => attempt(id)).catch((err: unknown) => log.warn(`usage refresh: ${id}: ${String(err)}`));
+          await inRefreshLane(() => attempt(id)).catch((err: unknown) =>
+            log.warn(`usage refresh: ${id}: ${String(err)}`),
+          );
         }
       } finally {
         draining = null;
