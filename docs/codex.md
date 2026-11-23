@@ -107,10 +107,15 @@ stateDir()/codex/              0700, the daemon's own
   skips when another process refreshed). The daemon never makes a copy or a link of `auth.json`: the first refresh of a
   copy logs every other copy out (`refresh_token_reused`, docs/agents.md spike 2).
 - **`config.toml` is generated whole** at each daemon start, never edited: `cli_auth_credentials_store = "file"`, update
-  checks off, `project_doc_fallback_filenames = ["CLAUDE.md"]` so Codex reads the repos' CLAUDE.md files (S9),
-  `[mcp_servers.seance]` resolved as `daemon/src/link.ts` resolves it for Claude (through `PATH`, never
-  `process.execPath`), and no hooks. Approval, sandbox and reviewer go on each `thread/start` (D5); remote control is
+  checks off, `project_doc_fallback_filenames = ["CLAUDE.md"]` so Codex reads a repo's CLAUDE.md where a directory has
+  no AGENTS.md (S9), `project_doc_max_bytes = 262144`, `[mcp_servers.seance]` resolved as `daemon/src/link.ts`
+  resolves it for Claude (through `PATH`, never `process.execPath`), and no hooks. Approval, sandbox and reviewer go on each `thread/start` (D5); remote control is
   enabled per server over the API (phase 3), never by config: a `--listen` server starts with it `disabled` (S5, part).
+- **A repo's instructions reach Codex whole.** _Decided: the 256 KiB cap, because_ Codex cuts project instructions at
+  32 KiB by default (S9) and Claude Code reads a CLAUDE.md whole, so a longer file would silently lose its last rules
+  to a Codex session alone. Where a directory has an AGENTS.md, Codex reads it instead of CLAUDE.md (S9); Séance
+  leaves that to the repo, since an AGENTS.md is the repo's word to Codex, and a pointer one ("Read and follow
+  CLAUDE.md", as the PengeFix repos have) was followed with a read at the turn's start (S9).
 - **`config.json` gains a `codex` block**, the machine's own, parsed strictly like `adapters`: `approvalPolicy`
   (`untrusted`, `on-request`, `never`; default `on-request`), `sandbox` (`read-only`, `workspace-write`; default
   `workspace-write`; `danger-full-access` refused), `approvalsReviewer` (`user`, `auto_review`; default `auto_review`).
@@ -187,12 +192,20 @@ stateDir()/codex/              0700, the daemon's own
 
 ### Login health
 
-- **From the same `account/read`, never from the home's files.** The daemon opens no credential file, not even through
+- **From the same probe, never from the home's files.** The daemon opens no credential file, not even through
   a child: strictly less than Claude's auth health, which has to. `refreshToken` is never set, so Codex refreshes under
   its own rules (within 5 minutes of expiry, or 8 days after the last).
-- **States:** signed in and identified (`ok`), `account: null` with `requiresOpenaiAuth` (signed out: `authOk: false`),
-  a refresh refused (`refresh_token_reused`, revoked: expired), a probe that failed or has not run (unknown). What
-  `account/read` answers on a lapsed login is S4. Codex gives no refresh-token expiry, so there is no `expiring`.
+- **States, read from `account/rateLimits/read`'s answer**, since `account/read` answers `account: null` both signed
+  out and with a login the backend refuses (S4):
+  - **`ok`**: it answers, and both id halves are present (one missing is unidentified: "Identity").
+  - **Signed out** (`authOk: false`): JSON-RPC error `-32600`, "authentication required", answered with no network
+    call. A home with no `auth.json` and one Codex cannot parse answer alike (S4); `seance codex login` fixes both.
+  - **Expired** (`lx`): error `-32603` whose message carries `401 Unauthorized`, the backend refusing the login (S4).
+    The parser tests that one fixed text and keeps nothing of the message, which quotes the backend's response body,
+    so a change of wording reads as unknown, never as signed in.
+  - **Unknown** (`lu`): any other failure (another `-32603`: the network, the backend), a timeout, or no probe yet.
+- Codex gives no refresh-token expiry, so there is no `expiring`. `codex login status` is no health check: it reported
+  "Logged in" for the login S4's backend refused.
 - **Alerts** reuse the leader's `authAlertStep`, its `SettingsRecord.authAlerts` entries and the `expired` push text,
   for a login read from `lx`. `AuthAlerted.exclave` holds an exclave id, so a login's entry needs a key no exclave id
   can be that still passes the step's `routable` check and an older leader's parser (an older leader then drops it as
@@ -442,7 +455,7 @@ session's `watch_github` is refused `nolistener` until messages land.
 
 ## Threat model changes
 
-To land in DESIGN.md's threat model and CLAUDE.md's invariants with the code that makes them true:
+To land in DESIGN.md's threat model with the code that makes them true:
 
 1. **A second credential store**: `stateDir()/codex/home/auth.json`, a ChatGPT refresh token. Codex alone writes and
    refreshes it. The daemon never opens, reads, copies, links or backs it up: the first refresh of a copy logs out the
@@ -513,7 +526,7 @@ Each is one PR, with DESIGN.md, CLAUDE.md and the docs it touches in the same co
    the windows, the credits state, rename, the "Open for work" switch through the existing account hold) and the
    Machines card's login row; MCP `list_machines`; the archivist's quota series; the leader's login alert.
 
-**Phase 2: auto tasks run.** Checks S1 (a Plus login), S4, S8's macOS half and S9 first.
+**Phase 2: auto tasks run.** Checks S1's and S4's rest and S8's macOS half first.
 
 3. **The field:** `TaskRequest.agent`, `AGENT_DEP_SENTINEL`, `CAPABILITIES.codex`'s leader half, the route filters,
    account-by-agent counting and the spill, the V1 refusals. Nothing places a Codex task yet: no daemon launches one.
@@ -540,20 +553,22 @@ Each is one PR, with DESIGN.md, CLAUDE.md and the docs it touches in the same co
 
 Run 2026-11-23:
 
-| Spike                                       | Where               | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **S2.** The TUI attaches                    | Mac, 0.170.0        | Yes, to a thread another client started, once it has had a turn (before: "No saved session found"); it showed the history and a pending approval, and its own turns reached the other client.                                                                                                                                                                                                                                                                                              |
-| **S3.** Notifications and approvals         | Mac, 0.170.0        | Status, turn and rate-limit notifications reach every client, whoever started the turn; so do approval requests, and an answer from any client resolves them for all; unanswered, the turn waits. `auto_review` approved a network escalation in about 3 s with no client asked. A `--listen` path is a symlink into Codex's own `/tmp/codex-daemon-<uid>/`. Another thread (Codex naming the thread) reports on the same connection. Bun's WebSocket cannot dial a unix socket; `ws` can. |
-| **S6.** Quota on a fresh probe              | Mac, 0.170.0        | A live fetch (about 0.5 s; the 5-hour figure moved with the spike's own turns). Windows of 300 and 10080 minutes, `resetsAt` in unix seconds, only the `codex` bucket. Both id halves present and identical across two processes (S1, part). Credits off on this Business login.                                                                                                                                                                                                           |
-| **S8.** The sandbox on Linux                | Thad (LXC), 0.166.0 | Starts with no host change (system `bwrap` 0.12.0, seccomp, a network namespace). Under the workspace profile: writes in cwd pass, `$HOME` and `CODEX_HOME` are read-only, `/tmp` is writable and is the host's, the network is off, reads outside cwd pass; cwd's `.git`, `.codex`, `.agents` are read-only.                                                                                                                                                                              |
-| **S5, part.** Remote control off by default | Mac, 0.170.0        | A `--listen` server reports `remoteControl/status` `disabled` at start.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Spike                                       | Where               | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **S2.** The TUI attaches                    | Mac, 0.170.0        | Yes, to a thread another client started, once it has had a turn (before: "No saved session found"); it showed the history and a pending approval, and its own turns reached the other client.                                                                                                                                                                                                                                                                                                                        |
+| **S3.** Notifications and approvals         | Mac, 0.170.0        | Status, turn and rate-limit notifications reach every client, whoever started the turn; so do approval requests, and an answer from any client resolves them for all; unanswered, the turn waits. `auto_review` approved a network escalation in about 3 s with no client asked. A `--listen` path is a symlink into Codex's own `/tmp/codex-daemon-<uid>/`. Another thread (Codex naming the thread) reports on the same connection. Bun's WebSocket cannot dial a unix socket; `ws` can.                           |
+| **S6.** Quota on a fresh probe              | Mac, 0.170.0        | A live fetch (about 0.5 s; the 5-hour figure moved with the spike's own turns). Windows of 300 and 10080 minutes, `resetsAt` in unix seconds, only the `codex` bucket. Both id halves present and identical across two processes (S1, part). Credits off on this Business login.                                                                                                                                                                                                                                     |
+| **S8.** The sandbox on Linux                | Thad (LXC), 0.166.0 | Starts with no host change (system `bwrap` 0.12.0, seccomp, a network namespace). Under the workspace profile: writes in cwd pass, `$HOME` and `CODEX_HOME` are read-only, `/tmp` is writable and is the host's, the network is off, reads outside cwd pass; cwd's `.git`, `.codex`, `.agents` are read-only.                                                                                                                                                                                                        |
+| **S5, part.** Remote control off by default | Mac, 0.170.0        | A `--listen` server reports `remoteControl/status` `disabled` at start.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **S4, part.** A home with no usable login   | Mac, 0.170.0        | Three throwaway homes. Empty: `account/read` gives `account: null`, `requiresOpenaiAuth: true`; `account/rateLimits/read` gives `-32600` "authentication required", no network. A garbage `auth.json`: the same answers. A fake login with expired tokens no issuer signed: `account: null` too (also with `refreshToken: true`), and `-32603` naming the backend's `401 Unauthorized`; Codex tried no refresh, and `codex login status` said "Logged in". A first start fills an empty home with Codex's databases. |
+| **S9.** A repo's instructions               | Mac, 0.170.0        | With the fallback set, Codex read CLAUDE.md in a plain directory and in a git worktree; where AGENTS.md sat beside it, only AGENTS.md. A pointer AGENTS.md was followed with `cat CLAUDE.md`. Instructions are cut at 32 KiB: markers at byte 32,437 seen, 33,480 not; with `project_doc_max_bytes = 262144`, a rule at byte 98,020 of this repo's CLAUDE.md was seen.                                                                                                                                               |
 
 Still to run, each before the phase named; each checks a fact the design already has a path for:
 
 - **S1, rest** (phase 2): a personal Plus login's two id halves, and one account signed in on two machines reading equal.
-- **S4** (phase 2): what `account/read` answers after `refresh_token_reused`, after a revoke, and signed out.
+- **S4, rest** (phase 2): a real login after a revoke and after `refresh_token_reused` reads as expired. It needs a
+  login the owner is willing to lose; a refresh failure that is not a `401` would read as unknown, and the rule moves.
 - **S8, macOS half** (phase 2): the file store in a Séance home and `codex login --device-auth`.
-- **S9** (phase 2): `project_doc_fallback_filenames = ["CLAUDE.md"]` makes Codex read a repo's CLAUDE.md files.
 - **S5, rest** (phase 3): `remoteControl/enable` on a `--listen` server reuses the home's enrollment and pairing.
 - **S7** (phase 3): a link to a thread in the ChatGPT app, for `agent.remote`.
 
