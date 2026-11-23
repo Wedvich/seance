@@ -36,7 +36,7 @@ import {
 } from "./custodian-launch.ts";
 import { CUSTODIAN_DEFAULTS } from "./config.ts";
 import { DEFAULT_EXCLAVE } from "./exclaves.ts";
-import { shq } from "./spawn.ts";
+import { shq } from "./shq.ts";
 import { scriptStub } from "../test/fixtures.ts";
 
 let base = "";

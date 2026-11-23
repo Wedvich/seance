@@ -5845,7 +5845,7 @@ Where the build adds to or departs from the wording above:
   best effort. It lives outside the directory so the session never sees it, and it is what
   cleanup and continuations read. The launch ledger is untouched, and reap from the CLI,
   which does not own the ledger, can read it.
-- **The command line** (`daemon/src/spawn.ts`): ` --add-dir ${shq(dir)}` per directory,
+- **The command line** (`daemon/src/agents/claude.ts` since the driver seam, `spawn.ts` before): ` --add-dir ${shq(dir)}` per directory,
   placed directly before `--model`. `--add-dir <directories...>` is variadic in
   `claude --help` (checked 2026-10-28, Claude Code 2.1.312), so a value is bounded only
   by the next flag, and `--model` always follows. The path is the daemon's own, never a
@@ -6489,6 +6489,32 @@ of this section built.
   `HandlerContext`/`RunOpts` — session group, pane-death budget, doctor's tmux
   checks), and leaving `SpawnFailure`/`SpawnOutcome` in `spawn.ts`, the one
   file such a fork deletes.
+- **Agent drivers** (`daemon/src/agents/`, built 2026-11-23, docs/codex.md "Build order" item 5): below the backend,
+  the tmux backend splits again, between what is agent-neutral and what only the agent a pane runs knows.
+  `AgentDriver` (`agents/driver.ts`) is three members: `panes` (how its panes are told apart: a tmux glob over
+  `pane_start_command` that only its own launches match, and the process name of one séance did not start),
+  `launch(spec)` (trust answered fail-open, then the pane's shell string, its `-e` pairs and start directory, with the
+  seed delivered as data; `started(window)` once the window is tagged, answering the session id the launch ledger
+  notes; `dispose()` after registration) and `close(pane, {graceMs, leaveDead})` (the graceful half of a despawn;
+  `killPane` stays the caller's). The spawn path keeps everything else: the gates, the ledger, worktree names and the
+  worktrees it makes itself (a stack), the seed's text (preamble, autonomy note, task, attachments), the window, the
+  task tag, registration and harvest. `claudeDriver` (`agents/claude.ts`) holds what used to sit in `spawn.ts` and
+  `despawn.ts`: the argv (pinned byte for byte by `agents/claude.test.ts`, captured before the move),
+  `RESUME_NEVER_ASKS`, `--session-id`/`--resume`, the plan-mode bypass read, the seed file and its redirect, the trust
+  calls, the `/exit` keys and the Keep answer. Its recognition facts are `CLAUDE_PANES` in `agents/panes.ts`, a module
+  that imports nothing, because `sessions.ts` and `tmux.ts` read every driver's (`AGENT_PANES`; `OURS` is folded from
+  them) and must load no module that logs (`claude-process.ts`'s closure, `message-layering.test.ts`).
+  `CLAUDE_PANES.command` is also what `sessionOf` and the adapter feed call a `claude` process: that is session
+  identity, Claude's until a second driver lands. `driverFor` in `spawn.ts` and despawn's close answer Claude alone
+  until a task carries its agent. The shape is Codex's session (docs/codex.md, "The session") as a second
+  implementation: its run dir and script are `launch`, its `thread/start` is `started` (the thread id is the daemon's
+  own call's answer, so `started` returns the id rather than `launch` choosing it), its `turn/interrupt` is `close`,
+  its run-dir mark is `panes`. A driver whose agent does not make its own worktree is handed one the spawn path made,
+  as for a stack (`LaunchSpec.worktree` names it either way). Named driver, never adapter: an adapter is messaging's
+  (Adapters). Rejected: the seed text in the driver (the preamble and autonomy note are the same facts for every
+  agent; an agent-aware wording is a parameter of the spawn path's, not a second copy), trust as its own member (it is
+  only ever the first step of a launch), and a driver per pane state (`classifyPane` reads Claude's screen and stays in
+  `sessions.ts` until a second agent's panes need classifying).
 - **Seams** (M4 readiness, R6): `startDaemon` takes `now`, `httpFetch` and `probe` (`RunOpts`), and
   hands the clock and `httpFetch` to the leader and telemetry, `probe` to telemetry; defaults are
   `Date.now`, the global `fetch` and `hostProbe`. They are what lets a daemon-tier test
@@ -7850,7 +7876,7 @@ of this section built.
   `-t` would also resolve `main:1.0`, `{marked}` or `=name` — and must name a
   pane the session list's own predicate (`isRegistered`) accepts, so despawn
   reaches exactly what a list offered; `invalid_target` and `session_not_found`
-  are security outcomes in the way `repo_not_found` is. Graceful first, then
+  are security outcomes in the way `repo_not_found` is. Graceful first (the driver's `close`, `agents/claude.ts`), then
   force, and the reply says which happened (`outcome: "exited" | "killed"`):
   Esc (interrupts a running turn), Ctrl+C (clears the draft), literal `/exit`,
   Enter, then a ~5s poll through the pane classifier. The Ctrl+C is not in the
@@ -12524,7 +12550,7 @@ session's pane process is its shell, which outlives a restarted `claude` (`claud
 no `ended`, so a handle bound to the pane pid would answer a stranger: the second `claude` would read the first's
 replies and could answer its questions. `session` is the `claude` process itself, read off the process tree, never the pane's start command
 (`sessionOf`, `daemon/src/messages.ts`): the **innermost** process on the peer's chain (`ancestorBelow`,
-`daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
+`daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_PANES.command`, `agents/panes.ts`, read by
 `processNames`: argv[0] and comm on Linux, `pbi_comm` and `pbi_name` from `proc_pidinfo` on macOS, `ps` only where
 libproc will not load), with its **start time** (`processStart`: `/proc/<pid>/stat` field 22, or `pbi_start_tvsec` and
 `pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seance inbox` or `seance mcp`, is the child

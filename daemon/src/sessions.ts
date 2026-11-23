@@ -1,30 +1,21 @@
 import { constants } from "node:os";
 import { EXIT_STATUS_MAX, isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
+import { runsAgentCommand } from "./agents/panes.ts";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
 import { capturePane, CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
-
-// What tmux reports as a claude pane's foreground command depends on the host,
-// not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
-// basename — the native installer keeps the binary under a versioned filename,
-// so "2.1.267" — while Linux (and WSL) tmux reads argv[0], the symlink name
-// "claude". Not "node": an npm-installed claude runs as one, but so does every
-// dev server, and under a title-setting shell such a pane would list as a
-// session. Hand-started npm claudes are the cost; séance's own are covered
-// below regardless of what the process is called.
-export const CLAUDE_COMMAND = /^(?:claude|\d+\.\d+\.\d+)$/u;
 
 /**
  * The one registration predicate, shared by the session list and the spawn
  * path so a `registered` outcome is by construction a window the list holds.
- * A séance window (`ours`: its start command is our `exec … claude
- * --remote-control` line) registers on the title alone — nothing else ever
+ * A séance window (`ours`: its start command carries a driver's mark,
+ * `AgentPanes.startMark`) registers on the title alone — nothing else ever
  * runs in that pane, and what tmux calls the process there is a host detail
  * (`claude`, the versioned filename, `node`, or the `caffeinate` wrapper on
  * macOS). The seat's round (`custodian`) is the same: its launch script `exec`s
  * claude, and on strict-mode Linux behind the vsock filter's `bwrap`, which
  * Linux tmux names the pane's command (the foreground group's leader). A pane
- * séance did not start needs a claude-named process too, or a shell that set a
- * title would count.
+ * séance did not start needs a process an agent's `AgentPanes.command` names too,
+ * or a shell that set a title would count.
  */
 export function isRegistered(pane: {
   readonly ours: boolean;
@@ -32,11 +23,11 @@ export function isRegistered(pane: {
   readonly titled: boolean;
   readonly command: string;
 }): boolean {
-  return pane.titled && runsClaude(pane);
+  return pane.titled && runsAgent(pane);
 }
 
-function runsClaude(pane: { readonly ours: boolean; readonly custodian: boolean; readonly command: string }): boolean {
-  return pane.ours || pane.custodian || CLAUDE_COMMAND.test(pane.command);
+function runsAgent(pane: { readonly ours: boolean; readonly custodian: boolean; readonly command: string }): boolean {
+  return pane.ours || pane.custodian || runsAgentCommand(pane.command);
 }
 
 /**
@@ -309,7 +300,7 @@ export function paneRunningTask(panes: readonly PaneInfo[], taskId: string): Pan
 /** What the list-panes fields settle alone; null when only the screen can tell. */
 function stateWithoutScreen(pane: PaneInfo): PaneState | null {
   if (pane.dead) return "dead";
-  if (!runsClaude(pane)) return "shell";
+  if (!runsAgent(pane)) return "shell";
   if (!pane.titled) return "starting";
   return null;
 }

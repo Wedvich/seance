@@ -17,9 +17,10 @@ import type { Conversations } from "./conversations.ts";
 import { exec } from "./exec.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { hardenedGit } from "./git-hardened.ts";
+import { CLAUDE_PANES } from "./agents/panes.ts";
 import { parsePsParents, processNames, processStart } from "./peer.ts";
 import type { EndedTasks } from "./session-events.ts";
-import { CLAUDE_COMMAND, repoNames } from "./sessions.ts";
+import { repoNames } from "./sessions.ts";
 import { CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, TASK_FIELD } from "./tmux.ts";
 
 /**
@@ -82,7 +83,7 @@ export async function listFeedPanes(): Promise<readonly FeedPane[]> {
 }
 
 const isClaude = async (pid: number): Promise<boolean> =>
-  (await processNames(pid)).some((name) => CLAUDE_COMMAND.test(name));
+  (await processNames(pid)).some((name) => CLAUDE_PANES.command.test(name));
 
 /**
  * The shallowest `claude`-named process at or under each pane's process, by breadth: a pane that `exec`s claude is its

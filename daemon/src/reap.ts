@@ -4,7 +4,7 @@ import { isRecord, type RepoEntry } from "@seance/shared";
 import { pruneAttachments, type AttachmentPruneReason, type PrunedAttachments } from "./attachments.ts";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
-import { answerKeepWorktree } from "./despawn.ts";
+import { answerKeepWorktree } from "./agents/claude.ts";
 import { harvestable } from "./exit-status.ts";
 import type { FsmonitorDaemon, FsmonitorSeams } from "./fsmonitor.ts";
 import { hardenedGit } from "./git-hardened.ts";

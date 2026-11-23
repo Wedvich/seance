@@ -24,7 +24,7 @@ import { createWorktreeRule } from "../src/custodian-worktree.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { exchange } from "../src/local-client.ts";
 import { custodianNotesPath, socketPath, stateDir } from "../src/paths.ts";
-import { shq } from "../src/spawn.ts";
+import { shq } from "../src/shq.ts";
 import { scanRepos } from "../src/scan.ts";
 import { ROUND_SEED } from "../src/custodian-agent.ts";
 import type { RoundEntry } from "../src/custodian-rounds.ts";
