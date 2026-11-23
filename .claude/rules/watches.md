@@ -11,7 +11,7 @@ paths:
 delivery.** Requirements, not observations: DESIGN.md's "Watches" and its threat model ("A daemon's
 watch table binds a watch to its session's `claude` process") are the record; docs/gh-watch.md indexes
 W1–W11. CLAUDE.md's recurring rules hold throughout; the leader's side (the poller, `watch-set`,
-`watch-event`, the caps and the reserve) is in CLAUDE.md's threat-model invariants.
+`watch-event`, the caps and the reserve) is github.md.
 
 - The local socket's `watch` frame (`add`, `remove`; `watch-frame.ts`, `parseWatchFrame`, exactly its
   fields) is bound only by peer pid, to the pane, its pane process and the innermost `claude` on the

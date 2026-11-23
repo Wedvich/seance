@@ -34,3 +34,21 @@ CLAUDE.md's recurring rules hold throughout.
   never trimmed by `fitStatus`.
 - The leader's outside pass drains a machine only from `drainStart` (`shared/src/status-reader.ts`: `dr`,
   else `cl` for a daemon not advertising `CAPABILITIES.softClose`, else never).
+
+## The drain's session ask
+
+The drain trigger's pass rules are scheduler.md's "Successors and passes".
+
+- The drain's session ask (`daemon/src/drain-ask.ts`) sends a pane only constant keys — `DRAIN_PROMPT` by
+  `send-keys -l`, then Enter, and Escape and Ctrl+C, the Ctrl+C once and never a second, no Escape in the
+  draft clear, never a field of any frame.
+- Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`),
+  once per pane and task per `cl` per process (a repeated close at the same `cl` asks and Escapes nothing
+  already asked), only while this machine is draining at the `cl` the ask began under (checked before an
+  Escape goes, not after).
+- The text only after that pane's `idle` carrying `turnEnded` and never while its last frame is
+  `needs-input` (the drain can deny a permission, never grant one), re-checking the pane, its task, `cl`,
+  its last frame and that its input box shows exactly the prompt before Enter, audited `origin=drain`
+  with the task id and outcome, never the text.
+- A `session-pass` carries `drain` only while its machine is closed, and the leader writes
+  `trigger: "drain"` for it only while that machine's status carries `cl`.
