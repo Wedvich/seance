@@ -1,7 +1,9 @@
 # Other agents (Codex, …) — scoping
 
 **Status: analysis, nothing built.** Decided only what "Antigravity CLI", below, records (2026-11-19).
-Codex was spiked on 2026-11-19 ("Codex spike", below); its answers revise the order.
+Codex was spiked on 2026-11-19 ("Codex spike", below); its answers revise the order. Codex's design,
+built on this file, is docs/codex.md (2026-11-23); where the two differ it wins (the owner chose one Codex home per
+login over the pool of paired homes this file's verdict proposes).
 Written 2026-11-13 from an owner voice memo
 (2026-11-12) and a read of the codebase at `ff048d3`. The question: could Séance spawn sessions of
 agents other than Claude Code — OpenAI Codex first, later Gemini, Mistral or whatever a free-token
