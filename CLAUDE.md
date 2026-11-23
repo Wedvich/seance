@@ -11,117 +11,50 @@ history service — DESIGN.md, "Archivist"; it imports daemon modules by path, n
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
 `seance mod install` (DESIGN.md, "Claude Code mods").
 
-Read the docs before changing behavior — this file deliberately doesn't repeat them:
+Read the docs before changing behavior — this file deliberately doesn't repeat them. Each doc opens with
+a **Status** line (built, spec, draft); trust it over memory.
 
-- **README.md** — setup, deploy, and update walkthrough.
-- **DESIGN.md** — the decision record: architecture, wire protocol spec, threat model, and every
-  rejected alternative with rationale. If a change alters decided behavior, update DESIGN.md with it.
-  For protocol work, start at its "The map: one spawn, end to end" subsection — a sequence diagram
-  plus a frame→module table saying which file owns each frame; `shared/src/types.ts` is the schema
-  of record, so a frame change touches both. Its "Archivist" section is the archivist's whole
-  record — the decisions code cites as A1–A37 and their rejected alternatives at its end; read it
-  before touching history, retention, registry roles or the Machines screen's charts (setup,
-  move-the-seat runbook and schema are the README's step 9).
-- **docs/psk.md** — where the PSK lives on each platform (keychain / DPAPI blob / TPM-sealed blob /
-  a blob systemd unseals and delivers to the unit on systemd ≥ 256),
-  how import keeps it off argv and shell history, and what the TPM path does and does not protect.
-  Constraints on the psk-store/import code live here, nowhere else in prose.
-- **docs/platform-notes.md** — Linux/WSL service specifics: linger, the Windows logon pin task, and
-  the service-definition lag that update/install code must respect, plus the one-time catch-up for
-  older installs.
-
-- **docs/development.md** — commands, local dev (dev server, `.dev.vars`), deploy mechanics
-  (wrangler is per-workspace, not hoisted), and how the tests are layered. Read it before running
-  the suite, setting up local dev, or deploying; don't restate it here — a change to commands,
-  deploys or test layout updates that file.
-- **docs/scheduler.md** — the scheduler plan (a sealed queue in the relay, run by a relay-nominated
-  daemon; filter/score routing across machines and accounts). M1 (visibility: the `status`
-  frame, daemon telemetry, the Machines screen), M2 (routing, leadership, the PWA's `auto`) and
-  M3 (the durable queue in the relay's store) are built and recorded in DESIGN.md; M4 records
-  decisions ahead of code, and DESIGN.md takes over each part as it lands. Read it before
-  scheduler work.
-- **docs/drain.md** — spec for closing a machine to new scheduled work and draining it. Item 1
-  (close, reopen, `MachineStatus.cl`, the `closed` filter and `machine_closed` gate, the PWA switch,
-  `seance close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
-  machine"; the leader's outside pass (item 2: `trigger: "drain"`, `Task.drained`, `drainView`, `seance close --wait`) is built too, in DESIGN.md, "The drain's outside pass", and so is the session ask (item 3: `CAPABILITIES.drainAsk`, `now`, the
-  `drain` mark on `session-pass`), in DESIGN.md, "The drain's session ask". §6's close warning (a closed leader keeps leading until empty)
-  and its "Later" (once empty, the signed role `fallback` beside `scheduler`, which `nominate` ranks below any other
-  connected nominee: `daemon/src/lead-fallback.ts`) are in "Closing a machine" and §12's time-to-empty line in "The drain's outside pass", and so is the soft close by default
-  (N5: `soft`, `closed.drainAt`, `MachineStatus.dr`, `drainStart`, `CAPABILITIES.softClose`, and the clients' surfaces —
-  the PWA's soft Close, Drain and Drain now, `seance close --drain`, MCP `drain` — in the three DESIGN.md sections
-  above); every part is built, and what is left in the file is the names, the owner's decisions, §11 and §12's
-  list of measures. Read it before scheduler routing or shutdown work.
-- **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
-  away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
-  and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
-  before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — built and folded: PR 1, PR 2, the reply by handle and the adapter seam (3a the child and state out, 3b delivery in, messages out and the subscription, 3c installing): local delivery (the `inbox` mod, the `inbox`
-  and `message` frames, `send_message`), cross-machine routing through the leader (`session-message`,
-  `deliver-message`, `message-receipt`, `CAPABILITIES.messageRoute`) and replies to a session with no task, by the id of
-  the message answered, on one machine or across (`replyTo`, `CAPABILITIES.messageReply`, `wake`; D3 amended), recorded
-  in DESIGN.md (Local op socket, "Session messages" and its "Cross-machine" and "Replies by handle" subsections;
-  "Adapters" for 3a: `config.json` `adapters`, the supervisor, the handshake, `snapshot`, `session`, `session-gone`,
-  `task`, `shared/src/adapter-protocol.ts` and its committed JSON Schema, audit origin `adapter`; for 3b: `deliver`,
-  `result`, `delivery`, the `message` frame out, `adapter:<name>` in `send_message`, the subscription in
-  `conversations.json`, the `tag` frame; for 3c, "Installing": `seance-adapter.json`, `seance adapter add | remove |
-  restart | status`, `adapter-status.json` and `adapter-restart.json`, `doctor`'s checks; the owner's brief, the fit
-  against three kinds of tool and the seam's rejected shapes; Claude Code mods; MCP server; Threat model item 6 and its
-  adapter invariant). What is left in the file is the problem, the spike evidence, the owner's decisions D1 to D4 and the
-  open questions. Read it, and DESIGN.md's "Adapters", before adding a leader event op or an adapter.
-- **docs/presence.md** — spec, nothing built: a session's self-declared `self.doing` tag (`set_self_tag`, the first key of the tags model, DESIGN.md "Tags and session identity"), `status` questions its daemon answers from presence without waking it, and the inbox mod merging a burst of wakes into one turn. Read it before touching `doing`, presence, receipts or the inbox mod's delivery.
-- **docs/gh-watch.md** — what is left of the spec: built (steps 1 to 4, spikes S1 to S4) and recorded in DESIGN.md,
-  "PR status" (the leader's poller, registry and reserve), "Watches" (the daemon's table and notes, W1–W11 with their
-  rejected alternatives, the weighing against extending `hand_off_task`, S4) and "MCP server". A session asks the fleet
-  to watch a GitHub PR or Actions run and is woken by a fixed note in its inbox. The file keeps an index of where each
-  part lives and the proposed /ship and owner-instruction changes (outside this repo, not applied). Read it, and those
-  sections, before touching the PR poller, `askGithub`, watches, or adding a way for sessions to wait on GitHub.
-- **docs/custodian.md** — what is left of the custodian spec: what 4b's drills left unsettled (the round's
-  containment — its own socket, the masks, the built environment, no network — is built, rounds are live, and it was
-  drilled on macOS and on Linux in both bwrap modes under its vsock filter: strict on WSL2, weaker nested on LXC), the open build-time details, and an
-  index of where each decision (C1–C49) is recorded in DESIGN.md. Everything else is built and recorded there: the
-  seat, the round and its containment ("The custodian's seat"), the round's verbs `sessions`, `close`, `capture`, `pr`,
-  `flag`, `nudge`, `interrupt`, `notes` and `done`, the flags and counts file and the round log ("The custodian frame
-  kind"), and `MachineStatus.cu`, the Machines row, the owner's shell verbs, the `custodian` app op and the card's menu
-  ("The custodian's status and the Machines row"). The custodian is one
-  seat per machine whose daemon starts a fresh, fenced Claude session per round to close finished sessions
-  (removing a worktree when nothing would be lost), nudge and interrupt stuck ones and flag the rest, through
-  `seance custodian` verbs the daemon checks, served only on the round's own socket. Read it, and those DESIGN.md
-  sections, before touching despawn, reap's merged check, a pane's tracked state, or anything that reads a live
-  session's screen.
-- **docs/agents.md** — analysis, nothing built: what spawning agents other than Claude Code
-  (Codex first, then Antigravity CLI `agy`, which replaced Gemini CLI) would touch — the agent as a
-  task field, launch, accounts, quota, session events, MCP, clients — the two risks (Codex's remote
-  control, binding by peer pid), both agents' spikes and hook mappings (Codex's answer: one
-  remote-control server per `CODEX_HOME`, so a pool of paired homes sharing one symlinked
-  `auth.json`, or a daemon-owned app-server), the
-  owner's two decisions (`agy` next; one account per machine for V1) and the order. Read it before adding a
+- **README.md** — setup, deploy, update; the archivist's setup and move-the-seat runbook (step 9).
+- **DESIGN.md** — the decision record: architecture, wire protocol, threat model, every rejected
+  alternative. A change to decided behavior updates it. Protocol work starts at "The map: one spawn,
+  end to end" (which module owns each frame); `shared/src/types.ts` is the schema of record, so a frame
+  change touches both. "Archivist" holds A1–A37: read it before touching history, retention, registry
+  roles or the Machines screen's charts.
+- **docs/development.md** — commands, local dev, deploy mechanics, test layering and the reasons behind
+  the Testing rules below. Read before running the suite, local dev or deploying.
+- **docs/psk.md** — where the PSK lives per platform and how import keeps it off argv; the only prose
+  home of the psk-store/import constraints.
+- **docs/platform-notes.md** — Linux/WSL service specifics (linger, Windows logon pin task, the
+  service-definition lag update/install code must respect).
+- **docs/scheduler.md** — the scheduler plan; M1–M3 built, M4 ahead of code. Read before scheduler work.
+- **docs/drain.md** — closing and draining a machine; built, keeps names, owner decisions and measures.
+  Read before scheduler routing or shutdown work.
+- **docs/leaving.md** — spec: the daemon's sealed `leaving` note. Read before touching shutdown,
+  presence or the systemd unit.
+- **docs/messaging.md** — session messages and the adapter seam; built, keeps spikes, D1–D4 and open
+  questions. Read it, and DESIGN.md's "Adapters", before adding a leader event op or an adapter.
+- **docs/presence.md** — spec: `self.doing`, presence-answered `status`, coalesced wakes. Read before
+  touching `doing`, presence, receipts or the inbox mod's delivery.
+- **docs/gh-watch.md** — GitHub watches; built, keeps an index into DESIGN.md. Read before touching the
+  PR poller, `askGithub`, watches, or a new way for sessions to wait on GitHub.
+- **docs/custodian.md** — the custodian; built, keeps 4b's open drill questions and an index of C1–C49.
+  Read before touching despawn, reap's merged check, a pane's tracked state, or anything that reads a
+  live session's screen.
+- **docs/agents.md** — analysis: agents other than Claude Code (Codex, `agy`). Read before adding a
   second agent or making the launch path agent-neutral.
-- **docs/codex.md** — design, nothing built, every question decided by the owner (2026-11-23): Codex as a
-  first-class account. One ChatGPT login per machine in one Codex home the daemon owns, shared by every session like
-  an exclave's config dir (`MachineInfo.logins`, never an exclave), identity, quota, credits and login health over the
-  app-server API (never the credential file), the task's `agent` field behind a sentinel and `CAPABILITIES.codex`, a
-  pane hosting its own app-server with the daemon as its client, escalations approved by Codex's reviewing agent, the
-  threat-model changes, the spikes run and the checks left, and a phased build. Read it, and docs/agents.md, before
-  any Codex work.
-- **docs/orchestrator.md** — draft, nothing decided or built: queueing a whole tracker project as
-  a living task graph, tended by long-lived orchestrator sessions that are not tasks, with the
-  tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
-  item and lists the open questions. Read it before building amend deps, anything that reads a
-  tracker, or a new kind of session that is not a task; build nothing from it until it is decided.
-- **docs/tags.md** — built and folded: tags at task and session scope (namespace = writer), session identity
-  (pane, process, conversation; a verified `agent.session`) and the adapter subscription that amends messaging's D3.
-  Steps 1 to 4 are built (the vocabulary in `shared/src/tags.ts`, the frame's `agent`, the conversation table and its
-  verification, `SessionEntry.tags`; the `session-tag` op, `conversations.json`, the PWA's session names and rename;
-  task tags: `TaskSpec.tags`, the sentinel, `ownerTags`, `SpawnRequest.ref`; the adapter subscription and adapter tags),
-  recorded in DESIGN.md: "Tags and session identity" (the model: the owner's T1–T4, the levels, the vocabulary, the
-  surfaces, the rejected alternatives and the threat model), "Session events", "Session identity", "The owner's
-  label", "Task tags", "Adapters"; the PWA's per-namespace view of a session's tags is built too, but off the Machines card since 2026-11-19 until its place is decided. What is left in the
-  file is the open questions and the spikes' evidence (S1–S3, macOS and Linux) that verification rests on. Read the
-  DESIGN.md section before adding a field that labels a session or a task, or touching session identity or adapter
-  addressing.
+- **docs/codex.md** — design, nothing built, every question decided by the owner: Codex as a
+  first-class account. Read it, and docs/agents.md, before any Codex work.
+- **docs/orchestrator.md** — draft, nothing decided: tracker projects as task graphs. Read before amend
+  deps, anything that reads a tracker, or a non-task session; build nothing from it.
+- **docs/tags.md** — tags and session identity; built, keeps open questions and spike evidence. Read
+  DESIGN.md's "Tags and session identity" before adding a field that labels a session or task, or
+  touching session identity or adapter addressing.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
+
+**This file holds rules, never the record.** A decision, its history or its evidence goes in DESIGN.md
+or a doc; here goes only the rule an agent must not break, and where its record lives.
 
 ## Deploys
 
@@ -132,98 +65,71 @@ updates them in the same commit. They are not auto-discovered — this list is h
 
 ## Testing
 
-Layout, commands and env vars are in docs/development.md; these are the rules that keep the suite
-green:
+Layout, commands and env vars are in docs/development.md, and so is the evidence behind each rule here
+("Why the testing rules hold"). The rules that keep the suite green:
 
-- Run the suite with `bun run test` (`scripts/test.ts`), never bare `bun test` — the last bullet
-  below is why.
-- Runner is `bun:test`, not Vitest — deliberate (DESIGN.md), don't introduce Vitest idioms.
-  The one exception is `claude-mods/`, whose tests only `claude plugin test` can run.
-- The daemon suites' isolation env vars (`SEANCE_TMUX_SOCKET`, `SEANCE_CLAUDE_BIN`) are set by the
-  tests themselves — useful to know when debugging. `spawn.test.ts` also sets
-  `SEANCE_MACHINE_TAG` before its tmux server boots, to prove an untagged spawn overrides it.
-- A fixed sleep before a _positive_ assertion is a latent flake: it has to outlast the slowest
-  machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
-  in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is
-  legitimate — a non-event can't be polled — so leave those alone.
-- Waiting on one signal proves nothing about another that nothing orders after it. A _positive_
-  assertion read straight after a wait on an independent chain (one stub's `requests()` after
-  another stub's answer was acted on; two sends of one `send`) is a latent flake too: the chains
-  finish within a fraction of a millisecond in either order, and the read rides on `pollUntil`'s
-  10 ms pace. Wait on the asserted thing's own signal (`waitForRequests`), as
-  `push-sender.test.ts`'s prune test does. A read is safe only when the awaited signal can come
-  solely after it (the same stub's answer, which follows its recording).
+- Run the suite with `bun run test` (`scripts/test.ts`), never bare `bun test` or a top-level
+  `bun test --parallel`: parallelism lives between shard processes, since `--isolate` resets the
+  once-per-process memos, and booting workerd within ~100 ms of a dispose in the same process breaks
+  its stdio. (`--parallel` inside the two daemon shards is fine.)
+- Runner is `bun:test`, not Vitest — deliberate (DESIGN.md). The one exception is `claude-mods/`,
+  whose tests only `claude plugin test` can run.
+- The daemon suites set their own isolation env vars (`SEANCE_TMUX_SOCKET`, `SEANCE_CLAUDE_BIN`;
+  `spawn.test.ts` also `SEANCE_MACHINE_TAG`).
+- Never a fixed sleep before a _positive_ assertion: poll (`pollUntil`, `daemon/test/fixtures.ts`).
+  A sleep before a _negative_ assertion is legitimate.
+- Wait on the asserted thing's own signal (`waitForRequests`), never on an independent chain's: two
+  chains finish in either order. A read is safe only when the awaited signal can come solely after it.
 - An e2e test ends every task it queued through `cancelTask` (`e2e/harness.ts`), never a bare
-  `client.cancel(...).catch(() => null)`, and never by killing its window alone. A file's tests share
-  one account under the leader's per-account cap (4), so a task left running starves later tests, and
-  a killed window frees its slot only at the 120s sweep. The leader refuses a task it still holds
-  `reserved` with `dispatching` — a reply, not a throw — including just after the store shows it
-  `running`, since the leader takes the write's ack after the store has it. `cancelTask` asks again on
-  that, and a suite that queues tasks asserts `takeLeakedTasks()` empty in `afterEach` (as
-  `auto.test.ts` and `leader.test.ts` do), so the test that leaked fails, not a later one. Before any other
-  leader op on a task you just saw `running` in the store, wait for the leader's own view
-  (`client.queue()`), as the mark-done test does.
-- Never let a test's first exec of a freshly written executable land inside a timed window. macOS
-  scans every never-executed file on first exec, one at a time machine-wide, so concurrent shards
-  queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
-  this stays green in CI while failing every local run. Exec it once in setup, and don't write a
-  new one: a bash stub is a `scriptStub` (`daemon/test/fixtures.ts`), a link to one committed file,
-  never a new script; a bun under another name is `bunNamed`, a copy made once per machine and bun
-  build. Never a hard link of the installed bun: removing one makes macOS's syspolicyd SIGKILL bun
-  execs anywhere on the machine (`bunNamed` says how; `bun-links.test.ts` holds it). Setup means
-  `beforeAll`: a stub written in `beforeEach` is a new file every test (`raycast-cli.test.ts` passes
-  per-test paths in by env instead).
-- A shell stub that a test stops with SIGINT traps it before writing anything the test waits on,
-  and idles as `sleep 1 >/dev/null 2>&1 & wait $!` in a loop, never a foreground `sleep`. macOS
-  `/bin/sh` is bash 3.2: a SIGINT landing while it waits on a foreground child is ignored outright
-  when untrapped, and lost now and then when trapped (after the child is reaped, before the handler
-  is restored), so the stub runs on to its SIGKILL. The redirect keeps the outliving `sleep` off
-  pipes the caller drains to EOF. `raycast-cli.test.ts`'s `ray` stubs are the example.
-- A private tmux server still loads the developer's own `~/.tmux.conf` — product code boots it, and
-  only `-f` skips the file — so local runs get its default-shell, hooks and `automatic-rename-format`
-  while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,
-  as `spawn.ts` does) rather than reading its automatic name, which on macOS is whatever tmux caught
-  mid-exec (`kernel_task`, `tmux`, `""`).
+  `client.cancel(...).catch(() => null)` or a killed window, and a suite that queues tasks asserts
+  `takeLeakedTasks()` empty in `afterEach`. Before another leader op on a task just seen `running` in
+  the store, wait for the leader's own view (`client.queue()`).
+- Never let a test's first exec of a freshly written executable land inside a timed window (macOS scans
+  it first, one at a time machine-wide). Exec it once in `beforeAll`, and write no new one: a bash stub
+  is a `scriptStub`, a renamed bun is `bunNamed` (`daemon/test/fixtures.ts`), never a hard link of the
+  installed bun (`bun-links.test.ts`).
+- A shell stub a test stops with SIGINT traps it before writing anything the test waits on, and idles
+  as `sleep 1 >/dev/null 2>&1 & wait $!` in a loop, never a foreground `sleep` (`raycast-cli.test.ts`'s
+  `ray` stubs).
+- Don't assert on anything the developer's `~/.tmux.conf` can set: name a test window at creation (`-n`).
 - Every tmux call that opens a pty (`new-window`, `new-session`, `split-window`, `respawn-pane`,
-  `respawn-window`) goes through `tmuxOk` (`daemon/src/tmux.ts`), in tests as in product code, or retries until
-  it lands as `machine-tag.test.ts`'s restart does. macOS's pty allocator fails such an open now and then, at
-  any call site (`respawn-pane`, then `new-window`, hit it on GitHub's macOS runners): `fork failed: Device not
-  configured` (ENXIO) when the machine reaches a new high of ptys in use since boot while another process frees
-  one, and `Unknown error: -6` when two opens collide. `tmuxOk` retries exactly those (`PTY_RACE` names the
-  kernel code). Only a freshly booted Mac shows the ENXIO race, since the kernel's pty table never shrinks:
-  reproduce it on a GitHub macOS runner beside a process churning ptys, not locally.
-- A test that needs its own process inside a session's pane (to be bound by peer pid, as a tool would be)
-  runs it through `ClaudeStub.runInPane` (`daemon/test/fixtures.ts`), not `respawn-pane -k`: it opens no pty
-  and kills nothing, where a respawn that hits the pty race above has already killed the pane's process.
-  `runInPane` starts it as the stub's child on the pane's own tty and untitles the pane, as the respawn did.
-- A test server binds the address it is dialed at — `hostname: "127.0.0.1"` on every `Bun.serve`.
-  Bun's default is the dual-stack `[::]`, and macOS lets another process's `SO_REUSEADDR` bind of
-  `127.0.0.1` on the same port (a VS Code helper, a dev server) sit on top of it and take every
-  `127.0.0.1` dial; the client then retries into the wrong server until its wait times out.
-  `daemon/test/harness.test.ts` holds the relay double to it.
-- `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
-  (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
-  wire protocol section is the spec.
-- Each pairwise suite keeps its double on purpose — the daemon's fake relay is controllable in ways
-  the real DO forbids — and the e2e suite is what catches fake-vs-real drift. Don't "upgrade" a
-  double to the real component.
-- The full suite is green on macOS and Linux. Two hard-won portability rules: tmux `-F` format
-  strings must use printable separators (tmux 3.4 mangles tabs to `_`; see `sessions.ts`/`tmux.ts`),
-  and sockets Bun dials into workerd need `perMessageDeflate: false` (frames die with close code
-  1002 otherwise).
-- Parallelism lives between shard processes (`scripts/test.ts`), never `bun test --parallel` at the
-  top level: `--parallel` implies `--isolate`, which re-evaluates modules per file and resets the
-  once-per-process memos below — and under `--isolate` neither `globalThis` nor `process.env` carries
-  across files, so no in-process cache can survive it. `--parallel` inside the two daemon shards is fine — two because a GitHub-runner run stopped dead past ~64 KiB of output, probably the non-blocking-stdout drop `flush` now works around rather than `--parallel` (`SHARDS` says more).
-- Reuse `relay/test/harness.ts`'s `startRelay`; never boot your own Miniflare. Its worker bundle is
-  memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
-  fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.
-  (An older note here said the opposite, that disposing mid-process hangs the next boot. That scar
-  is real but sharding routes around it: the relay, pwa, e2e and archivist boots now sit in four separate
-  processes, never one. Put them back together — a bare `bun test` over the whole tree — and the
-  rate-limit suite still fails, because booting workerd within ~100ms of a previous instance being
-  disposed makes Bun's `child_process` fail to wire up the new one's stdio (`Failed to connect`,
-  ENOENT). Run the suite through `scripts/test.ts`.)
+  `respawn-window`) goes through `tmuxOk` (`daemon/src/tmux.ts`), in tests as in product code. A test
+  that needs its own process in a session's pane uses `ClaudeStub.runInPane`, not `respawn-pane -k`.
+- A test server binds `hostname: "127.0.0.1"` on every `Bun.serve`, never Bun's dual-stack default.
+- `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO; never
+  a reference for relay behavior (DESIGN.md's wire protocol is). Each pairwise suite keeps its double on
+  purpose and e2e catches drift: don't "upgrade" a double to the real component.
+- tmux `-F` format strings use printable separators (tmux 3.4 mangles tabs), and sockets Bun dials into
+  workerd set `perMessageDeflate: false`.
+- Reuse `relay/test/harness.ts`'s `startRelay`; never boot your own Miniflare, and every caller
+  `dispose()`s (`bun test` fires no exit hooks, so workerd would outlive the process).
+
+## Recurring rules
+
+Stated once here; every subsystem rule assumes them.
+
+- **Bound by peer pid, never by a field.** A local-socket frame that acts for a session (`session-event`,
+  `message`, `inbox`, `watch`, `custodian`) is bound to its pane by the kernel-reported peer pid, never by
+  anything it sends, and refused where the host names no peer (`peerPidSupported`) or the pid came back
+  null — `session-event` alone falls back to its `pane` on a host that names no peer at all. Where a
+  binding names a session it is the `claude` process (`<pid>:<start time>` of the innermost `claude` on
+  the peer's chain), not the pane or its pid.
+- **Some stdouts are data channels.** Nothing reachable from `seance mcp` (JSON-RPC), `inbox-cli.ts` (the
+  inbox mod's) or `custodian-cli.ts` (the round's) may call `log.ts`; `daemon/test/message-layering.test.ts`
+  holds it. That is why `readState` exists beside `loadOrInitState`.
+- **The owner's sealed act.** An op only the owner may make (`availability`, `session-tag`, `custodian`)
+  is honoured only sealed `from: "app"` on the relay leg, parsed into a fresh value by its own
+  parser, audited without a payload, and is on none of `LOCAL_OPS`, `BROKER_OPS` or MCP, so a session can
+  never make it. A client offers it only where its `CAPABILITIES` flag is advertised.
+- **Offer only what the peer advertises.** A client sends a new field or op only to a _verified_ leader
+  (and target machine) advertising its `CAPABILITIES` flag, since an older peer drops what it does not
+  know and acts anyway. A new task-record field goes through the one task sealer with a marker (a dep
+  sentinel) an older leader's parser refuses.
+- **Text never reaches a log.** Prompt and message text, notes, labels, tags, task, PR and watch URLs, bearer-handle ids,
+  credentials, and anything a pane, an adapter, `gh` or git wrote never reach a log or an audit
+  line. Audit lines carry ids, counts, enums and outcomes, under an origin per surface.
+- **A new act is a threat-model change.** Widening a frame's acts, an op allowlist, the broker, a verb or
+  a seam is recorded in DESIGN.md in the same change, never a tweak.
 
 ## Conventions
 
@@ -384,10 +290,8 @@ green:
   labels an account only by the `account:` store key and removes rows only through the shared
   tiers' two horizon prunes (`daemon/src/metrics-tiers.ts`, the daemon's own rollup, imported,
   never copied). Don't let changes drift from them.
-- **Closing a machine is the owner's sealed act** (DESIGN.md, "Closing a machine"): the daemon answers
-  `availability` only when sealed `from: "app"` on the relay leg, parsed by `parseAvailabilityRequest`,
-  audited without a payload, and neither `LOCAL_OPS` nor `BROKER_OPS` carries it (a keyless box
-  refuses `seance close` and points to the PWA). A `closed` it cannot read in `state.json` loads as
+- **Closing a machine is the owner's sealed act** (DESIGN.md, "Closing a machine"): `availability`
+  (`parseAvailabilityRequest`; a keyless box refuses `seance close` and points to the PWA). A `closed` it cannot read in `state.json` loads as
   closed — in `loadOrInitState` only, `readState` stays log-free — `MachineStatus.cl` is never trimmed
   by `fitStatus`, the gate runs after `relaunchRefusal` and before any fetch or ledger write, and
   `SpawnRequest.routesClosed` is accepted only as `true`: a closed daemon answers `machine_closed` only
@@ -401,19 +305,15 @@ green:
   draining; `MachineStatus.dr` is sent only beside `cl` and never trimmed by `fitStatus`; and the leader's outside pass
   drains a machine only from `drainStart` (`shared/src/status-reader.ts`: `dr`, else `cl` for a daemon not advertising
   `CAPABILITIES.softClose`, else never).
-- **A session's name is the owner's sealed act too** (DESIGN.md, "Session identity", "The owner's label"): the daemon
-  answers `session-tag` only when sealed `from: "app"` on the relay leg, parsed by `parseSessionTagRequest`, audited
-  without a payload (`key-count` and `outcome`, never the label or an id), and neither `LOCAL_OPS`, `BROKER_OPS` nor MCP
-  carries it, so a session never names itself as the owner. It acts only on an untasked pane's newest live `claude`
+- **A session's name is the owner's sealed act too** (DESIGN.md, "Session identity", "The owner's label"):
+  `session-tag` (`parseSessionTagRequest`; audited `key-count` and `outcome`). It acts only on an untasked pane's newest live `claude`
   whose conversation is the one named, verified and unconflicted, re-checked with `atAct` at the act (`tasked`, `moved`,
   `unverified`, `ambiguous`, `ended` otherwise). The label is the one text in the daemon's 0600 `conversations.json`
   (written whole through `writeDurable`, at most 256 entries, a 30-day idle prune, a file it cannot read loading
   empty), never logged, and joined as `owner.label` only to an untasked process while that conversation's one claimant is verified. The PWA
   offers rename only for a connected machine advertising `CAPABILITIES.sessionTag`.
 - **The custodian's controls are the owner's sealed act too** (DESIGN.md, "The custodian's status and the Machines
-  row"): the daemon answers `custodian` (round now, pause, resume) only when sealed `from: "app"` on the relay leg,
-  parsed by `parseCustodianRequest`, audited without a payload, and neither `LOCAL_OPS`, `BROKER_OPS` nor MCP carries
-  it. It acts only through the shell verbs' one implementation (`daemon/src/custodian-owner.ts`: never a second), which
+  row"): `custodian` (round now, pause, resume; `parseCustodianRequest`). It acts only through the shell verbs' one implementation (`daemon/src/custodian-owner.ts`: never a second), which
   writes the pause or a round request in `custodian/` and nothing else; a daemon running no seat or one still
   starting answers `unsupported`, one whose host checks failed (or that refused to run rounds) refuses a round
   `host_failed`, reading the seat's own state, never `seat.json`; a round meets the shell's spacing and refusals; the daemon runs the op's acts on one chain, and against the shell

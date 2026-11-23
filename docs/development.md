@@ -260,6 +260,64 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
 No Cloudflare account is needed anywhere and no real `claude` outside the
 claude-mods shards; `tmux` and `git` are.
 
+## Why the testing rules hold
+
+CLAUDE.md's Testing section states each rule; this is the evidence behind it.
+
+- **Sharding, not `--parallel`.** `--parallel` implies `--isolate`, which re-evaluates modules per file:
+  neither `globalThis` nor `process.env` carries across files, so no in-process cache (the relay's
+  memoized worker bundle, `bunNamed`'s copy) survives it. Inside the two daemon shards it is fine; there
+  are two because a GitHub-runner run stopped dead past ~64 KiB of output, probably the non-blocking-stdout
+  drop `flush` now works around rather than `--parallel` (`SHARDS` in `scripts/test.ts` says more).
+- **workerd boots.** `startRelay`'s worker bundle is memoized because `Bun.build` runs once per process,
+  and every caller must `dispose()`: `bun test` fires no exit hooks, so an undisposed instance leaves its
+  workerd running past the test process. An older note said the opposite, that disposing mid-process
+  hangs the next boot. That scar is real, but sharding routes around it: the relay, pwa, e2e and
+  archivist boots sit in four separate processes. Put them back together — a bare `bun test` over the
+  whole tree — and the rate-limit suite fails, because booting workerd within ~100 ms of a previous
+  instance's dispose makes Bun's `child_process` fail to wire up the new one's stdio (`Failed to
+  connect`, ENOENT).
+- **Independent chains.** A _positive_ assertion read straight after a wait on an independent chain (one
+  stub's `requests()` after another stub's answer was acted on; two sends of one `send`) rides on
+  `pollUntil`'s 10 ms pace: the chains finish within a fraction of a millisecond in either order.
+  `push-sender.test.ts`'s prune test waits on `waitForRequests` instead.
+- **e2e tasks.** A file's tests share one account under the leader's per-account cap (4), so a task left
+  running starves later tests, and a killed window frees its slot only at the 120 s sweep. The leader
+  refuses a task it still holds `reserved` with `dispatching` — a reply, not a throw — including just
+  after the store shows it `running`, since the leader takes the write's ack after the store has it;
+  `cancelTask` asks again on that. `auto.test.ts` and `leader.test.ts` assert `takeLeakedTasks()` empty
+  so the test that leaked fails, not a later one; the mark-done test waits on `client.queue()`.
+- **First exec.** macOS scans every never-executed file on first exec, one at a time machine-wide, so
+  concurrent shards queue behind each other's stubs. GitHub's macOS runners measurably skip the scan,
+  which is how this stays green in CI while failing every local run. `scriptStub` is a link to one
+  committed file; `bunNamed` is a copy made once per machine and bun build. Removing a hard link of the
+  installed bun makes macOS's syspolicyd SIGKILL bun execs anywhere on the machine (`bunNamed` says how;
+  `bun-links.test.ts` holds it). A stub written in `beforeEach` is a new file every test
+  (`raycast-cli.test.ts` passes per-test paths in by env instead).
+- **SIGINT stubs.** macOS `/bin/sh` is bash 3.2: a SIGINT landing while it waits on a foreground child is
+  ignored outright when untrapped, and lost now and then when trapped (after the child is reaped, before
+  the handler is restored), so the stub runs on to its SIGKILL. The redirect keeps the outliving `sleep`
+  off pipes the caller drains to EOF.
+- **`~/.tmux.conf`.** A private tmux server still loads the developer's own config — product code boots
+  it, and only `-f` skips the file — so local runs get its default-shell, hooks and
+  `automatic-rename-format` while CI gets none. A window's automatic name on macOS is whatever tmux
+  caught mid-exec (`kernel_task`, `tmux`, `""`); `spawn.ts` names its windows with `-n`.
+- **The pty race.** macOS's pty allocator fails an open now and then, at any call site (`respawn-pane`,
+  then `new-window`, hit it on GitHub's macOS runners): `fork failed: Device not configured` (ENXIO) when
+  the machine reaches a new high of ptys in use since boot while another process frees one, and
+  `Unknown error: -6` when two opens collide. `tmuxOk` retries exactly those (`PTY_RACE` names the kernel
+  code), or a test retries until it lands as `machine-tag.test.ts`'s restart does. Only a freshly booted
+  Mac shows the ENXIO race, since the kernel's pty table never shrinks: reproduce it on a GitHub macOS
+  runner beside a process churning ptys, not locally. `ClaudeStub.runInPane` opens no pty and kills
+  nothing, where a respawn that hits the race has already killed the pane's process; it starts the
+  process as the stub's child on the pane's own tty and untitles the pane, as the respawn did.
+- **127.0.0.1.** Bun's default bind is the dual-stack `[::]`, and macOS lets another process's
+  `SO_REUSEADDR` bind of `127.0.0.1` on the same port (a VS Code helper, a dev server) sit on top of it
+  and take every `127.0.0.1` dial; the client then retries into the wrong server until its wait times
+  out. `daemon/test/harness.test.ts` holds the relay double to it.
+- **Portability.** tmux 3.4 mangles tabs in `-F` formats to `_` (see `sessions.ts`/`tmux.ts`); frames on
+  a socket Bun dials into workerd die with close code 1002 unless `perMessageDeflate: false`.
+
 ## Reproducing a flaky test
 
 A flake is fixed once it fails on demand and then passes the same way, not once
