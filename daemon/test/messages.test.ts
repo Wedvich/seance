@@ -29,7 +29,14 @@ import { EndedTasks, listPanePids } from "../src/session-events.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { processNames } from "../src/peer.ts";
 import { paneWindowName, tmuxOk } from "../src/tmux.ts";
-import { bunNamed, pollUntil, underClaude, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import {
+  bunNamed,
+  pollUntil,
+  underClaude,
+  usePrivateTmux,
+  writeAgentSessionFile,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 /**
  * Session messages with the binding real: panes in a private tmux server, the kernel's peer pid, and for the
@@ -84,6 +91,7 @@ function setup(overrides: Partial<MessagesDeps> = {}): Messages {
     machine: "testbox",
     audit,
     now: () => clock.now,
+    configDirs: () => [join(base, "claude-config")],
     ...overrides,
   });
   made.push(messages);
@@ -1911,7 +1919,7 @@ describe("a reply by handle, on one machine", () => {
     expect(await messages.send(replyFrame(q, "note", "still here"), t.pid)).toMatchObject({ ok: true });
   }, 60_000);
 
-  test("a claude a tool started under a claude is its own session: its listener neither reads nor ends the outer session's handles", async () => {
+  test("a claude a tool started under the pane's session cannot listen: the session keeps the pane's listener and what it received", async () => {
     const messages = setup();
     const taskId = await launched("nest-t");
     const t = await pane("nest-t", taskId);
@@ -1930,6 +1938,8 @@ describe("a reply by handle, on one machine", () => {
     const shell = await runner("nest-shell", outer);
     await shell.go();
     const [outerPeer, innerPeer] = [await pidFrom(file("outer.peer")), await pidFrom(file("inner.peer"))];
+    // The outer claude is a session by its own file, as Claude Code writes one; a wrapper never does (the test below).
+    await writeAgentSessionFile(join(base, "claude-config"), await pidFrom(file("outer.claude")));
 
     const first = sinkDouble();
     await messages.listen(INBOX, outerPeer, first.sink);
@@ -1938,15 +1948,13 @@ describe("a reply by handle, on one machine", () => {
     const r = idOf(await messages.send(replyFrame(q, "note", "src/a.ts"), t.pid));
     expect(lineOf(first.lines[1]).wake).toBe(true);
 
-    // The nested claude's listener takes the pane's one listener, and answers nothing the outer one received.
     const nested = sinkDouble();
     await messages.listen(INBOX, innerPeer, nested.sink);
-    expect(first.closed()).toBe(true);
+    expect(nested.lines).toEqual([JSON.stringify({ ok: false, code: "unbound" })]);
+    expect(nested.closed()).toBe(true);
+    expect(first.closed()).toBe(false);
     expect(await messages.send(replyFrame(r, "note", "not mine"), innerPeer)).toEqual({ ok: false, code: "unknown" });
 
-    // It ends; the outer session listens again and still holds what it received.
-    nested.drop();
-    await messages.listen(INBOX, outerPeer, sinkDouble().sink);
     expect(await messages.send(replyFrame(r, "note", "thanks"), outerPeer)).toMatchObject({
       ok: true,
       outcome: "delivered",
