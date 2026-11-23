@@ -1101,7 +1101,7 @@ nothing checked it. The last is the gap they leave.
   reason, outcome): never a URL, owner, repo, number, head, check name or watch id, and `watches.ts` imports neither a
   scheduler module nor `audit.ts`'s other writers.
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
-  docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
+  docs/custodian.md C36; `.claude/rules/github.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
   query whose owner, name and head branch reach it only as GraphQL variables (`-f`, never `-F`, which
   reads `@file`), bound to the worktree's own branch name and to `origin`'s URL as the clone's config
@@ -1156,7 +1156,7 @@ nothing checked it. The last is the gap they leave.
   claims a labelled id shows its own name, never the owner's. MCP's `get_sessions` prints `owner.label` through
   `AGENT_VISIBLE_TAG_KEYS`; message wrappers, receipts and the custodian's `sessions` never carry it.
 - **The drain's session ask is constant keys, into ledger-bound panes, while draining** (2026-11-13, Daemon, "The
-  drain's session ask"; `CLAUDE.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
+  drain's session ask"; `.claude/rules/drain.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
   Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`: not
   reported done, not being closed, no hand-off or pass mark), only while this machine is draining at the `cl` the
@@ -1233,7 +1233,7 @@ nothing checked it. The last is the gap they leave.
   audited, put in a push or an archive row, or returned by `get_queue` or the `sessions` verb. A push carries the
   reason as one of four fixed texts, and a `custodian-failing` push names the sealer's own device id.
 - **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
-  `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,
+  `pass-close` and the `successor` origin; `.claude/rules/scheduler.md` carries those requirements; Scheduler,
   "Passing to a successor"):
   - The daemon's one write to a forge is `pushTaskBranch` (`daemon/src/push-branch.ts`): a `git push`
     through `networkGit`, never forced, of `<tip sha>:refs/heads/<r>` to `origin` only, `<tip>` that of `<b>`. `<b>` is the
@@ -1286,7 +1286,7 @@ nothing checked it. The last is the gap they leave.
   - A re-added or removed adapter inherits no subscription, and `doctor` warns when its checkout moved since it was
     added: the owner is told new code runs, never stopped.
 - **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
-  Attachments and as requirements in `CLAUDE.md`. In short:
+  Attachments and as requirements in `.claude/rules/attachments.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
     `ATTACHMENT_ID_PATTERN`, and only for a spawn sealed by the scheduler.
   - The hash is checked before decryption, and any failure refuses the spawn.
@@ -5403,7 +5403,7 @@ PSK, stored in R2 behind the relay Worker, downloaded by the daemon the leader p
 task on, and handed to the Claude session as local paths. This section is the contract
 the build (tasks 2–7, "Who builds what" below) works against. Until a part lands, its
 names exist only here. Each task marks its part built in this section and adds the
-invariants it makes true to the list in `CLAUDE.md`, as earlier milestones did.
+invariants it makes true to its area's file in `.claude/rules/`, as earlier milestones did.
 
 ### Decided by the owner (2026-10-28)
 
@@ -6081,7 +6081,7 @@ with files queues as soon as its last upload ends, and a refusal shows before th
   leader lacking `attachments` (`attachmentsWithdrawn`), and goes back to waiting (its
   object may still have landed). The create re-checks at the end (`#prepare`, again
   after the wait), and a retry of an unqueued task carrying files re-checks too, so the
-  CLAUDE.md rule that a task carrying files goes only to a verified leader advertising
+  rule (`.claude/rules/task-records.md`) that a task carrying files goes only to a verified leader advertising
   `attachments` holds however the wait ended.
 - **One at a time**, in list order (`UploadQueue` in `pwa/src/upload-queue.ts`, apart
   from `Store` as `AccountStore` is: `Store` owns the list, the queue owns the pump, the
@@ -9411,7 +9411,7 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   daemon does not hold (a read per beat would be new traffic for a log line), and stay readable from the
   pass's `audit pass … trigger=drain` lines and the daemon's `audit drain` lines. No task id, no text. Not the
   clients that call `drainView`: none runs for most drains, and `seance mcp` never calls `log.ts`.
-- **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
+- **Threat model.** No new frame. The pass is the manual pass's, so its invariants (`.claude/rules/scheduler.md`) hold;
   the stamp is written only by the leader through the one task sealer, never from a frame.
 
 ### The drain's session ask — built (drain 3/3)
@@ -9547,7 +9547,7 @@ frame, only a mark on a frame it already takes.
   request, not a frame it takes), and step B stays the backstop at least 5 minutes after the interrupt. A known
   cost of that: with `now`, a session that has not passed itself within the leader's 10-minute grace meets the
   outside pass, which may pre-empt a session still committing.
-- **Threat model.** The new power is a daemon typing into a pane, so it gets its own invariant (CLAUDE.md;
+- **Threat model.** The new power is a daemon typing into a pane, so it gets its own invariant (`.claude/rules/drain.md`;
   "Threat model", invariants): constant text and keys only; only into a pane its own launch ledger binds to a
   worktree task (`askable`); only while draining; the text only at a turn-ended idle and never while
   `needs-input`; the Enter re-check; audited `audit drain origin=drain task=<quoted id>

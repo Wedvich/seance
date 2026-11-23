@@ -1598,7 +1598,7 @@ of M4 has landed.
   - _Decided, amendable (owner):_ `amend` gains `notBefore`, to set, move or clear (`null`) it. This
     works under amend's existing rule: only while `queued`, `blocked` or `ready` with no spawn out
     (`dispatching`, `placed` otherwise). It needs no `basis`: the last write wins, as with title, model
-    and effort. Audited `fields=notBefore` with no time on the line. The CLAUDE.md invariant listing
+    and effort. Audited `fields=notBefore` with no time on the line. The `.claude/rules/scheduler.md` invariant listing
     what amend may change ("prompt, title, model and effort") grows by this field.
   - _Decided, not inherited (owner):_ a successor (any trigger: manual, quota, drain or the session's
     own pass) and a continuation never copy the predecessor's `notBefore`. A continuation may carry

@@ -78,7 +78,7 @@ One line each; the text is in DESIGN.md.
   `list_machines`' `drain`: "Closing a machine", "The drain's outside pass" and "The drain's session ask" (`now`,
   "Drain now", the ask's wording). Raycast: none (spawn-only).
 - **§9 Threat model:** the invariants list ("Closing is the owner's act", "The drain's session ask is constant
-  keys…") and `CLAUDE.md`.
+  keys…") and `.claude/rules/drain.md`.
 - **§12's time from close to empty:** "The drain's outside pass" (the daemon's `drain: empty` line).
 - **§13 Soft close by default (N5):** the wire, daemon and leader in "Closing a machine" (state, `soft`, `dr`, skew
   and the daemon-rollback hazard), "The drain's outside pass" (`drainStart`) and "The drain's session ask" (the ask

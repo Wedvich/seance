@@ -38,7 +38,7 @@ home would be the relay store, and the store is the wrong place for it:
   _Send size_). A board read on every turn would send every post to every reader every time.
 - **No deletes outside `task:`.** The leader deletes only under `task:`, and only `task:` keeps
   tombstones. A board would grow until the cap and then refuse posts, or need a new delete policy
-  on a new prefix, which is a threat-model change of its own (CLAUDE.md, the store invariants).
+  on a new prefix, which is a threat-model change of its own (`.claude/rules/relay-store.md`).
 
 A board is a separate spec, if it is wanted at all. Point-to-point messages need no resting place,
 and Séance gives them none (DESIGN.md, "Cross-machine").

@@ -87,7 +87,7 @@ they bind by peer pid. `seance mcp` needs registering in each `CODEX_HOME`'s con
 
 **Clients and the record.** The PWA's model picker grouped by agent, the Accounts and Machines
 screens, Raycast's options, MCP `spawn_session`'s schema, skills (`.claude/skills` vs Codex's).
-DESIGN.md's threat model gains a second credential store and a second binary; CLAUDE.md's
+DESIGN.md's threat model gains a second credential store and a second binary; the `.claude/rules/`
 invariants gain the new sentinel and capability.
 
 ## The two risks
@@ -559,7 +559,7 @@ What that means for the design:
 
 - **Continue.** The invariant resumes "the session id this daemon chose at that launch". `agy` cannot
   take one (spike 5), so the daemon learns it from its own ledger plus the pane's first verified hook
-  `conversationId`, which exists only from the first prompt. That is a CLAUDE.md invariant and a
+  `conversationId`, which exists only from the first prompt. That is a `.claude/rules/scheduler.md` invariant and a
   DESIGN.md threat-model change.
 - **Interrupts.** No hook fires on an interrupted turn (above), so a `busy` with no `Stop` after it is
   normal. The status line's `idle` is the only end signal there; without it, an interrupted pane reads

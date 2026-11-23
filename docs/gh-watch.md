@@ -20,7 +20,7 @@ this repo.
 - MCP's `watch_github` and `unwatch_github` and their gate: "MCP server".
 - The threat-model invariants: Threat model, "A watch's target reaches GitHub only
   through the leader's poller…" and "A daemon's watch table binds a watch to its session's `claude`
-  process…"; `.claude/rules/watches.md` carries the daemon's side, CLAUDE.md's threat-model invariants the leader's.
+  process…"; `.claude/rules/watches.md` carries the daemon's side, `.claude/rules/github.md` the leader's.
 - The budget gauge (open question 3): #547, `MachineStatus.gh` and the leader's `github` alert, "GitHub rate limits".
   A live-watch count on the Machines row is not built, by decision.
 
