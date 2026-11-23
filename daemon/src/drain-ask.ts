@@ -12,7 +12,7 @@ import { capturePane, tmux } from "./tmux.ts";
  * this machine is draining (a close that is not soft, or a later drain request), the daemon types one constant prompt into each tasked session's pane so the session
  * commits and passes itself (`pass_to_successor`), which the outside pass cannot do for a dirty tree.
  *
- * Invariant (CLAUDE.md): the only keys that ever go in are `DRAIN_PROMPT` (`send-keys -l`), Enter, the graceful
+ * Invariant (.claude/rules/drain.md): the only keys that ever go in are `DRAIN_PROMPT` (`send-keys -l`), Enter, the graceful
  * despawn's Escape and its Ctrl+C, never a field of any frame. Only into a live pane whose launch ledger holds a
  * worktree launch of its task (`askable`), only while draining, the text only after that pane's `idle` carrying
  * `turnEnded` and never while its last frame is `needs-input` (the drain can deny a permission, never grant one).

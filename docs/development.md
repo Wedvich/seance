@@ -32,7 +32,8 @@ The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`h
 lists the commands). So does the archivist's: `bun archivist/src/main.ts <command>`.
 
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
-The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
+A `-`-prefixed argument goes to every bun shard as a flag (`--rerun-each=20 --randomize`,
+value after `=`; see "Admitting a test"). The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
 that boot workerd need the headroom.
 
 ## Measuring the PWA
@@ -261,6 +262,97 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
 
 No Cloudflare account is needed anywhere and no real `claude` outside the
 claude-mods shards; `tmux` and `git` are.
+
+## Why the testing rules hold
+
+CLAUDE.md's Testing section states each rule; this is the evidence behind it.
+
+- **Sharding, not `--parallel`.** `--parallel` implies `--isolate`, which re-evaluates modules per file:
+  neither `globalThis` nor `process.env` carries across files, so no in-process cache (the relay's
+  memoized worker bundle, `bunNamed`'s copy) survives it. Inside the two daemon shards it is fine; there
+  are two because a GitHub-runner run stopped dead past ~64 KiB of output, probably the non-blocking-stdout
+  drop `flush` now works around rather than `--parallel` (`SHARDS` in `scripts/test.ts` says more).
+- **workerd boots.** `startRelay`'s worker bundle is memoized because `Bun.build` runs once per process,
+  and every caller must `dispose()`: `bun test` fires no exit hooks, so an undisposed instance leaves its
+  workerd running past the test process. An older note said the opposite, that disposing mid-process
+  hangs the next boot. That scar is real, but sharding routes around it: the relay, pwa, e2e and
+  archivist boots sit in four separate processes. Put them back together — a bare `bun test` over the
+  whole tree — and the rate-limit suite fails, because booting workerd within ~100 ms of a previous
+  instance's dispose makes Bun's `child_process` fail to wire up the new one's stdio (`Failed to
+  connect`, ENOENT).
+- **Independent chains.** A _positive_ assertion read straight after a wait on an independent chain (one
+  stub's `requests()` after another stub's answer was acted on; two sends of one `send`) rides on
+  `pollUntil`'s 10 ms pace: the chains finish within a fraction of a millisecond in either order.
+  `push-sender.test.ts`'s prune test waits on `waitForRequests` instead.
+- **e2e tasks.** A file's tests share one account under the leader's per-account cap (4), so a task left
+  running starves later tests, and a killed window frees its slot only at the 120 s sweep. The leader
+  refuses a task it still holds `reserved` with `dispatching` — a reply, not a throw — including just
+  after the store shows it `running`, since the leader takes the write's ack after the store has it;
+  `cancelTask` asks again on that. `auto.test.ts` and `leader.test.ts` assert `takeLeakedTasks()` empty
+  so the test that leaked fails, not a later one; the mark-done test waits on `client.queue()`.
+- **First exec.** macOS scans every never-executed file on first exec, one at a time machine-wide, so
+  concurrent shards queue behind each other's stubs. GitHub's macOS runners measurably skip the scan,
+  which is how this stays green in CI while failing every local run. `scriptStub` is a link to one
+  committed file; `bunNamed` is a copy made once per machine and bun build. Removing a hard link of the
+  installed bun makes macOS's syspolicyd SIGKILL bun execs anywhere on the machine (`bunNamed` says how;
+  `bun-links.test.ts` holds it). A stub written in `beforeEach` is a new file every test
+  (`raycast-cli.test.ts` passes per-test paths in by env instead).
+- **SIGINT stubs.** macOS `/bin/sh` is bash 3.2: a SIGINT landing while it waits on a foreground child is
+  ignored outright when untrapped, and lost now and then when trapped (after the child is reaped, before
+  the handler is restored), so the stub runs on to its SIGKILL. The redirect keeps the outliving `sleep`
+  off pipes the caller drains to EOF.
+- **`~/.tmux.conf`.** A private tmux server still loads the developer's own config — product code boots
+  it, and only `-f` skips the file — so local runs get its default-shell, hooks and
+  `automatic-rename-format` while CI gets none. A window's automatic name on macOS is whatever tmux
+  caught mid-exec (`kernel_task`, `tmux`, `""`); `spawn.ts` names its windows with `-n`.
+- **The pty race.** macOS's pty allocator fails an open now and then, at any call site (`respawn-pane`,
+  then `new-window`, hit it on GitHub's macOS runners): `fork failed: Device not configured` (ENXIO) when
+  the machine reaches a new high of ptys in use since boot while another process frees one, and
+  `Unknown error: -6` when two opens collide. `tmuxOk` retries exactly those (`PTY_RACE` names the kernel
+  code), or a test retries until it lands as `machine-tag.test.ts`'s restart does. Only a freshly booted
+  Mac shows the ENXIO race, since the kernel's pty table never shrinks: reproduce it on a GitHub macOS
+  runner beside a process churning ptys, not locally. `ClaudeStub.runInPane` opens no pty and kills
+  nothing, where a respawn that hits the race has already killed the pane's process; it starts the
+  process as the stub's child on the pane's own tty and untitles the pane, as the respawn did.
+- **127.0.0.1.** Bun's default bind is the dual-stack `[::]`, and macOS lets another process's
+  `SO_REUSEADDR` bind of `127.0.0.1` on the same port (a VS Code helper, a dev server) sit on top of it
+  and take every `127.0.0.1` dial; the client then retries into the wrong server until its wait times
+  out. `daemon/test/harness.test.ts` holds the relay double to it.
+- **Portability.** tmux 3.4 mangles tabs in `-F` formats to `_` (see `sessions.ts`/`tmux.ts`); frames on
+  a socket Bun dials into workerd die with close code 1002 unless `perMessageDeflate: false`.
+
+## Admitting a test
+
+A test enters a PR only after three checks. Run the first two on its whole file, not only the new test:
+the file's other tests are what a new one leaks into.
+
+1. **Reruns in random order.** `bun run test <file> --rerun-each=20 --randomize` (on failure, bun prints
+   the seed; `--seed=<n>` replays that order). `scripts/test.ts` hands every `-`-prefixed argument to
+   each bun shard, so give a flag's value after `=`: a separate word reads as a path filter. Flags never
+   reach the `claude-mods/` shards. This catches order dependence and state one test leaves for the next.
+   A suite's own `beforeAll` must survive it: `usePrivateTmux` names a fresh socket per call for that
+   reason.
+2. **The same under CPU load.** Busy every core for the length of a run:
+
+   ```bash
+   trap 'kill $(jobs -p) 2>/dev/null' EXIT
+   for i in $(seq "$(getconf _NPROCESSORS_ONLN)"); do (while :; do :; done) & done
+   bun run test <file> --rerun-each=20
+   ```
+
+3. **No real-time window the test does not drive.** List every timer the code under test arms while the
+   test is waiting on it: a grace, a debounce, a timeout, an interval. Each must be driven by the test (an
+   injected `now`, a hold at the boundary as in "Reproducing a flaky test" below), or be longer than the
+   test's own timeout, so the test times out before it could lose the race, or the assertion must not
+   depend on which side of it the test lands. A window sized "large enough" for a slow machine, but
+   inside the test's timeout, is a flake on a slower one.
+
+The third check is the one that matters most. On 2026-11-23 `messages.test.ts`'s "held within the
+grace, its fate is told" failed on the macOS runner: it armed a 50 ms grace, then bound a listener whose
+tmux and process reads can take longer. Locally it passed 10 randomized reruns of its file and 50 runs
+under full CPU load. Only reading for the window finds it. #583 fixed it the second way: the listener
+half now runs under a 60 s grace, past the runner's 15 s test timeout, and the 50 ms one drives only the expiry
+half, which the test waits on with `pollUntil`.
 
 ## Reproducing a flaky test
 

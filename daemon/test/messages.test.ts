@@ -2534,15 +2534,18 @@ describe("a watch's note", () => {
   });
 
   test("held within the grace, its fate is told: nolistener when the grace ends, delivered when its listener connects", async () => {
-    const messages = setup({ graceMs: 50 });
+    // The hold's expiry is a real timer. A short grace lets the test wait on it; the listener half gets its own long
+    // grace, since `listen` reads tmux and the process chain before it binds, past 50 ms on a slow runner.
+    const brief = setup({ graceMs: 50 });
     const target = await pane("wn-held");
     const session = await sessionKeyOf(target);
     const at = { pane: target.id, pid: target.pid, task: null, session };
     const timedOut = noted();
-    expect(await messages.deliverWatchNote(at, { text: "held", wake: true }, timedOut)).toBe("sent");
+    expect(await brief.deliverWatchNote(at, { text: "held", wake: true }, timedOut)).toBe("sent");
     await pollUntil(() => timedOut.fates.length > 0, "the hold's grace to end");
     expect(timedOut.fates).toEqual(["nolistener"]);
 
+    const messages = setup({ graceMs: 60_000 });
     const connected = noted();
     expect(await messages.deliverWatchNote(at, { text: "held again", wake: true }, connected)).toBe("sent");
     const listener = sinkDouble();

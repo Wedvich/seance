@@ -61,8 +61,12 @@ const SHARDS: readonly Shard[] = [
 ];
 
 // `bun run test <path>` narrows to one bun shard (plus one for mods), so a single file still runs with
-// the timeout the workerd-booting suites need.
-const filters = process.argv.slice(2);
+// the timeout the workerd-booting suites need. A `-`-prefixed argument is a flag for every bun shard
+// (`--rerun-each=20 --randomize`), never a filter: as a filter it would run the whole suite in one
+// process. Flags take their value after `=`, since a separate word would read as a path.
+const args = process.argv.slice(2);
+const bunFlags = args.filter((arg) => arg.startsWith("-"));
+const filters = args.filter((arg) => !arg.startsWith("-"));
 // A filter overlapping a mod's folder (`claude-mods/`, the folder, a file inside it)
 // goes to `claude plugin test` as that folder: bun can't import the mods' tests,
 // and `claude plugin test` takes only plugin folders.
@@ -224,7 +228,7 @@ function shardArgv(shard: Shard): string[] | null {
   }
   const argv = ["bun", "test", ...shard.paths, "--timeout", String(TIMEOUT_MS)];
   if (shard.parallel === true) argv.push("--parallel");
-  return argv;
+  return [...argv, ...bunFlags];
 }
 
 async function runShard(shard: Shard): Promise<Result> {

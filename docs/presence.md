@@ -250,14 +250,14 @@ could already put a pane and a window title there.
 
 Wording this changes, in the same PR as the code:
 
-- CLAUDE.md, local-socket bullet, "The frame's other carried claims are `agent` …, `reason` …, `tool` …" (as #543
+- `.claude/rules/local-socket.md`, "The frame's other claims" (`agent`, `reason`, `tool`; as #543
   words it): add `self` (the `self.*` tags, today `self.doing` alone): sent only by `set_self_tag` (`seance session-event`
   drops it unsent), never binds, routes or authorizes anything, bound only by the kernel-reported
   peer pid (never the frame's `pane`, refused `unbound` where the host names no peer or no `claude` is on the peer's
   chain), kept in that `claude` process's `conversations.ts` entry, held
   to `displayLine`, `TAG_VALUE_MAX` and the key pattern, display-only, memory only, never logged, audited, persisted or in `MachineStatus`,
   a store record, a `sessions` reply to the scheduler, `get_sessions` or `get_queue`.
-- CLAUDE.md, same bullet, #543's sentence "Keeping, for each pane whose peer resolves to a `claude` process …, that
+- The same file, "Retention, not acts", the bullet "For each pane whose peer resolves to a `claude` process …, that
   process's last state, `reason` and `agent` claims": add `self.*`, and that it too reaches only an app's `sessions`
   (never a scheduler-sealed one, never MCP's `get_sessions`).
 - DESIGN.md, "Tags and session identity", Threat model, widens `self` to the keys it accepts later; until then the wording names `self.doing`
@@ -265,7 +265,7 @@ Wording this changes, in the same PR as the code:
 - DESIGN.md, "Session events": the frame shape, the `self` bullet, "Session identity" (the process entry, as #543 records it); MCP server: `set_self_tag`; the
   `sessions` op's `SessionEntry`; "Session messages" (the standing instruction's added sentence); Threat model item 6
   (the session-chosen line and its readers).
-- With PR 4: CLAUDE.md, custodian frame-kind bullet, where the flag's note is "never … returned by `sessions`": add
+- With PR 4: `.claude/rules/custodian.md`, the `flag` verb, where the flag's note is "never … returned by `sessions`": add
   that `sessions` returns a session's `doing`, labelled self-reported with its age, scrubbed and capped, and that no
   verb's verdict reads it; DESIGN.md, "The custodian frame kind" (the `sessions` reply) and "The custodian's seat" (the
   seed's sentence).
@@ -402,7 +402,7 @@ New: **the daemon answers on a session's behalf**, and **a receipt carries more 
 
 Wording this changes:
 
-- CLAUDE.md, messaging bullet: "sends `message-receipt` (ids, kind and an outcome; never text)" becomes "… and, for
+- `.claude/rules/messages.md`: "sends `message-receipt` (ids, kind and an outcome; never text)" becomes "… and, for
   an answered `status`, the target daemon's `presence`, whose only text is the target's own `doing`; never message
   text"; "as the one fixed line `receiptNote` makes per outcome" gains "or `presenceNote` for an answered `status`";
   the kinds list and `CAPABILITIES.messageStatus`; "the leader … keeps nothing" stands and is repeated for `presence`.
@@ -483,7 +483,7 @@ adapter's own bucket (60 a minute) allows denser bursts than a session's.
 
 ### Threat model
 
-None. The mod delivers only by `$.prompt.submit` and `$.session.append` (CLAUDE.md, messaging bullet, unchanged), each
+None. The mod delivers only by `$.prompt.submit` and `$.session.append` (`.claude/rules/messages.md`, unchanged), each
 text is still the daemon's own rendering, and nothing new crosses a boundary. DESIGN.md, Claude Code mods, **inbox**
 (the delivery table) and "Session messages" (D4's wake by kind: "one turn per burst") change wording.
 
@@ -509,7 +509,7 @@ needs the tags model's step 1 (#543, built).
    (`session-event-frame.ts`, `parseSessionEventFrame`), dropped unsent by `seance session-event`; `self.doing`'s
    parser in `shared/src/tags.ts`; its retention in `conversations.ts`'s process entry and on `SessionEntry.tags`
    through `withTags`; the `sessions` fitter and `tagsOmitted`; the PWA's Machines session list and the Queue card's
-   details; the standing instruction's sentence (D1.7). DESIGN.md and CLAUDE.md wording as in §1.
+   details; the standing instruction's sentence (D1.7). DESIGN.md and `.claude/rules` wording as in §1.
    - Tested by: `shared` unit tests for `self.doing` through `parseTagValue` (bidi overrides, zero-widths,
      separators, quotes, the cap on a code point, empty-after-scrub); daemon tests on the local socket with a real
      peer (`ClaudeStub.runInPane`):
@@ -548,7 +548,7 @@ needs the tags model's step 1 (#543, built).
      (Escape and an API error ending a turn, a worker respawn mid-turn, three requests in one merged submit). One live run per platform to confirm that the merged
      submit runs as one turn and the model answers each message in it.
 4. **The custodian's `sessions` carries `doing`** (D1.6, O1; needs PR 1). The verb's reply fields and the seed's
-   sentence; the CLAUDE.md and DESIGN.md wording in §1's threat model.
+   sentence; the `.claude/rules` and DESIGN.md wording in §1's threat model.
    - Tested by: `daemon/test` custodian verb tests: the scrub and the cap; and a round test
      that `tags["self.doing"]` appears in `CustodianPaneView` JSON and are null when none is held, and
      that `close` on a session whose `doing` says "done" but is `busy` is still refused (`closeVerdict` reads no
