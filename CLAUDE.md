@@ -96,12 +96,13 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   `auth.json`, or a daemon-owned app-server), the
   owner's two decisions (`agy` next; one account per machine for V1) and the order. Read it before adding a
   second agent or making the launch path agent-neutral.
-- **docs/codex.md** — design, nothing built: Codex as a first-class account, from docs/agents.md's spikes. A
-  ChatGPT login per machine in a store home the daemon owns (`MachineInfo.logins`, never an exclave), identity,
-  quota and login health over the app-server API (never the credential file), the task's `agent` field behind a
-  sentinel and `CAPABILITIES.codex`, a pane hosting its own app-server with the daemon as its second client, the
-  threat-model changes, the spikes still open, the owner's open questions and a phased build. Read it, and
-  docs/agents.md, before any Codex work.
+- **docs/codex.md** — design, nothing built, every question decided by the owner (2026-11-23): Codex as a
+  first-class account. One ChatGPT login per machine in one Codex home the daemon owns, shared by every session like
+  an exclave's config dir (`MachineInfo.logins`, never an exclave), identity, quota, credits and login health over the
+  app-server API (never the credential file), the task's `agent` field behind a sentinel and `CAPABILITIES.codex`, a
+  pane hosting its own app-server with the daemon as its client, escalations approved by Codex's reviewing agent, the
+  threat-model changes, the spikes run and the checks left, and a phased build. Read it, and docs/agents.md, before
+  any Codex work.
 - **docs/orchestrator.md** — draft, nothing decided or built: queueing a whole tracker project as
   a living task graph, tended by long-lived orchestrator sessions that are not tasks, with the
   tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
