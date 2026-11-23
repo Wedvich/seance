@@ -32,7 +32,8 @@ The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`h
 lists the commands). So does the archivist's: `bun archivist/src/main.ts <command>`.
 
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
-The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
+A `-`-prefixed argument goes to every bun shard as a flag (`--rerun-each=20 --randomize`,
+value after `=`; see "Admitting a test"). The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
 that boot workerd need the headroom.
 
 ## Measuring the PWA
@@ -317,6 +318,39 @@ CLAUDE.md's Testing section states each rule; this is the evidence behind it.
   out. `daemon/test/harness.test.ts` holds the relay double to it.
 - **Portability.** tmux 3.4 mangles tabs in `-F` formats to `_` (see `sessions.ts`/`tmux.ts`); frames on
   a socket Bun dials into workerd die with close code 1002 unless `perMessageDeflate: false`.
+
+## Admitting a test
+
+A test enters a PR only after three checks. Run the first two on its whole file, not only the new test:
+the file's other tests are what a new one leaks into.
+
+1. **Reruns in random order.** `bun run test <file> --rerun-each=20 --randomize` (on failure, bun prints
+   the seed; `--seed=<n>` replays that order). `scripts/test.ts` hands every `-`-prefixed argument to
+   each bun shard, so give a flag's value after `=`: a separate word reads as a path filter. Flags never
+   reach the `claude-mods/` shards. This catches order dependence and state one test leaves for the next.
+   A suite's own `beforeAll` must survive it: `usePrivateTmux` names a fresh socket per call for that
+   reason.
+2. **The same under CPU load.** Busy every core for the length of a run:
+
+   ```bash
+   trap 'kill $(jobs -p) 2>/dev/null' EXIT
+   for i in $(seq "$(getconf _NPROCESSORS_ONLN)"); do (while :; do :; done) & done
+   bun run test <file> --rerun-each=20
+   ```
+
+3. **No real-time window the test does not drive.** List every timer the code under test arms while the
+   test is waiting on it: a grace, a debounce, a timeout, an interval. Each must be driven by the test (an
+   injected `now`, a hold at the boundary as in "Reproducing a flaky test" below), or be longer than the
+   test's own timeout, so the test times out before it could lose the race, or the assertion must not
+   depend on which side of it the test lands. A window sized "large enough" for a slow machine, but
+   inside the test's timeout, is a flake on a slower one.
+
+The third check is the one that matters most. On 2026-11-23 `messages.test.ts`'s "held within the
+grace, its fate is told" failed on the macOS runner: it armed a 50 ms grace, then bound a listener whose
+tmux and process reads can take longer. Locally it passed 10 randomized reruns of its file and 50 runs
+under full CPU load. Only reading for the window finds it. #583 fixed it the second way: the listener
+half now runs under a 60 s grace, past the runner's 15 s test timeout, and the 50 ms one drives only the expiry
+half, which the test waits on with `pollUntil`.
 
 ## Reproducing a flaky test
 

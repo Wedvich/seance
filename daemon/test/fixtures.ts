@@ -619,11 +619,18 @@ export interface PrivateTmux {
  * run dir scripts/test.ts sweeps (which also kills a server whose suite never
  * reached teardown), else `base`, which the suite removes itself — never the
  * shared `tmux-$UID` dir. `label` keeps suites apart when `--parallel` gives
- * several the same pid. Keep it short: macOS caps a socket path at 104 bytes
- * and its tmpdir alone is ~48.
+ * several the same pid, and the call count keeps one suite's reruns apart
+ * (`--rerun-each`): `kill-server` returns before the server is gone, so a
+ * rerun on the same path reaches the dying one ("server exited unexpectedly").
+ * Keep it short: macOS caps a socket path at 104 bytes and its tmpdir alone
+ * is ~48.
  */
+let privateTmuxCalls = 0;
+
 export function usePrivateTmux(base: string, label: string): PrivateTmux {
-  process.env["SEANCE_TMUX_SOCKET"] = join(process.env[TEST_RUN_DIR_ENV] ?? base, `${label}-${process.pid}.sock`);
+  privateTmuxCalls += 1;
+  const name = `${label}-${process.pid}-${privateTmuxCalls}.sock`;
+  process.env["SEANCE_TMUX_SOCKET"] = join(process.env[TEST_RUN_DIR_ENV] ?? base, name);
   return {
     dispose: async () => {
       await tmux(["kill-server"]);
