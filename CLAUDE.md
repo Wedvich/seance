@@ -74,7 +74,8 @@ Layout, commands and env vars are in docs/development.md, and so is the evidence
   admit it (docs/development.md, "Admitting a test"): run its file with
   `bun run test <file> --rerun-each=20 --randomize`, then again under CPU load, and make sure every
   real-time window it races (a grace, a debounce, a timeout it does not drive) is driven by the test
-  through an injected clock or a held boundary, never sized to outlast a slow machine. Reruns and load
+  through an injected clock or a held boundary, or outlasts the test's own timeout — never sized to
+  outlast a slow machine. Reruns and load
   alone miss a window lost only on a busy CI runner. Fix a flake by reproducing it first (the
   `/fix-flaky-test` method), never with `--retry`, a per-test `retry` or a longer timeout.
 - Run the suite with `bun run test` (`scripts/test.ts`), never bare `bun test` or a top-level

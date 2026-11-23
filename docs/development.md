@@ -340,14 +340,17 @@ the file's other tests are what a new one leaks into.
 
 3. **No real-time window the test does not drive.** List every timer the code under test arms while the
    test is waiting on it: a grace, a debounce, a timeout, an interval. Each must be driven by the test (an
-   injected `now`, a hold at the boundary as in "Reproducing a flaky test" below), or the assertion must
-   not depend on which side of it the test lands. A window sized "large enough" is a flake on a slower
-   machine.
+   injected `now`, a hold at the boundary as in "Reproducing a flaky test" below), or be longer than the
+   test's own timeout, so the test times out before it could lose the race, or the assertion must not
+   depend on which side of it the test lands. A window sized "large enough" for a slow machine, but
+   inside the test's timeout, is a flake on a slower one.
 
 The third check is the one that matters most. On 2026-11-23 `messages.test.ts`'s "held within the
-grace, its fate is told" failed on the macOS runner: it arms a 50 ms grace, then binds a listener whose
+grace, its fate is told" failed on the macOS runner: it armed a 50 ms grace, then bound a listener whose
 tmux and process reads can take longer. Locally it passed 10 randomized reruns of its file and 50 runs
-under full CPU load. Only reading for the window finds it.
+under full CPU load. Only reading for the window finds it. #583 fixed it the second way: the listener
+half now runs under a 60 s grace, past the runner's 15 s test timeout, and the 50 ms one drives only the expiry
+half, which the test waits on with `pollUntil`.
 
 ## Reproducing a flaky test
 
