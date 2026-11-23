@@ -3,6 +3,7 @@ import { QUOTA_DEFAULTS } from "./config.ts";
 import { DEFAULT_EXCLAVE, type Exclave, type ExclaveScan } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import { log } from "./log.ts";
+import { inRefreshLane } from "./refresh-lane.ts";
 import { cachedStampReader } from "./telemetry-collectors.ts";
 
 /**
@@ -142,19 +143,6 @@ export function loginName(): string | null {
   }
 }
 
-/**
- * One run at a time in the whole process, not per instance: a config reload
- * starts a second daemon in process while the first one's run may still be
- * going, and an LXC cannot carry two of them for long.
- */
-let lane: Promise<unknown> = Promise.resolve();
-
-function inLane<T>(run: () => Promise<T>): Promise<T> {
-  const next = lane.then(run);
-  lane = next.catch(() => undefined);
-  return next;
-}
-
 interface Backoff {
   /** No run before this, whatever pokes it: the last one failed. */
   readonly retryAt: number;
@@ -163,7 +151,7 @@ interface Backoff {
 }
 
 /**
- * Per cache file and process-wide like `lane`: a config reload's new instance
+ * Per cache file and process-wide like the refresh lane: a config reload's new instance
  * must not retry a failing exclave inside its backoff, nor warn again.
  */
 const backoff = new Map<string, Backoff>();
@@ -298,7 +286,7 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
           const id = queued.shift();
           if (id === undefined || stopped) return;
           // oxlint-disable-next-line no-await-in-loop -- one run at a time is the point
-          await inLane(() => attempt(id)).catch((err: unknown) => log.warn(`usage refresh: ${id}: ${String(err)}`));
+          await inRefreshLane(() => attempt(id)).catch((err: unknown) => log.warn(`usage refresh: ${id}: ${String(err)}`));
         }
       } finally {
         draining = null;

@@ -103,6 +103,7 @@ import {
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
   STATUS_MAX_AUTH_EXPIRED,
+  STATUS_MAX_LOGINS,
   STATUS_MAX_TRAIT_PAIRS,
   DECISION_MAX_CANDIDATES,
   FLEET_LIMIT_MAX,
@@ -2506,6 +2507,67 @@ describe("M4 shapes", () => {
     }
     const given = [[1, 5]];
     expect(parseMachineStatus({ at: 1, scan: 2, ae: given })?.ae).not.toBe(given);
+  });
+
+  test("a status carries agent logins' quota and health: lq bounded, lx/lu/lb disjoint and bounded together", () => {
+    const lq = [{ x: 0, h: 3, d: 40, hr: 1_760_000_000, dr: 1_760_500_000, c: 0, s: "cache" as const, at: 1_759_999_000 }];
+    const status = { at: 1, scan: 2, lq, lb: [0], lx: [1], lu: [2] };
+    expect(parseMachineStatus(status)).toEqual(status);
+    const plain = parseMachineStatus({ at: 1, scan: 2 });
+    for (const key of ["lq", "lx", "lu", "lb"]) expect(plain).not.toHaveProperty(key);
+    const full = Array.from({ length: STATUS_MAX_LOGINS }, (_, x) => ({ ...lq[0], x }));
+    expect(parseMachineStatus({ at: 1, scan: 2, lq: full })?.lq).toHaveLength(STATUS_MAX_LOGINS);
+    for (const bad of [
+      { lq: [...full, { ...lq[0], x: STATUS_MAX_LOGINS }] },
+      { lq: [{ ...lq[0], s: "probe" }] },
+      { lq: [{ ...lq[0], x: -1 }] },
+      { lq: "x" },
+      { lx: [-1] },
+      { lu: [1.5] },
+      { lb: [0, 0] },
+      { lx: [0], lu: [0] },
+      { lu: [0], lb: [0] },
+      { lx: [0, 1], lu: [2], lb: [3, 4] },
+    ]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, ...bad })).toBeNull();
+    }
+    // The exclaves' lists and the logins' index different lists: one index may sit in both.
+    expect(parseMachineStatus({ at: 1, scan: 2, ax: [0], lx: [0] })).toEqual({ at: 1, scan: 2, ax: [0], lx: [0] });
+  });
+
+  test("a register blob carries agent logins beside its exclaves; one this build cannot read reads as absent", () => {
+    const blob = { name: "m", platform: "darwin", repos: [], scannedAt: 1 };
+    const login = {
+      agent: "codex",
+      accountId: "codex:3f2c-acct:user-abc",
+      email: "a@example.com",
+      plan: "team",
+      workspace: "Acme",
+      authOk: true,
+      credits: true,
+      version: "0.170.0",
+    } as const;
+    expect(parseMachineInfo({ ...blob, logins: [login] })?.logins).toEqual([login]);
+    expect(parseMachineInfo({ ...blob, logins: [] })?.logins).toEqual([]);
+    expect(parseMachineInfo(blob)).not.toHaveProperty("logins");
+    const signedOut = { agent: "codex", accountId: null, authOk: false } as const;
+    expect(parseMachineInfo({ ...blob, logins: [signedOut] })?.logins).toEqual([signedOut]);
+    for (const bad of [
+      { ...login, agent: "agy" },
+      { ...login, accountId: "" },
+      { ...login, accountId: "x".repeat(129) },
+      { ...login, authOk: "yes" },
+      { ...login, credits: false },
+      { ...login, paired: false },
+      { ...login, email: "" },
+      { ...login, version: "v".repeat(257) },
+    ]) {
+      const parsed = parseMachineInfo({ ...blob, logins: [bad] });
+      expect(parsed).not.toBeNull();
+      expect(parsed).not.toHaveProperty("logins");
+    }
+    const five = Array.from({ length: STATUS_MAX_LOGINS + 1 }, () => login);
+    expect(parseMachineInfo({ ...blob, logins: five })).not.toHaveProperty("logins");
   });
 
   test("a status carries failing and unknown trait probes: disjoint, bounded together, absent stays absent", () => {

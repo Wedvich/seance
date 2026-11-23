@@ -46,6 +46,7 @@ import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { graphqlResetOf, startGithubRate, type GithubRateOpts } from "./github-rate.ts";
+import { startCodex, type CodexAccountOpts } from "./codex/account.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
@@ -150,6 +151,13 @@ export interface RunOpts {
    * main.ts passes `{}`.
    */
   readonly githubRate?: GithubRateOpts;
+  /**
+   * Enables the Codex login (`codex/account.ts`) when the config has a `codex` block: the home's `config.toml` written
+   * at start, the probe on its timer, the blob's `logins` and the status's `lq`/`lx`/`lu`/`lb`. Off unless supplied,
+   * as `githubRate` is — tests must not run the developer's `codex` by surprise; main.ts passes `{}`. Without it, or
+   * without the block, `logins` is `[]`. `stateDir` is a test seam; the rest are the account's own.
+   */
+  readonly codex?: CodexAccountOpts & { readonly stateDir?: string };
   /**
    * Enables the custodian seat's side of this process (`custodian-seat.ts`): with a `custodian` key in the config it
    * advertises the capability and starts rounds, and without one it closes any round a seat left. Off unless supplied, as `authHealth` is — a test daemon must never start a real round in a developer's
@@ -332,7 +340,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // a reader drops a status whose stamp disagrees with the blob it holds
   // (DESIGN.md, Presence & identity). Committed only once the frame has left —
   // keyed by the blob, so two overlapping registers each commit their own.
-  let registered: Registered = { scan: 0, exclaves: exclaveScan };
+  let registered: Registered = { scan: 0, exclaves: exclaveScan, logins: [] };
   // One predicate for the capability bit and the seat, so they cannot disagree. Read per startDaemon, like the rest of the config.
   const custodianOn = seatEnabled(config, opts.custodian, process.platform);
   // Read per startDaemon, so a config reload's new daemon takes a changed `authHealth.keychain`.
@@ -349,6 +357,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         });
   const githubRate = opts.githubRate === undefined ? null : startGithubRate(opts.githubRate);
   if (githubRate !== null) void githubRate.readNow();
+  const codexAccount = await startCodex(config, opts.codex, home, {
+    // Late-bound: the client and the status loop are built below, and the account starts only after both.
+    onInfoChange: () => void client.reRegister(),
+    onStatusChange: () => status.refresh(),
+  });
   const traitProbes = hasProbe(config.traits)
     ? createTraitProbes({
         // Late-bound, as auth health's: the status loop is built after this.
@@ -372,6 +385,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // Declared in this machine's config only. Never dropped by `sealMachineInfo` (16 names of 32
       // characters an exclave at most): only project skills are, so a trait is never lost to size.
       exclaves: withTraits(exclaveScan.info, config.traits),
+      // Configured logins only, in a fixed order: `lq`, `lx`, `lu` and `lb` index this list.
+      logins: codexAccount === null ? [] : [codexAccount.login()],
       source,
       lastUpdate: state.lastUpdate ?? null,
       capabilities: [
@@ -425,7 +440,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.sessionTag,
       ],
     };
-    const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
+    const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan, logins: info.logins ?? [] };
     const { sealed, droppedSkills, oversized } = await sealMachineInfo(key, state.deviceId, info);
     // Once per size-deciding content (the exclave set among it, so the trait warning too): `scannedAt` and
     // `lastUpdate` change every rescan without changing the size, and a line after each hourly rescan and
@@ -723,6 +738,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
       ...(githubRate === null ? {} : { github: () => githubRate.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
+      ...(codexAccount === null ? {} : { logins: () => new Map([["codex", codexAccount.view()] as const]) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {
@@ -939,6 +955,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   if (capabilities.custodianHost !== undefined) custodianSeat.host = capabilities.custodianHost;
   custodianSeat.status = capabilities.custodianStatus;
   drainAsk.wire(capabilities.drainAsk, drainingOf(state)?.cl ?? null);
+  // After the client and the status loop its changes reach: a probe answers in under a second.
+  if (!stopped) codexAccount?.start();
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
@@ -953,6 +971,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       stopGateWatch();
       status.stop();
       githubRate?.stop();
+      codexAccount?.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();
       capabilities.stop();

@@ -4,6 +4,7 @@ import {
   METRIC_NAMES,
   QUOTA_CLOCK_SKEW_MS,
   STATUS_MAX_AUTH_EXPIRED,
+  STATUS_MAX_LOGINS,
   type QuotaObservation,
   type ScopedWindow,
   type SessionEntry,
@@ -83,6 +84,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   authCollector,
   traitCollector,
   githubCollector,
+  loginCollector,
 ];
 
 function cpuCollector(sources: CollectorSources): Collect {
@@ -205,6 +207,44 @@ function authCollector(sources: CollectorSources): Collect {
         ...(keptAx.length === 0 ? {} : { ax: keptAx }),
         ...(keptAe.length === 0 ? {} : { ae: keptAe }),
         ...(keptAu.length === 0 ? {} : { au: keptAu }),
+      },
+      samples: [],
+    });
+  };
+}
+
+/**
+ * `lq`, `lx`, `lu` and `lb` from each agent login's view, indexed through the registered blob's `logins` — never the
+ * exclave list, which `quota` and `ax` index. No metric yet: a login's quota series is the archivist's (docs/codex.md,
+ * build order item 2). A login the view lacks, or reads signed out while the blob says signed in (the re-register not
+ * committed yet), is `lu`, as `authCollector` does; one the blob holds signed out adds nothing (`authOk: false` says
+ * it). `lq` keeps a reading through `unknown`, its `at` telling its age, and is never beside `lx`.
+ */
+function loginCollector(sources: CollectorSources): Collect {
+  return (tick) => {
+    const views = sources.logins?.();
+    if (views === undefined) return Promise.resolve(NO_CONTRIBUTION);
+    const lq: QuotaObservation[] = [];
+    const lx: number[] = [];
+    const lu: number[] = [];
+    const lb: number[] = [];
+    (tick.registered.logins ?? []).slice(0, STATUS_MAX_LOGINS).forEach((login, x) => {
+      const view = views.get(login.agent);
+      if (view === undefined || view.health === "signed_out") {
+        if (login.authOk) lu.push(x);
+        return;
+      }
+      if (view.health === "expired") lx.push(x);
+      else if (view.health === "unknown") lu.push(x);
+      else if (view.blocked) lb.push(x);
+      if (view.quota !== null && view.health !== "expired") lq.push({ x, ...view.quota });
+    });
+    return Promise.resolve({
+      fields: {
+        ...(lq.length === 0 ? {} : { lq }),
+        ...(lx.length === 0 ? {} : { lx }),
+        ...(lu.length === 0 ? {} : { lu }),
+        ...(lb.length === 0 ? {} : { lb }),
       },
       samples: [],
     });

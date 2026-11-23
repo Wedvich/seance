@@ -1,6 +1,7 @@
 import {
   startSlotTimer,
   STATUS_MIN_INTERVAL_MS,
+  type AgentLoginKind,
   type CustodianStatus,
   type GithubRate,
   type MachineStatus,
@@ -15,6 +16,7 @@ import { createTelemetry, MIN_CPU_WINDOW_MS, type HostProbe, type Registered } f
 import type { AuthView } from "./auth-health.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import type { TraitLists } from "./trait-probes.ts";
+import type { LoginView } from "./codex/account.ts";
 
 /**
  * What the collector registry reads from the daemon: every dependency a `status`
@@ -45,6 +47,8 @@ export interface CollectorDeps {
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' pairs for the registered scan: the status's `tf`/`tu`. */
   readonly traits?: (scan: ExclaveScan) => TraitLists;
+  /** Agent logins' views (`codex/account.ts`): the status's `lq`/`lx`/`lu`/`lb`. */
+  readonly logins?: () => ReadonlyMap<AgentLoginKind, LoginView>;
 }
 
 export interface StatusLoopDeps {
@@ -104,6 +108,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     ...(collectors.github === undefined ? {} : { github: collectors.github }),
     ...(collectors.auth === undefined ? {} : { auth: collectors.auth }),
     ...(collectors.traits === undefined ? {} : { traits: collectors.traits }),
+    ...(collectors.logins === undefined ? {} : { logins: collectors.logins }),
   });
   // Never past the next beat: a beat shorter than the relay's floor (tests only) is the floor that holds.
   // A twentieth over it, since the relay times the frames by their arrival, not by our send. It assumes

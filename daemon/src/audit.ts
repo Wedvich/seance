@@ -1069,6 +1069,38 @@ export function adapterOwnerAudit(sink: AuditSink): AdapterOwnerAudit {
   };
 }
 
+export const CODEX_OWNER_OPS = ["login", "logout", "status"] as const;
+export type CodexOwnerOp = (typeof CODEX_OWNER_OPS)[number];
+
+/**
+ * Why a `seance codex` verb ended as it did: its own word (`ok`, `failed`, a refusal) or, for `status`, the health the
+ * probe read. A closed set, so no line can carry what Codex printed.
+ */
+export const CODEX_OWNER_OUTCOMES = [
+  "ok",
+  "failed",
+  "no_config",
+  "missing",
+  "outdated",
+  "no_home",
+  "signed_out",
+  "expired",
+  "unknown",
+] as const;
+export type CodexOwnerOutcome = (typeof CODEX_OWNER_OUTCOMES)[number];
+
+/**
+ * The owner's `seance codex login | logout | status` (`codex/codex-cli.ts`), under the `cli` origin like every command typed
+ * at this machine: the verb and its outcome only, never the device code, an email, an account id or anything Codex
+ * printed.
+ */
+export function codexOwnerAudit(sink: AuditSink): (op: CodexOwnerOp, outcome: CodexOwnerOutcome) => Promise<void> {
+  const origin: SpawnOrigin = "cli";
+  return async (op, outcome) => {
+    await sink(`audit codex origin=${origin} op=${op} outcome=${outcome}`);
+  };
+}
+
 /** Ids, kind and a byte count, never text, a title, a message id or a pane. */
 export function messageAudit(sink: AuditSink): MessageAudit {
   const origin: MessageOrigin = "message";

@@ -1,7 +1,8 @@
 import { readFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import type { CustodianStatus, GithubRate, MachineStatus, SessionEntry } from "@seance/shared";
+import type { AgentLogin, AgentLoginKind, CustodianStatus, GithubRate, MachineStatus, SessionEntry } from "@seance/shared";
 import type { AuthView } from "./auth-health.ts";
+import type { LoginView } from "./codex/account.ts";
 import type { TraitLists } from "./trait-probes.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { exec } from "./exec.ts";
@@ -45,6 +46,8 @@ export const SMOOTHING_MS = 120_000;
 export interface Registered {
   readonly scan: number;
   readonly exclaves: ExclaveScan;
+  /** The blob's `logins`, which `lq`/`lx`/`lu`/`lb` index; absent is none. */
+  readonly logins?: readonly AgentLogin[];
 }
 
 /** Cumulative counters and totals read off the host; the OS is the one boundary a test replaces. */
@@ -87,6 +90,8 @@ export interface TelemetrySources {
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' failing and unknown pairs for the registered scan (`tf`/`tu`); absent reads as no trait fields. */
   readonly traits?: (scan: ExclaveScan) => TraitLists;
+  /** Each configured agent login's view (`lq`/`lx`/`lu`/`lb`); absent reads as no login fields. */
+  readonly logins?: () => ReadonlyMap<AgentLoginKind, LoginView>;
   /** Outbound HTTP for a collector that polls an endpoint; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
   /**
