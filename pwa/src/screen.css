@@ -129,6 +129,11 @@
   background: var(--ok);
 }
 
+/* Online but closed to scheduled work: the Closed badge's colour. */
+.dot-closed {
+  background: var(--warn);
+}
+
 /* Offline: hollow like the relay's unreachable ring, so absence reads by shape and not only by a grey fill. */
 .dot-off {
   box-sizing: border-box;
