@@ -22,14 +22,14 @@ change) hold throughout; the `message`, `inbox` and `watch` frames have files of
   became tasks).
 - Its access control is the **0700 `stateDir()/run` directory**, not the socket's own mode:
   `Bun.listen({ unix })` creates it 0755 and the `chmod` races.
-- Its op allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change
-  (DESIGN.md's "Local op socket" records why `despawn` got in).
+- Its op allowlist is `sessions`, `spawn`, `despawn` and `rescan` only; widening it is a threat-model
+  change (DESIGN.md's "Local op socket" records why `despawn` and `rescan` got in).
 
 ## The fleet broker
 
 - On a daemon whose key is service-delivered (`source: "credential"`) — and only there — the same socket
   carries the fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, four
-  actions — `machines`, `fleet`, `request` (the same three remote ops) and `scheduler` (`enqueue`,
+  actions — `machines`, `fleet`, `request` (`sessions`, `spawn` and `despawn`, never `rescan`) and `scheduler` (`enqueue`,
   `queue`, `cancel`, `run-now`, `pass`, `amend`, `accounts`). DESIGN.md's "Fleet broker" is the record;
   any widening, including running it on other daemons, is a threat-model change.
 - A brokered enqueue is a create at `expect: 0` of a task the daemon sealed itself from a parsed spec,
