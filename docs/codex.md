@@ -1,12 +1,14 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 items 1 and 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
+**Status: phase 1 items 1, 2 and 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
 `codex` config block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login |
 logout | status`, `MachineInfo.logins` and `MachineStatus.lq`/`lx`/`lu`/`lb` — is recorded in DESIGN.md: Daemon, "Codex
 login"; Presence & identity (the status fields and their trim); and the threat model's "A second credential store, never
 opened", "Identity, quota and login health come over Codex's API", "A second binary" and the `seance codex` verbs (this
 doc's threat-model items 1–3 and 12's login line). Item 5, the driver seam, is in DESIGN.md, Daemon, "Agent drivers".
-Where this doc and DESIGN.md differ on those, DESIGN.md is the record. Nothing reads `logins` or `lq` yet (item 2).
+Item 2 (2026-11-24), the fleet's readers of a login, is in DESIGN.md, Daemon, "Codex login", "Fleet readers"; Scheduler,
+"Auth alerts" and "Fleet quota record"; Archivist, "Metrics"; and the threat model's "The fleet reads an agent login
+as it reads an exclave". Where this doc and DESIGN.md differ on those, DESIGN.md is the record.
 Written 2026-11-23 from docs/agents.md (the scoping, both Codex spikes
 of 2026-11-19 on 0.166.0, the owner's decisions of 2026-11-19) and a read of the code at `923bb32`. API names were
 checked against the app-server schema that **codex-cli 0.170.0** generates. Spikes S2, S3 and S6 ran on macOS against
@@ -214,10 +216,10 @@ stateDir()/codex/              0700, the daemon's own
   - **Unknown** (`lu`): any other failure (another `-32603`: the network, the backend), a timeout, or no probe yet.
 - Codex gives no refresh-token expiry, so there is no `expiring`. `codex login status` is no health check: it reported
   "Logged in" for the login S4's backend refused.
-- **Alerts** reuse the leader's `authAlertStep`, its `SettingsRecord.authAlerts` entries and the `expired` push text,
-  for a login read from `lx`. `AuthAlerted.exclave` holds an exclave id, so a login's entry needs a key no exclave id
-  can be that still passes the step's `routable` check and an older leader's parser (an older leader then drops it as
-  an exclave gone from the registry, and alerts nothing for it). Choosing that key is a build-time detail.
+- **Alerts** reuse the leader's `authAlertStep` and its `SettingsRecord.authAlerts` entries for a login read from `lx`,
+  under the key `login.codex` (built: DESIGN.md, Scheduler, "Auth alerts"). The push is the `auth` kind's, but its text
+  is Codex's own ("A Codex login needs seance codex login."), chosen by the service worker from that fixed key:
+  _corrected at build_, since the Claude text names `/login`, which does nothing for a Codex login.
 
 ### On the wire
 
@@ -535,8 +537,10 @@ task (2026-11-23) after the ones it names.
    version floor, the probe, `MachineInfo.logins`, `MachineStatus.lq`/`lx`/`lu`/`lb` with their parsers and the status
    budget. Its PR lists the owner's steps to try it: a `codex` block in a machine's `config.json`, then
    `seance codex login`.
-2. **Fleet readers** (after 1): `newestQuotaByAccount` and the fleet quota writer fold `lq`; `knownAccounts` reads
-   `logins`; MCP `list_machines`; the archivist's quota series; the leader's login alert and its `authAlerts` key.
+2. **Built 2026-11-24** (DESIGN.md, Daemon, "Codex login", "Fleet readers"). **Fleet readers** (after 1):
+   `newestQuotaByAccount` and the fleet quota writer fold `lq`; `knownAccounts` reads `logins`; MCP `list_machines`;
+   the archivist's quota series; the leader's login alert and its `authAlerts` key. _Corrected at build:_
+   `list_machines` shows no quota for an exclave, so it shows none for a login either ("as it shows an exclave's").
 3. **The PWA** (after 2): the account card (an agent badge, the windows, the credits state, rename, the "Open for work"
    switch through the existing account hold) and the Machines card's login row.
 
@@ -603,7 +607,8 @@ Still to run, each before the phase named; each checks a fact the design already
   `Bun.connect({ unix })`.
 - Recognising a Codex pane: its `AgentPanes.startMark` (`agents/panes.ts`, read by `sessions.ts` through `OURS`), a
   glob for the run dir `/tmp/seance-cx-*` in its start command, beside the window's `@seance-task`.
-- The key a login's `SettingsRecord.authAlerts` entry uses ("Login health").
+- ~~The key a login's `SettingsRecord.authAlerts` entry uses ("Login health")~~: built, `login.codex` (DESIGN.md,
+  Scheduler, "Auth alerts").
 
 ## Where it lands
 

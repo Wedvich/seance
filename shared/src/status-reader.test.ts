@@ -8,12 +8,13 @@ import {
   isQuotaTrimmed,
   isStatusStale,
   lastHeardAt,
+  loginHealth,
   sanitizeStatus,
   STATUS_CLOCK_SKEW_MS,
   STATUS_STALE_MS,
 } from "./status-reader.ts";
 import type { Machine } from "./app-client.ts";
-import { CAPABILITIES, type MachineStatus, type QuotaObservation } from "./types.ts";
+import { CAPABILITIES, type AgentLogin, type MachineStatus, type QuotaObservation } from "./types.ts";
 
 const NOW_MS = 1_760_000_000_000;
 const NOW_S = NOW_MS / 1000;
@@ -115,6 +116,71 @@ describe("sanitizeStatus", () => {
     const allAhead = sanitizeStatus({ ...status, quota: [observation(0, { at: ahead })] }, 2, NOW_MS);
     expect(allAhead).not.toBeNull();
     expect(allAhead).not.toHaveProperty("quota");
+  });
+});
+
+// The agent logins' fields index the blob's `logins` (DESIGN.md, Presence & identity) and never cost the status.
+describe("sanitizeStatus on login fields", () => {
+  const logins = { ...status, lq: [observation(0)], lx: [1], lu: [2] };
+
+  test("fields within the blob's logins come back as the status itself", () => {
+    expect(sanitizeStatus(logins, 2, NOW_MS, 3)).toBe(logins);
+  });
+
+  test("an index past the logins, a repeat or a bad percent drops the four fields alone", () => {
+    for (const bad of [
+      { ...logins, lb: [3] },
+      { ...logins, lq: [observation(3)] },
+      { ...logins, lq: [observation(0), observation(0)] },
+      { ...logins, lq: [observation(0, { h: 101 })] },
+    ]) {
+      const sanitized = sanitizeStatus(bad, 2, NOW_MS, 3);
+      expect(sanitized).toEqual(status);
+    }
+    // A blob whose logins this build could not read holds none: Claude's quota stands.
+    expect(sanitizeStatus(logins, 2, NOW_MS)?.quota).toEqual(status.quota);
+  });
+
+  test("a login reading stamped past clock skew is dropped alone", () => {
+    const ahead = NOW_S + STATUS_CLOCK_SKEW_MS / 1000 + 1;
+    const sanitized = sanitizeStatus({ ...logins, lq: [observation(0, { at: ahead })] }, 2, NOW_MS, 3);
+    expect(sanitized).toEqual({ ...status, lx: [1], lu: [2] });
+  });
+});
+
+describe("loginHealth", () => {
+  const login = (fields: Partial<AgentLogin> = {}): AgentLogin => ({
+    agent: "codex",
+    accountId: "codex:ws:user",
+    authOk: true,
+    ...fields,
+  });
+  const at = (fields: Partial<MachineStatus>, logins: readonly AgentLogin[] = [login()], connected = true) => ({
+    connected,
+    logins,
+    status: { at: NOW_S, scan: 1, ...fields },
+  });
+
+  test("reads lx, lu and lb from a live fresh status, else ok", () => {
+    expect(loginHealth(at({}), 0, NOW_MS)).toBe("ok");
+    expect(loginHealth(at({ lx: [0] }), 0, NOW_MS)).toBe("expired");
+    expect(loginHealth(at({ lu: [0] }), 0, NOW_MS)).toBe("unknown");
+    expect(loginHealth(at({ lb: [0] }), 0, NOW_MS)).toBe("blocked");
+  });
+
+  test("a login before its first probe reads unknown, though its blob says signed out", () => {
+    expect(loginHealth(at({ lu: [0] }, [login({ accountId: null, authOk: false })]), 0, NOW_MS)).toBe("unknown");
+  });
+
+  test("by the blob: signed out, unidentified; no login at the index is signed out", () => {
+    expect(loginHealth(at({}, [login({ accountId: null, authOk: false })]), 0, NOW_MS)).toBe("signed_out");
+    expect(loginHealth(at({}, [login({ accountId: null })]), 0, NOW_MS)).toBe("unidentified");
+    expect(loginHealth(at({}), 1, NOW_MS)).toBe("signed_out");
+  });
+
+  test("an asleep or stale machine says unknown for a signed-in login, never expired", () => {
+    expect(loginHealth(at({ lx: [0] }, [login()], false), 0, NOW_MS)).toBe("unknown");
+    expect(loginHealth(at({ lx: [0] }), 0, NOW_MS + STATUS_STALE_MS + 1000)).toBe("unknown");
   });
 });
 

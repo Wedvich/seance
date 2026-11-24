@@ -143,6 +143,18 @@ describe("account labels", () => {
     ]);
   });
 
+  test("knownAccounts reads agent logins beside exclaves, so a Codex account is named by its email", () => {
+    const CODEX = "codex:ws-1:user-1";
+    const withLogin = [
+      ...machines,
+      { logins: [{ agent: "codex" as const, accountId: CODEX, email: "gpt@example.com", authOk: true }] },
+      { logins: [{ agent: "codex" as const, accountId: null, authOk: false }] },
+    ];
+    expect(knownAccounts(withLogin).at(-1)).toEqual({ accountId: CODEX, email: "gpt@example.com" });
+    expect(knownAccounts(withLogin)).toHaveLength(4);
+    expect(accountNameIn(knownAccounts(withLogin), CODEX)).toBe("gpt@example.com");
+  });
+
   test("an email two known accounts share gains each one's org; a unique email or an alias reads as itself", () => {
     const known = knownAccounts(machines);
     expect(accountNameIn(known, PERSONAL)).toBe("me@example.com (org 1a2b3c4d)");

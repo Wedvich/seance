@@ -20,6 +20,7 @@ import {
   STORE_TIMEOUT_MS,
   TOKEN_PARAM,
   type AccountRecord,
+  type AgentLogin,
   type AppStoreRequestFrame,
   type AppFrame,
   type AttachmentHttpCode,
@@ -498,6 +499,11 @@ export interface Machine {
   readonly capabilities?: readonly string[];
   /** The register blob's `exclaves`, which `status` indexes; absent from a daemon that predates them. */
   readonly exclaves?: readonly ExclaveInfo[];
+  /**
+   * The register blob's `logins`, which `status.lq`/`lx`/`lu`/`lb` index; absent from a daemon that predates them, or
+   * when this build could not read the list (a newer agent kind).
+   */
+  readonly logins?: readonly AgentLogin[];
   /** The build the daemon is running (read once per process, not the checkout on disk); absent from an old daemon or one outside git. */
   readonly source?: SourceInfo;
   /** Its last self-update attempt that did something other than find itself current. */
@@ -869,6 +875,7 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.status === b.status &&
     a.capabilities === b.capabilities &&
     a.exclaves === b.exclaves &&
+    a.logins === b.logins &&
     a.source === b.source &&
     a.lastUpdate === b.lastUpdate &&
     a.instance === b.instance
@@ -2106,7 +2113,7 @@ export class RelayClient {
       const status =
         opened === null || opened.scan !== info.scannedAt
           ? null
-          : sanitizeStatus(opened, info.exclaves?.length ?? 0, Date.now());
+          : sanitizeStatus(opened, info.exclaves?.length ?? 0, Date.now(), info.logins?.length ?? 0);
       const built: Machine = {
         deviceId: entry.deviceId,
         name: info.name,
@@ -2118,6 +2125,7 @@ export class RelayClient {
         ...(status === null ? {} : { status }),
         ...(info.capabilities !== undefined ? { capabilities: info.capabilities } : {}),
         ...(info.exclaves !== undefined ? { exclaves: info.exclaves } : {}),
+        ...(info.logins !== undefined ? { logins: info.logins } : {}),
         ...(info.source !== undefined && info.source !== null ? { source: info.source } : {}),
         ...(info.lastUpdate !== undefined && info.lastUpdate !== null ? { lastUpdate: info.lastUpdate } : {}),
         ...(info.instance !== undefined ? { instance: info.instance } : {}),

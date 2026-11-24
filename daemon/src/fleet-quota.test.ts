@@ -461,6 +461,31 @@ describe("newestReadings", () => {
     );
   });
 
+  test("an agent login's readings join keyed through the blob's logins, never its exclaves", () => {
+    const logins = [
+      { agent: "codex" as const, accountId: "codex:ws:user", authOk: true },
+      { agent: "codex" as const, accountId: null, authOk: true },
+    ];
+    const status: MachineStatus = {
+      at: S,
+      scan: 5,
+      quota: [{ x: 0, h: 10, s: "cache", at: S - 60 }],
+      lq: [
+        { x: 0, h: 7, s: "cache", at: S - 30 },
+        { x: 1, h: 8, s: "cache", at: S },
+        { x: 2, h: 9, s: "cache", at: S },
+      ],
+    };
+    expect(newestReadings(status, 5, info, logins)).toEqual(
+      new Map([
+        ["org:a", { h: 10, s: "cache", at: S - 60 }],
+        ["codex:ws:user", { h: 7, s: "cache", at: S - 30 }],
+      ]),
+    );
+    // No logins held: `lq` indexes nothing.
+    expect([...newestReadings(status, 5, info).keys()]).toEqual(["org:a"]);
+  });
+
   test("a status naming another blob, or none yet, reads as no readings", () => {
     const status: MachineStatus = { at: S, scan: 4, quota: [{ x: 0, h: 10, s: "cache", at: S }] };
     expect(newestReadings(status, 5, info).size).toBe(0);

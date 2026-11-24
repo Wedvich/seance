@@ -258,6 +258,28 @@ describe("the collector registry", () => {
     for (const key of ["lq", "lx", "lu", "lb"]) expect(none).not.toHaveProperty(key);
   });
 
+  test("an identified login's reading is a quota series labelled by agent and account, never by exclave", async () => {
+    const quota = { s: "cache" as const, at: T0 / 1000 - 60, h: 3, d: 41 };
+    const series = async (accountId: string | null) => {
+      const store = MetricsStore.memory();
+      await createTelemetry(store, {
+        ...sources,
+        registered: () => ({ ...registered, logins: [{ agent: "codex", accountId, authOk: true }] }),
+        logins: () => new Map([["codex", { health: "ok", quota, blocked: false }] as const]),
+      }).tick(T0);
+      return store
+        .query({ from: 0, to: T0 / 1000, step: 30 })
+        .filter((s) => s.metric === METRIC_NAMES.h || s.metric === METRIC_NAMES.d);
+    };
+    const identified = await series("codex:ws:user");
+    expect(identified.map((s) => [s.metric, s.labels])).toEqual([
+      [METRIC_NAMES.h, { login: "codex", account: "codex:ws:user" }],
+      [METRIC_NAMES.d, { login: "codex", account: "codex:ws:user" }],
+    ]);
+    // Unidentified: still sent in `lq`, but there is no account to chart it under.
+    expect(await series(null)).toEqual([]);
+  });
+
   test("an entry that rejects or throws drops only its own contribution", async () => {
     const store = MetricsStore.memory();
     const telemetry = createTelemetry(store, sources, [rejects, ...TELEMETRY_COLLECTORS, throws, counting]);

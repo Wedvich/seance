@@ -3,6 +3,7 @@ import {
   AT_REST_OPS,
   STORE_PREFIXES,
   type AccountRecord,
+  type AgentLogin,
   type Envelope,
   type RecordUnreadable,
   type ExclaveInfo,
@@ -31,19 +32,20 @@ export interface KnownAccount {
 }
 
 /**
- * The accounts a client knows: every one some machine's exclave reports signed
- * in, once each, with the first email any of them reports (one account has one).
+ * The accounts a client knows: every one some machine's exclave or agent login
+ * (`logins`, docs/codex.md "Identity") reports signed in, once each, with the
+ * first email any of them reports (one account has one).
  * `extraIds` are accounts a screen names that no machine reports (a pin, a
  * hold): kept with no email, so a label rule sees them as twins too; the
  * registry's entry wins for the email.
  */
 export function knownAccounts(
-  machines: readonly { readonly exclaves?: readonly ExclaveInfo[] }[],
+  machines: readonly { readonly exclaves?: readonly ExclaveInfo[]; readonly logins?: readonly AgentLogin[] }[],
   extraIds: Iterable<string> = [],
 ): KnownAccount[] {
   const known = new Map<string, KnownAccount>();
   for (const machine of machines) {
-    for (const { accountId, email } of machine.exclaves ?? []) {
+    for (const { accountId, email } of [...(machine.exclaves ?? []), ...(machine.logins ?? [])]) {
       if (accountId === null) continue;
       const held = known.get(accountId);
       if (held === undefined || held.email === undefined) known.set(accountId, { accountId, email });

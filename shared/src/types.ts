@@ -4082,7 +4082,15 @@ export const DISK_ALERTS_MAX = 32;
  */
 export const AUTH_ALERTS_MAX = 16;
 
-/** An exclave alerted for its login, the state alerted, and when (ms). */
+/**
+ * The `AuthAlerted.exclave` (and `auth` push alert `exclave`) an agent login's alert is held under, one per agent
+ * (DESIGN.md, Scheduler, "Auth alerts"). A routing id, so an older leader's parser and the service worker still take
+ * it, but with a `.`, which no exclave id can hold (`EXCLAVE_NAME`, `[a-z0-9-]`, and `default`): an older leader drops
+ * the entry as an exclave gone from the registry and alerts nothing for the login.
+ */
+export const LOGIN_ALERT_KEYS = { codex: "login.codex" } as const satisfies Record<AgentLoginKind, string>;
+
+/** An exclave (or an agent login, under its `LOGIN_ALERT_KEYS` key) alerted for its login, the state alerted, and when (ms). */
 export interface AuthAlerted {
   readonly deviceId: string;
   readonly exclave: string;

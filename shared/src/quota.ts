@@ -22,7 +22,7 @@ export interface NewestQuota {
  * that has them (`mergeQuota`), so a machine whose cache never saw a per-model
  * cap doesn't erase the one another machine read. Statuses are expected
  * sanitized already (`RelayClient` does it), but an index outside the exclave
- * list is still skipped rather than trusted. Exclaves not signed in have no
+ * (or login) list is still skipped rather than trusted. Exclaves not signed in have no
  * account and contribute nothing.
  * Live and kept statuses fold alike — an observation carries its own `at`, so
  * an asleep machine's last reading still counts for an account it shares —
@@ -34,9 +34,13 @@ export interface NewestQuota {
  * quota record"): each joins its account's candidates after every status, so a
  * tie goes to the status, and its `observer` stands in as the machine — one
  * that may have left the registry, which is what the record is for.
+ *
+ * An agent login's readings (`status.lq`, indexing `logins`) fold the same way under the login's account id
+ * (docs/codex.md, "Identity"), so one ChatGPT account signed in on two machines is one account. Its id names its own
+ * kind (`codex:…`), never equal to a Claude one, so the two never fold together.
  */
 export function newestQuotaByAccount(
-  machines: readonly Pick<Machine, "deviceId" | "exclaves" | "status">[],
+  machines: readonly Pick<Machine, "deviceId" | "exclaves" | "logins" | "status">[],
   fleet: readonly FleetQuotaEntry[] = [],
 ): ReadonlyMap<string, NewestQuota> {
   const seen = new Map<string, NewestQuota[]>();
@@ -49,6 +53,12 @@ export function newestQuotaByAccount(
     const exclaves = machine.exclaves ?? [];
     for (const observation of machine.status?.quota ?? []) {
       const accountId = exclaves[observation.x]?.accountId;
+      if (accountId === undefined || accountId === null) continue;
+      add(accountId, { observation, deviceId: machine.deviceId });
+    }
+    const logins = machine.logins ?? [];
+    for (const observation of machine.status?.lq ?? []) {
+      const accountId = logins[observation.x]?.accountId;
       if (accountId === undefined || accountId === null) continue;
       add(accountId, { observation, deviceId: machine.deviceId });
     }

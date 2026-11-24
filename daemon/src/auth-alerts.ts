@@ -3,6 +3,8 @@ import {
   exclaveAuth,
   isStatusStale,
   liveStatus,
+  LOGIN_ALERT_KEYS,
+  loginHealth,
   ROUTING_ID_PATTERN,
   type AuthAlerted,
   type Machine,
@@ -20,6 +22,10 @@ import {
  * a login does not become less lapsed, and a reading that says `expiring` over a held `expired`
  * is the daemon's clock disagreeing with the last one. `unknown` (an older daemon, an unreadable
  * store, a fresh daemon that has not read yet) says nothing: it neither alerts nor clears.
+ *
+ * An agent login (`Machine.logins`) alerts the same way under its `LOGIN_ALERT_KEYS` key, from `loginHealth`: only
+ * `expired` (`lx`; Codex gives no refresh-token expiry, so there is no `expiring`), cleared by `ok` or `blocked` (a
+ * login the backend accepts), `unknown` saying nothing, signed out clearing it with no "restored".
  */
 
 export interface AuthAlertStep {
@@ -34,19 +40,25 @@ const keyOf = (deviceId: string, exclave: string): string => `${deviceId}\n${exc
 
 const routable = (id: string): boolean => ROUTING_ID_PATTERN.test(id);
 
+const LOGIN_KEYS: ReadonlySet<string> = new Set(Object.values(LOGIN_ALERT_KEYS));
+
 export function authAlertStep(
   machines: readonly Machine[],
   alerted: readonly AuthAlerted[],
   now: number,
 ): AuthAlertStep {
   const byDevice = new Map(machines.map((m) => [m.deviceId, m]));
-  // A machine or an exclave gone from the registry takes its entry with it. A machine whose exclave list is
-  // not known says nothing about them.
+  // A machine, an exclave or a login gone from the registry takes its entry with it. A machine whose exclave (or
+  // login) list is not known says nothing about them.
   const held = new Map(
     alerted
       .filter((a) => {
-        const exclaves = byDevice.get(a.deviceId)?.exclaves;
-        return byDevice.has(a.deviceId) && (exclaves === undefined || exclaves.some((x) => x.id === a.exclave));
+        const machine = byDevice.get(a.deviceId);
+        if (machine === undefined) return false;
+        if (LOGIN_KEYS.has(a.exclave)) {
+          return machine.logins === undefined || machine.logins.some((l) => LOGIN_ALERT_KEYS[l.agent] === a.exclave);
+        }
+        return machine.exclaves === undefined || machine.exclaves.some((x) => x.id === a.exclave);
       })
       .map((a) => [keyOf(a.deviceId, a.exclave), a]),
   );
@@ -80,6 +92,28 @@ export function authAlertStep(
       if (entry === undefined && held.size >= AUTH_ALERTS_MAX) return;
       held.set(key, { deviceId: machine.deviceId, exclave: exclave.id, state, at: now });
       alerts.push({ v: 1, kind: "auth", at: now, deviceId: machine.deviceId, exclave: exclave.id, state });
+    });
+    (machine.logins ?? []).forEach((login, index) => {
+      if (!routable(machine.deviceId)) return;
+      const id = LOGIN_ALERT_KEYS[login.agent];
+      const key = keyOf(machine.deviceId, id);
+      const entry = held.get(key);
+      const health = loginHealth(machine, index, now);
+      if (health === "signed_out" || health === "unidentified") {
+        held.delete(key);
+        return;
+      }
+      if (health === "unknown") return;
+      if (health === "ok" || health === "blocked") {
+        if (entry === undefined) return;
+        held.delete(key);
+        restored.push(entry);
+        return;
+      }
+      if (entry !== undefined) return;
+      if (held.size >= AUTH_ALERTS_MAX) return;
+      held.set(key, { deviceId: machine.deviceId, exclave: id, state: "expired", at: now });
+      alerts.push({ v: 1, kind: "auth", at: now, deviceId: machine.deviceId, exclave: id, state: "expired" });
     });
   }
   const next = [...held.values()];

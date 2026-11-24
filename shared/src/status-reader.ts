@@ -101,6 +101,32 @@ export function exclaveAuth(
   return { state: "ok" };
 }
 
+/**
+ * One agent login's health as a reader sees it (DESIGN.md, Daemon, "Codex login"): routing, MCP, the PWA and the
+ * alert step read it here. From a live fresh status, as `exclaveAuth`: `expired` for `lx`, `unknown` for `lu` (a
+ * login before its first probe included, whose blob still says `authOk: false`); then, by the blob, `signed_out`
+ * (`authOk: false`) and `unidentified` (signed in with no account id); `blocked` for `lb` (signed in, included usage
+ * refused); otherwise `ok`. With no live fresh status, `unknown` for a login the blob holds signed in. No capability
+ * check: a daemon that sends `logins` sends these lists with them.
+ */
+export type LoginHealth = "ok" | "expired" | "blocked" | "unknown" | "signed_out" | "unidentified";
+
+export function loginHealth(
+  machine: Pick<Machine, "connected" | "status" | "logins">,
+  index: number,
+  nowMs: number,
+): LoginHealth {
+  const login = machine.logins?.[index];
+  if (login === undefined) return "signed_out";
+  const status = liveStatus(machine);
+  if (status === undefined || isStatusStale(status, nowMs)) return login.authOk ? "unknown" : "signed_out";
+  if (status.lx?.includes(index) === true) return "expired";
+  if (status.lu?.includes(index) === true) return "unknown";
+  if (!login.authOk) return "signed_out";
+  if (login.accountId === null) return "unidentified";
+  return status.lb?.includes(index) === true ? "blocked" : "ok";
+}
+
 /** One trait probe as a reader sees it. */
 export type TraitHealth = "healthy" | "failing" | "unknown";
 
@@ -178,23 +204,67 @@ export function isQuotaTrimmed(status: MachineStatus): boolean {
  * bad field costs the tick. A quota observation stamped further ahead than
  * clock skew is dropped alone — it would read as the newest for its account
  * until the clock caught up. Returns `status` itself when nothing is dropped.
+ *
+ * The agent logins' fields (`lq`, `lx`, `lu`, `lb`) are held to `loginCount`, the blob's `logins`, the same way, but
+ * one that contradicts it drops those four fields alone, never the status: a blob whose `logins` this build cannot
+ * read (a newer agent kind) holds none while its daemon still reports them, and that must not cost the machine its
+ * Claude quota and pressure.
  */
-export function sanitizeStatus(status: MachineStatus, exclaveCount: number, nowMs: number): MachineStatus | null {
+export function sanitizeStatus(
+  status: MachineStatus,
+  exclaveCount: number,
+  nowMs: number,
+  loginCount = 0,
+): MachineStatus | null {
   const { cpu, mem, disk, sess, quota, tr } = status;
   if (![cpu, mem, disk].every(isPct)) return null;
   if (sess !== undefined && sess.length !== exclaveCount) return null;
-  if (quota === undefined) return (tr ?? 0) > exclaveCount ? null : status;
-  if (quota.length + (tr ?? 0) > exclaveCount) return null;
+  if (quota !== undefined && (quota.length + (tr ?? 0) > exclaveCount || !indicesSane(quota, exclaveCount))) {
+    return null;
+  }
+  if (quota === undefined && (tr ?? 0) > exclaveCount) return null;
+  const horizonS = (nowMs + STATUS_CLOCK_SKEW_MS) / 1000;
+  const logins = sanitizeLogins(status, loginCount, horizonS);
+  const kept = quota?.filter((q) => q.at <= horizonS);
+  if (kept?.length === quota?.length && logins === null) return status;
+  const { quota: _quota, lq: _lq, lx: _lx, lu: _lu, lb: _lb, ...rest } = status;
+  const { lq, lx, lu, lb } = logins ?? status;
+  return {
+    ...rest,
+    ...(kept === undefined || kept.length === 0 ? {} : { quota: kept }),
+    ...(lq === undefined ? {} : { lq }),
+    ...(lx === undefined ? {} : { lx }),
+    ...(lu === undefined ? {} : { lu }),
+    ...(lb === undefined ? {} : { lb }),
+  };
+}
+
+/**
+ * Null when the login fields stand as sent; else the ones to keep: none when an index falls outside `loginCount`,
+ * repeats, or a reading is not a percent; `lq` without a reading stamped past `horizonS`.
+ */
+function sanitizeLogins(
+  status: MachineStatus,
+  loginCount: number,
+  horizonS: number,
+): Pick<MachineStatus, "lq" | "lx" | "lu" | "lb"> | null {
+  const { lq, lx, lu, lb } = status;
+  if (lq === undefined && lx === undefined && lu === undefined && lb === undefined) return null;
+  const listed = [...(lx ?? []), ...(lu ?? []), ...(lb ?? [])];
+  if (listed.some((x) => x >= loginCount) || !indicesSane(lq ?? [], loginCount)) return {};
+  const kept = (lq ?? []).filter((q) => q.at <= horizonS);
+  if (lq === undefined || kept.length === lq.length) return null;
+  return { ...(kept.length === 0 ? {} : { lq: kept }), lx, lu, lb };
+}
+
+/** Every observation's index in range and unrepeated, every percent a percent. */
+function indicesSane(observations: readonly QuotaObservation[], count: number): boolean {
   const seen = new Set<number>();
-  for (const q of quota) {
-    if (q.x >= exclaveCount || seen.has(q.x) || !isSaneObservation(q)) return null;
+  for (const q of observations) {
+    if (q.x >= count || seen.has(q.x) || !isSaneObservation(q)) return false;
     seen.add(q.x);
   }
-  const horizonS = (nowMs + STATUS_CLOCK_SKEW_MS) / 1000;
-  const kept = quota.filter((q) => q.at <= horizonS);
-  if (kept.length === quota.length) return status;
-  const { quota: _quota, ...rest } = status;
-  return kept.length === 0 ? rest : { ...rest, quota: kept };
+  return true;
 }
 
 function isSaneObservation(q: QuotaObservation): boolean {

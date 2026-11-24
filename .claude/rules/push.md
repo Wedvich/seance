@@ -22,6 +22,8 @@ Requirements, not observations: DESIGN.md's Threat model is the record.
   - the archivist's silence one text, nothing of its payload shown;
   - a flag's one of four texts by its `reason`, an enum, and a generic one for any other value, the note
     never shown;
+  - a login's one of two texts by its `state`, an enum, and an agent login's (its `exclave` the fixed
+    `LOGIN_ALERT_KEYS` key, never shown) its own one text;
   - a failing custodian's one text, opening only `/?screen=machines`;
   - a GitHub budget's one of two texts by its `resource`, an enum, opening only `/?screen=machines`.
 - A click opens only a same-origin path it built from an id that passed `isTaskId` (`/?task=<id>`,

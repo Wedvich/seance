@@ -68,6 +68,7 @@ import {
   drainStuckText,
   drainView,
   exclaveAuth,
+  loginHealth,
   exclaveTraitHealth,
   exclaveTraitUnchecked,
   lastHeardAt,
@@ -412,6 +413,19 @@ function describeMachine(
               ...(auth.state === "expiring" ? { loginExpiresAt: new Date(auth.expiresAt).toISOString() } : {}),
             };
           }),
+        }),
+    // Absent on a daemon predating agent logins (or a list this build cannot read); empty with none configured.
+    ...(machine.logins === undefined
+      ? {}
+      : {
+          logins: machine.logins.map((login, index) => ({
+            agent: login.agent,
+            ...(login.accountId === null ? {} : { accountId: login.accountId }),
+            ...(login.email === undefined ? {} : { email: login.email }),
+            ...(login.accountId === null ? {} : describeName(names, login.accountId)),
+            auth: loginHealth(machine, index, now),
+            ...(login.version === undefined ? {} : { version: login.version }),
+          })),
         }),
     // Named so the model knows which target costs nothing to reach; get_sessions
     // and despawn_session there go straight to the daemon on this box.
@@ -1133,7 +1147,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `draining` false for a soft close, whose drain has not been started (nothing is moved: `running` tasks still working there, `idle` ones idle at their prompt, which never finish on their own and are what a drain is for (the leader counts one idle 10 minutes after its turn ended), and `waitingOnYou` ones waiting on a person), true once it has (`moving` tasks still being passed to other machines, `waitingOnYou` of them waiting on a person); then `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). `logins` are the machine's agent logins beside its exclaves (today one Codex sign-in to ChatGPT, which no task runs on yet): each one's `agent`, the `accountId` (`codex:<account>:<user>`) and `email` once identified, `account` and `alias` named as an exclave's are, `version` (its `codex --version`), and `auth`: `ok`, `expired` (its login needs `seance codex login` on that machine), `blocked` (signed in, but its included usage is refused), `unknown` (not read yet, or the machine is asleep), `signed_out`, or `unidentified` (signed in with no account id). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `draining` false for a soft close, whose drain has not been started (nothing is moved: `running` tasks still working there, `idle` ones idle at their prompt, which never finish on their own and are what a drain is for (the leader counts one idle 10 minutes after its turn ended), and `waitingOnYou` ones waiting on a person), true once it has (`moving` tasks still being passed to other machines, `waitingOnYou` of them waiting on a person); then `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },

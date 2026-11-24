@@ -402,6 +402,32 @@ describe("statusSamples", () => {
     });
   });
 
+  test("an agent login's reading is labelled by agent and by its account's HMAC, never by exclave", async () => {
+    const CODEX = "codex:ws-1:user-1";
+    const status: MachineStatus = {
+      at: NOW,
+      scan: 0,
+      lq: [
+        { x: 0, h: 12, d: 30, s: "cache", at: NOW - 60 },
+        { x: 1, h: 99, s: "cache", at: NOW },
+        { x: 2, h: 99, s: "cache", at: NOW },
+      ],
+    };
+    const keyOf = (accountId: string): Promise<string> => accountStoreKey(accountKey, accountId);
+    const logins = [
+      { agent: "codex" as const, accountId: CODEX, authOk: true },
+      // Unidentified: no account to file it under, so no series.
+      { agent: "codex" as const, accountId: null, authOk: true },
+    ];
+    const samples = await statusSamples(machine({ exclaves: [], logins }), status, keyOf);
+    const labels = { machine: "dev-a", login: "codex", account: await keyOf(CODEX) };
+    expect(samples).toEqual([
+      { metric: "quota_5h_pct", labels, ts: NOW - 60, value: 12 },
+      { metric: "quota_7d_pct", labels, ts: NOW - 60, value: 30 },
+    ]);
+    expect(JSON.stringify(samples)).not.toContain(CODEX);
+  });
+
   test("the GitHub budget is a used share per resource under the observer, never the user id", async () => {
     const status: MachineStatus = { at: NOW, scan: 0, gh: { u: 583231, c: [5000, 4000, 1], g: [5000, 0, 1] } };
     const samples = await statusSamples(machine(), status, () => Promise.reject(new Error("no account here")));
