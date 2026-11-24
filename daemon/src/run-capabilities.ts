@@ -189,8 +189,8 @@ export interface Started {
   readonly armPassClose?: SessionEvents["armPassClose"];
   /** A Codex session's states into the session-event step, once session events run: `run.ts` hands it to `codexSessions`. */
   readonly codexState?: SessionEvents["codex"];
-  /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
-  readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
+  /** The leader's forwarded messages and receipts, and a Codex session's inbox, once session events run: `run.ts` reads them late. */
+  readonly messages?: Pick<Messages, "deliverRouted" | "receipt" | "attachCodex">;
   /** The watch table's intake for the leader's `watch-event`, once session events run: the handler context reads it late (`run.ts`). */
   readonly watches?: Pick<Watches, "onEvent">;
   /** The drain's session ask, once session events run: `run.ts`'s availability reads it late. */
@@ -1129,8 +1129,8 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
 export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
   readonly codexState?: SessionEvents["codex"];
-  /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
-  readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
+  /** The leader's forwarded messages and receipts, and a Codex session's inbox, once session events run: `run.ts` reads them late. */
+  readonly messages?: Pick<Messages, "deliverRouted" | "receipt" | "attachCodex">;
   readonly watches?: Pick<Watches, "onEvent">;
   readonly drainAsk?: DrainAsk;
   readonly custodianStatus?: (now: number) => CustodianStatus | null;

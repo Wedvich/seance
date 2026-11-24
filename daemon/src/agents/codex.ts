@@ -1,6 +1,12 @@
 import { chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_CODEX_MODEL, isAgentSessionId, isRecord, type SpawnRequest } from "@seance/shared";
+import {
+  CODEX_STANDING_INSTRUCTION,
+  DEFAULT_CODEX_MODEL,
+  isAgentSessionId,
+  isRecord,
+  type SpawnRequest,
+} from "@seance/shared";
 import { SpawnFailure } from "../backend.ts";
 import {
   connectCodex,
@@ -277,8 +283,13 @@ async function converse(connection: CodexConnection, args: StartArgs): Promise<s
     sandbox: args.config.sandbox,
     approvalsReviewer: args.config.approvalsReviewer,
   };
+  // What a message is, as Claude's `--append-system-prompt`: a constant, only for a task, the one address a message
+  // has. Only a new thread takes it; a resumed one keeps what its start set.
+  const instructions = request.taskId === undefined ? undefined : CODEX_STANDING_INSTRUCTION;
   const thread =
-    resume === undefined ? await newThread(connection, settings) : await resumedThread(connection, resume, settings);
+    resume === undefined
+      ? await newThread(connection, settings, instructions)
+      : await resumedThread(connection, resume, settings);
   const turn = await connection.request("turn/start", {
     threadId: thread,
     input: [{ type: "text", text: args.seed, text_elements: [] }],
@@ -297,8 +308,15 @@ interface ThreadSettings {
   readonly approvalsReviewer: CodexConfig["approvalsReviewer"];
 }
 
-async function newThread(connection: CodexConnection, settings: ThreadSettings): Promise<string> {
-  const started = await connection.request("thread/start", { ...settings });
+async function newThread(
+  connection: CodexConnection,
+  settings: ThreadSettings,
+  instructions: string | undefined,
+): Promise<string> {
+  const started = await connection.request("thread/start", {
+    ...settings,
+    ...(instructions === undefined ? {} : { developerInstructions: instructions }),
+  });
   const thread = field(field(resultOf(started, "thread/start"), "thread"), "id");
   if (!isAgentSessionId(thread))
     throw new SpawnFailure("launch_error", "Codex answered thread/start with no thread id");

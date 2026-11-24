@@ -41,6 +41,22 @@ throughout.
 - `send-message.ts` and `message-frame.ts` are in `seance mcp`'s closure, and `inbox-cli.ts` is silent
   because its stdout is the mod's data channel.
 
+## A Codex session: the daemon's own inbox
+
+DESIGN.md, "Session messages", "A Codex session"; docs/codex.md item 12.
+
+- A Codex pane's listener is registered only by the daemon (`Messages.attachCodex`, from `codexSessions`
+  for the connection it holds), never by a frame: an `inbox` frame bound to a Codex pane is refused
+  `unbound`. `attachCodex` registers nothing for a pane that is not a live Codex pane of ours, and the
+  session key it binds is the server's (`sessionProcessOf(…, "codex")`), the one `seance mcp` binds to.
+- Everything upstream of the listener is shared: a Codex-only path for binding, grace, handles, receipts,
+  adapters, watches or nudges is a threat-model change.
+- Delivery (`codex/delivery.ts`) keeps D4: a question, request or `wake` note is `turn/steer`, else
+  `turn/start`; any other note is steered or held for the next turn, never starting one. Held notes keep
+  the inbox's caps and are memory only. The text is the rendered line, as an input item, never argv, a
+  file or a log line; `developerInstructions` carries only `CODEX_STANDING_INSTRUCTION`, on tasked
+  `thread/start`s.
+
 ## A session with no task
 
 **It is reached only as a reply, by the id of a message it sent, or by an adapter on its own machine

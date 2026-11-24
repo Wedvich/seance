@@ -1265,6 +1265,18 @@ describe("nudge", () => {
     expect(await r.flags.counts("t-1", 4242)).toEqual({ pid: 4242, nudges: 1, interrupted: false, round: ROUND });
   });
 
+  test("a Codex pane is nudged through the same delivery (the daemon's own inbox for it), never a key", async () => {
+    const r = rig();
+    r.state.panes = [info({ agent: "codex", command: "codex", taskId: "t-1" })];
+    expect(await r.verbs.handle(nudge("commit and push"), process.pid)).toMatchObject({
+      ok: true,
+      outcome: "delivered",
+      nudges: 1,
+    });
+    expect(r.state.deliveries).toEqual(["commit and push"]);
+    expect(r.state.keys).toEqual([]);
+  });
+
   test("a nudge held for a listener not connected yet is sent", async () => {
     const r = rig();
     r.state.delivery = { ok: true, taskId: "t-1", outcome: "sent" };
@@ -1633,10 +1645,16 @@ describe("interrupt", () => {
     expect(await lost.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "internal" });
     expect(await lost.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "limit" });
 
-    // Unwired: unsupported, and the round's reach does not count it.
+    // Unwired: unsupported, and the round's reach does not count it (its nudges spent, nothing else could).
     const bare = rig({ activity: () => hung() });
     bare.state.panes = [info({ taskId: "t-1", agent: "codex", command: "codex" })];
     expect(await bare.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "unsupported" });
+    await bare.flags.setCounts("t-1", {
+      pid: 4242,
+      nudges: CUSTODIAN_DEFAULTS.maxNudges,
+      interrupted: false,
+      round: null,
+    });
     expect(await bare.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
     expect(bare.state.keys).toEqual([]);
   });
@@ -1661,6 +1679,22 @@ describe("reach", () => {
     expect(await r.verbs.reach("%1", INTERRUPT_AFTER)).toBe(true);
     await r.flags.setCounts("%1", { pid: 4242, nudges: 0, interrupted: true, round: null });
     expect(await r.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
+  });
+
+  test("a Codex pane is reachable by a nudge (its daemon-run inbox), and by an interrupt only where its connection is wired", async () => {
+    const spent = { pid: 4242, nudges: CUSTODIAN_DEFAULTS.maxNudges, interrupted: false, round: null };
+    const bare = rig();
+    bare.state.panes = [info({ agent: "codex", command: "codex", taskId: "t-1" })];
+    expect(await bare.verbs.reach("%1", 15 * MIN)).toBe(true);
+    await bare.flags.setCounts("t-1", spent);
+    expect(await bare.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
+
+    const wired = rig({ codexInterrupt: () => Promise.resolve(true) });
+    wired.state.panes = [info({ agent: "codex", command: "codex", taskId: "t-1" })];
+    expect(await wired.verbs.reach("%1", 15 * MIN)).toBe(true);
+    await wired.flags.setCounts("t-1", spent);
+    expect(await wired.verbs.reach("%1", 15 * MIN)).toBe(false);
+    expect(await wired.verbs.reach("%1", INTERRUPT_AFTER)).toBe(true);
   });
 
   test("a session whose nudges are spent is reachable only by an interrupt, and not at all once interrupted", async () => {
@@ -1688,15 +1722,6 @@ describe("reach", () => {
       r.state.panes = panes;
       expect(await r.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
     }
-  });
-});
-
-describe("reach for a Codex pane", () => {
-  test("only an interrupt reaches it, never a nudge: it runs no inbox mod", async () => {
-    const r = rig({ codexInterrupt: () => Promise.resolve(true) });
-    r.state.panes = [info({ taskId: "t-1", agent: "codex", command: "codex" })];
-    expect(await r.verbs.reach("%1", 15 * MIN)).toBe(false);
-    expect(await r.verbs.reach("%1", INTERRUPT_AFTER)).toBe(true);
   });
 });
 

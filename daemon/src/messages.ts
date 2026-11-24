@@ -258,9 +258,26 @@ export interface Messages {
   ) => Promise<AdapterDeliverResult>;
   /** Binds the adapter host, or unbinds it (null): a message to `adapter:<name>` is then `unknown`. */
   readonly setAdapters: (outlet: AdapterOutlet | null) => void;
+  /**
+   * A Codex session's inbox (`codex/sessions.ts`), the pane's one listener as a mod's child would be: the daemon's own,
+   * from the launch or a reconnect, never a frame. `session` is the pane's server, the process a peer in that pane binds
+   * to; null holds no handle. Closed (the inbox's `close`) when replaced or the pane is swept.
+   */
+  readonly attachCodex: (pane: BoundPane, session: SessionKey | null, inbox: SessionInbox) => void;
   /** Session events saw `ended` for this pane's task. */
   readonly onEnded: (pane: string, taskId: string) => void;
   readonly stop: () => void;
+}
+
+/**
+ * A Codex session's inbox, which the daemon serves itself (`codex/delivery.ts`; DESIGN.md, "Session messages", "A Codex
+ * session"): no `inbox` mod and no `seance inbox` child, the line handed over as a value and sent into the session as a
+ * turn over the daemon's own connection to its server. `take` is false when that connection is gone.
+ */
+export interface SessionInbox {
+  readonly take: (line: InboxLine) => boolean;
+  readonly close: () => void;
+  readonly gone: AbortSignal;
 }
 
 interface Listener {
@@ -268,7 +285,9 @@ interface Listener {
   readonly panePid: number;
   /** The `claude` process this listener belongs to (`Bound.session`), null when none stands above it. */
   readonly session: SessionKey | null;
-  readonly sink: ListenerSink;
+  /** One line to the session: the mod's child's stdout, or a Codex session's turn. */
+  readonly take: (line: InboxLine) => boolean;
+  readonly sink: Pick<ListenerSink, "close" | "gone">;
 }
 
 /** What became of a held item: the outcomes `auditHeld` records. */
@@ -574,7 +593,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     }
   };
 
-  const lineOf = (item: Held, dropped: number, listener: Listener): string => {
+  const lineOf = (item: Held, dropped: number, listener: Listener): InboxLine => {
     const prefix = dropped > 0 ? `${droppedNotice(dropped)}\n\n` : "";
     const line: InboxLine = {
       v: 1,
@@ -586,7 +605,7 @@ export function createMessages(deps: MessagesDeps): Messages {
         ? { wake: true as const }
         : {}),
     };
-    return JSON.stringify(line);
+    return line;
   };
 
   /**
@@ -604,7 +623,7 @@ export function createMessages(deps: MessagesDeps): Messages {
         consumed += 1;
         continue;
       }
-      if (!listener.sink.write(lineOf(item, inbox.dropped, listener))) break;
+      if (!listener.take(lineOf(item, inbox.dropped, listener))) break;
       // The notice rode the first line out: a retry after a failed write must not repeat it.
       inbox.dropped = 0;
       release(item);
@@ -687,7 +706,7 @@ export function createMessages(deps: MessagesDeps): Messages {
       const current = listener.taskId === to && listener.panePid === target.pid;
       // Another session's listener is a live, valid one: not closed, but not this message's either.
       if (current && item.only !== undefined && item.only !== listener.session) return "nolistener";
-      if (current && listener.sink.write(lineOf(item, 0, listener))) {
+      if (current && listener.take(lineOf(item, 0, listener))) {
         noteReceived(item, target.id, listener);
         return "delivered";
       }
@@ -784,6 +803,12 @@ export function createMessages(deps: MessagesDeps): Messages {
       return refuse("unbound");
     }
     const { pane, session } = bound;
+    // A Codex pane's inbox is the daemon's own (`attachCodex`): a process inside it that listens would take the pane's
+    // one listener from its session, which then misses what arrives, and read what was meant for the session.
+    if (pane.agent === "codex") {
+      log.info(`local socket: inbox listener from pid=${peer ?? "unknown"} is in a Codex pane — refused`);
+      return refuse("unbound");
+    }
     // A `claude -p` a tool ran loads the pane's mods too, and its listener would take the pane's one listener from the
     // pane's own session, which then misses what arrives. Refused as unbindable, which the mod waits out.
     if (deps.configDirs !== undefined && (await nestedClaude(bound.chain, deps.configDirs()))) {
@@ -804,6 +829,27 @@ export function createMessages(deps: MessagesDeps): Messages {
     if (sink.gone.aborted) return;
     sweep(panes);
     // An untasked pane is acked too: no task id reaches it, but a reply by handle can (docs/messaging.md, D3).
+    const ack: InboxAck = {
+      ok: true,
+      keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
+    };
+    register(pane, session, {
+      take: (line) => sink.write(JSON.stringify(line)),
+      sink,
+      ack: () => sink.write(JSON.stringify(ack)),
+    });
+  };
+
+  /**
+   * Makes a bound listener the pane's one: the previous one closed, the pane's other sessions' handles dropped, a grace
+   * started when it drops, and what the pane holds for its task flushed to it.
+   */
+  const register = (
+    pane: BoundPane,
+    session: SessionKey | null,
+    to: Pick<Listener, "take" | "sink"> & { readonly ack?: () => void },
+  ): void => {
+    const { sink } = to;
     // Handles made for another process, task or session in this pane are not this listener's.
     dropHandles(pane.id, { pid: pane.pid, task: pane.taskId, session });
 
@@ -812,7 +858,7 @@ export function createMessages(deps: MessagesDeps): Messages {
       listeners.delete(pane.id);
       previous.sink.close();
     }
-    const listener: Listener = { taskId: pane.taskId, panePid: pane.pid, session, sink };
+    const listener: Listener = { taskId: pane.taskId, panePid: pane.pid, session, take: to.take, sink };
     listeners.set(pane.id, listener);
     disconnects.delete(pane.id);
     sink.gone.addEventListener(
@@ -825,17 +871,26 @@ export function createMessages(deps: MessagesDeps): Messages {
       },
       { once: true },
     );
-    const ack: InboxAck = {
-      ok: true,
-      keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
-    };
-    sink.write(JSON.stringify(ack));
+    to.ack?.();
 
     const inbox = inboxes.get(pane.id);
     if (inbox === undefined) return;
     if (inbox.taskId === pane.taskId) flush(pane.id, inbox, listener);
     // Held for another task: the pane was re-tagged since, and none of it is for this session.
     else dropInbox(pane.id, "ended");
+  };
+
+  /**
+   * A Codex session's inbox, bound by construction (DESIGN.md, "Session messages", "A Codex session"): the daemon
+   * launched the pane and holds the connection to its server, so the pane, its pid and task, and the session process
+   * (`run.sh`'s noted server, which `sessionOf` names for a peer in that pane) are the launch's facts, never a frame's.
+   */
+  const attachCodex: Messages["attachCodex"] = (pane, session, inbox) => {
+    if (stopped || inbox.gone.aborted || pane.agent !== "codex" || pane.dead) {
+      inbox.close();
+      return;
+    }
+    register(pane, session, { take: inbox.take, sink: inbox });
   };
 
   /** What one `send` knows once its sender is bound: both the task-addressed and the reply path run on it. */
@@ -1570,6 +1625,7 @@ export function createMessages(deps: MessagesDeps): Messages {
     deliverRouted,
     receipt,
     deliverFromAdapter,
+    attachCodex,
     setAdapters: (outlet) => {
       adapters = outlet;
     },

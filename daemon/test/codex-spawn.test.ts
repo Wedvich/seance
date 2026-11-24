@@ -2,7 +2,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_CODEX_MODEL, isAgentSessionId, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import {
+  CODEX_STANDING_INSTRUCTION,
+  DEFAULT_CODEX_MODEL,
+  isAgentSessionId,
+  type RepoEntry,
+  type SpawnRequest,
+} from "@seance/shared";
 import { CODEX_RUN_PREFIX } from "../src/agents/panes.ts";
 import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import type { ClaudeProcess } from "../src/claude-process.ts";
@@ -10,6 +16,9 @@ import { codexSessions } from "../src/codex/sessions.ts";
 import type { CodexConfig } from "../src/config.ts";
 import { despawnSession } from "../src/despawn.ts";
 import { DRAIN_PROMPT } from "../src/drain-ask.ts";
+import type { InboxLine } from "../src/message-frame.ts";
+import type { SessionInbox } from "../src/messages.ts";
+import type { SessionKey } from "../src/claude-process.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import type { CodexState } from "../src/session-events.ts";
@@ -82,10 +91,23 @@ async function windowNames(): Promise<readonly string[]> {
   return out.stdout.split("\n").filter((line) => line !== "");
 }
 
-async function runDirs(): Promise<readonly string[]> {
-  const prefix = CODEX_RUN_PREFIX.slice("/tmp/".length);
-  return (await readdir("/tmp")).filter((name) => name.startsWith(prefix)).map((name) => join("/tmp", name));
+/**
+ * The run dir this test's launch made, read from the `--listen` path the stub server was started with. Never a scan of
+ * `/tmp`: another checkout's suite on the same machine makes run dirs under the same prefix at the same time.
+ */
+async function launchedRunDir(): Promise<string> {
+  const listen = (await stub.calls()).find((call) => call.argv[0] === "app-server" && call.argv[1] === "--listen");
+  const url = listen?.argv[2] ?? "";
+  const dir = url.replace(/^unix:\/\//u, "").replace(/\/s\.sock$/u, "");
+  if (!dir.startsWith(CODEX_RUN_PREFIX)) throw new Error(`no run dir in ${url}`);
+  return dir;
 }
+
+const runDirGone = async (dir: string): Promise<boolean> =>
+  lstat(dir).then(
+    () => false,
+    () => true,
+  );
 
 async function paneOf(outcome: SpawnOutcome): Promise<string> {
   if (outcome.handle === undefined) throw new Error("the spawn named no window");
@@ -104,7 +126,6 @@ async function refusal(run: Promise<unknown>): Promise<SpawnFailure> {
 describe("a Codex spawn (real tmux, real git, stub codex)", () => {
   test("starts the thread itself, seeds its first turn over the socket, and the TUI joins it", async () => {
     await fixture.advanceOrigin();
-    const before = new Set(await runDirs());
     const outcome = await spawnSession(codex("Codex Hello"), repos, opts);
 
     expect(outcome.agent).toBe("codex");
@@ -131,8 +152,7 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
     for (const call of calls) expect(call.argv.join(" ")).not.toContain(PROMPT);
     expect(calls.map((call) => call.codexHome)).toEqual([codexHome, codexHome]);
     const [server, tui] = calls.map((call) => call.argv);
-    const runDir = (await runDirs()).find((dir) => !before.has(dir));
-    if (runDir === undefined) throw new Error("no run dir");
+    const runDir = await launchedRunDir();
     expect(server).toEqual(["app-server", "--listen", `unix://${runDir}/s.sock`]);
     expect(tui).toEqual(["resume", "--remote", `unix://${runDir}/s.sock`, "--", thread]);
     expect(((await lstat(runDir)).mode & 0o777).toString(8)).toBe("700");
@@ -148,21 +168,20 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
     // Idle, no turn to interrupt: the pane is killed, and its shell ends the server and removes the run dir.
     const closed = await despawnSession(pane, { force: false, graceMs: 200, reapWaitMs: 2_000 });
     expect(closed).toEqual({ window: "Codex Hello", outcome: "killed", agent: "codex" });
-    await pollUntil(async () => !(await runDirs()).includes(runDir), "the run dir to go");
+    await pollUntil(() => runDirGone(runDir), "the run dir to go");
   });
 
   test("a window closed by hand ends the TUI, which outlives a hangup, and the server, and removes the run dir", async () => {
-    const before = new Set(await runDirs());
     const outcome = await spawnSession(codex("Closed By Hand"), repos, opts);
-    const runDir = (await runDirs()).find((dir) => !before.has(dir));
-    if (runDir === undefined || outcome.handle === undefined) throw new Error("no run dir or window");
+    const runDir = await launchedRunDir();
+    if (outcome.handle === undefined) throw new Error("no window");
     const sessionProcesses = async (): Promise<string> =>
       (await exec(["pgrep", "-f", `${runDir}/s.sock`])).stdout.trim();
     expect(await sessionProcesses()).not.toBe("");
     // A bare `kill-window`: the pane's hangup alone, none of despawn's escalation.
     await tmuxOk(["kill-window", "-t", outcome.handle]);
     await pollUntil(async () => (await sessionProcesses()) === "", "the TUI and the server to end");
-    await pollUntil(async () => !(await runDirs()).includes(runDir), "the run dir to go");
+    await pollUntil(() => runDirGone(runDir), "the run dir to go");
   });
 
   test("an effort is sent with the first turn only when set; a model only as asked", async () => {
@@ -187,12 +206,12 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
 
   test("a server whose socket sits in a directory not its own 0700 is never dialled", async () => {
     await stub.scenario({ listenDirMode: 0o755 });
-    const before = await runDirs();
     const err = await refusal(spawnSession(codex("Loose Dir"), repos, opts));
     expect(err.code).toBe("launch_error");
     expect(await stub.rpc()).toEqual([]);
     expect(await windowNames()).not.toContain("Loose Dir");
-    await pollUntil(async () => (await runDirs()).length === before.length, "the run dir to go");
+    const runDir = await launchedRunDir();
+    await pollUntil(() => runDirGone(runDir), "the run dir to go");
   });
 
   test("a server answering for another home, or refusing the thread, ends the window", async () => {
@@ -225,6 +244,9 @@ interface Heard {
 describe("a Codex session's life: its server's notifications (codex/sessions.ts, docs/codex.md item 7)", () => {
   const heard: Heard[] = [];
   const readings: unknown[] = [];
+  /** Each pane's inbox as `Messages.attachCodex` is handed it (messages.test.ts covers what messaging does with it). */
+  const inboxes = new Map<string, SessionInbox>();
+  const inboxSessions = new Map<string, SessionKey | null>();
   const configure = async (): Promise<void> => {
     codexSessions.configure({
       sink: {
@@ -235,6 +257,10 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
       },
       home: await realpath(codexHome),
       launchSession: () => undefined,
+      inbox: (pane, session, inbox) => {
+        inboxes.set(pane.id, inbox);
+        inboxSessions.set(pane.id, session);
+      },
     });
   };
   const states = (pane: string): readonly CodexState[] => heard.filter((h) => h.pane === pane).map((h) => h.state);
@@ -243,6 +269,8 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
   beforeEach(async () => {
     heard.length = 0;
     readings.length = 0;
+    inboxes.clear();
+    inboxSessions.clear();
     await configure();
   });
 
@@ -352,6 +380,65 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
     });
     // The pane's death, not the connection's loss, ends the session here.
     await pollUntil(() => !codexSessions.holds(pane), "the dead pane's session to go", 10_000);
+  });
+
+  const inboxLine = (messageKind: InboxLine["messageKind"], push: string): InboxLine => ({
+    v: 1,
+    id: crypto.randomUUID(),
+    messageKind,
+    push,
+  });
+  const inputOf = (params: unknown): string => JSON.stringify(params);
+
+  test("messages (docs/codex.md item 12): a tasked thread carries the standing instruction; an idle session's note waits, a request starts a turn carrying it", async () => {
+    await stub.scenario({ turn: "complete" });
+    const outcome = await spawnSession(codex("Codex Idle Msg", { taskId: "task-idle-msg" }), repos, opts);
+    const pane = await paneOf(outcome);
+    const start = (await stub.rpc()).find((call) => call.method === "thread/start");
+    expect(start?.params).toMatchObject({ developerInstructions: CODEX_STANDING_INSTRUCTION });
+    await pollUntil(() => states(pane).some((s) => s.turnEnded === true), "the first turn's end", 10_000);
+    const inbox = inboxes.get(pane);
+    if (inbox === undefined) throw new Error("no inbox registered for the held session");
+    // Bound to the pane's server, the process a peer in the pane binds to: a reply by handle finds this inbox.
+    const server = heard[0]?.process;
+    expect(server).not.toBeNull();
+    expect(inboxSessions.get(pane)).toBe(server?.key ?? "none");
+
+    expect(inbox.take(inboxLine("note", "fyi: main moved"))).toBe(true);
+    expect(inbox.take(inboxLine("request", "rebase onto main"))).toBe(true);
+    await pollUntil(
+      async () => (await methods()).filter((m) => m === "turn/start").length === 2,
+      "the request's turn/start",
+    );
+    const turns = (await stub.rpc()).filter((call) => call.method === "turn/start");
+    expect(inputOf(turns[1]?.params)).toContain("fyi: main moved");
+    expect(inputOf(turns[1]?.params)).toContain("rebase onto main");
+    expect(await methods()).not.toContain("turn/steer");
+    await despawnSession(pane, { force: true });
+    // The connection's end closes the inbox: messaging's grace holds what comes next.
+    await pollUntil(() => inbox.gone.aborted, "the inbox to close with the session");
+  });
+
+  test("messages: into a busy session every kind is steered into the running turn, and an untasked thread has no instruction", async () => {
+    await stub.scenario({ turn: "hold" });
+    const outcome = await spawnSession(codex("Codex Busy Msg"), repos, opts);
+    const pane = await paneOf(outcome);
+    expect((await stub.rpc()).find((call) => call.method === "thread/start")?.params).not.toHaveProperty(
+      "developerInstructions",
+    );
+    await pollUntil(() => states(pane).some((s) => s.state === "busy"), "the turn's start", 10_000);
+    const inbox = inboxes.get(pane);
+    if (inbox === undefined) throw new Error("no inbox registered for the held session");
+    expect(inbox.take(inboxLine("note", "a note mid-turn"))).toBe(true);
+    expect(inbox.take(inboxLine("question", "which branch?"))).toBe(true);
+    await pollUntil(async () => (await methods()).filter((m) => m === "turn/steer").length === 2, "both steers");
+    const steers = (await stub.rpc()).filter((call) => call.method === "turn/steer");
+    for (const steer of steers) {
+      expect(steer.params).toMatchObject({ threadId: outcome.session, expectedTurnId: "turn-1" });
+    }
+    expect(inputOf(steers[0]?.params)).toContain("a note mid-turn");
+    expect((await methods()).filter((m) => m === "turn/start")).toHaveLength(1);
+    await despawnSession(pane, { force: false, graceMs: 2_000, reapWaitMs: 2_000 });
   });
 });
 

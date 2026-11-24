@@ -922,11 +922,12 @@ nothing checked it. The last is the gap they leave.
   thread id this daemon's own `thread/start` answered, a turn id its server named and constants; since item 10 a
   continuation's launch sends `thread/resume` in `thread/start`'s place, its `threadId` the one its launch ledger
   noted and its settings the same as below, with `excludeTurns`; since item 11 the drain's `turn/start`, whose only
-  input is the constant `DRAIN_PROMPT`); `cwd` the
+  input is the constant `DRAIN_PROMPT`; since item 12 `turn/steer` and a message's `turn/start`, "Messages into a
+  Codex session" below); `cwd` the
   worktree path the spawn path made; `approvalPolicy`, `sandbox` and `approvalsReviewer` from the machine's own
   `config.json` only, never a frame, autonomy level or session; `model` from the parsed spec (else
   `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input, never argv, a file or
-  `developerInstructions`. Nothing reaches the pane's argv but daemon paths and the thread id, the id only after
+  `developerInstructions` (which carries only the constant `CODEX_STANDING_INSTRUCTION`, on a tasked launch). Nothing reaches the pane's argv but daemon paths and the thread id, the id only after
   `isAgentSessionId` passed it and then as a shell variable's value after `--`. The daemon keeps only the answers to
   its own requests (a result, or an error's code: never its message), each frame bounded at 16 MiB; it reads a
   notification only through `codexSignals` ("A Codex session's events", below) and reads no server request, so it
@@ -953,8 +954,8 @@ nothing checked it. The last is the gap they leave.
   id and the login's rate-limit reading, which the account takes only for its own account id. A Codex pane's own
   local frames (its `seance mcp`, bound by peer pid to the innermost `codex`, the pane's server) may report `done`,
   hand off and pass (item 11, next item), and a state is dropped, so a `claude -p` a tool started in the pane never
-  speaks for it. Watches answer `nolistener` for a Codex pane and the custodian's `nudge` `unsupported`; its
-  `interrupt` and the drain ask reach one only over that connection, never keys (next item).
+  speaks for it. Its `interrupt` and the drain ask reach one only over that connection, never keys (next item), and so
+  do messages, watch notes and the custodian's `nudge` (item 12, the item after).
 - **A Codex task's pass, drain ask and interrupt** (item 11, 2026-11-24; Scheduler, "Codex tasks"; Daemon, "The drain's
   session ask"; docs/codex.md, "Parity (phase 3)"). No new act: the push, the record and the leader's create are the
   pass's own (agent-neutral), and the close is the driver's. What is new is two requests on the daemon's existing
@@ -966,6 +967,18 @@ nothing checked it. The last is the gap they leave.
   written for Claude, "typed into a pane" read as "sent over the connection" (`.claude/rules/drain.md`). A successor
   inherits `agent` (`successorSpec`) and is placed only on a machine advertising `CAPABILITIES.codexPass`; a pass of a
   Codex task (any trigger) needs that capability on its leader and its machine, and bills the machine's Codex login.
+- **Messages into a Codex session** (item 12, 2026-11-24; "Session messages", "A Codex session"; docs/codex.md
+  threat-model items 5 and 6, owner's decision O4). Not a new act: a message reaches a Codex session only through
+  messaging's local delivery, under every rule of the `message` frame (peer-pid binding, rate buckets, ledger-held
+  tasks, handles bound to the server's `<pid>:<start>`), and the daemon's own inbox for the pane is registered only
+  by the daemon, for the connection its launch or reconnect holds; an `inbox` frame from a process in a Codex pane is
+  refused `unbound`. What the daemon sends the server grows by `turn/steer` (the thread id, a turn id the server or
+  the daemon's own `turn/start` named, and input) and by `turn/start` carrying a message: the text is the wrapped,
+  fenced line messaging rendered, sent as a `text` input item, never argv, a file, a log line or
+  `developerInstructions`, which carries only the constant `CODEX_STANDING_INSTRUCTION` on a tasked `thread/start`
+  (a resumed thread keeps it). A message's wrapper gives it only its kind's authority, as for Claude. Watch notes and
+  the custodian's `nudge` reach a Codex pane this way, so watches no longer answer it `nolistener` while its
+  connection is held.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -1204,7 +1217,8 @@ nothing checked it. The last is the gap they leave.
   `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
   on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
   came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener
-  serves, which a Codex pane always is (item 7); the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
+  serves (a Codex pane's listener is the daemon's own inbox while its server's connection is held, "Session
+  messages", "A Codex session"); the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
   honoured only from the bound session that made the watch, and a wrong id, another session's id and an unknown id all
   answer `unknown`. The caps (8 a session, 64 a machine, equal to the leader's per-device cap) are the table's, refused
   at the add and never an eviction. A `watch-event` is looked up in the table by watch id and delivered only to the
@@ -13173,6 +13187,49 @@ verified id names only two acts, the owner's `session-tag` and adapter delivery 
 built 2026-11-18; "Tags and session identity")); and **replies on this machine only** (the owner's smoke test was cross-machine, and a cross-machine
 question is the common case).
 
+#### A Codex session (`daemon/src/codex/delivery.ts`; built 2026-11-24, docs/codex.md item 12, owner's decision O4)
+
+A Codex session runs no `inbox` mod and no `seance inbox` child (Codex runs no Séance hooks, docs/codex.md "Hooks:
+none in V1"). **Its listener is the daemon's own**: each time `codexSessions` holds a connection to the pane's server
+(the launch's, or a restart's reconnect) it registers a `SessionInbox` for the pane through `Messages.attachCodex`,
+and the inbox closes when that connection goes. Everything upstream of the listener is unchanged, so every rule above
+holds as written: the binding, the rate buckets, delivery only to a pane carrying a task the ledger holds, the
+listener grace (a lost connection starts it, as a dropped child does, and the reconnect's inbox is handed what was
+held), the `sent`/`received` handle tables, `wake`, receipts, adapter delivery through a subscription, watch notes
+and the custodian's `nudge`. Where it differs:
+
+- **Bound by construction, not by a frame.** `attachCodex` takes the pane as the daemon listed it and the session key
+  of its server (the innermost `codex`, `sessionProcessOf`, the same `<pid>:<start>` `seance mcp` in the pane binds to,
+  so a handle minted for that session's question is answered into this inbox). It registers nothing for a pane that is
+  not a live Codex pane of ours, or once messaging stopped. **An `inbox` frame bound to a Codex pane is refused
+  `unbound`**, so no process in the pane (a tool's child, a `claude` the session started) can take the session's
+  messages or replace its listener.
+- **Submit and append become `turn/start` and `turn/steer`** (`createCodexDelivery`). A question, a request, and a note
+  the line marks `wake` are the mod's submit: `turn/steer` into the running turn (with `expectedTurnId`, the turn id
+  the server's own notifications named, or the one this daemon's last `turn/start` answered before they did), else
+  `turn/start`, which wakes an idle session. Any other note is the mod's append: steered into a running turn, else
+  held by the daemon and steered into the next turn when its `turn/started` arrives, or carried ahead of the text in
+  the next waking `turn/start`, so a note never wakes an idle session (D4). A steer refused because the turn just
+  ended is tried as from idle once, and a start refused because a turn just began is steered into it once. Held
+  notes are bounded by the inbox's own caps (`INBOX_MAX_MESSAGES`, `INBOX_MAX_BYTES`), the oldest dropped and the
+  next delivery prefixed by `droppedNotice`, and are memory only (lost with the daemon, as the daemon's inbox is).
+  One delivery runs at a time per session, in the order taken.
+- **The full body, never a stub.** A note or question over `MESSAGE_PUSH_MAX` is sent whole (`body`, else `push`):
+  Codex has no `read_messages`. A request over it was already refused at the sender.
+- **`delivered` means handed to the live connection**, as a line written to a mod's child is. A turn the server then
+  refuses loses the message (as a child dying after the write does); the daemon logs that a message was lost, with
+  the method and the answer's code only, never the text.
+- **The standing instruction is `developerInstructions`**: the constant `CODEX_STANDING_INSTRUCTION` on a tasked
+  launch's `thread/start` only, as `STANDING_INSTRUCTION` is `--append-system-prompt` on a tasked Claude spawn. It
+  names the wrapper, the authority of each kind and `send_message` (the pane's `seance mcp`); it does not name
+  `read_messages`, which Codex lacks. The reconnect's `thread/resume` does not send it again: the thread keeps it.
+
+_Decided: reuse messaging's listener whole and swap only its last step, because_ every invariant above (binding,
+grace, handles, receipts, adapters, watches, the custodian's counts) is then the same code for both agents, and a
+Codex-only path would have had to restate each. _Decided: an idle session's note is held rather than sent by
+`thread/inject_items`, because_ that adds a method for one case and its effect on the next turn's context was not
+spiked; steering it into the next turn is what the mod's append amounts to.
+
 ### Watches (`daemon/src/watches.ts`, `watch-leader.ts`, `watch-frame.ts`, `watches-store.ts`) — built 2026-11-18, docs/gh-watch.md steps 3 and 4
 
 The daemon's side of fleet GitHub watches (docs/gh-watch.md; the leader's side is "PR status", "The registry"). A
@@ -13188,7 +13245,8 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   `watch-frame.ts` is in `message-layering.test.ts`'s entry list, and the table itself (which logs a warning) is the
   daemon's.
 - **Add.** In order: `stopping`, the binding (`unbound`, `nosession`), `canListen` (`nolistener`: a pane no inbox
-  listener serves would never read a note; a Codex pane's at once, since it runs no inbox mod), the caps (`too_many`, a replacement not counted), then the leader's
+  listener serves would never read a note; a Codex pane is served by the daemon's own inbox while its server's
+  connection is held, "Session messages", "A Codex session"), the caps (`too_many`, a replacement not counted), then the leader's
   verdict (`WatchLeader.check`: `none` is `no_leader`, one that does not advertise `CAPABILITIES.watches` is
   `unsupported`). The entry is inserted and saved, the whole set sent, and the add waits at most 3 s for the answer to
   it: a `fleet_full` or `invalid` refusal in that answer removes the entry and is the reply; no answer in the window is
@@ -14920,7 +14978,8 @@ V1"); its server's notifications say the same. The threat model's "A Codex sessi
   closed connection, never an exception: a dying server is one lost connection and, once its pane dies, one ended
   session.
 - **Wiring.** `run.ts` configures the registry once the account starts (its sink the session-event step's `codex` and
-  the account's `observe`, the home's realpath, the ledger's `launchSession`), re-joins, and stops it after the
+  the account's `observe`, the home's realpath, the ledger's `launchSession`, and since item 12 messaging's
+  `attachCodex` as each held connection's inbox, "Session messages", "A Codex session"), re-joins, and stops it after the
   account; `stop` closes every connection and leaves the servers running for the next daemon process.
 
 ### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4, 6 and 8), served on the round's own socket since custodian 4b
@@ -15063,10 +15122,10 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   (a task id is what the record is keyed by). Every call, taken or refused, is one audit line, `custodian
   origin=custodian op=flag pane=<id> task=<id|-> reason=<reason|-> outcome=<ok|unsent|code> by=<round|daemon>`, and the note
   is in none. `unsent` is a flag nothing took, the round's as the daemon's; an untasked pane's is `ok`, it has no record to tell.
-- **`nudge` (C22, C26, custodian 8)** answers `unsupported` for a Codex pane, after the foreign check: it runs no inbox
-  mod (its messages are docs/codex.md item 12, as `turn/steer`). Otherwise it delivers one `request` message to a task session through messaging's local
+- **`nudge` (C22, C26, custodian 8)** delivers one `request` message to a task session through messaging's local
   delivery (`Messages.deliverAsCustodian`, "Session messages"), so it reaches the session only through the `inbox`
-  mod's `$.prompt.submit`, never a key: it cannot answer a dialog, approve a permission or touch a draft (the
+  mod's `$.prompt.submit`, or for a Codex pane (since docs/codex.md item 12) the daemon's own inbox's `turn/steer` or
+  `turn/start` ("Session messages", "A Codex session"), never a key: it cannot answer a dialog, approve a permission or touch a draft (the
   evidence docs/messaging.md recorded against `send-keys` delivery, and why C22 replaced the owner's earlier "raw
   send-keys allowed"). The daemon is the sender: the push is `custodianRequest` (`shared/src/messages.ts`), "The
   custodian on `<machine>` (message `<id>`), the agent your user runs to look after this machine's sessions, asks you

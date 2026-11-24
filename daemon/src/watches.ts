@@ -408,9 +408,8 @@ export function createWatches(deps: WatchesDeps): Watches {
   ): Promise<WatchReply> => {
     if (stopped) return refuse("add", "stopping");
     const { pane, paneStart, session } = bound;
-    // A Codex pane runs no inbox mod, so nothing would hear the note; the launch and start graces `canListen` grants
-    // would admit the watch anyway (docs/codex.md, "Tools": until messages into a Codex session land).
-    if (pane.agent !== "claude") return refuse("add", "nolistener");
+    // A Codex session's listener is the daemon's own inbox for it (`attachCodex`), registered while its server's
+    // connection is held: its notes reach it as turns, through the same check.
     if (!messages.canListen(pane.id, { pid: pane.pid, task: pane.taskId, session })) return refuse("add", "nolistener");
     const key = watchTargetKey(frame.target);
     const replacing = (): Entry | undefined =>
