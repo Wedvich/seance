@@ -1,6 +1,8 @@
 # The Work screen: sessions beside tasks
 
-**Status: spec, nothing built.** The owner's brief (2026-11-23): the session list, today the task queue, also lists
+**Status: spec; Order step 1 (daemon: `SessionEntry.live`, `MachineStatus.sg`, `CAPABILITIES.sessionLive`) built
+2026-11-24, recorded in DESIGN.md ("Tags and session identity", "Live state and the session generation"); steps 2–3
+(PWA) not built.** The owner's brief (2026-11-23): the session list, today the task queue, also lists
 sessions that are not tasks. This is the place #567 left open when it took the session list off the Machines card
 "until its place is decided" (DESIGN.md, "Tags and session identity", "The PWA's per-namespace view"); `sessionRows`,
 the `SessionRow` model and `Store.renameSession` were kept for it.

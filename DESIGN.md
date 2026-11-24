@@ -1272,6 +1272,11 @@ nothing checked it. The last is the gap they leave.
   never logged; beside it the file holds only conversation ids, adapter names, adapter fingerprints and times), and it reaches a reader only while its conversation's one claimant is verified, so a session that
   claims a labelled id shows its own name, never the owner's. MCP's `get_sessions` prints `owner.label` through
   `AGENT_VISIBLE_TAG_KEYS`; message wrappers, receipts and the custodian's `sessions` never carry it.
+- **A session's live state is display for the owner's app only** (2026-11-24, docs/work.md; "Tags and session
+  identity", "Live state and the session generation"). `SessionEntry.live` is a reading of what ingest bound, joined
+  only into an app's `sessions` (never a scheduler-sealed one, and MCP's `get_sessions` strips it, WS6), and
+  `MachineStatus.sg` is a counter of when that view changed. Neither is run, sent, routed or decided on, and neither
+  reaches a log, an audit line, argv or a web push.
 - **The drain's session ask is constant keys, into ledger-bound panes, while draining** (2026-11-13, Daemon, "The
   drain's session ask"; `.claude/rules/drain.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
@@ -1637,7 +1642,9 @@ The Durable Object persists a machine registry:
   cannot disagree. `drn: true` says the daemon's task-launch
   gate is closed ("Restart waits for task launches"), absent otherwise; never trimmed either, and the
   parser takes `true` alone. `gh` is this machine's own `gh`'s GitHub budget (Daemon, "GitHub rate limits"),
-  never trimmed and dropped alone when malformed. `lq`, `lx`, `lu` and `lb` are an agent login's (Daemon,
+  never trimmed and dropped alone when malformed. `sg` is the session generation ("Tags and session identity",
+  "Live state and the session generation"): one integer, display-only, never trimmed, dropped alone when malformed,
+  compared by a reader for inequality only. `lq`, `lx`, `lu` and `lb` are an agent login's (Daemon,
   "Codex login"): indices into the register blob's `logins`, never `exclaves`, so an index may sit in both `ax` and
   `lx`. `lq` holds each login's quota reading, at most `STATUS_MAX_LOGINS` (4) entries; `lx` lists the logins the
   backend refused (expired), `lu` those unread or unreadable, `lb` those whose included usage the backend blocks
@@ -9282,8 +9289,8 @@ session-chosen text. The reader joins, since no single process holds both scopes
 | Surface                                  | Gets                                                                  |
 | ---------------------------------------- | --------------------------------------------------------------------- |
 | PWA (Queue, task details)                | a task's label and ref                                                |
-| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included             |
-| `sessions` op sealed from the scheduler  | none                                                                  |
+| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included, and `live` |
+| `sessions` op sealed from the scheduler  | none, and no `live`                                                   |
 | MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                 |
 | adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref |
 | custodian `sessions` verb                | no tag                                                                |
@@ -9299,6 +9306,34 @@ time). Values pass `displayLine`; only `creator.ref-url` is linked, and only as 
 layer means a task's `owner.label` names its session, over the session's own label and the task's title.
 
 An adapter never sees another adapter's tags: each is a separate third party.
+
+**Live state and the session generation** (built 2026-11-24, docs/work.md Order step 1; `daemon/src/session-view.ts`).
+The Work screen places a session that is not a task by its live state (docs/work.md WS1–WS4), so the state is on the
+wire, beside the tags and from the same table:
+
+- **`SessionEntry.live`** (`{state, since, turnEnded?, reason?}`, `shared/src/types.ts`): the pane's newest live
+  `claude` process's last state as the conversation table holds it (`ProcessView`: `state`, `since`, `turnEnded`
+  beside `idle` only, `reason` beside `needs-input` only), joined by `appSessionView` in `withTags`'s pass. Absent
+  when no state is retained (a process that never sent a frame: no hooks, an exclave without the mod), which a reader
+  shows as state unknown, never idle. On an app's `sessions` only, as the table above says: never a scheduler-sealed
+  reply (the leader keeps its own idle list from forwarded events), and never MCP `get_sessions`, which strips it
+  (WS6: what one session may learn of another's state is docs/presence.md's question). A reader parses it with
+  `parseSessionLive`, a bad one dropped alone, never the entry.
+- **`MachineStatus.sg`**: the client re-read a machine's sessions only on a `sess` change, and busy to idle changes no
+  count. Each status tick runs `appSessionView` over its own sessions read (the one `sess` and the drain's empty
+  watch use; no read of its own) and hashes what a reader acts on, every field but the clocks (`live.since`, a tag's
+  `at`); a differing hash bumps the generation, at most once per tick. Memory only, seeded at boot with the time in
+  unix seconds, so a restart starts above anything its predecessor reached unless the clock went back: a reader
+  compares for inequality only. A failed read drops `sg` with `sess` for the tick. Latency: a change reaches the next
+  beat (`STATUS_INTERVAL_MS`, 30 s, or a refresh that comes sooner), then the client's own spacing. _Rejected:_ a
+  status refresh on each state change (each status is a push to every app, and the beat is wall-clock aligned for one
+  radio wake a phone), per-session state in the status (its size budget and `fitStatus`), a timer poll by clients.
+- **`CAPABILITIES.sessionLive`**: a daemon sending both, advertised unconditionally as `sessionTag` is (the table
+  always runs). A client gates the Work screen's live placement on it.
+- **Threat model.** Display-only, a reading of what ingest bound (the `adapter` feed already sends every session's
+  state to adapters, `ADAPTER_SESSION_STATES`, so a PSK holder learns nothing new). Nothing is run, sent, routed or
+  decided on `live` or `sg`; neither reaches a log, an audit line, argv or a web push, and `sg` is a counter, no
+  text. No new act, frame or op.
 
 **Another agent's context: by writer, not by reader, and narrow.** `AGENT_VISIBLE_TAG_KEYS` is `agent.kind`,
 `creator.ref` and `owner.label`. Not `creator.ref-url` or an opaque `creator.*` key (when a session enqueued, those are
@@ -9792,11 +9827,15 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   (waiting wins over idle, and neither counts as running), since a session idle at its prompt or waiting on the
   owner never finishes on its own: the row is how the owner knows when to drain. _Decided: `idle` is
   `QueueResponse.idle`_, the leader's list of tasks it released a slot for while idle at their prompt, because it is
-  the nearest a client can read: `SessionEntry` carries no state and `MachineStatus` no per-session state, and the
-  pane's own idle frames reach only its daemon and the leader. It lags a turn's end by the leader's
-  `idleReleaseAfterMs` (10 minutes), so a session that just went idle reads running until then. _Rejected:_ a
-  per-pane state on `sessions` or the status (a wire change for one word on one row), and `Task.idleRelease` (the
-  leader's seed for that list, not a reading of its own).
+  the nearest a client could read when this was decided: `SessionEntry` carried no state and `MachineStatus` no
+  per-session state, and the pane's own idle frames reached only its daemon and the leader. It lags a turn's end by
+  the leader's `idleReleaseAfterMs` (10 minutes), so a session that just went idle reads running until then.
+  _Rejected:_ `Task.idleRelease` (the leader's seed for that list, not a reading of its own), and a per-pane state on
+  the status (its size budget). _Reversed (2026-11-24):_ a per-pane state on `sessions`, first rejected as "a wire
+  change for one word on one row", is now `SessionEntry.live` ("Tags and session identity", "Live state and the
+  session generation"), since the Work screen places every untasked session and every running task by it
+  (docs/work.md WS2, WS4). The drain keeps reading `QueueResponse.idle` for tasks: it is what the leader frees a slot
+  by, and the drain's soft view counts what the leader counts.
 - **Surfaces.** The PWA's close sheet counts the tasks that will be passed and lists what cannot move
   (runs in the clone, not a task); a closed machine's row shows "Draining: moving N · M stuck" (soft-closed:
   "Closed: running N · …", above) and
