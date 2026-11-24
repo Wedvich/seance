@@ -204,7 +204,7 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         flag: "--agent",
         value: "agent",
         choices: ["claude", "codex"],
-        help: "what runs it (default claude); codex runs on a machine's ChatGPT sign-in, at its default model, and for now only with --autonomy auto, to a scheduler leader that runs Codex tasks",
+        help: "what runs it (default claude); codex runs on a machine's ChatGPT sign-in, at its default model, at --autonomy checkpoint or auto (never steer), to a scheduler leader that runs Codex tasks",
       },
       {
         flag: "--now",
@@ -331,13 +331,15 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     },
   },
   codex: {
-    summary: "this machine's Codex login, in séance's own Codex home: login, logout, status",
-    usage: "login | logout | status",
+    summary: "this machine's Codex login, in séance's own Codex home: login, logout, status, pair, unpair",
+    usage: "login | logout | status | pair | unpair",
     details: ["needs a `codex` block in config.json; never touches your own ~/.codex"],
     verbs: {
       login: { summary: "sign séance's Codex home in with a device code (works over SSH)" },
       logout: { summary: "sign séance's Codex home out" },
       status: { summary: "probe the login now: health, account, quota and credits" },
+      pair: { summary: "pair the home with your phone's ChatGPT app: prints a code to enter there" },
+      unpair: { summary: "revoke every phone paired with the home" },
     },
   },
   "session-event": {

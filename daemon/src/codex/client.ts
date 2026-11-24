@@ -32,7 +32,16 @@ export type CodexMethod =
   | "thread/resume"
   | "turn/interrupt"
   | "account/rateLimits/read"
-  | "thread/turns/list";
+  | "thread/turns/list"
+  // Remote control (DESIGN.md, Daemon, "Codex remote control"): experimental, answered only over a connection
+  // `initializeCodex` opened with `experimental`, never a session's own.
+  | "remoteControl/enable"
+  | "remoteControl/disable"
+  | "remoteControl/status/read"
+  | "remoteControl/pairing/start"
+  | "remoteControl/pairing/status"
+  | "remoteControl/client/list"
+  | "remoteControl/client/revoke";
 
 /** A notification's method as the server named it: bounded, so nothing past it is held. */
 const METHOD_MAX = 128;
@@ -80,10 +89,13 @@ export async function ownDirectory(path: string): Promise<string | null> {
 export async function initializeCodex(
   connection: CodexConnection,
   home: string,
+  opts: { readonly experimental?: boolean } = {},
 ): Promise<{ readonly ok: true } | { readonly ok: false; readonly answer: CodexAnswer | "home" }> {
   const init = await connection.request("initialize", {
     clientInfo: { name: "seance", title: null, version: CLIENT_VERSION },
-    capabilities: null,
+    // Remote control answers only a connection that opted in (the item 9 spike); a session's own connection stays on
+    // the stable API, so the notifications it parses keep their shape.
+    capabilities: opts.experimental === true ? { experimentalApi: true } : null,
   });
   if (init.kind !== "result") return { ok: false, answer: init };
   const answered = isRecord(init.value) ? init.value["codexHome"] : undefined;

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ import {
 import { createBackend } from "../src/backend-default.ts";
 import { codexRunnable, createCodexAccount, type CodexAccount } from "../src/codex/account.ts";
 import { codexEnv, prepareCodexHome, renderCodexConfig } from "../src/codex/home.ts";
+import { readRemote, removeRemote, writeRemote } from "../src/codex/remote.ts";
 import { probeCodex } from "../src/codex/probe.ts";
 import { configSkeleton, type Config } from "../src/config.ts";
 import { startDaemon } from "../src/run.ts";
@@ -177,7 +178,7 @@ describe("the account", () => {
   let account: CodexAccount | null = null;
 
   const start = async (home: string, staleAfterMs = 3_600_000) => {
-    const counts = { info: 0, status: 0 };
+    const counts = { info: 0, status: 0, paired: 0 };
     account = createCodexAccount({
       home,
       userHome: base,
@@ -186,6 +187,8 @@ describe("the account", () => {
       checkIntervalMs: 50,
       onInfoChange: () => counts.info++,
       onStatusChange: () => counts.status++,
+      onPairedChange: () => counts.paired++,
+      remotePath: join(home, "..", "remote.json"),
     });
     account.start();
     await pollUntil(
@@ -211,9 +214,27 @@ describe("the account", () => {
       version: "0.170.0",
     });
     expect(account?.view().health).toBe("ok");
-    expect(counts).toEqual({ info: 1, status: 1 });
+    expect(counts).toEqual({ info: 1, status: 1, paired: 0 });
     // Fresh: the minute timer probes nothing until the reading is stale.
     await Bun.sleep(300);
+    expect((await stub.calls()).length).toBe(2);
+    account?.stop();
+  });
+
+  test("remote.json, read on the tick, sets the login's paired and offers the slot; a probe is not run for it", async () => {
+    const home = await freshHome();
+    await stub.scenario(SIGNED_IN);
+    const counts = await start(home);
+    expect(account?.paired()).toBe(false);
+    const note = join(home, "..", "remote.json");
+    await writeRemote({ v: 1, environmentId: "env_1", clients: ["cli_1"], at: 1 }, note);
+    await pollUntil(() => account?.paired() === true, "the pairing read");
+    expect(account?.login().paired).toBe(true);
+    expect(counts).toEqual({ info: 2, status: 1, paired: 1 });
+    await removeRemote(note);
+    await pollUntil(() => account?.paired() === false, "the unpairing read");
+    expect(account?.login()).not.toHaveProperty("paired");
+    expect(counts.paired).toBe(2);
     expect((await stub.calls()).length).toBe(2);
     account?.stop();
   });
@@ -453,13 +474,15 @@ describe("seance codex", () => {
       .split("\n")
       .filter((line) => line.includes("audit codex"))
       .map((line) => line.slice(line.indexOf("audit codex")));
+  const pairRunDirs = async (): Promise<readonly string[]> =>
+    (await readdir("/tmp")).filter((name) => name.startsWith("seance-cxp-"));
   const withBlock = async (): Promise<void> => {
     const file = join(root, "config", "config.json");
     await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, "utf8")), codex: {} }));
   };
 
   test("every verb refuses without a codex block, audited, and runs no codex", async () => {
-    for (const verb of ["login", "logout", "status"]) {
+    for (const verb of ["login", "logout", "status", "pair", "unpair"]) {
       // oxlint-disable-next-line no-await-in-loop -- one CLI at a time
       const { err, code } = await run(verb);
       expect(code).toBe(1);
@@ -469,6 +492,8 @@ describe("seance codex", () => {
       "audit codex origin=cli op=login outcome=no_config",
       "audit codex origin=cli op=logout outcome=no_config",
       "audit codex origin=cli op=status outcome=no_config",
+      "audit codex origin=cli op=pair outcome=no_config",
+      "audit codex origin=cli op=unpair outcome=no_config",
     ]);
     expect(await stub.calls()).toEqual([]);
   });
@@ -511,5 +536,63 @@ describe("seance codex", () => {
       "audit codex origin=cli op=status outcome=signed_out",
     ]);
     for (const line of lines) expect(line).not.toContain("example.com");
+  });
+
+  test("pair prints only the code, notes every client on a --listen server of its own, and unpair revokes them all", async () => {
+    await withBlock();
+    await prepareCodexHome(join(root, "state"), null);
+    await stub.scenario({ remote: { clients: ["cli_old"] } });
+    const before = new Set(await pairRunDirs());
+    const paired = await run("pair");
+    expect(paired.code).toBe(0);
+    expect(paired.out).toContain("pairing code  STUB-CODE");
+    expect(paired.out).toContain("paired");
+    for (const id of ["env_stub", "cli_old", "cli_new", "1234567890"])
+      expect(paired.out + paired.err).not.toContain(id);
+    const note = join(root, "state", "codex", "remote.json");
+    expect(await readRemote(note)).toMatchObject({ environmentId: "env_stub", clients: ["cli_old", "cli_new"] });
+    expect((await stat(note)).mode & 0o777).toBe(0o600);
+    const calls = await stub.calls();
+    expect(calls.at(-1)?.argv.slice(0, 2)).toEqual(["app-server", "--listen"]);
+    expect(calls.at(-1)?.codexHome).toBe(join(root, "state", "codex", "home"));
+    const rpc = await stub.rpc();
+    expect(rpc.map((call) => call.method)).toEqual([
+      "initialize",
+      "remoteControl/enable",
+      "remoteControl/pairing/start",
+      "remoteControl/pairing/status",
+      "remoteControl/client/list",
+      "remoteControl/disable",
+    ]);
+    expect(rpc[1]?.params).toEqual({ ephemeral: true });
+    // The verb's server and run dir went with it.
+    expect((await pairRunDirs()).filter((dir) => !before.has(dir))).toEqual([]);
+
+    const unpaired = await run("unpair");
+    expect(unpaired.code).toBe(0);
+    expect(unpaired.out).toContain("2 phones revoked");
+    expect(await readRemote(note)).toBeNull();
+    const revoked = (await stub.rpc()).filter((call) => call.method === "remoteControl/client/revoke");
+    expect(revoked.map((call) => call.params)).toEqual([
+      { environmentId: "env_stub", clientId: "cli_old" },
+      { environmentId: "env_stub", clientId: "cli_new" },
+    ]);
+    expect((await run("unpair")).out).toContain("no phone was paired");
+    expect(await auditLines()).toEqual([
+      "audit codex origin=cli op=pair outcome=ok",
+      "audit codex origin=cli op=unpair outcome=ok",
+      "audit codex origin=cli op=unpair outcome=not_paired",
+    ]);
+  });
+
+  test("a server that will not enable remote control fails pair, audited, and leaves no note", async () => {
+    await withBlock();
+    await prepareCodexHome(join(root, "state"), null);
+    await stub.scenario({ remote: { refuse: true } });
+    const { err, code } = await run("pair");
+    expect(code).toBe(1);
+    expect(err).toContain("remote control did not come up");
+    expect(await readRemote(join(root, "state", "codex", "remote.json"))).toBeNull();
+    expect(await auditLines()).toEqual(["audit codex origin=cli op=pair outcome=failed"]);
   });
 });

@@ -19,8 +19,24 @@
  * loads the one named, as the real server loads a thread from the home's store for a continuation (`resumeError`
  * answers an error instead, a store that lost it). `thread/turns/list` answers the turn. A reply to a server request
  * is logged as `(response)`.
+ *
+ * Remote control, as the real 0.170.0 did in the item 9 spike: `remoteControl/*` answers only a connection whose
+ * `initialize` opted into `experimentalApi`; `enable` turns it on for this server, `connected` while no other server on
+ * the home holds the backend's one connection (`<scenario>.slot` names the holder's pid) and `errored` while one does;
+ * `disable` turns it off and frees the slot, as the server's exit does. Pairing needs it on; `pairing/status` reads
+ * claimed (unless `remote.unclaimed`) and adds the phone `cli_new` to the environment's clients (`<scenario>.clients`,
+ * seeded from `remote.clients`); `client/revoke` removes one.
  */
-import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 interface Scenario {
@@ -49,6 +65,14 @@ interface Scenario {
   readonly listenExit?: number;
   /** How the first turn runs on the listening server; absent, it announces nothing. */
   readonly turn?: "complete" | "hold" | "approval";
+  readonly remote?: {
+    /** `enable` answers an error. */
+    readonly refuse?: boolean;
+    /** `pairing/status` never reads claimed. */
+    readonly unclaimed?: boolean;
+    /** The environment's clients before any pairing. */
+    readonly clients?: readonly string[];
+  };
 }
 
 const [scenarioPath = "", ...args] = process.argv.slice(2);
@@ -110,6 +134,29 @@ async function listen(url: string): Promise<void> {
   }
   process.on("exit", cleanup);
   const peers = new Set<{ send: (text: string) => unknown }>();
+  const experimental = new WeakSet<object>();
+  const slotPath = `${scenarioPath}.slot`;
+  const clientsPath = `${scenarioPath}.clients`;
+  const ENVIRONMENT = "env_stub";
+  let remote = false;
+  const holdsSlot = (): boolean => existsSync(slotPath) && readFileSync(slotPath, "utf8") === String(process.pid);
+  const freeSlot = (): void => {
+    if (holdsSlot()) rmSync(slotPath, { force: true });
+  };
+  process.on("exit", freeSlot);
+  const remoteStatus = (): object => {
+    if (!remote) return { status: "disabled", serverName: "stub", installationId: "inst", environmentId: null };
+    if (!existsSync(slotPath)) writeFileSync(slotPath, String(process.pid));
+    return {
+      status: holdsSlot() ? "connected" : "errored",
+      serverName: "stub",
+      installationId: "inst",
+      environmentId: ENVIRONMENT,
+    };
+  };
+  const clients = (): string[] =>
+    existsSync(clientsPath) ? JSON.parse(readFileSync(clientsPath, "utf8")) : [...(scenario.remote?.clients ?? [])];
+  const setClients = (next: readonly string[]): void => writeFileSync(clientsPath, JSON.stringify(next));
   const announce = (method: string, params: unknown): void => {
     for (const peer of peers) peer.send(JSON.stringify({ method, params }));
   };
@@ -172,8 +219,52 @@ async function listen(url: string): Promise<void> {
         const reply = (body: object): void => {
           ws.send(JSON.stringify({ id: message.id, ...body }));
         };
-        if (message.method === "initialize") {
+        if (
+          typeof message.method === "string" &&
+          message.method.startsWith("remoteControl/") &&
+          !experimental.has(ws)
+        ) {
+          reply({ error: { code: -32_600, message: `${message.method} requires experimentalApi capability` } });
+        } else if (message.method === "initialize") {
+          if (message.params?.capabilities?.experimentalApi === true) experimental.add(ws);
           reply({ result: { userAgent: "stub", codexHome: scenario.codexHome ?? process.env["CODEX_HOME"] ?? null } });
+        } else if (message.method === "remoteControl/enable") {
+          if (scenario.remote?.refuse === true) {
+            reply({ error: { code: -32_603, message: "stub refused" } });
+          } else {
+            remote = true;
+            reply({ result: remoteStatus() });
+          }
+        } else if (message.method === "remoteControl/disable") {
+          remote = false;
+          freeSlot();
+          reply({ result: remoteStatus() });
+        } else if (message.method === "remoteControl/status/read") {
+          reply({ result: remoteStatus() });
+        } else if (message.method === "remoteControl/pairing/start") {
+          reply(
+            remote
+              ? {
+                  result: {
+                    pairingCode: "1234567890",
+                    manualPairingCode: "STUB-CODE",
+                    environmentId: ENVIRONMENT,
+                    expiresAt: Math.floor(Date.now() / 1000) + 600,
+                  },
+                }
+              : { error: { code: -32_600, message: "remote control pairing requires remote control to be enabled" } },
+          );
+        } else if (message.method === "remoteControl/pairing/status") {
+          const claimed = scenario.remote?.unclaimed !== true;
+          if (claimed && !clients().includes("cli_new")) setClients([...clients(), "cli_new"]);
+          reply({ result: { claimed } });
+        } else if (message.method === "remoteControl/client/list") {
+          reply({
+            result: { data: clients().map((clientId) => ({ clientId, deviceType: "phone" })), nextCursor: null },
+          });
+        } else if (message.method === "remoteControl/client/revoke") {
+          setClients(clients().filter((id) => id !== message.params?.clientId));
+          reply({ result: {} });
         } else if (message.method === "thread/start") {
           thread = scenario.threadId ?? Bun.randomUUIDv7();
           reply(

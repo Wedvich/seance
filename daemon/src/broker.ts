@@ -1,6 +1,7 @@
 import {
   APP_ID,
   CAPABILITIES,
+  codexNeedsCheckpointLeader,
   codexRefusalText,
   codexSpecRefusal,
   isRecord,
@@ -340,6 +341,17 @@ export function createBroker(opts: BrokerOpts): Broker {
               id,
               "invalid_request",
               "the scheduler's leader does not continue Codex tasks yet, or no verified scheduler is leading",
+            );
+          }
+          // An older leader holds a Codex task at `checkpoint` and places it nowhere.
+          if (
+            codexNeedsCheckpointLeader(request.spec) &&
+            !advertises(machines, scheduler, CAPABILITIES.codexCheckpoint)
+          ) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader runs Codex tasks only at autonomy auto, or no verified scheduler is leading",
             );
           }
         }

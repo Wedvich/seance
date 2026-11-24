@@ -1,5 +1,6 @@
 import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
+import { codexNeedsCheckpointLeader } from "./codex.ts";
 import { statesIn } from "./task-phase.ts";
 import { taskPrs } from "./task-prs.ts";
 import { chainTags, displayLine, taskTagEntries } from "./tags.ts";
@@ -29,7 +30,9 @@ export type PassOffer = { readonly ok: true } | { readonly ok: false; readonly r
  * `leaderSuccessor` is whether the verified leader advertises `CAPABILITIES.successor`: an older
  * one answers an unknown op `invalid_request`, never a timeout. A Codex task also needs `leaderCodexPass` (the
  * verified leader advertises `CAPABILITIES.codexPass`) and its machine advertising it: an older leader refuses it
- * `successor_unsupported`, and an older daemon could not close or ask its session over its connection.
+ * `successor_unsupported`, and an older daemon could not close or ask its session over its connection. A Codex task
+ * at `checkpoint` also needs `leaderCodexCheckpoint`: its successor keeps the level, and a leader without
+ * `CAPABILITIES.codexCheckpoint` places it nowhere.
  *
  * Only a `running` task: a task waiting on a person is never moved from under them (the person can
  * answer or cancel first), and `lost` has no live session to push from. A finished task and a reserved
@@ -40,6 +43,7 @@ export function passOffer(
   machines: readonly Machine[],
   leaderSuccessor: boolean,
   leaderCodexPass = false,
+  leaderCodexCheckpoint = false,
 ): PassOffer {
   if (task.successor !== undefined) return { ok: false, reason: "it has already been passed to a successor" };
   if (statesIn("finished").includes(task.state)) return { ok: false, reason: "it has already finished" };
@@ -63,6 +67,12 @@ export function passOffer(
     return {
       ok: false,
       reason: "the scheduler's leader can't pass a Codex task to a successor yet (needs seance update)",
+    };
+  }
+  if (codexNeedsCheckpointLeader(task.spec) && !leaderCodexCheckpoint) {
+    return {
+      ok: false,
+      reason: "the scheduler's leader can't run a Codex task at checkpoint yet (needs seance update)",
     };
   }
   const machine = machines.find((m) => m.deviceId === assignment.deviceId);

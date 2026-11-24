@@ -6163,15 +6163,36 @@ describe("a Codex pick", () => {
     expect(deriveView(new Store(claude, form).getState(), 0).modelTile.tag).toBeNull();
   });
 
-  test("is refused before anything is written below auto, or to a leader that does not run Codex", async () => {
-    const client = fleet();
+  test("is refused before anything is written at steer, at checkpoint to an item 8 leader, or to one without Codex", async () => {
+    const client = fleet([CAPABILITIES.codex, CAPABILITIES.codexCheckpoint]);
     const store = new Store(client, form);
     store.setModel(codex);
+    store.setAutonomy("steer");
     const view = deriveView(store.getState(), 0);
-    expect(view.formStatus).toBe("Codex runs only at Auto autonomy for now. Pick Auto, or a Claude model");
-    expect(view.button.label).toBe("Codex needs Auto");
+    expect(view.formStatus).toBe("Codex can't run at Steer autonomy yet. Pick Checkpoint or Auto, or a Claude model");
     await store.spawn();
     expect(client.creates).toEqual([]);
+
+    // Checkpoint, the default, goes to a leader advertising codexCheckpoint…
+    store.setAutonomy("checkpoint");
+    expect(deriveView(store.getState(), 0).formStatus ?? "").not.toContain("Codex");
+    await store.spawn();
+    expect(firstCreate(client).spec.agent).toBe("codex");
+    // The default level is written as no level, which every reader takes for checkpoint.
+    expect(firstCreate(client).spec).not.toHaveProperty("autonomy");
+
+    // …and never to one that places a Codex task at auto only.
+    const item8 = fleet();
+    const item8Store = new Store(item8, form);
+    item8Store.setModel(codex);
+    item8Store.setAutonomy("checkpoint");
+    const refused = deriveView(item8Store.getState(), 0);
+    expect(refused.formStatus).toBe(
+      "The scheduler's leader runs Codex only at Auto autonomy. Pick Auto, or update seanced on its machine",
+    );
+    expect(refused.button.label).toBe("Codex needs Auto");
+    await item8Store.spawn();
+    expect(item8.creates).toEqual([]);
 
     const old = fleet([]);
     const oldStore = new Store(old, form);

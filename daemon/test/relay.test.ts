@@ -903,6 +903,7 @@ describe("daemon ↔ relay integration", () => {
         "drainAsk",
         "codexPass",
         "sessionTag",
+        "codexCheckpoint",
         "codexContinue",
         "sessionLive",
       ]);

@@ -25,3 +25,8 @@ constraints.
 - A Codex session's pane (DESIGN.md, Daemon, "Codex sessions") gets `CODEX_HOME` only from its own `run.sh`, set to
   Séance's home through `shq()`, with `OPENAI_API_KEY` and `CODEX_API_KEY` unset; the daemon dials its server only
   after `socketState` and accepts it only when `initialize` answers that home's realpath.
+- Remote control (DESIGN.md, Daemon, "Codex remote control") keeps only ids in `remote.json` (0600, read as a plain
+  file through a strict parser), never a pairing secret: the enrollment stays in the home. `seance codex pair` prints
+  only the manual code, and no environment or client id reaches the terminal, a log or an audit line. Its server is
+  the verb's own `--listen` one in a 0700 `/tmp/seance-cxp-` run dir, under the same `socketState` and realpath
+  checks, killed by group however the verb ends.

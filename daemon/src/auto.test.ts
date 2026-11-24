@@ -24,11 +24,11 @@ describe("specError", () => {
     const codex: AutoSpec = { ...BASE, agent: "codex", autonomy: "auto" };
     expect(specError(codex)).toBeNull();
     expect(specError({ ...codex, effort: "max" })).toBe("a Codex task can't run with effort max yet");
-    expect(specError({ ...BASE, agent: "codex" })).toBe(
-      "a Codex task runs only at autonomy auto for now, not checkpoint",
-    );
+    // `checkpoint`, the default, runs since item 9; `steer` does not.
+    expect(specError({ ...BASE, agent: "codex" })).toBeNull();
+    expect(specError({ ...BASE, agent: "codex", autonomy: "checkpoint" })).toBeNull();
     expect(specError({ ...BASE, agent: "codex", plan: true })).toBe(
-      "a Codex task runs only at autonomy auto for now, not steer",
+      "a Codex task runs only at autonomy auto or checkpoint for now, not steer",
     );
     // A continuation passes (item 10): its gate is the leader's and the target's `codexContinue`, not V1's.
     expect(

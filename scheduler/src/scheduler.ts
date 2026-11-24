@@ -2002,7 +2002,7 @@ export class Scheduler {
       const ex = exhaustion(task, machines, now, config, fleetQuota);
       const due = quotaDue(task, ex, now, config);
       if (ex === null || due === null) continue;
-      const offered = passOffer(task, machines, true, true).ok;
+      const offered = passOffer(task, machines, true, true, true).ok;
       const auto = autonomyOf(task.spec) === "auto";
       // An auto task whose successor routing would not place now would strand it `ready`: it alerts like the rest.
       const target = offered && auto ? this.#successorTarget(task, ex.accountId, now) : null;

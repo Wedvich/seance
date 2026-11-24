@@ -33,6 +33,7 @@ import {
   deriveAutoAvailability,
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveCodexCheckpointAvailability,
   deriveCodexContinueAvailability,
   deriveLimitsAvailability,
   derivePassAvailability,
@@ -918,7 +919,13 @@ export class SchedulerStore {
     if (listed === undefined) return "That task is no longer listed.";
     // The item was gated on this when drawn; the leader may have changed or gone since the tap.
     if (!derivePassAvailability(this.#state.relay)) return PASS_UNAVAILABLE;
-    const offer = passOffer(listed, this.#state.relay.machines, true, deriveCodexPassAvailability(this.#state.relay));
+    const offer = passOffer(
+      listed,
+      this.#state.relay.machines,
+      true,
+      deriveCodexPassAvailability(this.#state.relay),
+      deriveCodexCheckpointAvailability(this.#state.relay),
+    );
     if (!offer.ok) return sentence(offer.reason);
     const reply = await this.#client.pass(taskId);
     if (reply === null || "ok" in reply) return actionReplyText(reply);
@@ -937,6 +944,7 @@ export class SchedulerStore {
       now: Date.now() + (view?.kind === "ok" ? view.skew : 0),
       leaderHandoff: deriveContinueHandoffAvailability(this.#state.relay),
       leaderCodexContinue: deriveCodexContinueAvailability(this.#state.relay),
+      leaderCodexCheckpoint: deriveCodexCheckpointAvailability(this.#state.relay),
     };
     const offer = continueOffer(listed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : [], context);
     if (!offer.ok) return sentence(offer.reason);

@@ -34,6 +34,7 @@ import {
   parseCustodianResponse,
   parseSessionTagResponse,
   CAPABILITIES,
+  codexNeedsCheckpointLeader,
   codexRefusalText,
   codexSpecRefusal,
   queuedTask,
@@ -113,6 +114,7 @@ import {
   deriveReportedAvailability,
   deriveTaskTagsAvailability,
   deriveCodexAvailability,
+  deriveCodexCheckpointAvailability,
   deriveCodexProblem,
   deriveTraitsAvailability,
   heldNeedsLeader,
@@ -122,6 +124,7 @@ import {
   refTagsOf,
   settlesOnReport,
   TASK_TAGS_UNAVAILABLE,
+  CODEX_CHECKPOINT_UNAVAILABLE,
   CODEX_UNAVAILABLE,
   TRAITS_UNAVAILABLE,
 } from "./view.ts";
@@ -1941,6 +1944,10 @@ export class Store {
     // An older leader holds a Codex record unreadable; checked here as the form could not (no leader to ask when held).
     if (task.spec.agent !== undefined && !deriveCodexAvailability(this.#state.relay)) {
       this.#heldFailed(task, `${CODEX_UNAVAILABLE}. Try again once it does, or discard it.`);
+      return;
+    }
+    if (codexNeedsCheckpointLeader(task.spec) && !deriveCodexCheckpointAvailability(this.#state.relay)) {
+      this.#heldFailed(task, `${CODEX_CHECKPOINT_UNAVAILABLE}. Try again once it does, or discard it.`);
       return;
     }
     // The same checks the form made, against the registry as it stands when the task is sent.

@@ -1721,11 +1721,10 @@ describe("a Codex task", () => {
   test("agent_unsupported: a machine not advertising codex, and a spec V1 refuses, on every candidate", () => {
     const older = codexMachine({ capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
     expect(codes(only(decide([older], { task: codexTask() })))).toEqual(["agent_unsupported"]);
-    // No level reads `checkpoint`, and `plan` alone `steer`: a Codex task says `auto` explicitly.
+    // `plan` alone reads `steer`, which a Codex task never runs.
     const refused: Partial<TaskSpec>[] = [
       { autonomy: "auto", effort: "max" },
-      { autonomy: "checkpoint" },
-      {},
+      { autonomy: "steer" },
       { plan: true },
       { autonomy: "auto", attachments: [attachment(1)] },
     ];
@@ -1735,6 +1734,11 @@ describe("a Codex task", () => {
       });
       expect(decision.chosen).toBeNull();
       expect(codes(only(decision))).toContain("agent_unsupported");
+    }
+    // `checkpoint`, explicit or the default, places since item 9: on the machine alone, no capability of its own.
+    for (const fields of [{ autonomy: "checkpoint" }, {}] satisfies Partial<TaskSpec>[]) {
+      const decision = decide([codexMachine()], { task: task({ spec: spec({ agent: "codex", ...fields }) }) });
+      expect(decision.chosen).toEqual(target);
     }
   });
 

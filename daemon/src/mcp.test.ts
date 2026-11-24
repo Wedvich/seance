@@ -1632,10 +1632,11 @@ function taggingMachines(): Machine[] {
 }
 
 /** A leader that reports, takes task tags and runs Codex tasks. */
-function codexMachines(): Machine[] {
+function codexMachines(checkpoint = false): Machine[] {
   const [leader, ...rest] = autoMachines();
+  const capabilities = [CAPABILITIES.reportedDone, CAPABILITIES.taskTags, CAPABILITIES.codex];
   return [
-    machine({ ...leader, capabilities: [CAPABILITIES.reportedDone, CAPABILITIES.taskTags, CAPABILITIES.codex] }),
+    machine({ ...leader, capabilities: checkpoint ? [...capabilities, CAPABILITIES.codexCheckpoint] : capabilities }),
     ...rest,
   ];
 }
@@ -1737,9 +1738,21 @@ describe("spawn_session on auto, authoring fields", () => {
     expect(fake.creates).toEqual([]);
   });
 
+  test("checkpoint, the default level, goes only to a leader advertising codexCheckpoint", async () => {
+    const older = leaderRelay([], codexMachines());
+    const refused = await callAuto(older, { agent: "codex" });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("runs Codex tasks only at autonomy auto");
+    expect(refused.text).toContain("retry with autonomy auto");
+    expect(older.creates).toEqual([]);
+
+    const fake = leaderRelay([], codexMachines(true));
+    expect((await callAuto(fake, { agent: "codex", autonomy: "checkpoint" })).error).toBe(false);
+    expect(fake.creates[0]?.spec).toMatchObject({ agent: "codex", autonomy: "checkpoint" });
+  });
+
   test.each([
-    [{}, "a Codex task runs only at autonomy auto for now, not checkpoint"],
-    [{ autonomy: "steer" }, "a Codex task runs only at autonomy auto for now, not steer"],
+    [{ autonomy: "steer" }, "a Codex task runs only at autonomy auto or checkpoint for now, not steer"],
     [{ autonomy: "auto", effort: "max" }, "a Codex task can't run with effort max yet"],
   ])("a Codex spawn V1 refuses (%o) is refused before the relay is dialled", async (fields, text) => {
     const fake = leaderRelay([], codexMachines());
@@ -2702,13 +2715,23 @@ describe("queue_batch", () => {
     const fake = leaderRelay([], codexMachines());
     expect((await callTool(fake, "queue_batch", { tasks })).error).toBe(false);
     expect(fake.creates.map((t) => t.spec.agent)).toEqual([undefined, "codex"]);
+
+    // Every Codex member is gated, not only the first: a checkpoint one refuses the batch to a leader without it.
+    const mixed = [member({ agent: "codex", autonomy: "auto" }), member({ agent: "codex" })];
+    const older = leaderRelay([], codexMachines());
+    const second = await callTool(older, "queue_batch", { tasks: mixed });
+    expect(second.error).toBe(true);
+    expect(second.text).toContain("queue_batch task 2 refused");
+    expect(older.creates).toEqual([]);
   });
 
   test("a Codex member V1 refuses names its member, before any create", async () => {
     const fake = leaderRelay([], codexMachines());
-    const answer = await callTool(fake, "queue_batch", { tasks: [member(), member({ agent: "codex" })] });
+    const answer = await callTool(fake, "queue_batch", {
+      tasks: [member(), member({ agent: "codex", autonomy: "steer" })],
+    });
     expect(answer.error).toBe(true);
-    expect(answer.text).toContain("queue_batch refused: task 2: a Codex task runs only at autonomy auto");
+    expect(answer.text).toContain("queue_batch refused: task 2: a Codex task runs only at autonomy auto or checkpoint");
     expect(fake.creates).toEqual([]);
   });
 

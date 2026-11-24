@@ -204,7 +204,7 @@ export async function spawnAuto(
     if (traitsGate !== null) return failed(traitsGate);
     const tagsGate = spec.tags === undefined ? null : taskTagsGateError(leg, "spawn", "--ref");
     if (tagsGate !== null) return failed(tagsGate);
-    const codexGate = spec.agent === undefined ? null : codexGateError(leg, "spawn", "--agent");
+    const codexGate = spec.agent === undefined ? null : codexGateError(leg, "spawn", "--agent", spec);
     if (codexGate !== null) return failed(codexGate);
     const placed = await resolvePlacement(leg.machines, leg.scheduler.accounts, placement.input, CLI_PLACEMENT_NAMES);
     if ("error" in placed) return failed(`spawn refused: ${placed.error}`);

@@ -161,7 +161,10 @@ the `codex app-server` of a pane it launched (or, on a restart, of a pane of our
 - The daemon sends a server only constant methods with daemon-held params (the thread it started, a turn id
   its server named, the constant `DRAIN_PROMPT` as the drain's turn) and never answers a server request: an approval
   is never granted by the daemon. The drain's and the custodian's acts reach a Codex pane only this way, never keys
-  (drain.md, custodian.md).
+  (drain.md, custodian.md). The remote-control slot adds only `remoteControl/enable` and `disable`
+  (`{ephemeral: true}`) and `status/read`, over a one-shot connection of its own with `experimentalApi` (a session's
+  connection never opts in), moved only by `remote.json` and the sessions' own launch levels (DESIGN.md, "Codex remote
+  control").
 - A Codex pane's own local `session-event` frames take `done`, `handoff` and `pass` (items 4 and 5 above, as a Claude
   pane's; the pass's close waits for the turn end its server reports) only; a state is dropped, so nothing else
   running in the pane speaks for it. `sessionOf`'s session for a

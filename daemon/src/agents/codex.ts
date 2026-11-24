@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  autonomyOf,
   CODEX_STANDING_INSTRUCTION,
   DEFAULT_CODEX_MODEL,
   isAgentSessionId,
@@ -17,7 +18,7 @@ import {
   type CodexAnswer,
   type CodexConnection,
 } from "../codex/client.ts";
-import { codexSessions } from "../codex/sessions.ts";
+import { codexSessions, LEVEL_FILE } from "../codex/sessions.ts";
 import { codexBin } from "../codex/home.ts";
 import type { CodexConfig } from "../config.ts";
 import { shq } from "../shq.ts";
@@ -103,6 +104,8 @@ async function launchCodex(spec: LaunchSpec, opts: CodexDriverOptions): Promise<
       mode: 0o600,
       flag: "wx",
     });
+    // The level the remote-control slot ranks this session by, read again by a restarted daemon's re-join.
+    await writeFile(join(runDir, LEVEL_FILE), `${autonomyOf(spec.request)}\n`, { mode: 0o600, flag: "wx" });
   } catch (err) {
     await rm(runDir, { recursive: true, force: true });
     throw new SpawnFailure("launch_error", `could not write the Codex launch script: ${String(err)}`);
@@ -219,7 +222,7 @@ interface StartArgs {
  */
 async function startThread(args: StartArgs): Promise<string> {
   await awaitSocket(args.runDir, args.window);
-  const tracked = codexSessions.track(args.runDir);
+  const tracked = codexSessions.track(args.runDir, autonomyOf(args.spec.request));
   const connection = await connectCodex(args.runDir, tracked.listener);
   if (connection === null) throw new SpawnFailure("launch_error", "could not connect to the session's Codex server");
   try {

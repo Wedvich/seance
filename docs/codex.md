@@ -1,6 +1,6 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and items 10, 11 and 12 built, the rest design.** Item 12
+**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and items 9 to 12 built, the rest design.** Item 12
 (2026-11-24), messages into a Codex session (O4), is in DESIGN.md: Session messages, "A Codex session"; Watches; the
 custodian frame kind's `nudge`; and the threat model's "Messages into a Codex session". Item 11 (2026-11-24), a Codex task's pass to a successor (every trigger), the drain's ask and the custodian's `interrupt` over
 the session's connection, is in DESIGN.md: Scheduler, "Codex tasks" ("Passing one"); Daemon, "The drain's session ask"
@@ -9,7 +9,10 @@ compatibility list (`CAPABILITIES.codexPass`); and the threat model's "A Codex t
 Item 10 (2026-11-24), continuing a Codex task (`thread/resume` of the thread its launch ledger noted, the agent kept,
 the gate `CAPABILITIES.codexContinue`), is in DESIGN.md: Daemon, "Continuing a Codex session" (in "Continuing a
 session"); Scheduler, "Codex tasks"; Wire protocol's compatibility list; and the threat model's "A Codex launch's thread
-id" (this doc's threat-model item 10, now whole). Item 8 (2026-11-24),
+id" (this doc's threat-model item 10, now whole). Item 9 (2026-11-24), remote control and `checkpoint` Codex tasks, is in
+DESIGN.md: Daemon, "Codex remote control"; Scheduler, "Codex tasks" (D6 lifted); Wire protocol's compatibility list
+(`CAPABILITIES.codexCheckpoint`); and the threat model's "Codex remote control" (this doc's threat-model items 11 and
+12's pair line). Item 8 (2026-11-24),
 the clients (the PWA's picker grouped by agent, effort per agent, the agent badge; MCP's and the CLI's `agent`; the
 gates and the broker leg's sentinel), is in DESIGN.md: Scheduler, "Codex tasks", "Clients"; Wire protocol's
 compatibility list; and the threat model's "The task field `agent`". Item 7 (2026-11-24), the Codex
@@ -118,7 +121,8 @@ This doc's:
   not a person, approves escalations. No autonomy level changes these (DESIGN.md, "Autonomy level").
 - **D6. Phase 2 runs Codex tasks at `autonomy: "auto"` only.** _Decided, because_ in Codex's default mode a question is
   prose and reads as an idle turn end with no alert ("Questions read as idle"). Phase 3 opens `checkpoint`. Cheap to
-  reverse.
+  reverse. _Lifted 2026-11-24 (item 9):_ `checkpoint` runs, written by a client only to a leader advertising
+  `CAPABILITIES.codexCheckpoint`; a `checkpoint` session is first for the phone (the slot). `steer` stays refused.
 
 ## The account
 
@@ -330,8 +334,9 @@ the machine's Codex login instead of the exclave's Claude login (`accountOf(mach
   `EFFORTS`; `max` beside `agent: "codex"` is refused (0.170.0 had no `max`; mapping it silently to `xhigh` would run
   something nobody asked for. 0.171.0 lists `max` on most models: lifting the refusal is a later choice, per model). The record always says `agent` explicitly; no reader infers it from a model name.
 - **Refused beside `agent: "codex"` in V1:** effort `max`, `steer`/`plan` (no plan mode reaches the app-server's
-  `turn/start` in 0.170, and only a tightening may stand in), any level but `auto` in phase 2 (D6), `attachments`,
-  and `attachments` (`continues` until item 10; `succeeds` until item 11, gated on `CAPABILITIES.codexPass`). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
+  `turn/start` in 0.170, and only a tightening may stand in), any level but `auto` in phase 2 (D6, lifted for
+  `checkpoint` at item 9) and `attachments` (`continues` until item 10; `succeeds` until item 11, gated on
+  `CAPABILITIES.codexPass`). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
   the broker and the CLI; the PWA's form). A record that carries one anyway stays readable and the leader places it
   nowhere (`agent_unsupported` on every candidate), so a later build that supports it can run it. `until`, deps,
   batches, tags and `pin`/`avoid` are agent-neutral and pass.
@@ -485,6 +490,11 @@ notes arrive as messages do.
   decides whether a task starts (O3).
 - **`agent.remote`**: a link into the ChatGPT app for a thread, if one exists (S7); without it the PWA links nothing
   for a Codex task.
+- _Built (item 9, 2026-11-24):_ DESIGN.md, Daemon, "Codex remote control" is the record. _Corrected at build:_ the
+  methods are experimental, so every remote-control call goes over a connection of its own opened with
+  `experimentalApi`; `pair` drives a `--listen` server of its own (a stdio one enrolls another environment, S5's
+  rest) and waits on `pairing/status`, then notes every client the environment lists; `enable` and `disable` are
+  ephemeral; `unpair` revokes every listed client, not only the noted ones; and no `agent.remote` (S7 found no link).
 
 ### Parity (phase 3)
 
@@ -528,7 +538,7 @@ To land in DESIGN.md's threat model with the code that makes them true:
 9. **The task field** `agent`: sealed through the one task sealer behind `AGENT_DEP_SENTINEL`, written by a client only
    to a verified leader advertising `CAPABILITIES.codex`, sent in a spawn only to a machine advertising it.
 10. **The launch ledger** notes a Codex launch's thread id, and a continuation resumes only that.
-11. **Pairing** (phase 3) is the owner's shell act; a paired phone drives the session holding the slot through OpenAI's
+11. **Pairing** (phase 3; built, DESIGN.md's "Codex remote control") is the owner's shell act; a paired phone drives the session holding the slot through OpenAI's
     remote control, as the Claude app does through Anthropic's.
 12. **Audit**: spawn and despawn lines gain `agent=codex`; a probe carries no origin (it is not a spawn, as the usage
     refresh is not); `seance codex login | logout | pair | unpair` audit under `cli` with an outcome, never a code, an
@@ -618,10 +628,13 @@ nothing.
    queue Claude; `--now` refuses `--agent codex`. An amend to effort `max` on a Codex task is refused before a write,
    by `sendAmend` and again by the leader (`codexAmendRefusal`; DESIGN.md, "Amending a waiting task").
 
-**Phase 3: parity.** Checks S5 and S7 first.
+**Phase 3: parity.** S5's rest and S7 ran 2026-11-24 ("Spikes").
 
-9. Remote control (after 7 and 8): `seance codex pair | unpair`, `paired`, the slot's hand-over, `agent.remote` if S7
-   finds a link; opens `checkpoint`.
+9. **Built 2026-11-24** (DESIGN.md, Daemon, "Codex remote control"; Scheduler, "Codex tasks"). Remote control (after 7
+   and 8): `seance codex pair | unpair`, `remote.json`, `paired`, the slot's hand-over; opens `checkpoint`.
+   _Corrected at build:_ no `agent.remote`, since S7 found no link; opening `checkpoint` needs a leader advertising
+   `CAPABILITIES.codexCheckpoint`, since an item 8 leader places such a record nowhere; `paired` shows in MCP's
+   `list_machines`, not the PWA's login row (item 3's owner decision).
 10. **Built 2026-11-24** (DESIGN.md, Daemon, "Continuing a Codex session"). **Continue** (after 7). _Corrected at
     build:_ `thread/resume` takes more than a `threadId` (0.172.0's `ThreadResumeParams` accepts `cwd`, `model`,
     approval, sandbox and reviewer as overrides), so a resume sends `thread/start`'s settings from `config.json` and
@@ -666,14 +679,19 @@ Run 2026-11-23:
 | **S4, part.** A home with no usable login   | Mac, 0.170.0        | Three throwaway homes. Empty: `account/read` gives `account: null`, `requiresOpenaiAuth: true`; `account/rateLimits/read` gives `-32600` "authentication required", no network. A garbage `auth.json`: the same answers. A fake login with expired tokens no issuer signed: `account: null` too (also with `refreshToken: true`), and `-32603` naming the backend's `401 Unauthorized`; Codex tried no refresh, and `codex login status` said "Logged in". A first start fills an empty home with Codex's databases. |
 | **S9.** A repo's instructions               | Mac, 0.170.0        | With the fallback set, Codex read CLAUDE.md in a plain directory and in a git worktree; where AGENTS.md sat beside it, only AGENTS.md. A pointer AGENTS.md was followed with `cat CLAUDE.md`. Instructions are cut at 32 KiB: markers at byte 32,437 seen, 33,480 not; with `project_doc_max_bytes = 262144`, a rule at byte 98,020 of this repo's CLAUDE.md was seen.                                                                                                                                               |
 
+Run 2026-11-24 (Mac, 0.170.0, Séance's home; the owner's Android phone):
+
+| Spike                            | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **S5, rest.** Enable and pairing | `remoteControl/*` needs `experimentalApi` at `initialize` (`-32600` otherwise). `enable` persists in the home (the next `--listen` server started connected); `{ephemeral: true}` does not. Every `--listen` server on the home shares one environment and its pairing: the phone stayed on `client/list` across a server kill and restart, no new code, whatever the client's name. A second enabled server reads `errored` and connects within about 5 s of the holder disabling or exiting. `pairing/start` needs remote control on (`-32600` otherwise) and works on an `errored` server; `client/list` works with it off, given the environment id. A stdio server enrolls a different environment with no clients (left in place: nothing deletes one). A manual code reads `XXXX-XXXX` and lapses 600 s after issue. The home was left disabled. |
+| **S7.** A link to a thread       | None found. The thread showed on the phone, but neither `codex://threads/<id>` (a scheme in the binary) nor chatgpt.com's `/codex/threads/<id>` or `/codex/tasks/<id>` opened it. No `agent.remote` for Codex.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+
 Still to run, each before the phase named; each checks a fact the design already has a path for:
 
 - **S1, rest** (phase 2): a personal Plus login's two id halves, and one account signed in on two machines reading equal.
 - **S4, rest** (phase 2): a real login after a revoke and after `refresh_token_reused` reads as expired. It needs a
   login the owner is willing to lose; a refresh failure that is not a `401` would read as unknown, and the rule moves.
 - **S8, macOS half** (phase 2): the file store in a Séance home and `codex login --device-auth`.
-- **S5, rest** (phase 3): `remoteControl/enable` on a `--listen` server reuses the home's enrollment and pairing.
-- **S7** (phase 3): a link to a thread in the ChatGPT app, for `agent.remote`.
 
 ## Left to build time
 
@@ -702,4 +720,5 @@ Still to run, each before the phase named; each checks a fact the design already
 | The connection and the driver                                                                   | `daemon/src/codex/client.ts`, `daemon/src/agents/codex.ts`                           |
 | A session's events, close and reconnect                                                         | `daemon/src/codex/sessions.ts`, `daemon/src/codex/events.ts`                         |
 | The seam                                                                                        | `daemon/src/agents/driver.ts`, `daemon/src/agents/claude.ts`                         |
+| Remote control: the slot, `remote.json`, the pair verbs' server                                 | `daemon/src/codex/remote.ts`, `daemon/src/codex/pair.ts`, `codex-cli.ts`             |
 | Clients                                                                                         | `pwa/src/` (picker, account card, Machines row), `daemon/src/mcp*.ts`, the CLI       |
