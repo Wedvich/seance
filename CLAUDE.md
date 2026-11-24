@@ -52,6 +52,9 @@ a **Status** line (built, spec, draft); trust it over memory.
 - **docs/tags.md** — tags and session identity; built, keeps open questions and spike evidence. Read
   DESIGN.md's "Tags and session identity" before adding a field that labels a session or task, or
   touching session identity or adapter addressing.
+- **docs/work.md** — spec: the Queue screen renamed Work, listing every live session beside the tasks by
+  its live state (`SessionEntry.live`, `MachineStatus.sg`); WS1–WS7. Read before touching the session list,
+  `sessions`' reply or the Queue screen's sections.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
