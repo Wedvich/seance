@@ -1,9 +1,7 @@
 import {
   CAPABILITIES,
   creatorTaskTags,
-  DISPLAY_NAME_MARKS,
-  displayName,
-  joinSessionTags,
+  displayLine,
   refTags,
   resolveNotBefore,
   withAutonomy,
@@ -463,15 +461,14 @@ export async function cmdAvailabilityAuto(
 }
 
 /**
- * What a `--wait` line names an item by: a task by its id, an untasked session as the owner's surfaces name it
- * (`displayName`, docs/work.md WS7; the PWA's drain row does the same). The owner's terminal only, never MCP's
- * `list_machines` (another agent's context keeps the window). Tag values passed `displayLine`: printable text.
+ * What a `--wait` line names an item by: a task by its id, an untasked session by its window. Never `displayName`:
+ * any process holding the app keys can run `seance close --wait`, a session included, so the CLI keeps to what
+ * `get_sessions` gives an agent and never prints `owner.label` or the session-chosen `self.name` (DESIGN.md, "The
+ * join and the name"). JSON-quoted, so a quote or an empty name stays unambiguous.
  */
 export function drainStuckLabel(stuck: DrainStuck): string {
   if (stuck.session === undefined) return stuck.taskId ?? "-";
-  const name = displayName(joinSessionTags(stuck.session.tags), null, stuck.session.window);
-  const mark = DISPLAY_NAME_MARKS[name.source];
-  return `"${name.text}"${mark === null ? "" : ` ${mark}`}`;
+  return `window ${JSON.stringify(displayLine(stuck.session.window))}`;
 }
 
 export async function cmdPassAuto(args: PassCliArgs): Promise<void> {

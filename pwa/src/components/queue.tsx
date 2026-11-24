@@ -40,6 +40,9 @@ export interface OlderActions {
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
 
+/** How long an unmatched session link waits for its row before the focus is forgotten. */
+const FOCUS_WAIT_MS = 10_000;
+
 /** How long a notification's row stays marked. */
 const MARK_MS = 3_000;
 
@@ -306,7 +309,7 @@ export function QueueScreen(props: {
   const [pendingReveal, setPendingReveal] = useState<string | null>(null);
   const revealOpening = useCallback(
     (taskId: string): void => {
-      const asleep = view.sections.some((s) => s.title === ASLEEP_SECTION && s.rows.some((r) => r.id === taskId));
+      const asleep = sectionOf(view.sections, taskId) === ASLEEP_SECTION;
       if (!asleep || asleepOpen) {
         reveal(taskId);
         return;
@@ -339,6 +342,14 @@ export function QueueScreen(props: {
     setMarked(focusedTask);
     onFocused();
   }, [focusedTask, focusedIn, asleepOpen, onFocused, reveal]);
+
+  // A session's row id can be reused (a tmux restart, a window name), so a link whose session is gone must not wait
+  // for a later namesake: forget an unmatched session focus once its sessions have had time to be read.
+  useEffect(() => {
+    if (focusedTask === null || focusedIn !== undefined || !focusedTask.startsWith("session:")) return;
+    const timer = setTimeout(onFocused, FOCUS_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [focusedTask, focusedIn, onFocused]);
 
   useEffect(() => {
     if (marked === null) return;

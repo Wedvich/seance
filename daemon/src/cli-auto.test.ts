@@ -1414,7 +1414,7 @@ describe("seance close --wait", () => {
     expect(outcome.printed).toEqual(["MacBook Pro: moving 1"]);
   });
 
-  test("exits 2 listing what cannot move, one line each, a session that is not a task by its name", async () => {
+  test("exits 2 listing what cannot move, one line each, a session that is not a task by its window, never its label", async () => {
     const labelled = { ...pane(), id: "%7", tags: { "owner.label": { value: "notes", at: 1, scope: "conversation" } } };
     const fake = polled(closedBox(), {
       sessions: () => ({ sessions: [pane("t1"), pane(), labelled], at: 1 }),
@@ -1426,8 +1426,8 @@ describe("seance close --wait", () => {
       [
         "MacBook Pro still runs:",
         "t1 Can't move: runs in the clone",
-        '"w" (window) Not a task: close it yourself',
-        '"notes" Not a task: close it yourself',
+        'window "w" Not a task: close it yourself',
+        'window "w" Not a task: close it yourself',
       ].join("\n"),
     );
   });

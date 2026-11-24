@@ -23,7 +23,8 @@ threat model are recorded in DESIGN.md (index below); what stays here is the own
 - **WS6. `live` stays off MCP.** `get_sessions` does not carry it. What one session may learn of another's state is
   docs/presence.md's question (its `status` answered from presence), decided there, not leaked here first.
 - **WS7. The drain row links to the session.** Each "Not a task" line on a closed machine's card names the session
-  (`displayName`) and opens its Work row, where Close is.
+  (`displayName`) and opens its Work row, where Close is (only when the daemon sends the pane id). A task's stuck line
+  opens the task's row the same way.
 
 ## Where each part is recorded
 

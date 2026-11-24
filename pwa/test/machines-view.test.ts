@@ -148,8 +148,8 @@ describe("the drain row and the close sheet", () => {
       draining: true,
       summary: "moving 1 · 2 stuck",
       stuck: [
-        { text: "t2: Can't move: runs in the clone", row: null },
-        { text: "w (window): Not a task: close it yourself", row: "session:dev-1:w" },
+        { text: "t2: Can't move: runs in the clone", row: "t2" },
+        { text: "w (window): Not a task: close it yourself", row: null },
       ],
     });
   });
@@ -170,6 +170,9 @@ describe("the drain row and the close sheet", () => {
       { text: "notes: Not a task: close it yourself", row: "session:dev-1:%7" },
       { text: "fixing ci (self-named): Not a task: close it yourself", row: "session:dev-1:%8" },
     ]);
+    // An older daemon sends no pane id: its window name can repeat and the row has no Close, so no link.
+    const old = { "dev-1": { sessions: [pane(), pane()] } };
+    expect(draw(inputs({ tasks: [], sessions: old }))?.drain?.stuck.map((l) => l.row)).toEqual([null, null]);
     // The row id is the one the Work screen gives the session's row.
     expect(sessionRowId("dev-1", labelled)).toBe("session:dev-1:%7");
   });

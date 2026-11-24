@@ -9410,13 +9410,14 @@ per-platform `procStart` read come from the spikes (docs/tags.md, "Spikes").
 **The join and the name.** `joinTags(task?, conversation?, process?)` is the one place precedence lives; a key exists
 at one scope by construction, bar `owner.label`, where the task's wins. `displayName` is used only on the owner's own
 surfaces (the PWA) and in an adapter's `Session`; anything that puts a name in another agent's context (a message
-wrapper, a receipt, the custodian's `sessions`, MCP) keeps the task's title or the window, since `self.name` is
+wrapper, a receipt, the custodian's `sessions`, MCP, the `seance` CLI: a session can run it) keeps the task's title or the window, since `self.name` is
 session-chosen text. The reader joins, since no single process holds both scopes; the daemon gets only a task's ref
 (`SpawnRequest.ref`, for adapters), never `owner.*`, so there is no stale second copy of the owner's label.
 
 | Surface                                  | Gets                                                                              |
 | ---------------------------------------- | --------------------------------------------------------------------------------- |
 | PWA (Work, task details)                 | a task's label and ref; on the Work screen, each session's joined tags and `live` |
+| `seance close --wait`, MCP `list_machines` | an untasked stuck pane's window (and MCP: its pane id), never a label or `self.name` |
 | `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included, and `live`             |
 | `sessions` op sealed from the scheduler  | none, and no `live`                                                               |
 | MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                             |
@@ -9986,10 +9987,11 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   (docs/work.md WS7) such a line names the session: `DrainStuck.session` carries the `SessionEntry` beside
   `untasked` (display-only), the sheet and row name it by `displayName` (owner label, else `self.name`, else the
   window, the last two marked), and on a closed machine's row the line is a link opening that session's row on the
-  Work screen (`sessionRowId`, focused as a deep link's task is), where Close is. `seance close --wait` names it the
-  same way on the owner's terminal (`drainStuckLabel`, `daemon/src/cli-auto.ts`, injected into `waitForDrain` so
-  the naming stays out of `seance mcp`'s closure); MCP `list_machines`, read by sessions, gives only `window` and
-  `pane`, never a label or `self.name`. No name reaches a log or audit line. `seance close
+  Work screen (`sessionRowId`, focused as a deep link's task is) when the daemon sends the pane id, where Close is.
+  `seance close --wait` names it by its window alone, JSON-quoted (`drainStuckLabel`, `daemon/src/cli-auto.ts`,
+  injected into `waitForDrain` so the naming stays out of `seance mcp`'s closure): the CLI is not an owner-only
+  surface, since any process holding the app keys can run it, a session included, so it never prints `owner.label`
+  or `self.name`; MCP `list_machines`, read by sessions, gives only `window` and `pane`. No name reaches a log or audit line. `seance close
   [--wait]` exits 0 when empty (a successor still `unplaced` is listed after "is empty" and does not
   block it), 2 when only stuck work is left, 1 on a failure; it uses the close reply's `closed` as the
   drain's `cl` since status lags. Exit 1 also covers a reopen (a status without `cl` that was sampled after

@@ -353,7 +353,7 @@ export interface DrainRow {
 
 export interface DrainStuckLine {
   readonly text: string;
-  /** A session that is not a task: its Work row (`sessionRowId`), where Close is (docs/work.md WS7). Null for a task. */
+  /** Its Work row: a task's id, or a session that is not a task by `sessionRowId`, where Close is (docs/work.md WS7). */
   readonly row: string | null;
 }
 
@@ -388,6 +388,15 @@ function stuckLine(tasks: readonly Task[], stuck: DrainStuck): string {
   return task === undefined ? text : `${taskTitle(task)}: ${text}`;
 }
 
+/**
+ * The Work row a stuck line opens: a listed task's own id, or an untasked session's by pane id only (a daemon too
+ * old to send it has no Close on the row, and its window name can repeat).
+ */
+function stuckRow(deviceId: string, tasks: readonly Task[], stuck: DrainStuck): string | null {
+  if (stuck.session !== undefined) return stuck.session.id === undefined ? null : sessionRowId(deviceId, stuck.session);
+  return stuck.taskId !== undefined && tasks.some((t) => t.id === stuck.taskId) ? stuck.taskId : null;
+}
+
 function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
   if (!inputs.passes || inputs.tasks === null || closedAt(machine) === null) return null;
   const view = drainView(machine, inputs.tasks, sessionsOf(inputs, machine.deviceId), {
@@ -404,7 +413,7 @@ function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
     summary: reading ? "reading sessions" : drainSummary(view),
     stuck: view.stuck.map((entry) => ({
       text: stuckLine(inputs.tasks ?? [], entry),
-      row: entry.session === undefined ? null : sessionRowId(machine.deviceId, entry.session),
+      row: stuckRow(machine.deviceId, inputs.tasks ?? [], entry),
     })),
   };
 }
