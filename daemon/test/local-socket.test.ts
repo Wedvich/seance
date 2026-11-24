@@ -2,7 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DespawnResponse, Plain, RepoEntry, SessionsResponse, SpawnResponse } from "@seance/shared";
+import type {
+  DespawnResponse,
+  Plain,
+  RepoEntry,
+  RescanResponse,
+  SessionsResponse,
+  SpawnResponse,
+} from "@seance/shared";
 import type { AuditSink } from "../src/audit.ts";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
@@ -232,9 +239,17 @@ describe("the local op socket", () => {
     handle.stop();
   });
 
+  test("a rescan answers the daemon's set and is audited as local", async () => {
+    lines.length = 0;
+    const reply = await localRequest<RescanResponse>("rescan", {}, { path: sockPath });
+    if ("ok" in reply) throw new Error(reply.message);
+    expect(reply.repos).toEqual(repos);
+    expect(logged()).toContain('audit request origin=local op="rescan"');
+  });
+
   test("ops outside the allowlist are refused before they reach the handler", async () => {
     lines.length = 0;
-    for (const op of ["rescan", "update-available", "availability", "custodian", "session-tag"]) {
+    for (const op of ["update-available", "availability", "custodian", "session-tag"]) {
       const line = await raw(`${JSON.stringify({ id: `x-${op}`, ts: Date.now(), op, payload: {} })}\n`);
       const reply = JSON.parse(line.trim()) as Plain;
       expect(reply.payload).toMatchObject({ ok: false });

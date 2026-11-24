@@ -1,12 +1,13 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 item 1 built (2026-11-23), the rest design.** The daemon's side of the account — the `codex` config
-block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login | logout | status`,
-`MachineInfo.logins` and `MachineStatus.lq`/`lx`/`lu`/`lb` — is built and recorded in DESIGN.md: Daemon, "Codex login";
-Presence & identity (the status fields and their trim); and the threat model's "A second credential store, never
-opened", "Identity, quota and login health come over Codex's API", "A second binary" and the `seance codex` verbs
-(this doc's threat-model items 1–3 and 12's login line). Where this doc and DESIGN.md differ on those, DESIGN.md is the
-record. Nothing reads `logins` or `lq` yet (item 2). Written 2026-11-23 from docs/agents.md (the scoping, both Codex spikes
+**Status: phase 1 items 1 and 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
+`codex` config block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login |
+logout | status`, `MachineInfo.logins` and `MachineStatus.lq`/`lx`/`lu`/`lb` — is recorded in DESIGN.md: Daemon, "Codex
+login"; Presence & identity (the status fields and their trim); and the threat model's "A second credential store, never
+opened", "Identity, quota and login health come over Codex's API", "A second binary" and the `seance codex` verbs (this
+doc's threat-model items 1–3 and 12's login line). Item 5, the driver seam, is in DESIGN.md, Daemon, "Agent drivers".
+Where this doc and DESIGN.md differ on those, DESIGN.md is the record. Nothing reads `logins` or `lq` yet (item 2).
+Written 2026-11-23 from docs/agents.md (the scoping, both Codex spikes
 of 2026-11-19 on 0.166.0, the owner's decisions of 2026-11-19) and a read of the code at `923bb32`. API names were
 checked against the app-server schema that **codex-cli 0.170.0** generates. Spikes S2, S3 and S6 ran on macOS against
 0.170.0, and S8's Linux half ran on Thad (an LXC, 0.166.0), all on 2026-11-23 ("Spikes"). The owner decided every
@@ -353,8 +354,11 @@ sequenceDiagram
 5. **The daemon dials the socket** with a WebSocket client (Bun's own cannot dial a unix socket; the `ws` package can, as
    `ws+unix:`; S3), checks the server's `initialize` answer, and calls `thread/start` with `cwd` its own worktree path,
    `model` from the parsed spec, and approval, sandbox and reviewer from `config.json` (D5). The returned thread id is
-   noted in the launch ledger as `session` before any turn: the continue invariant then reads "the thread id this
-   daemon's own `thread/start` returned", never a claimed one.
+   what the driver's `started` answers, and the launch ledger notes it as `session` from the spawn's outcome, as it
+   notes Claude's: the continue invariant then reads "the thread id this daemon's own `thread/start` returned", never a
+   claimed one. (This said "before any turn"; the seam keeps the code's order, where a Claude session id is noted only
+   once the spawn returns, too. A daemon dying between the first turn and that note loses the id for a continuation,
+   as it does for Claude between `exec` and the note.)
 6. **The seed is the first `turn/start`'s input**: the preamble, the autonomy note and the task, as text, never argv,
    never a file the model reads. The preamble is agent-aware ("a new independent Codex session", "AGENTS.md or
    CLAUDE.md"), and Codex's autonomy note says to stop on a real choice by ending the turn with the question stated (it
@@ -542,9 +546,12 @@ nothing.
 4. **The field** (after 2): `TaskRequest.agent`, `SpawnRequest.agent`, `AGENT_DEP_SENTINEL`, `CAPABILITIES.codex`'s
    leader half, the route filters, account-by-agent counting and the spill, the V1 refusals, `CODEX_MODELS`. Nothing
    places a Codex task yet: no daemon launches one.
-5. **The driver seam, no behaviour change** (at once, beside 1): Claude's argv, pane recognition, graceful close, trust
-   and resume move behind an `AgentDriver` interface (`daemon/src/agents/claude.ts`), the command line byte-identical
-   under test. (Named driver, not adapter: "adapter" is messaging's.)
+5. **Built 2026-11-23: the driver seam, no behaviour change** (at once, beside 1): Claude's argv, pane recognition,
+   graceful close, trust and resume move behind an `AgentDriver` interface (`daemon/src/agents/claude.ts`), the command
+   line byte-identical under test (`agents/claude.test.ts`). (Named driver, not adapter: "adapter" is messaging's.)
+   Codex's driver is `panes` (its run-dir mark), `launch` (run dir, script, connection), `started` (`thread/start`,
+   the seed's turn; answers the thread id) and `close` (`turn/interrupt`); the spawn path makes its worktree, as for a
+   stack, and `driverFor` (`spawn.ts`) picks it by the task's `agent`.
 6. **The Codex launch** (after 1, 4 and 5): the run dir and script, the connection, `thread/start`, the ledger's thread
    id, the seed, the TUI's late join, pane recognition. Not advertised: a wire spawn of `agent: "codex"` is refused.
 7. **The Codex session** (after 6): notifications into the pipeline, the graceful close, reconnect at start, the tools'
@@ -594,8 +601,8 @@ Still to run, each before the phase named; each checks a fact the design already
 - `DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version.
 - The daemon's WebSocket client over a unix socket: `ws` as a daemon dependency, or a minimal one over
   `Bun.connect({ unix })`.
-- Recognising a Codex pane in `sessions.ts`: its start command names a run dir under `/tmp/seance-cx-`, beside the
-  window's `@seance-task`.
+- Recognising a Codex pane: its `AgentPanes.startMark` (`agents/panes.ts`, read by `sessions.ts` through `OURS`), a
+  glob for the run dir `/tmp/seance-cx-*` in its start command, beside the window's `@seance-task`.
 - The key a login's `SettingsRecord.authAlerts` entry uses ("Login health").
 
 ## Where it lands

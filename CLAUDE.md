@@ -42,9 +42,10 @@ a **Status** line (built, spec, draft); trust it over memory.
   live session's screen.
 - **docs/agents.md** — analysis: agents other than Claude Code (Codex, `agy`). Read before adding a
   second agent or making the launch path agent-neutral.
-- **docs/codex.md** — Codex as a first-class account; every question decided by the owner. Item 1 (the
-  daemon's login: `codex` block, home, probe, `logins`/`lq`, `seance codex`) is built, in DESIGN.md's
-  "Codex login". Read it, and docs/agents.md, before any Codex work.
+- **docs/codex.md** — Codex as a first-class account; every question decided by the owner. Built so far: item 1
+  (the daemon's login: `codex` block, home, probe, `logins`/`lq`, `seance codex`, DESIGN.md "Codex login") and item 5
+  (the driver seam: `AgentDriver`, `daemon/src/agents/`, DESIGN.md "Agent drivers"). Read it, and docs/agents.md,
+  before any Codex work.
 - **docs/orchestrator.md** — draft, nothing decided: tracker projects as task graphs. Read before amend
   deps, anything that reads a tracker, or a non-task session; build nothing from it.
 - **docs/tags.md** — tags and session identity; built, keeps open questions and spike evidence. Read

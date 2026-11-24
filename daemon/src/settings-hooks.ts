@@ -11,7 +11,7 @@ import type { Check } from "./check.ts";
 import { writeDurable } from "./durable-write.ts";
 import type { ClaudeConfigTarget } from "./exclaves.ts";
 import { SETTINGS_HOOK_EVENTS } from "./session-event-frame.ts";
-import { shq } from "./spawn.ts";
+import { shq } from "./shq.ts";
 
 /** Seconds, as Claude reads a hook's `timeout`: past the CLI's own 2 s exchange, so Claude never kills it first. */
 const HOOK_TIMEOUT_S = 5;

@@ -33,7 +33,8 @@ import {
   pskBlobPathIn,
   stateDir,
 } from "./paths.ts";
-import { sessionName, shq } from "./spawn.ts";
+import { shq } from "./shq.ts";
+import { sessionName } from "./spawn.ts";
 import { loginName } from "./usage-refresh.ts";
 import {
   CUSTODIAN_FIELD,

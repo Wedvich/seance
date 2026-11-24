@@ -1661,7 +1661,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `"ping"` / `"pong"`                                                                          | both socket legs                                                                                                                                                                                                                                                                                                                                                                                                                                                               | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                                                                                         |
 | envelope `seal`/`open`, AAD, replay                                                          | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                         | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                                                                                     |
 | ops `sessions` / `spawn`                                                                     | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seance spawn --now`)                                                                                                                                                                                                                                                                                                                                         | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
-| op `rescan`                                                                                  | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
+| op `rescan`                                                                                  | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row; `daemon/src/cli.ts` `cmdScan` over the local op socket                                                                                                                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
 | op `availability` (built 2026-11-13; `now?` with drain 3/3, `soft?` with the soft close)     | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seance close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                                                                                                                      | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
 | op `custodian` (built 2026-11-14, custodian 7)                                               | `pwa/src/store.ts` `custodianControl`, from the Machines card's menu, over the relay as app-role only                                                                                                                                                                                                                                                                                                                                                                          | `daemon/src/handlers.ts` `handleCustodian` → `CustodianControl` in `daemon/src/run.ts` → `ownerAct` (`daemon/src/custodian-owner.ts`); sealed `from: "app"` only; writes `custodian/state.json` or `round-request` and pokes the seat (Daemon, "The custodian's status and the Machines row")                                                                                                           |
 | op `despawn`                                                                                 | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
@@ -1707,12 +1707,12 @@ Who owns each frame in code — the place to change when a frame changes:
 | field `ownerTags`                                                                            | built: `AmendRequest`, from the PWA's Label dialog (`pwa/src/store.ts`) to a verified leader advertising `taskTags`; `parseAmendDraft` refuses it for every other client                                                                                                                                                                                                                                                                                                       | built: `Scheduler.amend` (`scheduler/src/scheduler.ts`), taken in any task state when no other field is set                                                                                                                                                                                                                                                                                             |
 | field `inheritedPr`                                                                          | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                                                                                                                | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only on a worktree spawn sealed from the scheduler (or the leader in process) with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                     |
 
-`sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
+`sessions`, `spawn`, `despawn` and `rescan` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
 The daemon builds one handler per surface over a single context, so the two differ
 only in the audit origin they are tagged with — see "Local op socket".
 
-The same three ops have a third sender on a credential-delivered box, and only
+`sessions`, `spawn` and `despawn` have a third sender on a credential-delivered box, and only
 there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
 `seance mcp` that reached it over the local op socket with a broker frame — not a
 `Plain`, and not on this wire. To the relay and the target it is one more app. The
@@ -5884,7 +5884,7 @@ Where the build adds to or departs from the wording above:
   best effort. It lives outside the directory so the session never sees it, and it is what
   cleanup and continuations read. The launch ledger is untouched, and reap from the CLI,
   which does not own the ledger, can read it.
-- **The command line** (`daemon/src/spawn.ts`): ` --add-dir ${shq(dir)}` per directory,
+- **The command line** (`daemon/src/agents/claude.ts` since the driver seam, `spawn.ts` before): ` --add-dir ${shq(dir)}` per directory,
   placed directly before `--model`. `--add-dir <directories...>` is variadic in
   `claude --help` (checked 2026-10-28, Claude Code 2.1.312), so a value is bounded only
   by the next flag, and `--model` always follows. The path is the daemon's own, never a
@@ -6528,6 +6528,32 @@ of this section built.
   `HandlerContext`/`RunOpts` — session group, pane-death budget, doctor's tmux
   checks), and leaving `SpawnFailure`/`SpawnOutcome` in `spawn.ts`, the one
   file such a fork deletes.
+- **Agent drivers** (`daemon/src/agents/`, built 2026-11-23, docs/codex.md "Build order" item 5): below the backend,
+  the tmux backend splits again, between what is agent-neutral and what only the agent a pane runs knows.
+  `AgentDriver` (`agents/driver.ts`) is three members: `panes` (how its panes are told apart: a tmux glob over
+  `pane_start_command` that only its own launches match, and the process name of one séance did not start),
+  `launch(spec)` (trust answered fail-open, then the pane's shell string, its `-e` pairs and start directory, with the
+  seed delivered as data; `started(window)` once the window is tagged, answering the session id the launch ledger
+  notes; `dispose()` after registration) and `close(pane, {graceMs, leaveDead})` (the graceful half of a despawn;
+  `killPane` stays the caller's). The spawn path keeps everything else: the gates, the ledger, worktree names and the
+  worktrees it makes itself (a stack), the seed's text (preamble, autonomy note, task, attachments), the window, the
+  task tag, registration and harvest. `claudeDriver` (`agents/claude.ts`) holds what used to sit in `spawn.ts` and
+  `despawn.ts`: the argv (pinned byte for byte by `agents/claude.test.ts`, captured before the move),
+  `RESUME_NEVER_ASKS`, `--session-id`/`--resume`, the plan-mode bypass read, the seed file and its redirect, the trust
+  calls, the `/exit` keys and the Keep answer. Its recognition facts are `CLAUDE_PANES` in `agents/panes.ts`, a module
+  that imports nothing, because `sessions.ts` and `tmux.ts` read every driver's (`AGENT_PANES`; `OURS` is folded from
+  them) and must load no module that logs (`claude-process.ts`'s closure, `message-layering.test.ts`).
+  `CLAUDE_PANES.command` is also what `sessionOf` and the adapter feed call a `claude` process: that is session
+  identity, Claude's until a second driver lands. `driverFor` in `spawn.ts` and despawn's close answer Claude alone
+  until a task carries its agent. The shape is Codex's session (docs/codex.md, "The session") as a second
+  implementation: its run dir and script are `launch`, its `thread/start` is `started` (the thread id is the daemon's
+  own call's answer, so `started` returns the id rather than `launch` choosing it), its `turn/interrupt` is `close`,
+  its run-dir mark is `panes`. A driver whose agent does not make its own worktree is handed one the spawn path made,
+  as for a stack (`LaunchSpec.worktree` names it either way). Named driver, never adapter: an adapter is messaging's
+  (Adapters). Rejected: the seed text in the driver (the preamble and autonomy note are the same facts for every
+  agent; an agent-aware wording is a parameter of the spawn path's, not a second copy), trust as its own member (it is
+  only ever the first step of a launch), and a driver per pane state (`classifyPane` reads Claude's screen and stays in
+  `sessions.ts` until a second agent's panes need classifying).
 - **Seams** (M4 readiness, R6): `startDaemon` takes `now`, `httpFetch` and `probe` (`RunOpts`), and
   hands the clock and `httpFetch` to the leader and telemetry, `probe` to telemetry; defaults are
   `Date.now`, the global `fetch` and `hostProbe`. They are what lets a daemon-tier test
@@ -7960,7 +7986,7 @@ of this section built.
   `-t` would also resolve `main:1.0`, `{marked}` or `=name` — and must name a
   pane the session list's own predicate (`isRegistered`) accepts, so despawn
   reaches exactly what a list offered; `invalid_target` and `session_not_found`
-  are security outcomes in the way `repo_not_found` is. Graceful first, then
+  are security outcomes in the way `repo_not_found` is. Graceful first (the driver's `close`, `agents/claude.ts`), then
   force, and the reply says which happened (`outcome: "exited" | "killed"`):
   Esc (interrupts a running turn), Ctrl+C (clears the draft), literal `/exit`,
   Enter, then a ~5s poll through the pane classifier. The Ctrl+C is not in the
@@ -12117,7 +12143,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   a relayed spawn's. A local spawn differs from a relayed one in exactly one
   observable way: the origin tag.
 - **Semantic ops, never the key.** A peer sends a `Plain` and gets a `Plain`
-  back; the ops it may ask for are `sessions`, `spawn` and `despawn` and nothing
+  back; the ops it may ask for are `sessions`, `spawn`, `despawn` and `rescan` and nothing
   else (`availability` is not one: it is app-sealed, and a keyless box points to the PWA). `despawn` joined on 2026-10-09, deliberately — widening this list is a
   threat-model change, so the reasoning is kept here: without it the
   `despawn_session` tool cannot end a session on the box it runs on whenever the
@@ -12125,13 +12151,20 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   (the fleet broker below came later, and self-targets still bypass it); and
   it is the same kind of op as `spawn`, an action on this box's own tmux,
   recorded `origin=local`, granting nothing a same-uid process lacks (it can
-  `tmux kill-pane` directly). `rescan` is out of scope and `update-available` is
+  `tmux kill-pane` directly). `rescan` joined on 2026-11-23, for `seance scan`: a
+  live daemon holds its repo set in memory and rewrites `state.json` from it, so a
+  scan the CLI made beside it could only be printed, and refreshing a set meant the
+  app. It takes no payload, scans only the daemon's own `repoRoots`, queues behind a
+  scan in flight like the app's, is audited `origin=local`, and grants nothing a
+  same-uid process lacks (`seance restart` rescans too). A daemon that refuses it
+  (older than this) or cannot be reached gets the CLI's own scan, printed, the cache
+  untouched. `update-available` is
   refused structurally — it is fire-and-forget, drives the self-updater, and
   must not be reachable from a surface whose premise is skipping the envelope.
   Same posture as the broadcast allowlist in `relay-client.ts`. Rejected: a
   crypto oracle (seal/open on request), which is what the open item warned
   against — same-uid peers make it unpoliceable, and it hands out the relay's
-  whole reach rather than three ops against this box.
+  whole reach rather than four ops against this box.
 - **The 0700 directory is the access control**, not the socket's mode. The
   socket lives at `stateDir()/run/seanced.sock`, in a directory the daemon
   creates 0700 and re-tightens on every start. `Bun.listen({ unix })` creates
@@ -12237,7 +12270,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
 
 Non-goals: routing `seance spawn --now` through the socket (it would collapse the
 executors further, but `origin=cli` should keep meaning "typed at this machine");
-a `rescan` op, or `availability`; the Raycast extension using it — its local-only reach was rejected
+`availability`; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
 
 ### Session messages (`daemon/src/messages.ts`) — built 2026-11-13 (PR 1) and 2026-11-14 (PR 2, and replies by handle), docs/messaging.md
@@ -12627,7 +12660,7 @@ session's pane process is its shell, which outlives a restarted `claude` (`claud
 no `ended`, so a handle bound to the pane pid would answer a stranger: the second `claude` would read the first's
 replies and could answer its questions. `session` is the `claude` process itself, read off the process tree, never the pane's start command
 (`sessionOf`, `daemon/src/messages.ts`): the **innermost** process on the peer's chain (`ancestorBelow`,
-`daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_COMMAND`, `sessions.ts`, read by
+`daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_PANES.command`, `agents/panes.ts`, read by
 `processNames`: argv[0] and comm on Linux, `pbi_comm` and `pbi_name` from `proc_pidinfo` on macOS, `ps` only where
 libproc will not load), with its **start time** (`processStart`: `/proc/<pid>/stat` field 22, or `pbi_start_tvsec` and
 `pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seance inbox` or `seance mcp`, is the child

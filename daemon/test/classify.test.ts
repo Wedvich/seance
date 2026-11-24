@@ -2,15 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  CLAUDE_COMMAND,
-  classifyPane,
-  listPanes,
-  listStuckWindows,
-  paneInfo,
-  type PaneInfo,
-  type PaneState,
-} from "../src/sessions.ts";
+import { CLAUDE_PANES } from "../src/agents/panes.ts";
+import { classifyPane, listPanes, listStuckWindows, paneInfo, type PaneInfo, type PaneState } from "../src/sessions.ts";
 import { CUSTODIAN_OPTION, resolveTargetSession, tmuxOk } from "../src/tmux.ts";
 import {
   makeClaudeStub,
@@ -127,7 +120,7 @@ describe("classifyPane (real tmux, stub claude)", () => {
       return info === null ? "gone" : classifyPane(info);
     };
     await pollUntil(async () => (await paneInfo(round))?.titled === true, "the round to title");
-    expect((await paneInfo(round))?.command).not.toMatch(CLAUDE_COMMAND);
+    expect((await paneInfo(round))?.command).not.toMatch(CLAUDE_PANES.command);
     expect(await roundState()).toBe("live");
     await pollUntil(async () => (await pane(plain))?.titled === true, "the unmarked pane to title");
     expect(await stateOf(plain)).toBe("shell");

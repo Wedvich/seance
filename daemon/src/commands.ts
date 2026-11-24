@@ -152,7 +152,7 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
   },
   doctor: { summary: "preflight checks: config, binaries, roots, relay, service" },
   status: { summary: "service / socket / scan status" },
-  scan: { summary: "discover repos now; caches for the next start unless a daemon is running" },
+  scan: { summary: "discover repos now: a running daemon rescans, else the cache is primed for its next start" },
   sessions: { summary: "list running claude tmux windows, each with the id despawn takes" },
   spawn: {
     summary: "queue a session for the scheduler",

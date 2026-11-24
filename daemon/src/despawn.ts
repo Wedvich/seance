@@ -1,16 +1,14 @@
+import { claudeDriver } from "./agents/claude.ts";
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { noteClosing } from "./closing-panes.ts";
 import { exec } from "./exec.ts";
 import { PANE_ID } from "./pane-id.ts";
-import { classifyPane, isRegistered, paneInfo, type PaneInfo } from "./sessions.ts";
+import { isRegistered, paneInfo, type PaneInfo } from "./sessions.ts";
 import { tmux } from "./tmux.ts";
 
 const DEFAULT_GRACE_MS = 5_000;
 /** How long a killed pane's processes get to exit on their own, and again after SIGTERM. */
 const DEFAULT_REAP_WAIT_MS = 2_000;
-/** Between keys: an ESC chased too closely by the next key reads as one Alt chord. */
-export const KEY_GAP_MS = 150;
-const POLL_MS = 100;
 
 export interface DespawnOptions {
   /** Kill straight away instead of asking claude to exit first. */
@@ -31,9 +29,9 @@ export interface DespawnOptions {
 }
 
 /**
- * Ends one session: asks claude to `/exit`, answers the worktree prompt that
- * follows with Keep, and kills the pane if it is still there when the grace
- * runs out. The window only — the worktree and its branch are reap's.
+ * Ends one session: asks its agent to leave (`AgentDriver.close`: claude's `/exit`, the worktree prompt that
+ * follows answered Keep), and kills the pane if it is still there when the grace runs out. The window only — the
+ * worktree and its branch are reap's.
  */
 export async function despawnSession(id: string, opts: DespawnOptions): Promise<DespawnResult> {
   if (!PANE_ID.test(id)) {
@@ -79,71 +77,11 @@ async function close(
   leaveDead: boolean,
 ): Promise<DespawnResult> {
   const window = pane.windowName;
-  if (!force && (await exitGracefully(pane, graceMs ?? DEFAULT_GRACE_MS, leaveDead))) {
+  if (!force && (await claudeDriver.close(pane, { graceMs: graceMs ?? DEFAULT_GRACE_MS, leaveDead }))) {
     return { window, outcome: "exited" };
   }
   await killPane(pane.paneId, reapWaitMs ?? DEFAULT_REAP_WAIT_MS);
   return { window, outcome: "killed" };
-}
-
-/**
- * Enter on the worktree exit prompt, whose preselected first option is Keep:
- * claude exits 0 and leaves the worktree (measured on 2.1.295). Never Esc,
- * which cancels the exit. The caller has classified the pane as `exit-prompt`.
- */
-export async function answerKeepWorktree(paneId: string): Promise<void> {
-  await tmux(["send-keys", "-t", paneId, "Enter"]);
-}
-
-/**
- * Esc interrupts a running turn. Ctrl+C then clears the draft, if any: Esc
- * alone only arms "Esc again to clear", so `/exit` would be appended to the
- * draft and Enter would send it as a prompt, and Ctrl+U clears just one line
- * of a multi-line one. On an empty box Ctrl+C only arms "press again to exit",
- * which typing disarms. Measured on Claude Code 2.1.295.
- *
- * `tmux`, not `tmuxOk`: a pane that exits mid-sequence is the outcome asked
- * for, not a failure.
- */
-async function askToExit(paneId: string): Promise<void> {
-  for (const keys of [["Escape"], ["C-c"], ["-l", "/exit"], ["Enter"]]) {
-    // oxlint-disable-next-line no-await-in-loop -- keystrokes, in order and paced
-    await tmux(["send-keys", "-t", paneId, ...keys]);
-    // oxlint-disable-next-line no-await-in-loop
-    await Bun.sleep(KEY_GAP_MS);
-  }
-}
-
-/** True once the pane is gone; false when it outlived the grace. */
-async function exitGracefully(pane: PaneInfo, graceMs: number, leaveDead: boolean): Promise<boolean> {
-  const deadline = Date.now() + graceMs;
-  // Already on the prompt — answering it is the whole exit.
-  let answered = (await classifyPane(pane)) === "exit-prompt";
-  if (answered) await answerKeepWorktree(pane.paneId);
-  else await askToExit(pane.paneId);
-  for (;;) {
-    // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next
-    const now = await paneInfo(pane.paneId);
-    if (now === null) return true;
-    // oxlint-disable-next-line no-await-in-loop
-    const state = await classifyPane(now);
-    // claude has gone; what is left is a pane remain-on-exit kept, or the shell a
-    // hand-started claude ran from, and closing the window was the point.
-    if (state === "dead" && leaveDead) return true;
-    if (state === "dead" || state === "shell") {
-      // oxlint-disable-next-line no-await-in-loop
-      await tmux(["kill-pane", "-t", pane.paneId]);
-      return true;
-    }
-    if (state === "exit-prompt" && !answered) {
-      answered = true;
-      // oxlint-disable-next-line no-await-in-loop
-      await answerKeepWorktree(pane.paneId);
-    }
-    if (Date.now() >= deadline) return false;
-    // oxlint-disable-next-line no-await-in-loop
-    await Bun.sleep(POLL_MS);
-  }
 }
 
 /**

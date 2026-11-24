@@ -1,6 +1,6 @@
 import { DRAIN_INTERRUPT_MS, type NeedsInputReason, type SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
-import { KEY_GAP_MS } from "./despawn.ts";
+import { KEY_GAP_MS } from "./agents/claude.ts";
 import { INPUT_BOX_RULE } from "./pane-activity.ts";
 import { PANE_ID } from "./pane-id.ts";
 import { log } from "./log.ts";

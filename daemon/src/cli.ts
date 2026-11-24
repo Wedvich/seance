@@ -11,6 +11,8 @@ import {
   type AmendDraft,
   type AutonomyLevel,
   type DespawnRequest,
+  type RepoEntry,
+  type RescanResponse,
   type SpawnRequest,
 } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
@@ -33,7 +35,7 @@ import type { Check } from "./check.ts";
 import { custodianChecks } from "./custodian-checks.ts";
 import { CLI_NAME, LEGACY_CLI_NAME, usageLine } from "./commands.ts";
 import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
-import { localSocketReachable } from "./local-client.ts";
+import { localRequest, localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
 import { scanExclaves, tagExclaves, userScopeTargets } from "./exclaves.ts";
@@ -97,27 +99,53 @@ export async function cmdInit(): Promise<void> {
 }
 
 /**
- * Prints what the configured roots hold now, and primes the cache for the next
- * start — but only when no daemon is running. A live daemon holds `repos` in
- * memory and rewrites state.json from it on every rescan, so writing here would
- * be clobbered without ever reaching it: silently losing the work and leaving
- * `status` reporting a count nothing had registered.
+ * With a daemon running, asks it to rescan over the local socket: it holds `repos` in memory and
+ * rewrites state.json from it on every rescan, so a scan written here would be clobbered without
+ * ever reaching it. With none, scans here and primes the cache for the next start. A daemon that
+ * does not answer (an older one refuses the op, an unbound socket) gets the scan done here and the
+ * cache left alone.
  */
 export async function cmdScan(): Promise<void> {
-  const config = await loadConfig();
-  const state = await loadOrInitState();
-  const repos = await scanRepos(config.repoRoots, state.repos);
   const daemonPid = await livePid();
-  if (daemonPid === null) await saveState({ ...state, repos, scannedAt: Date.now() });
+  if (daemonPid !== null) {
+    const answer = await daemonRescan();
+    if (typeof answer !== "string") {
+      printRepos(answer.repos);
+      console.log(`rescanned by daemon pid ${daemonPid}`);
+      return;
+    }
+    // `readState`, never `loadOrInitState`: the daemon owns state.json, and an init would rewrite it.
+    const { repoRoots } = await loadConfig();
+    printRepos(await scanRepos(repoRoots, (await readState())?.repos ?? []));
+    // A timed-out or cut-off request may still have rescanned, so this says unconfirmed, not "did not".
+    console.log(
+      `cache untouched — daemon pid ${daemonPid} did not confirm a rescan (${answer}). Refresh from the app to rescan.`,
+    );
+    return;
+  }
+  // Config first: a missing one must fail before an init writes a fresh state.json.
+  const { repoRoots } = await loadConfig();
+  const state = await loadOrInitState();
+  const repos = await scanRepos(repoRoots, state.repos);
+  await saveState({ ...state, repos, scannedAt: Date.now() });
+  printRepos(repos);
+}
+
+/** The daemon's rescan reply, or why there is none. */
+async function daemonRescan(): Promise<RescanResponse | string> {
+  try {
+    const reply = await localRequest<RescanResponse>("rescan", {});
+    return "ok" in reply ? reply.message : reply;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+function printRepos(repos: readonly RepoEntry[]): void {
   for (const repo of repos) {
     console.log(`${repo.name.padEnd(30)} ${(repo.defaultBranch ?? "-").padEnd(12)} ${repo.path}`);
   }
   console.log(`\n${repos.length} repos`);
-  if (daemonPid !== null) {
-    console.log(
-      `cache untouched — daemon pid ${daemonPid} owns it. Refresh from the app to rescan, or \`seance restart\` if you edited repoRoots.`,
-    );
-  }
 }
 
 export interface SpawnCliArgs {
