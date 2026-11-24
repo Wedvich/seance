@@ -53,6 +53,7 @@ import {
   type WatchClient,
   watchGate,
 } from "./mcp.ts";
+import type { keepSessionOpen } from "./keep-session-open.ts";
 import type { WatchGate } from "./watch-github.ts";
 
 interface FakeLocal extends LocalMachine {
@@ -91,6 +92,7 @@ async function connectedClient(
   sendMsg?: typeof sendMessage,
   ownPane: () => string | undefined = () => undefined,
   watchClient?: WatchClient,
+  keepOpen?: typeof keepSessionOpen,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -104,7 +106,19 @@ async function connectedClient(
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   serveStdio(
     () =>
-      buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane, watchClient),
+      buildMcpServer(
+        fleet,
+        local,
+        audit,
+        report,
+        handOffTask,
+        passOwnTask,
+        passPoll,
+        sendMsg,
+        ownPane,
+        watchClient,
+        keepOpen,
+      ),
     { transport: serverTransport },
   );
   await client.connect(clientTransport);
@@ -3636,6 +3650,52 @@ describe("watch_github and unwatch_github", () => {
       };
       await refusedWith(watchGate(fleet, fakeLocal(undefined, { deviceId: "device-2" }))(), "can't confirm");
     });
+  });
+});
+
+describe("keep_session_open", () => {
+  test("is offered with one optional boolean, holds by default, releases on false, and a refusal is a tool error", async () => {
+    const asked: boolean[] = [];
+    const client: typeof keepSessionOpen = (keep) => {
+      asked.push(keep);
+      return Promise.resolve(asked.length < 3 ? { ok: true, text: `held=${keep}` } : { ok: false, text: "not held" });
+    };
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    try {
+      const c = await connectedClient(
+        lazy,
+        null,
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        client,
+      );
+      const { tools } = await c.listTools();
+      const tool = tools.find((t) => t.name === "keep_session_open");
+      expect(tool?.annotations?.idempotentHint).toBe(true);
+      expect(tool?.inputSchema.required ?? []).toEqual([]);
+      expect(tool?.description).toContain("never to avoid being cleaned up");
+
+      const held = await c.callTool({ name: "keep_session_open", arguments: {} });
+      expect(held.isError).not.toBe(true);
+      expect(toolText(held)).toBe("held=true");
+      const released = await c.callTool({ name: "keep_session_open", arguments: { keep: false } });
+      expect(toolText(released)).toBe("held=false");
+      const refused = await c.callTool({ name: "keep_session_open", arguments: { keep: true } });
+      expect(refused.isError).toBe(true);
+      expect(asked).toEqual([true, false, true]);
+
+      const extra = await c.callTool({ name: "keep_session_open", arguments: { pane: "%1" } });
+      expect(extra.isError).toBe(true);
+      expect(asked).toHaveLength(3);
+    } finally {
+      lazy.stop();
+    }
   });
 });
 

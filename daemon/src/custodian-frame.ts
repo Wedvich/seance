@@ -44,6 +44,8 @@ export const CUSTODIAN_REPLY_CODES = [
   "busy",
   "too_soon",
   "unobserved",
+  /** A `close` of a session that asked to be left open (`keep_session_open`; DESIGN.md, "Keep open"). */
+  "held_open",
   /** A `notes`, `done` or `nudge` text, or a `flag` note, over its cap. */
   "too_long",
   /** A `flag` reason outside `FLAG_REASONS`. */
@@ -75,7 +77,7 @@ export type CustodianReplyCode = (typeof CUSTODIAN_REPLY_CODES)[number];
 /** Why a `close` did not act on a pane (`invalid` is a pane id that is not tmux's own form). */
 export type CloseRefusal = Extract<
   CustodianReplyCode,
-  "foreign" | "marked" | "waiting" | "busy" | "too_soon" | "unobserved" | "gone" | "invalid"
+  "foreign" | "marked" | "held_open" | "waiting" | "busy" | "too_soon" | "unobserved" | "gone" | "invalid"
 >;
 
 /** Why an `interrupt` sent no key (C27). */

@@ -4,6 +4,7 @@ paths:
   - "daemon/src/{session-event*,settings-hooks*,usage-refresh,report-done*,handoff*}.ts"
   - "daemon/src/{launch-ledger*,pane-activity*,conversations,claude-process,agent-session-file*}.ts"
   - "daemon/src/owner-labels*.ts"
+  - "daemon/src/{keep-open,keep-open-frame,keep-session-open}.ts"
   - "shared/src/tags.ts"
 ---
 
@@ -142,6 +143,22 @@ Nothing kept below is run or sent, and no reply depends on it.
   conversation table beside it (`conversations.ts`, memory only). Its tags reach only an app's `sessions`
   (`SessionEntry.tags`: never a scheduler-sealed one, and MCP's `get_sessions` only
   `AGENT_VISIBLE_TAG_KEYS`), never a log, an audit line or argv.
+
+## `keep-open`: a session's hold on the custodian
+
+DESIGN.md, "Keep open". `keep-open.ts`, `keep-open-frame.ts`, `keep-session-open.ts` (MCP's `keep_session_open`).
+
+- The frame is exactly `{v, kind, keep}`, on neither `LOCAL_OPS` nor the broker, bound only by peer pid to the
+  innermost `claude` on the peer's chain (`bindPeer`): `unbound` where the host names no peer, the pid came back null
+  or no live pane holds the peer, `nosession` with no `claude`, never a field.
+- A hold ends with its `claude` process (`sessionAlive` at each read) and acts on nothing: it only makes the
+  custodian's `close` answer `held_open` and the seat's due check skip the pane. Giving it any other effect (a despawn,
+  drain, hand-off, pass, reap or the round's `nudge` or `interrupt` reading it) is a threat-model change.
+- `keep-open.json` is 0600, written by atomic rename through one write chain per path per process and never once
+  stopped, holds pane ids, process identity and a time only, at most `KEEP_OPEN_MACHINE_MAX` holds, and an entry is
+  reloaded only while its process runs with the saved start time.
+- Its audit lines (`origin=keep-open`) carry `op` and an outcome only; `keep-open-frame.ts` and
+  `keep-session-open.ts` are in `seance mcp`'s closure (`message-layering.test.ts`).
 
 ## A session's name is the owner's sealed act
 

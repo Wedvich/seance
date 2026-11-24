@@ -17,6 +17,8 @@ const ENTRIES = [
   "message-frame.ts",
   "watch-frame.ts",
   "watch-github.ts",
+  "keep-open-frame.ts",
+  "keep-session-open.ts",
   "inbox-cli.ts",
   "custodian-cli.ts",
   "custodian-frame.ts",

@@ -27,6 +27,7 @@ import type { DespawnResult, SpawnOutcome } from "./backend.ts";
 import type { BrokerErrorCode, BrokerSchedulerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 import type { CloseRefusal, CustodianReplyCode, KeptWhy } from "./custodian-frame.ts";
+import type { KeepOpenReplyCode } from "./keep-open-frame.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
@@ -1162,5 +1163,24 @@ export function watchAudit(sink: AuditSink): WatchAudit {
     await sink(
       `audit watch origin=${origin} op=${line.op} kind=${line.kind ?? "-"} event=${line.event ?? "-"} reason=${line.reason ?? "-"} outcome=${line.outcome ?? "-"}`,
     );
+  };
+}
+
+export type KeepOpenOrigin = "keep-open";
+
+export interface KeepOpenAuditLine {
+  /** `hold` and `release` are a session's own frames; `end` is the daemon dropping a hold whose session is gone. */
+  readonly op: "hold" | "release" | "end";
+  /** `ok` or a refusal's code for a frame; absent for an `end`. */
+  readonly outcome?: KeepOpenReplyCode | "ok";
+}
+
+export type KeepOpenAudit = (line: KeepOpenAuditLine) => Promise<void>;
+
+/** A session's hold on the custodian (DESIGN.md, "Keep open"): closed values only, never a pane, task or session id. */
+export function keepOpenAudit(sink: AuditSink): KeepOpenAudit {
+  const origin: KeepOpenOrigin = "keep-open";
+  return async (line) => {
+    await sink(`audit keep-open origin=${origin} op=${line.op} outcome=${line.outcome ?? "-"}`);
   };
 }

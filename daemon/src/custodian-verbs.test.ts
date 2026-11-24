@@ -62,6 +62,7 @@ const verdict = (over: Partial<CloseVerdictInput> = {}): ReturnType<typeof close
     activity: rested(),
     untouchable: false,
     awaitsWake: false,
+    heldOpen: false,
     now: NOW,
     closeAfterMs: CLOSE_AFTER,
     ...over,
@@ -88,6 +89,14 @@ describe("closeVerdict", () => {
     // What the daemon saw first: a dialog still waits, and an unobserved pane stays unobserved.
     expect(verdict({ awaitsWake: true, activity: rested({ state: "needs-input" }) })).toBe("waiting");
     expect(verdict({ awaitsWake: true, activity: null })).toBe("unobserved");
+  });
+
+  test("a session held open is refused whatever its state, but foreign and marked are said first", () => {
+    expect(verdict({ heldOpen: true })).toBe("held_open");
+    expect(verdict({ heldOpen: true, activity: rested({ state: "busy" }) })).toBe("held_open");
+    expect(verdict({ heldOpen: true, state: "exit-prompt" })).toBe("held_open");
+    expect(verdict({ heldOpen: true, info: info({ ours: false }) })).toBe("foreign");
+    expect(verdict({ heldOpen: true, untouchable: true })).toBe("marked");
   });
 
   test("foreign and the round's own pane are never touched, and a mark outranks the state", () => {

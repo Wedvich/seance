@@ -902,7 +902,12 @@ describe("what the table holds open", () => {
   test("a live watch makes its pane and task await a wake for the custodian, and is no part of untouchable", async () => {
     const r = rig();
     const target = await listening(r, "holds-a", "task-holds-1");
-    const holds = paneHolds({ events: () => undefined, drain: () => undefined, watches: () => r.watches });
+    const holds = paneHolds({
+      events: () => undefined,
+      drain: () => undefined,
+      watches: () => r.watches,
+      keepOpen: () => undefined,
+    });
     expect(holds.awaitsWake(target.id)).toBe(false);
     const id = await added(r, target, pr(1));
     expect(holds.awaitsWake(target.id)).toBe(true);
