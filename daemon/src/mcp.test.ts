@@ -4853,6 +4853,30 @@ describe("pass_to_successor", () => {
     expect(result.queueReads).toBe(31);
   });
 
+  test("a Codex task's own pass is refused before the push under a leader that cannot pass one (codexPass)", async () => {
+    const codex: Task = {
+      ...active,
+      spec: { ...active.spec, agent: "codex", autonomy: "auto" },
+      assignment: { ...AT, window: "fix-it", pane: "%7" },
+    };
+    const refused = await callSelf({ pane: "%7", queued: () => [codex] });
+    expect(refused.error).toBe(true);
+    expect(refused.passed).toEqual([]);
+    expect(refused.queueReads).toBe(1);
+    expect(refused.text).toContain("cannot pass a Codex task yet");
+    expect(refused.text).toContain("Nothing was pushed");
+
+    const [leader, box] = leaderMachines();
+    const able = [
+      machine({ ...leader, capabilities: [CAPABILITIES.successorSelf, CAPABILITIES.codexPass] }),
+      machine({ ...box }),
+    ];
+    expect((await callSelf({ pane: "%7", queued: () => [codex], machines: able })).passed).toHaveLength(1);
+    // A Claude task in the pane reads nothing of it.
+    const claude = { ...codex, spec: active.spec };
+    expect((await callSelf({ pane: "%7", queued: () => [claude] })).passed).toHaveLength(1);
+  });
+
   describe("a task its merge settled while this session kept working", () => {
     const MERGED_PR = "https://github.com/m/seance/pull/186";
     const settled: Task = {

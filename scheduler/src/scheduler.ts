@@ -79,7 +79,15 @@ import { prunable, unprunable } from "./prune.ts";
 import { stackOf, stackRecord } from "./stack.ts";
 import { drainDue, stampDrain, stampDrainRefusal } from "./drain-trigger.ts";
 import { quotaDue, spillAlerted, stampQuota } from "./quota-trigger.ts";
-import { accountOfPlacement, accountResetAt, exhaustion, route, type Decision, type Exhaustion } from "./route.ts";
+import {
+  accountOf,
+  accountOfPlacement,
+  accountResetAt,
+  exhaustion,
+  route,
+  type Decision,
+  type Exhaustion,
+} from "./route.ts";
 import {
   answerable,
   asSeen,
@@ -1594,21 +1602,21 @@ export class Scheduler {
     const fleet = this.#fleet;
     const create = this.#create;
     // Before any push: an older host answers an unknown op `invalid_request`, which would read as a failure to push.
-    // A Codex task's pass is phase 3 (docs/codex.md, "Parity"): its successor would carry `succeeds` beside `agent`,
-    // which V1 places nowhere, so nothing is pushed for one.
-    if (
-      create === undefined ||
-      (session === undefined ? fleet.pushBranch : fleet.passClose) === undefined ||
-      task.spec.agent !== undefined
-    ) {
+    if (create === undefined || (session === undefined ? fleet.pushBranch : fleet.passClose) === undefined) {
       return { ok: false, code: "successor_unsupported" };
     }
     const machine = fleet.machines().find((m) => m.deviceId === assignment.deviceId);
     if (machine === undefined || !machine.connected) return { ok: false, code: "offline" };
     const needed = session === undefined ? CAPABILITIES.successor : CAPABILITIES.successorSelf;
     if (machine.capabilities?.includes(needed) !== true) return { ok: false, code: "successor_unsupported" };
-    const account = machine.exclaves?.find((x) => x.id === assignment.exclave)?.accountId;
-    if (account === undefined || account === null) return { ok: false, code: "account_unknown" };
+    // A Codex task only off a daemon that closes and asks its session over the connection (docs/codex.md, item 11).
+    if (task.spec.agent !== undefined && machine.capabilities?.includes(CAPABILITIES.codexPass) !== true) {
+      return { ok: false, code: "successor_unsupported" };
+    }
+    // The account the task bills, by its agent: a Codex task's is the machine's Codex login, never the exclave's.
+    const exclave = machine.exclaves?.find((x) => x.id === assignment.exclave);
+    const account = exclave === undefined ? null : accountOf(machine, exclave, task.spec.agent);
+    if (account === null) return { ok: false, code: "account_unknown" };
     // The daemon's mark only chooses the label, and only while the machine's own status says it is closed.
     const effective: SuccessorTrigger =
       trigger === "session" && session?.drain === true && closedAt(machine) !== null ? "drain" : trigger;
@@ -1994,7 +2002,7 @@ export class Scheduler {
       const ex = exhaustion(task, machines, now, config, fleetQuota);
       const due = quotaDue(task, ex, now, config);
       if (ex === null || due === null) continue;
-      const offered = passOffer(task, machines, true).ok;
+      const offered = passOffer(task, machines, true, true).ok;
       const auto = autonomyOf(task.spec) === "auto";
       // An auto task whose successor routing would not place now would strand it `ready`: it alerts like the rest.
       const target = offered && auto ? this.#successorTarget(task, ex.accountId, now) : null;

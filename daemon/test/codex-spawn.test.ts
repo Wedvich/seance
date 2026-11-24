@@ -9,6 +9,7 @@ import type { ClaudeProcess } from "../src/claude-process.ts";
 import { codexSessions } from "../src/codex/sessions.ts";
 import type { CodexConfig } from "../src/config.ts";
 import { despawnSession } from "../src/despawn.ts";
+import { DRAIN_PROMPT } from "../src/drain-ask.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import type { CodexState } from "../src/session-events.ts";
@@ -284,6 +285,39 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
       () => states(pane).some((s) => s.turnEnded === true),
       "the interrupted turn's end to reach the session-event step",
     );
+  });
+
+  test("the drain's interrupt and prompt go over the connection, only under the pane's pid and only when the turn allows", async () => {
+    await stub.scenario({ turn: "hold" });
+    const outcome = await spawnSession(codex("Codex Drain"), repos, opts);
+    const paneId = await paneOf(outcome);
+    const pid = Number((await tmuxOk(["display-message", "-p", "-t", paneId, "#{pane_pid}"])).trim());
+    // The stub announces the rate limits after `turn/started`, and messages are read in order: once the read they
+    // prompted has answered, the session holds the running turn's id (the busy state alone can come before it).
+    await pollUntil(() => readings.length > 0, "the turn's start", 10_000);
+    const sent = async (method: string): Promise<number> => (await methods()).filter((m) => m === method).length;
+
+    // A pane id tmux reused, or one this process holds no session for, gets nothing.
+    expect(await codexSessions.interruptTurn({ paneId, pid: pid + 1 })).toBe(false);
+    expect(await codexSessions.interruptTurn({ paneId: "%999", pid })).toBe(false);
+    // No new turn over a running one.
+    const starts = await sent("turn/start");
+    expect(await codexSessions.drainTurn({ paneId, pid })).toBe(false);
+    expect(await sent("turn/interrupt")).toBe(0);
+    expect(await sent("turn/start")).toBe(starts);
+
+    expect(await codexSessions.interruptTurn({ paneId, pid })).toBe(true);
+    await pollUntil(() => states(paneId).some((s) => s.turnEnded === true), "the interrupted turn's end", 10_000);
+    // Nothing left to interrupt.
+    expect(await codexSessions.interruptTurn({ paneId, pid })).toBe(false);
+
+    expect(await codexSessions.drainTurn({ paneId, pid })).toBe(true);
+    const drain = (await stub.rpc()).findLast((call) => call.method === "turn/start");
+    expect(drain?.params).toEqual({
+      threadId: outcome.session,
+      input: [{ type: "text", text: DRAIN_PROMPT, text_elements: [] }],
+    });
+    await despawnSession(paneId, { force: true });
   });
 
   test("a daemon restart re-joins a running session: its thread resumed, its status and running turn re-read", async () => {

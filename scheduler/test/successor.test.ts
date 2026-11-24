@@ -236,6 +236,33 @@ describe("pass", () => {
     expect(s.fleet.pushes[0]?.request).toEqual({ taskId: "old" });
   });
 
+  test("a Codex task passes to a Codex successor that continues the login's account, never the exclave's", async () => {
+    const login = { agent: "codex", accountId: "codex:ws:user", authOk: true, version: "0.171.0" } as const;
+    const s = setup([
+      machine("a", {
+        capabilities: [...CAPABLE, CAPABILITIES.codex, CAPABILITIES.codexPass],
+        logins: [login],
+      }),
+    ]);
+    const task: Task = {
+      id: "old",
+      spec: spec({ agent: "codex", autonomy: "auto" }),
+      state: "running",
+      createdAt: NOW,
+      assignment: { deviceId: "a", exclave: "main", clone: "app" },
+    };
+    await s.store.put("old", 0, task);
+    await s.scheduler.refresh("old");
+    const result = ok(await s.scheduler.pass("old"));
+    expect(s.scheduler.task(result.successorId)?.spec).toMatchObject({
+      agent: "codex",
+      autonomy: "auto",
+      succeeds: { task: "old", account: "codex:ws:user", trigger: "manual" },
+    });
+    expect(s.fleet.pushes).toEqual([{ deviceId: "a", request: { taskId: "old" } }]);
+    expect(result.task).toMatchObject({ id: "old", state: "superseded", successor: result.successorId });
+  });
+
   test("the trigger rides the successor's spec", async () => {
     const s = setup();
     const old = await running(s, false);
@@ -326,6 +353,31 @@ describe("pass", () => {
       await s.store.put("old", 0, task);
       await s.scheduler.refresh("old");
       expect(await refusal(s)).toBe("account_unknown");
+    });
+
+    test("a Codex task off a machine that cannot pass one, and one whose machine has no Codex login", async () => {
+      const codexCaps = [...CAPABLE, CAPABILITIES.codex];
+      const login = { agent: "codex", accountId: "codex:ws:user", authOk: true, version: "0.171.0" } as const;
+      const place = async (s: Setup): Promise<void> => {
+        // Built by hand, as a placed task: routing is route.test.ts's.
+        const task: Task = {
+          id: "old",
+          spec: spec({ agent: "codex", autonomy: "auto" }),
+          state: "running",
+          createdAt: NOW,
+          assignment: { deviceId: "a", exclave: "main", clone: "app" },
+        };
+        await s.store.put("old", 0, task);
+        await s.scheduler.refresh("old");
+      };
+      // A daemon of the Codex build before item 11 would refuse its own pass and the ask.
+      const older = setup([machine("a", { capabilities: codexCaps, logins: [login] })]);
+      await place(older);
+      expect(await refusal(older)).toBe("successor_unsupported");
+      const unsigned = setup([machine("a", { capabilities: [...codexCaps, CAPABILITIES.codexPass] })]);
+      await place(unsigned);
+      expect(await refusal(unsigned)).toBe("account_unknown");
+      expect([...older.fleet.pushes, ...unsigned.fleet.pushes]).toEqual([]);
     });
 
     test("a PR the leader cannot read, one already merged or closed, one from a fork", async () => {

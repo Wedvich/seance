@@ -337,7 +337,7 @@ function modelOf(spec: Pick<TaskSpec, "model" | "agent">): string {
 
 /**
  * A task carrying `agent`, judged per machine (docs/codex.md, "Routing a Codex task"): what V1 refuses beside it, or a
- * daemon that does not launch it, is `agent_unsupported` (so a record carrying a refused field stays readable and is
+ * daemon that does not launch it (or, for a successor, does not pass one: `codexPass`), is `agent_unsupported` (so a record carrying a refused field stays readable and is
  * placed nowhere); then the login's presence, version floor and health, one auth code per candidate as for Claude.
  * `unknown` health (no probe yet, a stale status) still routes, as an exclave's does. A Claude task: nothing.
  */
@@ -345,6 +345,11 @@ function agentFilter(task: Task, machine: Machine, now: number): Reason[] {
   const { agent } = task.spec;
   if (agent === undefined) return [];
   if (codexSpecRefusal(task.spec) !== null || machine.capabilities?.includes(CAPABILITIES.codex) !== true) {
+    return [{ code: "agent_unsupported" }];
+  }
+  // A Codex successor only where a pass of it can follow (docs/codex.md, item 11): a daemon of the Codex build before
+  // it would run the session but refuse its own pass and the drain's ask.
+  if (task.spec.succeeds !== undefined && machine.capabilities?.includes(CAPABILITIES.codexPass) !== true) {
     return [{ code: "agent_unsupported" }];
   }
   const found = loginOf(machine, agent);

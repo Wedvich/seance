@@ -859,6 +859,7 @@ describe("daemon ↔ relay integration", () => {
       const { info } = await registerWithRepo(relay, "myrepo");
       expect(info.capabilities).toContain("drain");
       expect(info.capabilities).not.toContain("drainAsk");
+      expect(info.capabilities).not.toContain("codexPass");
     } finally {
       await daemon.stop();
       relay.stop();
@@ -900,6 +901,7 @@ describe("daemon ↔ relay integration", () => {
         "messages",
         "messageReply",
         "drainAsk",
+        "codexPass",
         "sessionTag",
         "codexContinue",
         "sessionLive",

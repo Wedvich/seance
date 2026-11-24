@@ -2400,10 +2400,10 @@ describe("the drain ask's hooks", () => {
     await ended.handingOff("handed");
     expect(ended.askable("handed")).toBe(false);
 
-    // A Codex pane's TUI takes none of the ask's keys as Claude's does, and its pass is phase 3.
+    // A Codex launch too (docs/codex.md item 11): its ask goes over the session's connection, never keys.
     await ledger.record("codex");
     await ledger.note("codex", { ...SITE, agent: "codex" });
-    expect(ended.askable("codex")).toBe(false);
+    expect(ended.askable("codex")).toBe(true);
   });
 });
 
@@ -2427,6 +2427,8 @@ describe("a Codex pane (its server's notifications, docs/codex.md item 7)", () =
     const forwarded: SessionEvent[] = [];
     const endedPanes: [string, string][] = [];
     const handedOff: [string, string][] = [];
+    const passes: SessionPass[] = [];
+    const closed: [string, string][] = [];
     const conversations = createConversations({
       configDirs: () => [],
       launchSession: (taskId) => ended.launchSession(taskId),
@@ -2445,19 +2447,29 @@ describe("a Codex pane (its server's notifications, docs/codex.md item 7)", () =
         handedOff.push([pane, taskId]);
         return Promise.resolve();
       },
+      pass: {
+        push: () => Promise.resolve({ ok: true, remoteBranch: "feature/x", tip: "a".repeat(40), pushed: true }),
+        send: (pass: SessionPass): Promise<boolean> => {
+          passes.push(pass);
+          return Promise.resolve(true);
+        },
+        close: (pane: string, taskId: string): Promise<void> => {
+          closed.push([pane, taskId]);
+          return Promise.resolve();
+        },
+      },
     });
     const send = (fields: object): Promise<unknown> => events.handle(frame({ pane: "%3", ...fields }), null);
-    return { panes, ended, forwarded, endedPanes, handedOff, conversations, events, send };
+    return { panes, ended, forwarded, endedPanes, handedOff, passes, closed, conversations, events, send };
   }
 
-  test("its states come from its server: a peer's state is dropped, a pass refused, a done report and a hand-off taken", async () => {
+  test("its states come from its server: a peer's state is dropped, a done report and a hand-off taken", async () => {
     const { forwarded, handedOff, events, send } = await setup();
     try {
       // A `claude -p` one of its tools ran, with hooks of its own, never speaks for the pane.
       expect(await send({ state: "busy" })).toEqual({ ok: true });
       expect(await send({ state: "idle", turnEnded: true })).toEqual({ ok: true });
       expect(forwarded).toEqual([]);
-      expect(await send({ pass: true, record: "carry on" })).toEqual({ ok: false, code: "unsupported" });
 
       await events.codex(codexPane, THREAD, null, { state: "busy" });
       await events.codex(codexPane, THREAD, null, { state: "needs-input", reason: "permission" });
@@ -2478,6 +2490,27 @@ describe("a Codex pane (its server's notifications, docs/codex.md item 7)", () =
       expect(handedOff).toEqual([]);
       await events.codex(codexPane, THREAD, null, { state: "idle", turnEnded: true });
       expect(handedOff).toEqual([["%3", "t3"]]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("its own pass is taken as a Claude pane's, and closes at the turn end its server reports (item 11)", async () => {
+    const { passes, closed, events, send } = await setup();
+    try {
+      expect(await send({ pass: true, record: "carry on" })).toEqual({
+        ok: true,
+        pass: { taskId: "t3", remoteBranch: "feature/x", tip: "a".repeat(40), pushed: true },
+      });
+      expect(passes.map((p) => [p.session, p.taskId, p.record])).toEqual([["%3", "t3", "carry on"]]);
+      expect(events.marked("%3")).toBe(true);
+      expect(await events.armPassClose("t3")).toEqual({ ok: true });
+      // A peer's turn end in the pane is dropped, never the session's; its status's plain idle is no turn end.
+      await send({ state: "idle", turnEnded: true });
+      await events.codex(codexPane, THREAD, null, { state: "idle" });
+      expect(closed).toEqual([]);
+      await events.codex(codexPane, THREAD, null, { state: "idle", turnEnded: true });
+      expect(closed).toEqual([["%3", "t3"]]);
     } finally {
       events.stop();
     }

@@ -62,6 +62,7 @@ import {
   deriveCodexContinueAvailability,
   deriveLimitsAvailability,
   derivePassAvailability,
+  deriveCodexPassAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
   deriveRunNowPastPause,
@@ -736,7 +737,12 @@ function rowOf(
   };
   const canContinue =
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
-  const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
+  const canPass = passOffer(
+    task,
+    state.relay.machines,
+    derivePassAvailability(state.relay),
+    deriveCodexPassAvailability(state.relay),
+  ).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = startNowFor(task, deriveRunNowPastPause(state.relay), now + skew);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;

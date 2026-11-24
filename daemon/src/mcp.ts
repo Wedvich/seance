@@ -1007,6 +1007,7 @@ function describeTask(
   idle: ReadonlySet<string>,
   traits: ReadonlyMap<string, readonly string[]>,
   leaderSuccessor: boolean,
+  leaderCodexPass: boolean,
   now: number,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
@@ -1074,7 +1075,7 @@ function describeTask(
     ...(spec.succeeds === undefined ? {} : { succeeds: spec.succeeds.task }),
     ...(task.successor === undefined ? {} : { passedTo: task.successor }),
     // The same offer the app's menu follows; `pass_task` still re-checks the leader.
-    ...(passOffer(task, machines, leaderSuccessor).ok ? { passable: true } : {}),
+    ...(passOffer(task, machines, leaderSuccessor, leaderCodexPass).ok ? { passable: true } : {}),
     // Never `prBlocked` on the task: an `until: "reported"` task does not wait on its merge.
     ...(blocked === null ? {} : { prBlocked: blocked }),
   };
@@ -1141,7 +1142,7 @@ export function buildMcpServer(
   passOwnTask: typeof passToSuccessor = passToSuccessor,
   passPoll: PassPoll = PASS_POLL,
   sendMsg: typeof sendMessage = sendMessage,
-  /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
+  /** `pass_to_successor`'s own pane, for its check before the push (`ownTasks`). */
   ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
   watchClient: WatchClient = WATCH_CLIENT,
   keepOpen: typeof keepSessionOpen = keepSessionOpen,
@@ -1269,8 +1270,20 @@ export function buildMcpServer(
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
         const traits = fleetTraits(lease.machines);
         const leaderSuccessor = advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.successor);
+        const leaderCodexPass = advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.codexPass);
         const tasks = reply.tasks.map((task) =>
-          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits, leaderSuccessor, Date.now()),
+          describeTask(
+            task,
+            lease.machines,
+            names,
+            reply.tasks,
+            offer,
+            idle,
+            traits,
+            leaderSuccessor,
+            leaderCodexPass,
+            Date.now(),
+          ),
         );
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
@@ -1970,9 +1983,21 @@ export function buildMcpServer(
             }. Nothing was pushed.`,
           );
         }
+        const own = local === null ? null : await ownTasks(lease.scheduler, local.deviceId, ownPane());
+        // Before the push: a leader of the Codex build before item 11 refuses a Codex task's pass after it, and only the
+        // queue says which agent this pane's task runs.
+        if (
+          own !== null &&
+          own.some((t) => TASK_PHASES[t.state] !== "finished" && t.spec.agent !== undefined) &&
+          !advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.codexPass)
+        ) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: the scheduler's leader cannot pass a Codex task yet — its daemon needs \`seance update\`. Nothing was pushed.`,
+          );
+        }
         // Before the push: a task the scheduler already counts as finished (a merge settles `until: "merged"` while the
         // session still runs) can have no successor, and the session must hear that, not "not confirmed".
-        const settled = local === null ? null : await ownSettledTask(lease.scheduler, local.deviceId, ownPane());
+        const settled = own === null ? null : settledOf(own);
         if (settled !== null) {
           return errorResult(
             `${PASS_SELF_TOOL} refused: no successor can be made. ${settledText(settled)} Nothing was pushed. ${settledInstead(null)}`,
@@ -2158,16 +2183,15 @@ async function passVerdict(
 }
 
 /**
- * The calling session's task when the leader already counts it finished with no successor, else null. Found by
- * this machine and `$TMUX_PANE` against the tasks' assignments: a claim, not a binding, which only ever refuses
- * early what the leader would refuse anyway (`finished`); anything unclear (no read, no pane, a live task in the
- * pane) is left to the daemon and the leader.
+ * The tasks the leader placed on the calling session's pane, from one queue read, else null (no read, no pane). Found
+ * by this machine and `$TMUX_PANE` against the tasks' assignments: a claim, not a binding, which only ever refuses
+ * early what the leader would refuse anyway; anything unclear is left to the daemon and the leader.
  */
-async function ownSettledTask(
+async function ownTasks(
   scheduler: SchedulerLeg,
   deviceId: string,
   pane: string | undefined,
-): Promise<Task | null> {
+): Promise<readonly Task[] | null> {
   if (pane === undefined || pane === "") return null;
   let queue: Awaited<ReturnType<SchedulerLeg["queue"]>>;
   try {
@@ -2176,7 +2200,11 @@ async function ownSettledTask(
     return null;
   }
   if (queue === null || "ok" in queue) return null;
-  const mine = queue.tasks.filter((t) => t.assignment?.deviceId === deviceId && t.assignment.pane === pane);
+  return queue.tasks.filter((t) => t.assignment?.deviceId === deviceId && t.assignment.pane === pane);
+}
+
+/** The pane's task when the leader already counts it finished with no successor (`finished`), else null. */
+function settledOf(mine: readonly Task[]): Task | null {
   if (mine.some((t) => TASK_PHASES[t.state] !== "finished" || t.successor !== undefined)) return null;
   return mine.toSorted((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }

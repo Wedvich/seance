@@ -811,7 +811,7 @@ export async function passAuto(lease: SchedulerLease, taskId: string, surface: E
   if (task.successor !== undefined) {
     return done(`task ${taskId} was already passed to successor ${task.successor}; nothing was sent`);
   }
-  const offer = passOffer(task, lease.machines, true);
+  const offer = passOffer(task, lease.machines, true, leaderAdvertises(lease, CAPABILITIES.codexPass));
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
   const mayHave = `the pass may have landed anyway — ${PASS_CHECK[surface]}, or pass it again: a task already passed answers with its successor`;
   let reply: Awaited<ReturnType<SchedulerLeg["pass"]>>;

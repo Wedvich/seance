@@ -82,9 +82,13 @@ interface Rig {
   failKey: string | undefined;
   /** A key whose send throws, as a failed spawn does. */
   throwKey: string | undefined;
+  /** What went over a Codex pane's connection, in order. */
+  readonly requests: { kind: "interrupt" | "prompt"; pane: string; pid: number }[];
+  /** Whether the Codex server takes a request. */
+  codexTakes: boolean;
 }
 
-function rig(): Rig {
+function rig(opts: { readonly codex?: boolean } = {}): Rig {
   const c = clock();
   const r: Rig = {
     keys: [],
@@ -101,8 +105,16 @@ function rig(): Rig {
     afterScreen: undefined,
     failKey: undefined,
     throwKey: undefined,
+    requests: [],
+    codexTakes: true,
     ask: undefined as never,
   };
+  const request =
+    (kind: "interrupt" | "prompt") =>
+    (p: { readonly paneId: string; readonly pid: number }): Promise<boolean> => {
+      r.requests.push({ kind, pane: p.paneId, pid: p.pid });
+      return Promise.resolve(r.codexTakes);
+    };
   const ask = createDrainAsk({
     draining: () => (r.cl === null || r.soft ? null : { cl: r.cl, drainAt: r.drainAt ?? r.cl }),
     panes: () => Promise.resolve(r.panes),
@@ -124,6 +136,7 @@ function rig(): Rig {
       r.audits.push({ taskId, outcome });
       return Promise.resolve();
     },
+    ...(opts.codex === false ? {} : { codex: { interrupt: request("interrupt"), prompt: request("prompt") } }),
     sleep: () => Promise.resolve(),
     after: c.after,
     now: c.now,
@@ -561,6 +574,82 @@ describe("the interrupt", () => {
       expect(r.keys).toEqual([]);
       expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
     }
+  });
+});
+
+describe("a Codex pane (docs/codex.md item 11)", () => {
+  const codexRig = (opts: { readonly codex?: boolean } = {}): Rig => {
+    const r = rig(opts);
+    r.panes = [pane("%1", "t-1", { agent: "codex", pid: 300 })];
+    return r;
+  };
+
+  test("its turn-ended idle gets DRAIN_PROMPT as a turn over its connection, never a key", async () => {
+    const r = codexRig();
+    turnEnd(r);
+    await r.ask.drain(CL, false);
+    await settle();
+    expect(r.keys).toEqual([]);
+    expect(r.requests).toEqual([{ kind: "prompt", pane: "%1", pid: 300 }]);
+    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
+  });
+
+  test("a busy one is interrupted at the deadline over its connection, then asked at the turn end that follows", async () => {
+    const r = codexRig();
+    frame(r, "busy");
+    await r.ask.drain(CL, false);
+    r.clock.advance(INTERRUPT_MS);
+    await settle();
+    expect(r.requests).toEqual([{ kind: "interrupt", pane: "%1", pid: 300 }]);
+    turnEnd(r);
+    await settle();
+    expect(r.keys).toEqual([]);
+    expect(r.requests.map((q) => q.kind)).toEqual(["interrupt", "prompt"]);
+    expect(r.audits.map((a) => a.outcome)).toEqual(["interrupted", "typed"]);
+  });
+
+  test("never a prompt while needs-input; an open question is interrupted at once", async () => {
+    const r = codexRig();
+    frame(r, "needs-input", { reason: "question" });
+    await r.ask.drain(CL, false);
+    frame(r, "needs-input", { reason: "permission" });
+    await settle();
+    expect(r.requests.map((q) => q.kind)).toEqual(["interrupt"]);
+    expect(r.keys).toEqual([]);
+  });
+
+  test("a prompt its server does not take is skipped and never sent again", async () => {
+    const r = codexRig();
+    r.codexTakes = false;
+    turnEnd(r);
+    await r.ask.drain(CL, false);
+    await settle();
+    turnEnd(r);
+    await settle();
+    expect(r.requests.map((q) => q.kind)).toEqual(["prompt"]);
+    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
+  });
+
+  test("a pane now under another pid gets nothing", async () => {
+    const r = codexRig();
+    frame(r, "busy");
+    await r.ask.drain(CL, false);
+    r.panes = [pane("%1", "t-1", { agent: "codex", pid: 301 })];
+    turnEnd(r);
+    await settle();
+    expect(r.requests).toEqual([]);
+    expect(r.keys).toEqual([]);
+  });
+
+  test("a daemon with no connection to ask through leaves it alone", async () => {
+    const r = codexRig({ codex: false });
+    turnEnd(r);
+    await r.ask.drain(CL, false);
+    r.clock.advance(INTERRUPT_MS + SKIP_MS);
+    await settle();
+    expect(r.keys).toEqual([]);
+    expect(r.audits).toEqual([]);
+    expect(r.ask.holds("%1")).toBe(false);
   });
 });
 

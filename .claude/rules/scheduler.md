@@ -78,6 +78,9 @@ the branch push are github.md; the drain's own ask is drain.md.
   quota passes never do; the app's `pass` op cannot reach the drain), and its successor is never placed on
   `succeeds.account`.
 - A `superseded` predecessor's dependents follow its `successor` chain, never fail on it.
+- A Codex task (`agent`) passes, by any trigger, only off a machine advertising `CAPABILITIES.codexPass` under a
+  leader advertising it, its `succeeds.account` the machine's Codex login's (`accountOf`); its successor copies
+  `agent` and is placed only on a machine advertising `codexPass` (`agentFilter`), never on another agent.
 - A pass is offered, by the PWA, `seance pass` and MCP `pass_task`, only through `passOffer`
   (`shared/src/successor.ts`) to a verified leader and a task machine that advertise
   `CAPABILITIES.successor`, and is sent once and never retried.

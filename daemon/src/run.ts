@@ -435,7 +435,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           : []),
         // Only where an ask is wired (`sessionEvents` wires none without a despawn): the clients' wording and
         // "Drain now" promise an action.
-        ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),
+        // `codexPass` beside it: a Codex pane's own pass closes through the despawn, and its ask is wired with this one.
+        ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk, CAPABILITIES.codexPass]),
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
         ...(custodianOn ? [CAPABILITIES.custodian] : []),
         // Unconditional: session events always run, and a host whose frames cannot bind verifies no conversation,

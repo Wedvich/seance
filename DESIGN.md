@@ -921,7 +921,8 @@ nothing checked it. The last is the gap they leave.
   `turn/interrupt`, `thread/resume`, `thread/turns/list` and `account/rateLimits/read`, whose params are only the
   thread id this daemon's own `thread/start` answered, a turn id its server named and constants; since item 10 a
   continuation's launch sends `thread/resume` in `thread/start`'s place, its `threadId` the one its launch ledger
-  noted and its settings the same as below, with `excludeTurns`); `cwd` the
+  noted and its settings the same as below, with `excludeTurns`; since item 11 the drain's `turn/start`, whose only
+  input is the constant `DRAIN_PROMPT`); `cwd` the
   worktree path the spawn path made; `approvalPolicy`, `sandbox` and `approvalsReviewer` from the machine's own
   `config.json` only, never a frame, autonomy level or session; `model` from the parsed spec (else
   `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input, never argv, a file or
@@ -950,10 +951,21 @@ nothing checked it. The last is the gap they leave.
   session: <thread id>}` verified against the launch ledger. It sends a server nothing a notification named, answers
   no server request (an approval stays the owner's or Codex's reviewer's), and keeps only an enum state, a bounded turn
   id and the login's rate-limit reading, which the account takes only for its own account id. A Codex pane's own
-  local frames (its `seance mcp`, bound by peer pid to the innermost `codex`, the pane's server) may report `done`
-  and hand off; a `pass` is `unsupported` (phase 3) and a state is dropped, so a `claude -p` a tool started in the
-  pane never speaks for it. Watches answer `nolistener` for a Codex pane, the custodian's `nudge` and `interrupt`
-  `unsupported`, and the drain ask never types into one (`EndedTasks.askable`).
+  local frames (its `seance mcp`, bound by peer pid to the innermost `codex`, the pane's server) may report `done`,
+  hand off and pass (item 11, next item), and a state is dropped, so a `claude -p` a tool started in the pane never
+  speaks for it. Watches answer `nolistener` for a Codex pane and the custodian's `nudge` `unsupported`; its
+  `interrupt` and the drain ask reach one only over that connection, never keys (next item).
+- **A Codex task's pass, drain ask and interrupt** (item 11, 2026-11-24; Scheduler, "Codex tasks"; Daemon, "The drain's
+  session ask"; docs/codex.md, "Parity (phase 3)"). No new act: the push, the record and the leader's create are the
+  pass's own (agent-neutral), and the close is the driver's. What is new is two requests on the daemon's existing
+  connection to the server of a pane it launched (previous item): `turn/interrupt` of the turn the server itself named,
+  where Claude's is Escape, and `turn/start` whose only input is the constant `DRAIN_PROMPT`, where Claude's is the
+  typing. Neither takes a frame field; each goes only to the session held for that pane under the pid the act read
+  (`CodexSessions.interruptTurn`, `drainTurn`), the prompt only while the server reports no turn running. Nothing goes
+  through Codex's composer: pasting there and pressing Enter wedges it (openai/codex#28167). Every drain rule holds as
+  written for Claude, "typed into a pane" read as "sent over the connection" (`.claude/rules/drain.md`). A successor
+  inherits `agent` (`successorSpec`) and is placed only on a machine advertising `CAPABILITIES.codexPass`; a pass of a
+  Codex task (any trigger) needs that capability on its leader and its machine, and bills the machine's Codex login.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -1281,11 +1293,14 @@ nothing checked it. The last is the gap they leave.
   drain's session ask"; `.claude/rules/drain.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
   Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`: not
-  reported done, not being closed, no hand-off or pass mark, not a Codex launch), only while this machine is draining at the `cl` the
+  reported done, not being closed, no hand-off or pass mark), only while this machine is draining at the `cl` the
   ask began under. The text goes in only after that pane's `idle` carrying `turnEnded` and never while its last
   frame is `needs-input`, so the drain can deny a permission and never grant one; Ctrl+C is sent once, never
   twice (a second exits Claude Code), and no Escape belongs to the draft clear. Enter goes in only after every
-  re-check, the screen's own input box showing exactly the prompt among them. A `session-pass` carries `drain`
+  re-check, the screen's own input box showing exactly the prompt among them. A Codex pane gets no key at all: the same
+  rules over the daemon's connection to its server, `turn/interrupt` for Escape and `DRAIN_PROMPT` as a `turn/start`
+  for the typing, at the same turn-ended idle, never while `needs-input`, after the same re-checks under the pid the
+  ask enumerated (item 11; "typed" reads "sent over the connection"). A `session-pass` carries `drain`
   only while its machine is closed, and the leader writes `trigger: "drain"` for it only while that machine's
   status carries `cl`. Audited `origin=drain` with the task id and outcome, never the text.
 - **The custodian's round is a reader of untrusted text behind a fenced shell** (2026-11-13, Daemon, "The
@@ -2538,6 +2553,15 @@ an old peer's frames parse as before. Mixed versions:
   the spawn `not_continuable`. Every client (the PWA, MCP, the CLI, the broker) writes one only to a verified leader
   advertising it and offers one only for a task whose machine does; an unknown string to an older reader, which keeps
   the machine. Every daemon of this build advertises it. No relay change; rollout is leaders first.
+- `CAPABILITIES.codexPass` (2026-11-24, docs/codex.md item 11; Scheduler, "Codex tasks"): one string for both halves,
+  as `codex` is. A daemon advertises it beside `drainAsk` (a despawn is wired) and then takes a Codex pane's own pass,
+  asks its sessions to drain and lets the custodian interrupt one; a leader advertising it passes a Codex task and
+  places a Codex successor only on a machine advertising it. An older leader of the Codex build still refuses
+  `succeeds` beside `agent` (`codexSpecRefusal`), so it places such a successor nowhere (`agent_unsupported`) and its
+  `#runPass` refuses a Codex task `successor_unsupported` before any push; a leader older than `codex` holds the record
+  unreadable (`AGENT_DEP_SENTINEL`). An older daemon answers a Codex pane's `pass` `unsupported` and asks it nothing.
+  Clients offer a Codex task's pass only to a verified leader and a task machine advertising it (`passOffer`), and
+  `pass_to_successor` refuses before any push from a Codex pane when the leader does not.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -3917,16 +3941,25 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     Codex plan is estimated at `unknownSeat` (capacity 1) until observed deltas say otherwise. A Claude task's
     candidates never read `logins`: its decision is unchanged by a machine's login and capability (under test).
   - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max`, any autonomy but an explicit `auto` (so
-    `steer`, `plan`, and an absent level, which reads `checkpoint`), `attachments` and `succeeds`. `continues` was
-    refused until item 10 (2026-11-24): `continueFilter` now routes a Codex continuation only to a machine advertising
-    `CAPABILITIES.codexContinue` (`continue_unsupported` otherwise; Daemon, "Continuing a Codex session").
-    `specError` refuses them before a write for MCP, the broker and the CLI; a record carrying one anyway stays
-    readable and is placed nowhere (`agent_unsupported` on every candidate), so a later build can run it. Of the
-    fields an amend changes only effort meets one, so an amend to `max` on a Codex task is refused before a write too
-    (`codexAmendRefusal`, "Amending a waiting task"), by the client and again by the leader.
-    `passOffer` and the leader's own pass refuse a Codex task (phase 3); `continueOffer` offers one only under a
-    verified leader advertising `codexContinue` and for a machine advertising it; `successorSpec` and
-    `continuationSpec` copy `agent`, so a task never silently becomes Claude.
+    `steer`, `plan`, and an absent level, which reads `checkpoint`) and `attachments`. `continues` was refused until
+    item 10 (2026-11-24): `continueFilter` now routes a Codex continuation only to a machine advertising
+    `CAPABILITIES.codexContinue` (`continue_unsupported` otherwise; Daemon, "Continuing a Codex session"). `succeeds`
+    was refused until item 11 (below). `specError` refuses them before a write for MCP, the broker and the CLI; a
+    record carrying one anyway stays readable and is placed nowhere (`agent_unsupported` on every candidate), so a
+    later build can run it. Of the fields an amend changes only effort meets one, so an amend to `max` on a Codex task is refused before a
+    write too (`codexAmendRefusal`, "Amending a waiting task"), by the client and again by the leader. `continueOffer` offers one only under a verified leader advertising `codexContinue` and for
+    a machine advertising it; `successorSpec` and `continuationSpec` copy `agent`, so a task never silently becomes
+    Claude.
+  - **Passing one** (built 2026-11-24, docs/codex.md item 11). Every trigger (the outside pass, the session's own, the
+    quota trigger, the drain's) runs as a Claude task's: the push and the record are agent-neutral, the leader's create
+    is `successorSpec` (which copies `agent`, so a successor is never placed on another agent), and the predecessor's
+    close is its driver's (a Codex pane's turn end arrives as a turn-ended idle from its server, Daemon, "Codex session
+    events"). Gated by `CAPABILITIES.codexPass` (Wire protocol, compatibility): `#runPass` refuses a Codex task
+    `successor_unsupported` off a machine not advertising it, `passOffer` refuses it under a leader or on a machine
+    without it (the quota trigger, MCP, the PWA), and `agentFilter` places a Codex task carrying `succeeds` only on a
+    machine advertising it, since an older daemon of the Codex build would run the session but refuse its pass and
+    ask. The pass's account is `accountOf(machine, exclave, agent)`, the Codex login's, as routing bills, so the
+    predecessor check and the quota trigger read the same account; a machine with no login reads `account_unknown`.
   - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
     `codex app-server` 0.171.0 (2026-11-24): the models it lists with no `upgrade`, only the newest version in each
     family (an older one stays runnable by name), in its order, and the one it marks `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
@@ -9913,6 +9946,16 @@ frame, only a mark on a frame it already takes.
   existing path: the daemon pushes, the leader creates the successor, the daemon closes the pane at its turn end.
   The exclave's Claude permissions must allow `mcp__seance__pass_to_successor` (README, step 6's `pass_to_successor` paragraph), or
   the session stops at a permission dialog the drain will not answer; the interrupt at the deadline then ends it.
+- **A Codex pane** (built 2026-11-24, docs/codex.md item 11) is asked by every rule here, over the daemon's own
+  connection to its server instead of keys: pasting into Codex's composer and pressing Enter wedges it
+  (openai/codex#28167), and its TUI's Escape is its own. The interrupt is `turn/interrupt` of the turn the server
+  named; the typing is one `turn/start` whose only input is `DRAIN_PROMPT`, sent at the same turn-ended idle (from
+  its server's `turn/completed`), never while `needs-input`, after the same synchronous re-checks and only under the pid
+  enumerated, and only while the server reports no turn running. There is no draft clear and no screen check: nothing
+  goes through the composer. A request the server does not take is `skipped`, never retried (the turn may have
+  started with its answer lost). The audit outcomes keep their names, `typed` read as "sent over the connection". A
+  daemon with no `codexSessions` wired (`DrainAskDeps.codex` absent) enumerates no Codex pane and leaves it to the
+  outside pass.
 - **Spike, 2026-11-13, Claude Code 2.1.323** (a live session in a private tmux server, `-f /dev/null`, manual
   permission mode, a throwaway mod logging `turn.start`, `turn.complete`, `tool.check` and `tool.call`, the events
   the session-events mod reads). Held: typed text plus Enter at a turn-ended idle starts a new turn (a one-line
@@ -9928,8 +9971,7 @@ frame, only a mark on a frame it already takes.
   Code.
 - **When.** On the drain's start (a plain or `now` close, or a later drain request on a soft-closed machine; a soft
   close starts nothing) the daemon enumerates its live panes and keeps those `EndedTasks.askable` accepts: a
-  launch of the pane's task is in its ledger, a worktree one (never `here`: it has no branch to push), not a Codex launch (`TaskNote.agent`: its TUI takes
-  none of the ask's keys as Claude's does, and its pass is phase 3), no `done`
+  launch of the pane's task is in its ledger, a worktree one (never `here`: it has no branch to push), no `done`
   report noted, no close under way, and the pane carries no hand-off or pass mark (`SessionEvents.marked`). For
   each: a pane whose last frame is a turn-ended `idle` (an `idle` carrying `turnEnded`; a respawn's plain idle
   never counts) is typed into at once; a pane that is not waits for one. If none comes by `drainAt +
@@ -10028,7 +10070,7 @@ frame, only a mark on a frame it already takes.
 - **Threat model.** The new power is a daemon typing into a pane, so it gets its own invariant (`.claude/rules/drain.md`;
   "Threat model", invariants): constant text and keys only; only into a pane its own launch ledger binds to a
   worktree task (`askable`); only while draining; the text only at a turn-ended idle and never while
-  `needs-input`; the Enter re-check; audited `audit drain origin=drain task=<quoted id>
+  `needs-input`; the Enter re-check; for a Codex pane, the same over its connection, constant requests and never a key; audited `audit drain origin=drain task=<quoted id>
   outcome=<typed|interrupted|skipped>` (and ` now=true` on `availability`'s line), never the text. It is prompt
   text for a session the same person runs, so it sits under the prompt-injection item (Threat model, item 6),
   like the successor record. No new frame, no relay or archivist change.
@@ -14363,8 +14405,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
 - **The drain ask's hook** (built 2026-11-13; "The drain's session ask"). While this machine is closed, a bound,
   tasked frame's state, `turnEnded` and reason are also handed to the daemon's drain ask (`onState`), once per
   frame and before any coalescing, and a pass the session sends then carries `drain: true`. That is the whole
-  effect: the state times the constant keys the daemon types into that pane (and the Escape after the deadline),
-  and no frame field chooses what is typed or which pane. The pane is still the kernel's answer, the task the
+  effect: the state times the constant keys the daemon types into that pane (and the Escape after the deadline; a
+  Codex pane's, the constant requests over its connection), and no frame field chooses what is typed or which pane. The pane is still the kernel's answer, the task the
   pane's own.
 - **Per-pane retention and the screen sampler** (built 2026-11-13, docs/custodian.md C15; `daemon/src/pane-activity.ts`).
   Both run only while a custodian seat runs ("The custodian's seat"): the seat starts the sampler and turns
@@ -14843,8 +14885,9 @@ V1"); its server's notifications say the same. The threat model's "A Codex sessi
   hand-off and pass closes, the needs-input alerts and the conversation table are unchanged downstream. Not reached:
   the `/usage` poke and the claims' retention, which are a Claude exclave's.
 - **The pane's own frames.** Its `seance mcp` (the tools) binds by peer pid as any session's, to the innermost
-  `codex` (`sessionOf`), and still sends bound `session-event` frames: `done` (`report_task_done`) and `handoff`
-  are taken as a Claude pane's; `pass` answers `unsupported` (phase 3); a state is answered `ok` and dropped, so a
+  `codex` (`sessionOf`), and still sends bound `session-event` frames: `done` (`report_task_done`), `handoff`
+  and, since item 11, `pass` (`pass_to_successor`: the mark, the push and `session-pass`, then the close at the turn
+  end the server reports) are taken as a Claude pane's; a state is answered `ok` and dropped, so a
   `claude -p` one of its tools ran in the pane, with hooks of its own, never speaks for it.
 - **The session's process** is the pane's server: `run.sh` writes its pid to `server`, and `serverOf` takes it only
   while it is named `codex` and under the pane, with its start time: the `<pid>:<start>` `sessionOf` binds `seance
@@ -15021,7 +15064,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   origin=custodian op=flag pane=<id> task=<id|-> reason=<reason|-> outcome=<ok|unsent|code> by=<round|daemon>`, and the note
   is in none. `unsent` is a flag nothing took, the round's as the daemon's; an untasked pane's is `ok`, it has no record to tell.
 - **`nudge` (C22, C26, custodian 8)** answers `unsupported` for a Codex pane, after the foreign check: it runs no inbox
-  mod (phase 3's messages arrive as `turn/steer`). Otherwise it delivers one `request` message to a task session through messaging's local
+  mod (its messages are docs/codex.md item 12, as `turn/steer`). Otherwise it delivers one `request` message to a task session through messaging's local
   delivery (`Messages.deliverAsCustodian`, "Session messages"), so it reaches the session only through the `inbox`
   mod's `$.prompt.submit`, never a key: it cannot answer a dialog, approve a permission or touch a draft (the
   evidence docs/messaging.md recorded against `send-keys` delivery, and why C22 replaced the owner's earlier "raw
@@ -15049,8 +15092,11 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   own, so a round in that window can spend a nudge on an exclave without the mod: accepted, `doctor` warns about
   the mod). A placed delivery is `delivered`, and the reply carries the session's `nudges` after it. No rate limit applies beside the
   counts: the custodian is not a task, and the counts bound it tighter than `MESSAGE_RATE` would.
-- **`interrupt` (C27, custodian 8)** answers `unsupported` for a Codex pane (Escape is its TUI's own; phase 3 sends
-  `turn/interrupt` over the connection). Otherwise it sends a single Escape, the constant key `["Escape"]` and never a frame field
+- **`interrupt` (C27, custodian 8)** reaches a Codex pane only over the daemon's connection to its server (docs/codex.md
+  item 11): `turn/interrupt` of the turn the server named (`CodexSessions.interruptTurn`, under the pid the verb read),
+  never a key, with the same verdict, counts and audit; its box-draft check is skipped, since nothing touches the
+  composer, and a request the server did not take answers `internal` with the count kept. Unwired (no `codexSessions`),
+  a Codex pane answers `unsupported`, and the round's `reach` counts one only where it is wired. Otherwise it sends a single Escape, the constant key `["Escape"]` and never a frame field
   (`send-keys -t <pane> Escape`, the drain ask's `sendKeys`), for a session hung inside a command, where a message
   would wait for a turn that never ends: Escape on a busy turn ends it and a turn-ended idle follows (the drain ask's
   verified key). `interruptVerdict`, a pure function of the daemon's facts, allows it only for an `ours` pane that is
