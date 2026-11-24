@@ -124,6 +124,7 @@ import { localRequest, localSocketReachable, LocalUnavailable } from "./local-cl
 import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import { sendMessage, type RouteGate } from "./send-message.ts";
 import { WATCH_TTL_MS } from "./watch-frame.ts";
+import { keepSessionOpen } from "./keep-session-open.ts";
 import { unwatchGithub, watchGithub, type WatchGate } from "./watch-github.ts";
 import { readState } from "./state.ts";
 
@@ -237,6 +238,7 @@ const PASS_SELF_TOOL = "pass_to_successor";
 const SEND_MESSAGE_TOOL = "send_message";
 const WATCH_TOOL = "watch_github";
 const UNWATCH_TOOL = "unwatch_github";
+const KEEP_OPEN_TOOL = "keep_session_open";
 
 /**
  * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
@@ -1123,6 +1125,7 @@ export function buildMcpServer(
   /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
   ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
   watchClient: WatchClient = WATCH_CLIENT,
+  keepOpen: typeof keepSessionOpen = keepSessionOpen,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -2051,6 +2054,23 @@ export function buildMcpServer(
     },
     async ({ id }) => {
       const result = await watchClient.remove(id);
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    KEEP_OPEN_TOOL,
+    {
+      title: "Keep this session open",
+      description:
+        "Ask this machine's custodian never to close this session, for one meant to stay open after its work looks done: a standing assistant, a long-lived watcher, a session the owner returns to. Only when your task or the owner says the session is long-lived; never to avoid being cleaned up after finishing ordinary work. The hold lasts while this `claude` process runs (a restart or resume drops it) and touches nothing else: the owner can still end the session, and the custodian may still nudge it. `keep: false` releases it.",
+      inputSchema: z.strictObject({
+        keep: z.boolean().optional().describe("false releases the hold; default true"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ keep }) => {
+      const result = await keepOpen(keep !== false);
       return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );

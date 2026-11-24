@@ -73,6 +73,8 @@ export interface CloseVerdictInput {
   readonly untouchable: boolean;
   /** Its last turn ended with background work in flight or a session cron pending (`SessionEvents.awaitsWake`). */
   readonly awaitsWake: boolean;
+  /** Its live session asked to be left open (`keep_session_open`). */
+  readonly heldOpen: boolean;
   readonly now: number;
   readonly closeAfterMs: number;
 }
@@ -86,6 +88,8 @@ export function closeVerdict(o: CloseVerdictInput): CloseAct | CloseRefusal {
   if (info.custodian) return "marked";
   if (!info.ours) return "foreign";
   if (o.untouchable) return "marked";
+  // Only while its `claude` runs (`keep-open.ts`), so a dead pane or an exit prompt's never carries one.
+  if (o.heldOpen) return "held_open";
   switch (state) {
     case "dead":
       // Killed first, it would lose its exit status: `harvestExits` notes it, then closes the pane.
@@ -240,6 +244,8 @@ export interface CustodianVerbDeps {
   readonly untouchable: (pane: string) => boolean;
   /** Its last turn left background work or a session cron to wake it (`SessionEvents.awaitsWake`); absent, none did. */
   readonly awaitsWake?: (pane: string, taskId: string | null) => boolean;
+  /** Its live session asked to be left open (`KeepOpen.holds`); absent, none did. */
+  readonly heldOpen?: (pane: string) => boolean;
   readonly tasks: Pick<EndedTasks, "worktree" | "prUrl" | "closing" | "harvestExits" | "launchedAt">;
   readonly worktree: WorktreeRule;
   readonly despawn: NonNullable<SessionBackend["despawn"]>;
@@ -356,6 +362,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       activity: info.ours ? deps.activity(info.paneId) : null,
       untouchable: deps.untouchable(info.paneId) || inFlight.has(info.paneId),
       awaitsWake: deps.awaitsWake?.(info.paneId, info.taskId) === true,
+      heldOpen: deps.heldOpen?.(info.paneId) === true,
       now: deps.now(),
       closeAfterMs,
     });
@@ -573,6 +580,7 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
           activity: deps.activity(pane),
           untouchable: deps.untouchable(pane),
           awaitsWake: deps.awaitsWake?.(pane, info.taskId) === true,
+          heldOpen: deps.heldOpen?.(pane) === true,
           now: deps.now(),
           closeAfterMs,
         });
