@@ -1718,16 +1718,19 @@ describe("a task's tags on its row", () => {
     },
   });
 
-  test("the label sits beside the title, never in place of it, and the ref links to its https URL", () => {
+  test("the label names the card in place of the title, which it keeps, and the ref links to its https URL", () => {
     expect(rowOf(tagged)).toMatchObject({
       title: "Fix the thing",
+      name: "Mine",
       label: "Mine",
       ref: { text: "linear:ENG-1", url: "https://linear.app/x/issue/ENG-1" },
     });
   });
 
   test("a task with no tags has no label and no ref", () => {
-    expect(rowOf(task("t"))).toMatchObject({ label: null, ref: null });
+    const row = rowOf(task("t"));
+    expect(row).toMatchObject({ label: null, ref: null });
+    expect(row?.name).toBe(row?.title);
   });
 
   test("a ref URL that is not https is text only, and control characters are cut from every value", () => {
