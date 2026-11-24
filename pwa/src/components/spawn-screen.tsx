@@ -31,6 +31,7 @@ import { matchesFilter, splitMatch } from "../sheet-filter.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
 import { seen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
+import { AgentLogo } from "./icons.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
 import { Sheet, SheetItem, SheetSetting, TileButton, useSheetExit } from "./sheet.tsx";
@@ -596,7 +597,10 @@ function ActiveSheet(props: {
       <Sheet title={SHEET_TITLES.model} closing={closing} onExited={onExited} onClose={close}>
         {MODEL_GROUPS.map(({ agent, picks }) => (
           <Fragment key={agent}>
-            <p className="label sheet-group">{AGENT_LABELS[agent]}</p>
+            <p className="label sheet-group">
+              <AgentLogo kind={agent} name={AGENT_LABELS[agent]} size={12} className="sheet-group-logo" />
+              {AGENT_LABELS[agent]}
+            </p>
             {picks.map((pick) => (
               <SheetItem
                 key={pick.model}

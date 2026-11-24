@@ -1565,8 +1565,17 @@
 
 /* A heading over a run of items, such as the model sheet's agents; worn with .label, the tiles' voice. */
 .sheet-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 10px 0 2px;
   padding: 0 13px;
+}
+
+/* The agent's logo before the group's name, faded as on the account card (`.fleet-agent-logo`). */
+.sheet-group-logo {
+  flex: none;
+  opacity: 0.6;
 }
 
 .sheet-group:first-child {
