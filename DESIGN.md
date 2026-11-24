@@ -11203,10 +11203,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
     drawn, since a login is configured on purpose and the card is where a signed-out one shows: the agent, the
     account's label (`not signed in` without an id, `signed in` unidentified), then `loginHealth` in words —
     `expired: run seance codex login` (err), `run seance codex login` (signed out, warn), `account not identified`
-    (warn), `included usage blocked` (err), nothing for ok or unknown — and, below the floor (`loginOutdated`,
-    `CODEX_MIN_VERSION` in `shared/src/agent-version.ts`, moved from the daemon so every reader holds the one floor),
-    `codex <version>: needs <floor>` (err) whatever the health, since the daemon reports an outdated binary as
-    unknown.
+    (warn), `included usage blocked` (err), nothing for ok or unknown. Decided: no outdated-binary note, though the
+    login carries its `version`: the owner keeps every machine at or above `CODEX_MIN_VERSION` before Codex goes
+    live (2026-11-24), so a binary below it reads as unknown, like any login not read.
 - **Machines say who leads and what each runs** (2026-10-18). A line above the cards names
   the scheduler leader, an unverified nominee (by registry name, or a short id when its entry
   did not open), or that nobody leads; the leader's card carries a SCHEDULER badge and an

@@ -397,9 +397,6 @@ function MachineCardView(props: {
               {row.health !== null && (
                 <span className={`exclave-auth exclave-auth-${row.health.level}`}>{row.health.text}</span>
               )}
-              {row.outdated !== null && (
-                <span className={`exclave-auth exclave-auth-${row.outdated.level}`}>{row.outdated.text}</span>
-              )}
             </li>
           ))}
         </ul>

@@ -28,4 +28,3 @@ export * from "./not-before.ts";
 export * from "./tags.ts";
 export * from "./adapter-protocol.ts";
 export * from "./watch.ts";
-export * from "./agent-version.ts";

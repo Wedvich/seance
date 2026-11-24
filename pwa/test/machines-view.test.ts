@@ -979,7 +979,7 @@ describe("an agent login", () => {
         .cards[0]?.logins;
 
     test("one row per login, always drawn: agent, account, and ok or unknown says nothing", () => {
-      expect(rowOf({})).toEqual([{ agent: "Codex", account: "me@example.com", health: null, outdated: null }]);
+      expect(rowOf({})).toEqual([{ agent: "Codex", account: "me@example.com", health: null }]);
       expect(rowOf({ lu: [0] })?.[0]?.health).toBeNull();
       expect(deriveMachines([machine()], NOW, NO_LEADER).cards[0]?.logins).toEqual([]);
     });
@@ -995,15 +995,6 @@ describe("an agent login", () => {
         health: { text: "account not identified", level: "warn" },
       });
       expect(rowOf({ lb: [0] })?.[0]?.health).toEqual({ text: "included usage blocked", level: "err" });
-    });
-
-    test("a binary below the floor is named with the floor, whatever the health", () => {
-      expect(rowOf({ lu: [0] }, login({ version: "0.166.0" }))?.[0]?.outdated).toEqual({
-        text: "codex 0.166.0: needs 0.170.0",
-        level: "err",
-      });
-      expect(rowOf({}, login({ version: "0.171.0" }))?.[0]?.outdated).toBeNull();
-      expect(rowOf({ lu: [0] }, login({ version: undefined }))?.[0]?.outdated).toBeNull();
     });
 
     test("an asleep machine draws no login row, as it draws no exclave row", () => {

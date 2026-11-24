@@ -25,11 +25,9 @@ import {
   leadsQueue,
   knownAccounts,
   type KnownAccount,
-  CODEX_MIN_VERSION,
   effectivePct,
   exclaveAuth,
   loginHealth,
-  loginOutdated,
   exclaveTraitHealth,
   isRemoteSessionId,
   lastHeardAt,
@@ -122,8 +120,6 @@ export interface LoginRow {
   readonly account: string;
   /** `loginHealth` in words; null for ok, and for unknown: unread says nothing, as for an exclave. */
   readonly health: LoginNote | null;
-  /** Its binary is below the floor, so it is never placed (`login_outdated`); null otherwise. */
-  readonly outdated: LoginNote | null;
 }
 
 export interface MachineCard {
@@ -675,13 +671,10 @@ function loginRow(
   known: readonly KnownAccount[],
   now: number,
 ): LoginRow {
-  // The daemon reports an outdated binary as unknown health with its version, so the floor is read here.
-  const outdated = loginOutdated(login) ? `${login.agent} ${login.version ?? ""}: needs ${CODEX_MIN_VERSION}` : null;
   return {
     agent: AGENT_NAMES[login.agent],
     account: accountLabel(login, aliases, known),
     health: loginNote(machine, login, index, now),
-    outdated: outdated === null ? null : { text: outdated, level: "err" },
   };
 }
 

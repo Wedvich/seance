@@ -544,8 +544,8 @@ task (2026-11-23) after the ones it names.
    `list_machines` shows no quota for an exclave, so it shows none for a login either ("as it shows an exclave's").
 3. **Built 2026-11-24** (DESIGN.md, PWA, "An agent login is an account like a Claude one"). **The PWA** (after 2): the
    account card (an agent badge, the windows, the credits state, rename, the "Open for work" switch through the existing
-   account hold) and the Machines card's login row. `CODEX_MIN_VERSION` moved to `shared/src/agent-version.ts` so the
-   PWA can name an outdated binary. _Corrected at build:_ item 2's labels tagged a Codex twin of a Claude account with
+   account hold) and the Machines card's login row (no outdated-binary note: the owner keeps machines at the floor).
+   _Corrected at build:_ item 2's labels tagged a Codex twin of a Claude account with
    both org halves; a twin of another kind is now told apart by kind (DESIGN.md, Account records).
 
 **Phase 2: auto tasks run.** Checks S1's and S4's rest and S8's macOS half first; they need the owner, and decide
