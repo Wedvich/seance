@@ -1915,9 +1915,46 @@ describe("sessions on the queue screen", () => {
     const view = viewOf([], sessions);
     const [row] = view.sections.flatMap((s) => s.sessions);
     expect([row?.kind, row?.tasked, row?.rename]).toEqual(["Task not listed", true, null]);
-    expect(view.summary).toBe("1 running · 0 waiting");
+    expect(view.summary).toBe("0 running · 0 waiting · 1 session");
     // Before a list is read, every tasked session would read as unlisted.
     expect(viewOf(null, sessions).sections).toEqual([]);
+  });
+
+  test("a second session of a listed task is a row of its own, and the first stays the task's", () => {
+    const view = viewOf(
+      [task("t", { state: "running", assignment: at })],
+      read([entry("%1", { taskId: "t" }), entry("%2", { taskId: "t" })]),
+    );
+    const rows = view.sections.flatMap((s) => s.sessions);
+    expect(rows.map((r) => [r.id, r.kind, r.close?.pane])).toEqual([
+      ["session:dev-a:%2", "Another session of a task", "%2"],
+    ]);
+    expect(view.sections[0]?.rows[0]?.close?.pane).toBe("%1");
+  });
+
+  test("the cap figure follows the leader's idle list, while sections follow live", () => {
+    const tasks = ["a", "b"].map((id) => task(id, { state: "running", assignment: at }));
+    const sessions = read([
+      // Its turn ended, but the leader still holds its slot: it sits in Idle and still counts against the cap.
+      entry("%1", { taskId: "a", live: live("idle", 1000) }),
+      // The leader released it, though its session reads busy: Running, and no slot.
+      entry("%2", { taskId: "b", live: live("busy", 1000) }),
+    ]);
+    const view = deriveQueue(state(ok(tasks, [], 0, [{ taskId: "b", since: NOW - 60_000 }], 3), { sessions }), NOW);
+    expect(placement(view)).toEqual([
+      ["Running", ["b"]],
+      ["Idle", ["a"]],
+    ]);
+    expect(view.summary).toBe("1/3 running · 1 idle · 0 waiting");
+  });
+
+  test("a failed queue read stays said beside an untasked session", () => {
+    const view = deriveQueue(
+      state({ kind: "failed", message: "Couldn't read the queue" }, { sessions: read([entry("%1")]) }),
+      NOW,
+    );
+    expect(view.empty).toBe("Couldn't read the queue");
+    expect(view.sections.flatMap((s) => s.sessions)).toHaveLength(1);
   });
 
   test("the summary counts untasked sessions apart, and the fleet cap counts tasks only", () => {

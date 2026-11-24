@@ -88,8 +88,9 @@ as Running with "state unknown" (no `sg`: re-read on `sess` changes, as today).
   it is open, beside the queue read. An asleep or offline machine keeps its last read, shown under Asleep as its tasks are.
   `Store`'s per-machine `sessions` state is already the drain row's; the Work screen shares it.
 - **Join** (`queue-view.ts`, `deriveQueue`). A session whose `taskId` the queue lists folds into that task's row, which
-  gains the pane (Close) and the session's tags. A session whose `taskId` the capped queue does not list stays a task row
-  with what the session shows. A session with no `taskId` is an untasked row.
+  gains the pane (Close) and the session's tags. A session whose `taskId` the capped queue does not list has no record
+  to build a task row from: it is a session row marked "Task not listed" (see Built, below). A session with no `taskId`
+  is an untasked row.
 - **Untasked row.** Name by `displayName` (owner label, else the window name), the machine and repo, a "Not a task" mark,
   the state line ("waiting on you: permission", "idle 12m"). Actions: Rename (`CAPABILITIES.sessionTag`, as #556),
   Close (the graceful despawn; `despawnSession` already takes any registered pane), Open on claude.ai (`agent.remote`),
@@ -100,9 +101,18 @@ as Running with "state unknown" (no `sg`: re-read on `sess` changes, as today).
   tasks only.
 - **Built (step 2), the choices the brief left open.**
   - A session whose task the list leaves out is a row of the untasked model marked "Task not listed" (no record to
-    build a task row from), with Close, Open and Tags only, counted with the tasks of its section in the summary, and
-    shown only once a list was read (before one, every tasked session would read as unlisted).
-  - Close is on a tasked row too, after Cancel, asking twice like it: the owner's despawn of any registered pane.
+    build a task row from), with Close, Open and Tags only, counted in the summary's "sessions" figure, never against
+    the cap, and shown only once a list was read (before one, every tasked session would read as unlisted). A second
+    session carrying a listed task's id (the first joins the row, the assignment's machine first) is such a row too,
+    marked "Another session of a task", so every live session stays closable.
+  - The summary's "N/max running" follows the leader's slot accounting (running tasks its idle list does not hold,
+    plus reserved), while the sections follow `live`: a task whose turn ended is in Idle at once but holds its slot
+    until the leader releases it. A failed or unavailable queue's reason stays shown beside session rows.
+  - Close is on a tasked row too, after Cancel, asking twice like it: the owner's despawn of any registered pane, a
+    direct request to the machine, so it stays enabled while the leader is away (stopping a runaway session). The task
+    ends with its session, not as a cancel; the item's text says so.
+  - Session reads happen only while the document is visible; the key of a machine whose tick carried no `sg` is the one
+    last seen, and closing the screen re-keys without reading.
   - In a section, task rows come first, then session rows by `live.since`, oldest first, no `live` last.
   - The reads are keyed per machine on `sg` while the screen shows and the machine advertises `sessionLive`, else on
     the `sess` counts (the drain's key); a read while the screen is hidden keeps the drain's unspaced behaviour.

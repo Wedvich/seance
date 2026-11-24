@@ -577,7 +577,11 @@ function joinByTask(reads: readonly ReadSession[], tasks: ReadonlyMap<string, Ta
     const { taskId } = read.entry;
     const task = taskId === undefined ? undefined : tasks.get(taskId);
     if (taskId === undefined || task === undefined) continue;
-    if (!joined.has(taskId) || read.machine.deviceId === task.assignment?.deviceId) joined.set(taskId, read);
+    const held = joined.get(taskId);
+    const assigned = task.assignment?.deviceId;
+    if (held === undefined || (read.machine.deviceId === assigned && held.machine.deviceId !== assigned)) {
+      joined.set(taskId, read);
+    }
   }
   return joined;
 }
@@ -874,7 +878,13 @@ function sessionSection(read: ReadSession): string {
   return read.live?.state === "idle" ? IDLE_SECTION : RUNNING_SECTION;
 }
 
-function sessionRowOf(read: ReadSession, tasks: readonly Task[], relayOpen: boolean, now: number): SessionQueueRow {
+function sessionRowOf(
+  read: ReadSession,
+  tasks: readonly Task[],
+  relayOpen: boolean,
+  now: number,
+  listed: boolean,
+): SessionQueueRow {
   const { machine, entry } = read;
   const renameable = relayOpen && machine.connected && machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
   // One entry in, one row out: the per-namespace view's model, kept for this surface.
@@ -886,7 +896,7 @@ function sessionRowOf(read: ReadSession, tasks: readonly Task[], relayOpen: bool
     name: row?.name ?? entry.window,
     nameMark: row?.mark ?? null,
     tasked,
-    kind: tasked ? "Task not listed" : "Not a task",
+    kind: !tasked ? "Not a task" : listed ? "Another session of a task" : "Task not listed",
     where: entry.repo === null ? machine.name : `${machine.name} · ${entry.repo}`,
     state: sessionStateLine(read.live, now),
     close: closeOf(read, relayOpen),
@@ -923,14 +933,16 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
 
   const relayOpen = state.relay.status === "open";
   // A tasked session waits for a list: before one, every such session would read as a task the list leaves out.
+  // One session joins a task: a second carrying the same listed id is a row of its own, so it can still be closed.
   const unjoined = reads
-    .filter((read) => read.entry.taskId === undefined || (ok !== null && !byId.has(read.entry.taskId)))
+    .filter((read) => read.entry.taskId === undefined || (ok !== null && joined.get(read.entry.taskId) !== read))
     // Longest in its state first; no `live` last.
     .toSorted((a, b) => (a.live?.since ?? Infinity) - (b.live?.since ?? Infinity));
   const placed = new Map<string, SessionQueueRow[]>();
   for (const read of unjoined) {
     const title = sessionSection(read);
-    placed.set(title, [...(placed.get(title) ?? []), sessionRowOf(read, tasks, relayOpen, now)]);
+    const listed = read.entry.taskId !== undefined && byId.has(read.entry.taskId);
+    placed.set(title, [...(placed.get(title) ?? []), sessionRowOf(read, tasks, relayOpen, now, listed)]);
   }
 
   const sections = SECTIONS.map(({ title, pick, oldestFirst }) => {
@@ -952,27 +964,30 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, known, now));
 
   // A list already read stays up while the leader is away: the status line says it may be stale.
+  // Why the task list is missing stays up beside session rows: they say nothing of whether the queue was read.
   let empty: string | null = null;
-  if (tasks.length === 0 && unjoined.length === 0) {
+  if (tasks.length === 0) {
     if (!available) empty = text;
     else if (view === null || view.kind === "loading") empty = "Loading…";
     else if (view.kind === "failed") empty = view.message;
-    else empty = "Nothing in the queue.";
+    else if (unjoined.length === 0) empty = "Nothing in the queue.";
   }
 
-  // The fleet cap counts tasks only: a session row counts with them only when it carries one the list left out.
-  const count = (title: string): number => {
-    const section = sections.find((s) => s.title === title);
-    return (section?.rows.length ?? 0) + (section?.sessions.filter((row) => row.tasked).length ?? 0);
-  };
-  const untasked = unjoined.filter((read) => read.entry.taskId === undefined).length;
+  // The fleet cap follows the leader's slot accounting, not `live` (WS4): a task it lists idle holds no slot, and one it
+  // does not holds one even while its session reads idle. Session rows never count against it.
+  const slots = tasks.filter(
+    (t) =>
+      (t.state === "reserved" || (t.state === "running" && !idle.has(t.id))) && !machineAsleep(t, state.relay.machines),
+  ).length;
+  const count = (title: string): number => sections.find((s) => s.title === title)?.rows.length ?? 0;
+  const untasked = unjoined.length;
 
   return {
     summary:
       ok === null
         ? null
         : [
-            `${count(RUNNING_SECTION)}${ok.globalMax === undefined ? "" : `/${ok.globalMax}`} running`,
+            `${slots}${ok.globalMax === undefined ? "" : `/${ok.globalMax}`} running`,
             ...(count(IDLE_SECTION) === 0 ? [] : [`${count(IDLE_SECTION)} idle`]),
             `${count("Waiting")} waiting`,
             ...(untasked === 0 ? [] : [`${untasked} ${untasked === 1 ? "session" : "sessions"}`]),

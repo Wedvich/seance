@@ -5143,6 +5143,18 @@ describe("the Queue screen's session reads", () => {
     detach();
   });
 
+  test("closing a session on a machine that is not connected sends nothing and says so", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ machines: [autoMachine("dev-c", { connected: false })] });
+    const store = new Store(client, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    await store.closeSession("dev-c", "%1");
+    expect(store.getState().queueNotice).toBe("That session's machine isn't connected");
+    expect(asked(client, "dev-c")).toBe(0);
+    detach();
+  });
+
   test("a trailing read is dropped when the screen closed meanwhile", async () => {
     fake = fakeHistory();
     const client = new ScriptedClient({ machines: [live("dev-b", 7)] });
