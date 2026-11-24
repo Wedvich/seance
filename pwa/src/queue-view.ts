@@ -48,6 +48,7 @@ import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveCodexContinueAvailability,
   deriveLimitsAvailability,
   derivePassAvailability,
   deriveReportedOffered,
@@ -610,7 +611,11 @@ function rowOf(
   const idleRef = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
   const canFollowUp = phase !== "finished";
-  const context = { now: now + skew, leaderHandoff: deriveContinueHandoffAvailability(state.relay) };
+  const context = {
+    now: now + skew,
+    leaderHandoff: deriveContinueHandoffAvailability(state.relay),
+    leaderCodexContinue: deriveCodexContinueAvailability(state.relay),
+  };
   const canContinue =
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;

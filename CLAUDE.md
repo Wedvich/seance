@@ -50,8 +50,9 @@ a **Status** line (built, spec, draft); trust it over memory.
   driver seam: `AgentDriver`, `daemon/src/agents/`, DESIGN.md "Agent drivers"), item 6 (the Codex launch:
   `agents/codex.ts`, `codex/client.ts`, run dir, thread id in the ledger; DESIGN.md "Codex sessions"), item 7 (the
   session: its server's notifications as session events, `turn/interrupt` close, reconnect, `CAPABILITIES.codex`;
-  `codex/sessions.ts`, DESIGN.md "Codex session events") and item 8 (the clients: the PWA's picker by agent and agent
-  badge, MCP's and `seance spawn`'s `agent`, DESIGN.md "Codex tasks", "Clients"). Read it, and docs/agents.md, before
+  `codex/sessions.ts`, DESIGN.md "Codex session events"), item 8 (the clients: the PWA's picker by agent and agent
+  badge, MCP's and `seance spawn`'s `agent`, DESIGN.md "Codex tasks", "Clients") and item 10 (continue: `thread/resume`
+  of the noted thread, the agent kept, `CAPABILITIES.codexContinue`; DESIGN.md "Continuing a Codex session"). Read it, and docs/agents.md, before
   any Codex work.
 - **docs/orchestrator.md** — draft, nothing decided: tracker projects as task graphs. Read before amend
   deps, anything that reads a tracker, or a non-task session; build nothing from it.

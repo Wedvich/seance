@@ -443,6 +443,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // A Codex session's states, close and tools are this build's (docs/codex.md, build order item 7): offered
         // while the login could run one, so the scheduler routes none to a machine signed out or below the floor.
         ...(codexAccount !== null && codexRunnable(codexAccount.login()) ? [CAPABILITIES.codex] : []),
+        // Unconditional: its leader half routes a Codex continuation whatever this machine's own login, and `codex`
+        // already says whether a Codex task is placed here at all (docs/codex.md, build order item 10).
+        CAPABILITIES.codexContinue,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan, logins: info.logins ?? [] };

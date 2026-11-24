@@ -334,6 +334,14 @@ export function createBroker(opts: BrokerOpts): Broker {
               "the scheduler's leader does not run Codex tasks yet, or no verified scheduler is leading",
             );
           }
+          // An older leader refuses `continues` beside `agent` and would hold the record forever.
+          if (request.spec.continues !== undefined && !advertises(machines, scheduler, CAPABILITIES.codexContinue)) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not continue Codex tasks yet, or no verified scheduler is leading",
+            );
+          }
         }
         // A client's create seals `creator.*` alone (the leader drops anything else from a version-1 record), so refuse
         // rather than store dead text, and only to a leader that takes tags: an older one holds the record unreadable.

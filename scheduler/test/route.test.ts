@@ -1738,6 +1738,23 @@ describe("a Codex task", () => {
     }
   });
 
+  test("a Codex continuation goes only to a target advertising codexContinue: an older one would refuse it", () => {
+    const continues = codexTask({ mode: "continue", continues: { task: "t-old", at: target } });
+    const resumes = [...CODEX_CAPS, CAPABILITIES.continueTask, CAPABILITIES.continueSession];
+    const older = decide([codexMachine({ capabilities: resumes })], { task: continues });
+    expect(older.chosen).toBeNull();
+    expect(codes(only(older))).toEqual(["continue_unsupported"]);
+    const current = decide([codexMachine({ capabilities: [...resumes, CAPABILITIES.codexContinue] })], {
+      task: continues,
+    });
+    expect(current.chosen).toEqual(target);
+    // A Claude continuation needs none of it.
+    const claude = task({ spec: spec({ mode: "continue", continues: { task: "t-old", at: target } }) });
+    expect(codes(only(decide([codexMachine({ capabilities: resumes })], { task: claude })))).not.toContain(
+      "continue_unsupported",
+    );
+  });
+
   test("the login's presence, version floor and health each filter; unreadable health routes", () => {
     const reasons = (fields: Partial<Machine>, statusFields: Partial<MachineStatus> = {}): string[] =>
       codes(only(decide([codexMachine(fields, statusFields)], { task: codexTask() })));

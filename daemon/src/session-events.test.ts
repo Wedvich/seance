@@ -596,7 +596,7 @@ describe("EndedTasks", () => {
     expect(ended.continuation("landed")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION });
   });
 
-  test("a Codex launch notes its agent beside its thread, and refuses a continuation, past a reload", async () => {
+  test("a Codex launch notes its agent beside its thread, and its continuation carries both, past a reload", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-ledger-codex-"));
     try {
       const path = join(dir, "launched.json");
@@ -605,11 +605,17 @@ describe("EndedTasks", () => {
       await (
         await ended.launch("cx")
       )(true, { site: { repo: "/r", worktree, session: SESSION, agent: "codex" } });
-      expect(ended.continuation("cx")).toEqual({ refused: expect.stringContaining("Codex") });
+      expect(ended.continuation("cx")).toEqual({ repo: "/r", path: worktree, session: SESSION, agent: "codex" });
       // A later note of progress keeps the agent: it is the launch's, as its session is.
       await (await LaunchLedger.open(path)).note("cx", { branch: "b" });
       const reloaded = new EndedTasks(await LaunchLedger.open(path));
-      expect(reloaded.continuation("cx")).toEqual({ refused: expect.stringContaining("Codex") });
+      expect(reloaded.continuation("cx")).toEqual({
+        repo: "/r",
+        path: worktree,
+        session: SESSION,
+        branch: "b",
+        agent: "codex",
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

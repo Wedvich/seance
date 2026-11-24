@@ -65,7 +65,7 @@ describe("continueOffer", () => {
       ["another failure", failed({ failure: { code: "lost_expired", message: "lost" } }), able],
       ["no failure at all", failed({ failure: undefined }), able],
       ["here mode", failed({}, { mode: "here" }), able],
-      // Phase 3: Codex's resume is its own driver's.
+      // With no context there is no verified leader to say it continues Codex (`continueOffer, a Codex task`).
       ["a Codex task", failed({}, { agent: "codex", autonomy: "auto" }), able],
       ["never placed", failed({ assignment: undefined }), able],
       ["machine unlisted", failed(), [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession], "dev-other")]],
@@ -79,6 +79,38 @@ describe("continueOffer", () => {
       expect(offer.ok, name).toBe(false);
       expect(offer.ok ? "" : offer.reason.length, name).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("continueOffer, a Codex task", () => {
+  const codex = failed({}, { agent: "codex", autonomy: "auto" });
+  const resumes = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession, CAPABILITIES.codexContinue])];
+  const leader: OfferContext = { now: 2, leaderHandoff: false, leaderCodexContinue: true };
+  const reasonOf = (offer: ReturnType<typeof continueOffer>): string => (offer.ok ? "" : offer.reason);
+
+  test("offered under a leader and on a machine that both advertise codexContinue, and the spec keeps its agent", () => {
+    const offer = continueOffer(codex, resumes, [], leader);
+    expect(offer).toEqual({ ok: true, at: { deviceId: "dev-a", exclave: "default", clone: "app" } });
+    if (!offer.ok) return;
+    const spec = offeredSpec(codex, offer, "carry on", true);
+    expect(spec.agent).toBe("codex");
+    expect(spec.autonomy).toBe("auto");
+    // The record a client writes stays readable to a leader that takes `agent` (the parser keeps both fields).
+    expect(parseTaskSpec(spec)).toMatchObject({ agent: "codex", mode: "continue", continues: { task: "t-old" } });
+  });
+
+  test("refused under a leader without it: an older one would hold the record forever", () => {
+    const offer = continueOffer(codex, resumes, [], { ...leader, leaderCodexContinue: false });
+    expect(reasonOf(offer)).toContain("leader can't continue a Codex task");
+    expect(reasonOf(continueOffer(codex, resumes, []))).toContain("leader can't continue a Codex task");
+  });
+
+  test("refused on a machine without it: an older daemon refuses the spawn", () => {
+    expect(reasonOf(continueOffer(codex, able, [], leader))).toContain("can't continue a Codex session");
+  });
+
+  test("a Claude task's offer ignores the Codex capability", () => {
+    expect(continueOffer(failed(), able, [], { ...leader, leaderCodexContinue: false }).ok).toBe(true);
   });
 });
 
@@ -433,7 +465,7 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
       },
       spec,
     );
-  const context = { now: 2, leaderHandoff: true } as const;
+  const context = { now: 2, leaderHandoff: true, leaderCodexContinue: false } as const;
   const target = { deviceId: "dev-a", exclave: "default", clone: "app" };
 
   test("is offered, resuming the task itself, with the fixed brief naming the PR and the failing checks", () => {
@@ -457,7 +489,7 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
       ["the PR is not blocked", stuck({ pr: { state: "open", merge: "clean", at: 1 } }), handoffable, [], context],
       ["until: reported", stuck({}, { until: "reported" }), handoffable, [], context],
       ["no context", stuck(), handoffable, [], undefined],
-      ["the leader lacks it", stuck(), handoffable, [], { now: 2, leaderHandoff: false }],
+      ["the leader lacks it", stuck(), handoffable, [], { now: 2, leaderHandoff: false, leaderCodexContinue: false }],
       ["the machine lacks continueHandoff", stuck(), able, [], context],
       ["a continuation waits in the list", stuck(), handoffable, [continuationOf("t-c", "queued")], context],
       [
@@ -509,11 +541,21 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
 
   test("a session older than the launch ledger keeps is refused, from the task and from the pointer; the bound itself is offered", () => {
     const bound = LAUNCH_LEDGER_MAX_AGE_MS;
-    expect(continueOffer(stuck(), handoffable, [], { now: 1 + bound, leaderHandoff: true }).ok).toBe(true);
-    expect(continueOffer(stuck(), handoffable, [], { now: 2 + bound, leaderHandoff: true }).ok).toBe(false);
+    expect(
+      continueOffer(stuck(), handoffable, [], { now: 1 + bound, leaderHandoff: true, leaderCodexContinue: false }).ok,
+    ).toBe(true);
+    expect(
+      continueOffer(stuck(), handoffable, [], { now: 2 + bound, leaderHandoff: true, leaderCodexContinue: false }).ok,
+    ).toBe(false);
     const pointed = stuck({ continuedBy: { task: "t-c1", createdAt: 100 } });
-    expect(continueOffer(pointed, handoffable, [], { now: 100 + bound, leaderHandoff: true }).ok).toBe(true);
-    const old = continueOffer(pointed, handoffable, [], { now: 101 + bound, leaderHandoff: true });
+    expect(
+      continueOffer(pointed, handoffable, [], { now: 100 + bound, leaderHandoff: true, leaderCodexContinue: false }).ok,
+    ).toBe(true);
+    const old = continueOffer(pointed, handoffable, [], {
+      now: 101 + bound,
+      leaderHandoff: true,
+      leaderCodexContinue: false,
+    });
     expect(old.ok).toBe(false);
   });
 

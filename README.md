@@ -931,7 +931,7 @@ waits for approval, `auto` decides reversible choices itself and records them fo
 (DESIGN.md, "Autonomy level"); `queue_batch` takes one for the whole batch, and a continuation
 keeps its task's (a `steer` task's continues at `checkpoint`). `agent: "codex"` (on `spawn_session` and
 each `queue_batch` member) runs the task on a machine's Codex login instead of Claude Code; a model
-name never picks the agent. For now it needs `autonomy: "auto"` and no `max` effort, and a scheduler leader on a build that runs Codex tasks. There is no separate `plan` input:
+name never picks the agent. For now it needs `autonomy: "auto"` and no `max` effort, and a scheduler leader on a build that runs Codex tasks. `continue_task` resumes a Codex task's own thread, as Codex, on a leader and machine whose build continues Codex tasks. There is no separate `plan` input:
 every tool refuses a key it does not know, naming it, rather than ignoring it. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.

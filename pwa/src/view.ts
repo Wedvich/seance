@@ -584,6 +584,14 @@ export function deriveCodexAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.codex);
 }
 
+/**
+ * A Codex task's Continue is offered only under a verified leader advertising `codexContinue`: an older one refuses
+ * `continues` beside `agent` and would hold the continuation forever (`agent_unsupported`).
+ */
+export function deriveCodexContinueAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.codexContinue);
+}
+
 export const CODEX_UNAVAILABLE = "The scheduler's leader doesn't run Codex tasks yet. Update seanced on its machine";
 
 /**
