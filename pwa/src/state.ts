@@ -32,6 +32,17 @@ export type Model = (typeof MODELS)[number];
 
 export { EFFORTS, isEffort, type Effort };
 
+/**
+ * Efforts the picker offers. `max` stays on the wire, so MCP and the CLI still send it and a task carrying it still
+ * shows its label, but the owner never picks it here (2026-11-24).
+ */
+export const OFFERED_EFFORTS = ["low", "medium", "high", "xhigh"] as const satisfies readonly Effort[];
+export type OfferedEffort = (typeof OFFERED_EFFORTS)[number];
+
+export function isOfferedEffort(value: unknown): value is OfferedEffort {
+  return OFFERED_EFFORTS.some((effort) => effort === value);
+}
+
 /** `xhigh` capitalises badly; this matches what Claude Code on web shows. */
 export const EFFORT_LABELS: Record<Effort, string> = {
   low: "Low",
