@@ -56,7 +56,8 @@ a **Status** line (built, spec, draft); trust it over memory.
   "Codex remote control"), item 10 (continue: `thread/resume` of the noted thread, the agent kept,
   `CAPABILITIES.codexContinue`; DESIGN.md "Continuing a Codex session"), item 11 (pass, quota trigger, drain ask and
   custodian `interrupt` over the connection, `CAPABILITIES.codexPass`; DESIGN.md "Codex tasks") and item 12 (messages
-  in: the daemon's own inbox, `turn/steer`/`turn/start`, DESIGN.md "A Codex session"). Read it, and docs/agents.md,
+  in: the daemon's own inbox, `turn/steer`/`turn/start`, DESIGN.md "A Codex session"). Phase 4, the leader choosing
+  the agent: policy A (Codex as overflow) decided, the ask deferred, nothing built. Read it, and docs/agents.md,
   before any Codex work.
 - **docs/orchestrator.md** — draft, nothing decided: tracker projects as task graphs. Read before amend
   deps, anything that reads a tracker, or a non-task session; build nothing from it.

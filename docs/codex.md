@@ -663,7 +663,105 @@ nothing.
     not survive a daemon restart.
 
 **Phase 4** (after 3 and 9 to 12): the leader's `auto` choosing the agent as well as the account, a policy the owner
-sets.
+sets. The owner chose policy A and deferred the ask (2026-11-25): "Choosing the agent (phase 4)", below. Nothing is
+built: with no way for a task to ask for either agent, A has nothing to route.
+
+## Choosing the agent (phase 4)
+
+**Status: policy decided, nothing built** (owner, 2026-11-25: "Decided", below). Today the agent is explicit (the
+owner's 2026-11-19 decision): absent is Claude, `agent: "codex"` is Codex, and the leader chooses only among the
+(machine, exclave) candidates of that one agent. Phase 4 lets a task leave the agent to the leader.
+
+### What an explicit `agent` keeps meaning
+
+Whatever is chosen below, these hold, since every record and client written so far relies on them:
+
+- **Absent stays Claude.** Every stored record, every older client and every older leader reads absent as Claude; a
+  new meaning for absent would move work silently onto another agent. "Either" is therefore a new, explicit ask.
+- **`agent: "codex"` (and a stored `"claude"`, dropped to absent) stays a pin**: the leader never moves such a task to
+  the other agent, whatever the quota says. It may still wait (`quota_over_line` on every candidate) as it does today.
+- **The agent is fixed once a task launches.** Continue resumes its noted thread or session, a successor copies
+  `agent` (`successorSpec`), a pass bills the launch's account: none of them re-chooses. Only a task never launched
+  (queued, blocked, ready, or a reservation dropped before its spawn) is still open to either agent.
+- **No reader infers the agent from a model name** (rejected alternatives): "either" never reads `model` to decide.
+
+### How a client asks for "either"
+
+- **A new value, `agent: "any"`**, sealed through the one task sealer behind a sentinel of its own
+  (`AGENT_ANY_DEP_SENTINEL`, `after: "agent-any"`), so a leader of the Codex build, whose parser knows only `"codex"`,
+  holds the record unreadable rather than run it as Claude, and an older one does as it does for `"codex"`. Written
+  by a client only to a verified leader advertising a new `CAPABILITIES.agentAny`. _Rejected:_ a list
+  (`agents: ["claude", "codex"]`), which is the same thing with a second agent to come (`agy`) but one more shape to
+  parse; `"any"` reads as "every agent this leader can place", and a list can follow if the owner ever wants "Claude
+  or `agy`, not Codex".
+- **The answer lands on the record at dispatch.** The leader writes the agent it chose into the task (a
+  `Task.agentChosen`, the leader's own write through the sealer, beside the reservation) and dispatch sends it as
+  `SpawnRequest.agent` as today; a reservation dropped before the spawn clears it, so a retry chooses again. Every
+  reader downstream (continue, pass, the badge, `accountInFlight`) reads `spec.agent ?? agentChosen` and is otherwise
+  unchanged; the spec keeps `"any"`, so the owner can see what was asked and what was chosen.
+- **Model and effort under "either".** A model names one agent's model, so an `"any"` task carries **no `model`**
+  (each agent's default: `DEFAULT_MODEL`, `DEFAULT_CODEX_MODEL`); a client refuses the pair before a write. Effort is
+  shared (`EFFORTS` minus `max`, which Codex refuses; `max` beside `"any"` is refused, never silently made Claude).
+  _Alternative:_ a model per agent (`models: { claude, codex }`), more to parse and to show, for a choice nobody has
+  asked for yet.
+- **What only Claude can run** (`codexSpecRefusal`: `steer`/`plan`, attachments) beside `"any"`: the Codex candidates
+  are rejected `agent_unsupported`, as for a pinned Codex task, so the task runs on Claude and the decision record says
+  why. Not refused at the client: "either" is honest about it, and nothing runs that was not asked for.
+- **Clients:** the PWA's model sheet gains an "Either agent" row above the groups (agent `"any"`, no model, the effort
+  row shared); MCP `spawn_session` and `queue_batch` take `agent: "any"`; `seance spawn --agent any`. The queue's badge
+  shows the chosen agent, and "either" until one is chosen.
+
+### What the leader can weigh
+
+| Input                         | Where it comes from today                                                     | Cost to weigh it                                                                                                                                                                                                                                                                                                    |
+| ----------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Each account's headroom       | `accountPressure`, the quota line, from `quota` and `lq` (`judgeAccount`)     | None: every candidate already has it, on one scale for both agents.                                                                                                                                                                                                                                                 |
+| Credits and extra usage       | `spillsInto`, `AgentLogin.credits`, the spill reading                         | None to read; a policy choice which money to spend first (below).                                                                                                                                                                                                                                                   |
+| Machine, distance, queue      | the score's other components                                                  | None: agent-neutral.                                                                                                                                                                                                                                                                                                |
+| The task's effort and options | the spec; `codexSpecRefusal`                                                  | None: refusals already reject Codex candidates.                                                                                                                                                                                                                                                                     |
+| A per-agent bias              | new: `SchedulerConfig.weights.agent` or a per-agent penalty in the score      | Small: one config number, shown as a score component. The only way to say "prefer Claude unless it is clearly worse".                                                                                                                                                                                               |
+| The repo's history per agent  | **nothing today**: finished records are not kept as a per-(repo, agent) tally | Medium to large: an outcome tally (merged PR, closed unmerged, failed, superseded by quota) per repo and agent, kept by the leader in a record of its own or read from the archivist, which the leader does not read today. And noisy: a few tasks per repo, and outcome depends more on the prompt than the agent. |
+| Which repos may use Codex     | new: an owner list (`settings:scheduler` beside the limits)                   | Small: the owner's own word for "track record", instead of a measured one. One more owner act (`set-limits`'s path, app-only, never MCP).                                                                                                                                                                           |
+
+### Policies
+
+- **A. Overflow.** An `"any"` task is routed as Claude first; only when every Claude candidate is rejected (quota over
+  the line, a paused or closed account, auth, the fleet's holds that are per account), Codex candidates are judged,
+  and the best of those wins. Spill comes last for both: in-line Claude, then in-line Codex, then Claude's extra usage,
+  then Codex credits (no money while either account has included usage left). Codex is a pressure valve, Claude the
+  default; nothing about repo history is needed. Cheapest to build (a second `route` pass over the other agent's
+  candidates, one decision record holding both).
+- **B. One pool, a bias.** Both agents' candidates are judged in one pass and the existing score decides, with a
+  configurable per-agent penalty added to Codex candidates (default chosen so an idle Codex account beats a Claude one
+  only past, say, half its window). Spends both quotas evenly; the owner tunes one number. Spill as A.
+- **C. B (or A) limited to repos the owner names.** An `"any"` task in a repo off the list routes as Claude only
+  (Codex candidates rejected with a new `agent_not_allowed`), so Codex earns its track record repo by repo by the
+  owner's word.
+- **D. Measured history.** B with the bias per repo, from an outcome tally per (repo, agent). Not recommended now: the
+  tally is new state with its own retention, the samples are small, and the owner can read the outcomes in the queue
+  and grow C's list by hand.
+
+### Decided (owner, 2026-11-25)
+
+- **P1. Policy A, overflow.** Chosen as recommended, below.
+- **P2. The ask: not now.** No `agent: "any"`, no sentinel, no capability, no client row. The agent stays explicit on
+  every task until the owner opens the ask; phase 4 is built then, as one PR, to A.
+- **Switching policy later is cheap** (the owner's question). The ask, `agentChosen`, the sentinel and the capability
+  are the same under A, B and C, so moving between them is a leader-only change (`scheduler/src/route.ts` and a
+  config value), with no new wire field, no record migration and no client release: an `"any"` record written under A
+  routes under B as soon as the leader updates. A task already launched keeps its agent either way. Only D adds state
+  (the outcome tally) and so costs more, whenever it comes.
+
+### Recommendation (as written for the owner, 2026-11-24)
+
+**A, opt-in per task through `agent: "any"`, no model, no repo list.** Because the owner's stated reason for keeping
+the agent explicit is a missing track record, and A is the policy that builds one without betting on it: Claude keeps
+every task it can run, and Codex gets only the work that would otherwise wait for a window, where any run beats
+none. It needs no new state and no tuned number, its decision record explains itself (every Claude candidate's reason,
+then the Codex winner), and it moves to B later by adding a bias, without a change to the wire: `"any"`,
+`agentChosen`, the sentinel and the capability are the same under A, B and C. Spill order as A: no money while either
+account has included usage left. Absent stays Claude in every client; no client defaults to `"any"` (a later,
+separate choice).
 
 ## Spikes
 
