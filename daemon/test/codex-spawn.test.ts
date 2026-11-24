@@ -7,7 +7,7 @@ import { CODEX_RUN_PREFIX } from "../src/agents/panes.ts";
 import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import type { CodexConfig } from "../src/config.ts";
 import { despawnSession } from "../src/despawn.ts";
-import { git } from "../src/exec.ts";
+import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions, paneInfo } from "../src/sessions.ts";
 import { spawnSession, type SpawnOptions } from "../src/spawn.ts";
@@ -144,6 +144,20 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
     // No graceful close yet: the pane is killed, and its shell ends the server and removes the run dir.
     const closed = await despawnSession(pane, { force: false, graceMs: 200, reapWaitMs: 2_000 });
     expect(closed).toEqual({ window: "Codex Hello", outcome: "killed", agent: "codex" });
+    await pollUntil(async () => !(await runDirs()).includes(runDir), "the run dir to go");
+  });
+
+  test("a window closed by hand ends the TUI, which outlives a hangup, and the server, and removes the run dir", async () => {
+    const before = new Set(await runDirs());
+    const outcome = await spawnSession(codex("Closed By Hand"), repos, opts);
+    const runDir = (await runDirs()).find((dir) => !before.has(dir));
+    if (runDir === undefined || outcome.handle === undefined) throw new Error("no run dir or window");
+    const sessionProcesses = async (): Promise<string> =>
+      (await exec(["pgrep", "-f", `${runDir}/s.sock`])).stdout.trim();
+    expect(await sessionProcesses()).not.toBe("");
+    // A bare `kill-window`: the pane's hangup alone, none of despawn's escalation.
+    await tmuxOk(["kill-window", "-t", outcome.handle]);
+    await pollUntil(async () => (await sessionProcesses()) === "", "the TUI and the server to end");
     await pollUntil(async () => !(await runDirs()).includes(runDir), "the run dir to go");
   });
 

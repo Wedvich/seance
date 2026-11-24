@@ -7599,11 +7599,14 @@ of this section built.
     command and its mark are the same on every host), holding `run.sh` (constant text, 0600, `wx`), `thread` and the
     `--listen` path `s.sock`. The script exports `CODEX_HOME`, unsets the API-key variables, starts the server in the
     background with its output discarded, and waits for `thread` (at most 180 s, past the daemon's own wait, and only
-    while the server lives); then runs `codex resume --remote unix://<run>/s.sock -- <thread>` in the foreground.
-    The TUI is waited on, never `exec`ed: an `exec`ed TUI's exit would leave the server orphaned to init, so the
-    shell's `EXIT` trap ends the server and removes the run dir, whether the TUI ended or the pane hung up, and the
-    shell exits with the TUI's status for harvest. The run dir lives exactly as long as the session; `dispose` removes
-    it only for a launch whose `started` never answered.
+    while the server lives); then starts `codex resume --remote unix://<run>/s.sock -- <thread>` and `wait`s on it.
+    The TUI is never `exec`ed: its exit would leave the server orphaned to init. Nor is it a foreground child: Codex's
+    TUI outlives a hangup (seen live on 0.170.0), and the shell defers a trap until a foreground child exits, so a
+    window closed by hand or a tmux server's end left the TUI and the server running with no pane. It runs in the
+    background on the pane's terminal (an explicit `<&3`: a background job's stdin is otherwise `/dev/null`), and a
+    trapped `HUP` or `TERM` interrupts the `wait` at once; the shell's `EXIT` trap ends the TUI and the server and
+    removes the run dir, and the shell exits with the TUI's status for harvest. The run dir lives exactly as long as
+    the session; `dispose` removes it only for a launch whose `started` never answered.
   - **The connection** (`connectCodex`): the `ws` package, a daemon dependency, dialling `ws+unix://<run>/s.sock:/`,
     since Bun's own WebSocket cannot dial a unix socket (S3); `maxPayload` 16 MiB, no compression, a 10 s handshake
     and a 30 s bound on each request. Rejected: a minimal client over `Bun.connect({ unix })`, a second WebSocket
@@ -7618,7 +7621,7 @@ of this section built.
     the `AGENT` format (`agentFormat`, `agents/panes.ts`) fold it: `PaneInfo.agent` is `codex` only for a pane of
     ours whose start command carries that mark, `claude` otherwise. `CODEX_PANES.command` is null: a hand-started
     `codex` runs on the owner's own home and is no session of Séance's to list, close or bind. A Codex pane
-    registers by its title like a Claude pane (the TUI titles its pane).
+    registers by its title like a Claude pane: the TUI titles its pane with the thread's name (seen live).
   - **Close.** No graceful close until `turn/interrupt` lands (item 7): `closeCodex` answers false and despawn kills
     the pane; the thread stays in the home's store. Despawn picks it by the pane's agent, so a machine whose `codex`
     block has since gone still closes one.

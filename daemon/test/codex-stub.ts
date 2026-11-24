@@ -64,7 +64,9 @@ if (args[0] === "login" || args[0] === "logout") {
 }
 
 if (args[0] === "resume") {
-  // The TUI's join: titled as a claude pane titles itself, so the pane registers; it holds nothing open.
+  // The TUI's join: titled as the real one titles its pane (its thread's name), so the pane registers. Like the real
+  // one (0.170.0) it outlives a hangup: only the launch script's own `TERM` ends it.
+  process.on("SIGHUP", () => undefined);
   process.stdout.write("\u001B]2;codex\u0007stub tui\n");
   setInterval(() => undefined, 60_000);
 } else if (args[0] === "app-server" && args[1] === "--listen") {

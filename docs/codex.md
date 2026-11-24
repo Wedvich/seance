@@ -360,8 +360,10 @@ sequenceDiagram
    quoting of it), wrapped in `caffeinate -is` on macOS. The script is constant text with daemon paths through `shq()`:
    start the server in the background, wait (bounded) for `thread`, then run the TUI on that thread. _Corrected at
    build:_ this said `exec` the TUI, but an `exec`ed TUI's exit leaves the server orphaned to init, listening with no
-   pane; so the shell waits on the TUI, and its `EXIT` trap ends the server and removes the run dir, passing the TUI's
-   status on for harvest. The pane pid is the shell (under `caffeinate` on macOS), and every hook, tool command and
+   pane. Nor can the TUI be a foreground child: it outlives a hangup, and the shell defers its trap until a foreground
+   child exits, so a window closed by hand left both running (seen live). The shell starts the TUI in the background on
+   the pane's terminal and `wait`s on it; a hangup interrupts the `wait`, and the `EXIT` trap ends the TUI and the
+   server and removes the run dir, passing the TUI's status on for harvest. The pane pid is the shell (under `caffeinate` on macOS), and every hook, tool command and
    MCP server is a descendant of it. The script also unsets `OPENAI_API_KEY` and `CODEX_API_KEY`, so the session bills
    the home's login. The window carries `SEANCE_AUTONOMY` and the machine tag like any session.
 5. **The daemon dials the socket** with a WebSocket client (Bun's own cannot dial a unix socket; the `ws` package can, as

@@ -144,9 +144,12 @@ export function paneCommand(runDir: string): string {
 /**
  * The launch script: constant text, daemon paths through `shq` and nothing else interpolated. The server and the TUI
  * are the shell's children, so the pane's processes are the session's. The TUI is waited on, never `exec`ed: an
- * `exec`ed TUI's exit would orphan the server to init, running on with no pane, so the shell's exit (the TUI's end, or
- * the pane's hangup, which reaches the TUI as well) ends the server and removes the run dir, and passes the TUI's
- * status on for harvest. The server's output goes nowhere (it would draw over the TUI); the daemon reads it over the
+ * `exec`ed TUI's exit would orphan the server to init, running on with no pane. Nor run in the foreground: Codex's TUI
+ * outlives a hangup, and the shell defers its `HUP` trap until a foreground child exits, so a window closed by hand or
+ * a tmux server's end left both running (seen live on 0.170.0). Started in the background on the pane's terminal (an
+ * explicit `<&3`, since a background job's stdin is otherwise `/dev/null`) and `wait`ed on, which a trapped signal
+ * interrupts at once, so the shell's exit, on the TUI's end, a hangup or a `TERM`, ends the TUI and the server and
+ * removes the run dir, and passes the TUI's status on for harvest. The server's output goes nowhere (it would draw over the TUI); the daemon reads it over the
  * socket. `thread` is the daemon's, written once the first turn is accepted, and only ever a thread id
  * `isAgentSessionId` passed; it reaches the TUI's argv as a variable's value, after `--`, never as shell text. A server
  * that dies, or a daemon that never writes `thread`, ends the pane: the daemon's own wait is the shorter, and it kills
@@ -165,7 +168,8 @@ export function runScript(o: { readonly runDir: string; readonly home: string; r
     "unset OPENAI_API_KEY CODEX_API_KEY",
     `"$codex" app-server --listen "unix://$run/${SOCKET_NAME}" </dev/null >/dev/null 2>&1 &`,
     "server=$!",
-    `trap 'kill "$server" 2>/dev/null; rm -rf "$run"' EXIT`,
+    "tui=",
+    `trap 'kill $tui "$server" 2>/dev/null; rm -rf "$run"' EXIT`,
     "trap 'exit 129' HUP",
     "trap 'exit 143' TERM",
     "i=0",
@@ -180,7 +184,11 @@ export function runScript(o: { readonly runDir: string; readonly home: string; r
     "  sleep 0.1",
     "done",
     `IFS= read -r thread < "$run/${THREAD_FILE}"`,
-    `"$codex" resume --remote "unix://$run/${SOCKET_NAME}" -- "$thread"`,
+    "exec 3<&0",
+    `"$codex" resume --remote "unix://$run/${SOCKET_NAME}" -- "$thread" <&3 3<&- &`,
+    "tui=$!",
+    "exec 3<&-",
+    'wait "$tui"',
     "exit $?",
     "",
   ].join("\n");
