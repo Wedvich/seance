@@ -1792,8 +1792,8 @@ describe("sessions on the queue screen", () => {
     path: "/x",
     ...fields,
   });
-  const live = (state: "busy" | "idle" | "needs-input", ago: number, extra: object = {}) => ({
-    state,
+  const live = (kind: "busy" | "idle" | "needs-input", ago: number, extra: object = {}) => ({
+    state: kind,
     since: NOW - ago,
     ...extra,
   });
@@ -1932,8 +1932,8 @@ describe("sessions on the queue screen", () => {
   });
 
   test("a session row offers Rename only with sessionTag over an open relay, and Close only on a connected machine", () => {
-    const verified = {
-      "agent.session": { value: conversation, at: NOW, scope: "conversation" as const, verified: true },
+    const verified: SessionEntry["tags"] = {
+      "agent.session": { value: conversation, at: NOW, scope: "conversation", verified: true },
     };
     const rowWith = (machines: readonly Machine[], relay: Partial<RelayState> = {}) =>
       deriveQueue(
