@@ -1,11 +1,19 @@
 import { lstat, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { autonomyOf, isTaskId, WORKTREE_AND_BRANCH_GONE, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import {
+  autonomyOf,
+  isTaskId,
+  WORKTREE_AND_BRANCH_GONE,
+  type AgentKind,
+  type RepoEntry,
+  type SpawnRequest,
+} from "@seance/shared";
 import { claudeDriver } from "./agents/claude.ts";
+import { codexDriver, codexRequestRefusal, type CodexDriverOptions } from "./agents/codex.ts";
 import type { AgentDriver, AgentLaunch } from "./agents/driver.ts";
 import { autonomyNote } from "./autonomy.ts";
 import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
-import { fetchBase, freshenBase } from "./base-fetch.ts";
+import { defaultBaseTip, fetchBase, freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
 import { DEFAULT_EXCLAVE } from "./exclaves.ts";
@@ -187,18 +195,28 @@ export function continuePreamble(
  * another branch told the phone something untrue. Don't restore it — a remote
  * spawn has no business moving a local HEAD.
  */
-function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
+function prepareWorktree(repo: RepoEntry, worktreeName: string, agent: AgentKind): Prepared {
   const worktreePath = join(repo.path, ".claude", "worktrees", worktreeName);
+  const { who, instructions } = AGENT_WORDS[agent];
   return {
     cwd: worktreePath,
     worktree: { clone: repo.path, name: worktreeName },
     preamble:
-      `You are a new independent Claude session in a FRESH git worktree at ${worktreePath}, ` +
+      `You are a new independent ${who} session in a FRESH git worktree at ${worktreePath}, ` +
       `on branch worktree-${worktreeName}. Before starting the task, set this worktree up per ` +
-      `the repo's own docs (check CLAUDE.md's worktree-setup section and/or README), including ` +
+      `the repo's own docs (check ${instructions}'s worktree-setup section and/or README), including ` +
       `copying any .env from the main checkout at ${repo.path}.`,
   };
 }
+
+/**
+ * How the seed names the session and the repo's instructions to it: Codex reads AGENTS.md where a directory has one,
+ * else CLAUDE.md (docs/codex.md, S9). Constants, never wire text.
+ */
+const AGENT_WORDS: Readonly<Record<AgentKind, { readonly who: string; readonly instructions: string }>> = {
+  claude: { who: "Claude", instructions: "CLAUDE.md" },
+  codex: { who: "Codex", instructions: "AGENTS.md or CLAUDE.md" },
+};
 
 /**
  * A stacked worktree, made by `addStackedWorktree` at its base's tip before launch: `claude --worktree <name>`
@@ -207,8 +225,8 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
  * `base` passed `isBranchName`; the seed is a file, never the shell string, and the session is told its PR's
  * base, since a PR against the default branch of a squash-merging repo carries the predecessor's commits.
  */
-function prepareStacked(repo: RepoEntry, worktreeName: string, base: string): Prepared {
-  const worktree = prepareWorktree(repo, worktreeName);
+function prepareStacked(repo: RepoEntry, worktreeName: string, base: string, agent: AgentKind): Prepared {
+  const worktree = prepareWorktree(repo, worktreeName, agent);
   return {
     ...worktree,
     preamble:
@@ -227,8 +245,8 @@ function prepareStacked(repo: RepoEntry, worktreeName: string, base: string): Pr
  * A task that would have stacked on a predecessor that left nothing to stack on (`SpawnRequest.noBase`, decided
  * #4): a plain worktree spawn, from the default branch, whose preamble says why. A constant: no wire text.
  */
-function prepareUnstacked(repo: RepoEntry, worktreeName: string): Prepared {
-  const worktree = prepareWorktree(repo, worktreeName);
+function prepareUnstacked(repo: RepoEntry, worktreeName: string, agent: AgentKind): Prepared {
+  const worktree = prepareWorktree(repo, worktreeName, agent);
   return {
     ...worktree,
     preamble:
@@ -238,10 +256,10 @@ function prepareUnstacked(repo: RepoEntry, worktreeName: string): Prepared {
   };
 }
 
-function prepareHere(repo: RepoEntry): Prepared {
+function prepareHere(repo: RepoEntry, agent: AgentKind): Prepared {
   return {
     cwd: repo.path,
-    preamble: `You are a new independent Claude session running in the CURRENT worktree at ${repo.path}.`,
+    preamble: `You are a new independent ${AGENT_WORDS[agent].who} session running in the CURRENT worktree at ${repo.path}.`,
   };
 }
 
@@ -275,21 +293,33 @@ function seedText(prepared: Prepared, request: SpawnRequest, attachments?: Sessi
   const prompt = request.prompt === undefined || request.prompt === "" ? undefined : request.prompt;
   const listed = attachmentsBlock(attachments);
   if (prompt === undefined && !resume && listed === "") return undefined;
-  const header = `${prepared.preamble}\n${autonomyNote(autonomyOf(request))}`;
+  const header = `${prepared.preamble}\n${autonomyNote(autonomyOf(request), agentOf(request))}`;
   return resume
     ? `${header}${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
     : `${header}${prompt === undefined ? "" : `\nTask: ${prompt}\n`}${listed}`;
 }
 
+function agentOf(request: SpawnRequest): AgentKind {
+  return request.agent ?? "claude";
+}
+
 /**
- * The driver a spawn runs. Claude alone until a task carries its agent (docs/codex.md, "Build order" item 6).
+ * The driver a spawn runs, by its agent (DESIGN.md, Daemon, "Agent drivers"). Codex only on a machine whose
+ * `config.json` has a `codex` block: its home and its approval settings come from nowhere else.
  */
-function driverFor(_request: SpawnRequest): AgentDriver {
-  return claudeDriver;
+function driverFor(request: SpawnRequest, opts: SpawnOptions): AgentDriver {
+  if (agentOf(request) === "claude") return claudeDriver;
+  if (opts.codex === undefined) {
+    throw new SpawnFailure("launch_error", "this machine runs no Codex: its config.json has no codex block");
+  }
+  const refused = codexRequestRefusal(request);
+  if (refused !== null) throw refused;
+  return codexDriver(opts.codex);
 }
 
 /** Hands the agent-neutral half of a launch to its driver. */
 function launchAgent(
+  driver: AgentDriver,
   prepared: Prepared,
   name: string,
   request: SpawnRequest,
@@ -298,7 +328,7 @@ function launchAgent(
   attachments?: SessionAttachments,
 ): Promise<AgentLaunch> {
   const seed = seedText(prepared, request, attachments);
-  return driverFor(request).launch({
+  return driver.launch({
     request,
     name,
     cwd: prepared.cwd,
@@ -450,6 +480,8 @@ export interface SpawnOptions {
    * fetch before that, so the default leaves room for a slow origin.
    */
   readonly waitMs?: number;
+  /** This machine's Codex (`config.json`'s `codex` block and the home); absent, a Codex spawn is refused. */
+  readonly codex?: CodexDriverOptions;
 }
 
 /**
@@ -815,7 +847,15 @@ async function continueLocked(
   const windowName = sanitizeWindowName(request.title ?? name);
   const prepared = prepareContinue(continuation);
   // The worktree, not the clone root, is where the session starts, so the driver trusts the worktree's own path.
-  const launch = await launchAgent(prepared, sessionName(name, opts.machineTag), request, repo, opts, attachments);
+  const launch = await launchAgent(
+    driverFor(request, opts),
+    prepared,
+    sessionName(name, opts.machineTag),
+    request,
+    repo,
+    opts,
+    attachments,
+  );
   const outcome = await launchWindow(prepared, launch, windowName, request, opts);
   return present ? outcome : { ...outcome, readded: true };
 }
@@ -848,25 +888,39 @@ async function spawnUntracked(
   const freshened = base === undefined ? freshenBase(repo, request.mode) : Promise.resolve(undefined);
 
   const slug = slugify(request.title ?? request.prompt ?? "session");
+  const agent = agentOf(request);
+  // Before any worktree is made: a machine that runs no such agent leaves nothing behind.
+  const driver = driverFor(request, opts);
   let stacked: Stacked | undefined;
   if (base !== undefined) {
     const tip = await fetchBase(repo, base);
     if (!tip.ok) throw new SpawnFailure("base_not_found", tip.message);
     stacked = await addStackedWorktree(repo, slug, tip.sha);
   }
+  // Claude makes a plain worktree itself (`--worktree`). For another agent the daemon makes it, after the fetch, at the
+  // tip Claude's would start from, under the same lock and in the same layout as a stack's, so reap, the custodian,
+  // continue and `pushTaskBranch` find it where they find Claude's (DESIGN.md, Daemon, "Codex sessions").
+  let made = stacked;
+  if (agent !== "claude" && base === undefined && request.mode === "worktree") {
+    await freshened;
+    const tip = await defaultBaseTip(repo);
+    if (!tip.ok) throw new SpawnFailure("no_default_branch", tip.message);
+    made = await addStackedWorktree(repo, slug, tip.sha);
+  }
 
-  const worktreeName = stacked?.name ?? (request.mode === "here" ? slug : await freeWorktreeName(repo, slug));
+  const worktreeName = made?.name ?? (request.mode === "here" ? slug : await freeWorktreeName(repo, slug));
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
   const prepared =
     request.mode === "here"
-      ? prepareHere(repo)
+      ? prepareHere(repo, agent)
       : base !== undefined
-        ? prepareStacked(repo, worktreeName, base)
+        ? prepareStacked(repo, worktreeName, base, agent)
         : request.noBase === true
-          ? prepareUnstacked(repo, worktreeName)
-          : prepareWorktree(repo, worktreeName);
+          ? prepareUnstacked(repo, worktreeName, agent)
+          : prepareWorktree(repo, worktreeName, agent);
   const launch = await launchAgent(
+    driver,
     prepared,
     sessionName(worktreeName, opts.machineTag),
     request,
@@ -948,6 +1002,7 @@ async function launchWindow(
     ...(note === undefined ? {} : { note }),
     ...(server === undefined ? {} : { server }),
     ...(session === undefined ? {} : { session }),
+    ...(request.agent === undefined ? {} : { agent: request.agent }),
   };
 }
 

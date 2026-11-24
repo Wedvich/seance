@@ -1,4 +1,5 @@
 import type {
+  AgentLoginKind,
   DespawnErrorCode,
   DespawnOutcome,
   RepoEntry,
@@ -44,6 +45,8 @@ export interface DespawnResult {
   /** The window the session ran in, for the audit line and the reply. */
   readonly window: string;
   readonly outcome: DespawnOutcome;
+  /** The closed pane's agent when it is not Claude (its start mark, `AgentPanes`), for the audit line. */
+  readonly agent?: AgentLoginKind;
 }
 
 export interface SpawnOutcome {
@@ -77,6 +80,11 @@ export interface SpawnOutcome {
    * ledger; backend-scoped, never on the wire.
    */
   readonly session?: string;
+  /**
+   * The agent the session runs when it is not Claude: noted in the launch ledger beside `session` (a Codex thread id
+   * is no Claude session to resume) and on the spawn's audit line. Backend-scoped, never on the wire.
+   */
+  readonly agent?: AgentLoginKind;
   /**
    * A stacked spawn's start: the commit its worktree was made at (`origin/<baseBranch>`'s tip after the
    * fetch). Noted in the launch ledger (`TaskNote.stackedOn`); backend-scoped, never on the wire.

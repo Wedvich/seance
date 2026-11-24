@@ -1,4 +1,4 @@
-import type { SpawnRequest } from "@seance/shared";
+import type { AgentKind, SpawnRequest } from "@seance/shared";
 import type { PaneInfo } from "../sessions.ts";
 
 /**
@@ -8,9 +8,9 @@ import type { PaneInfo } from "../sessions.ts";
  * session starts and resumes, what its pane looks like, and how it is asked to leave. Named driver, never adapter:
  * an adapter is messaging's (DESIGN.md, "Adapters").
  *
- * Small on purpose. Codex's session (docs/codex.md, "The session") is meant to be a second implementation of exactly
- * this: its run dir and script are `launch`, its `thread/start` and the thread id are `started`, its `turn/interrupt`
- * is `close`, its run-dir mark is `panes`.
+ * Small on purpose. Codex's session (`agents/codex.ts`; DESIGN.md, Daemon, "Codex sessions") is a second
+ * implementation of exactly this: its run dir and script are `launch`, its `thread/start`, seed turn and thread id are
+ * `started`, its run-dir mark is `panes`.
  */
 export interface AgentDriver {
   readonly panes: AgentPanes;
@@ -31,10 +31,11 @@ export interface AgentDriver {
  * load no module that logs, can hold every driver's (`AGENT_PANES`) without loading any driver.
  */
 export interface AgentPanes {
+  readonly agent: AgentKind;
   /** A tmux `#{m:}` glob over `pane_start_command` that only a pane this driver launched matches (`OURS`). */
   readonly startMark: string;
-  /** What tmux or `ps` calls the agent's process in a pane séance did not start. */
-  readonly command: RegExp;
+  /** What tmux or `ps` calls the agent's process in a pane séance did not start; null when no such pane is a session. */
+  readonly command: RegExp | null;
 }
 
 export interface LaunchSpec {

@@ -163,6 +163,7 @@ interface InfoLine {
   readonly task?: string;
   readonly pid?: string;
   readonly custodian?: string;
+  readonly agent?: string;
   readonly path?: string;
 }
 
@@ -182,6 +183,7 @@ function infoLine(fields: InfoLine): string {
     fields.task ?? "",
     fields.pid ?? "4242",
     fields.custodian ?? "",
+    fields.agent ?? "claude",
     fields.path ?? "/Users/m/repos/seance",
   ].join("|");
 }
@@ -198,6 +200,7 @@ describe("parsePaneInfo", () => {
         windowId: "@1",
         windowName: "alive",
         ours: true,
+        agent: "claude",
         dead: false,
         deadAt: null,
         deadStatus: null,
@@ -213,6 +216,7 @@ describe("parsePaneInfo", () => {
         windowId: "@2",
         windowName: "died",
         ours: true,
+        agent: "claude",
         dead: true,
         deadAt: 1_760_000_000_000,
         deadStatus: null,
@@ -282,6 +286,21 @@ describe("parsePaneInfo", () => {
     expect(parsePaneInfo(raw).map((pane) => [pane.paneId, pane.custodian, pane.path])).toEqual([
       ["%1", true, "/tmp/a|b"],
       ["%2", false, "/Users/m/repos/seance"],
+    ]);
+  });
+
+  test("reads a pane's agent only from its own start mark: a pane séance did not start is Claude's, whatever it says", () => {
+    const raw = [
+      infoLine({ pane: "%1", agent: "codex" }),
+      infoLine({ pane: "%2", agent: "claude" }),
+      infoLine({ pane: "%3", agent: "codex", ours: "0" }),
+      infoLine({ pane: "%4", agent: "agy" }),
+    ].join("\n");
+    expect(parsePaneInfo(raw).map((pane) => [pane.paneId, pane.agent])).toEqual([
+      ["%1", "codex"],
+      ["%2", "claude"],
+      ["%3", "claude"],
+      ["%4", "claude"],
     ]);
   });
 

@@ -589,6 +589,25 @@ describe("EndedTasks", () => {
     expect(ended.continuation("landed")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION });
   });
 
+  test("a Codex launch notes its agent beside its thread, and refuses a continuation, past a reload", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-ledger-codex-"));
+    try {
+      const path = join(dir, "launched.json");
+      const ended = new EndedTasks(await LaunchLedger.open(path));
+      const worktree = "/r/.claude/worktrees/x";
+      await (
+        await ended.launch("cx")
+      )(true, { site: { repo: "/r", worktree, session: SESSION, agent: "codex" } });
+      expect(ended.continuation("cx")).toEqual({ refused: expect.stringContaining("Codex") });
+      // A later note of progress keeps the agent: it is the launch's, as its session is.
+      await (await LaunchLedger.open(path)).note("cx", { branch: "b" });
+      const reloaded = new EndedTasks(await LaunchLedger.open(path));
+      expect(reloaded.continuation("cx")).toEqual({ refused: expect.stringContaining("Codex") });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("the newest note on a path owns it: an older task is refused, naming the newer", async () => {
     const clock = { now: 1000 };
     const ledger = LaunchLedger.memory(() => clock.now);

@@ -855,8 +855,12 @@ nothing checked it. The last is the gap they leave.
   `lstat` of the directory entry, a signature of inode, size and mtime that says when to probe again. A copy is worse
   than a leak: the first refresh of a copy logs every other copy out. `stateDir()` is already in the custodian's masks.
   A backup restoring an older copy logs the machine out: accepted, the owner signs in again. No test, live check or
-  verb points `CODEX_HOME` at the owner's `~/.codex`: every Codex child gets the env `codexEnv` builds (bare, plus
-  `CODEX_HOME`), never an inherited one.
+  verb points `CODEX_HOME` at the owner's `~/.codex`: every probe and verb child gets the env `codexEnv` builds
+  (bare, plus `CODEX_HOME`), never an inherited one. A session's pane is the exception, as a Claude pane is: its
+  server and TUI run in the tmux server's environment (a session needs the owner's `PATH`, toolchains and agent
+  sockets), with no `CREDENTIALS_DIRECTORY` (`exec.ts` strips it before tmux boots), `CODEX_HOME` set to the home by
+  the pane's own script, and `OPENAI_API_KEY` and `CODEX_API_KEY` unset there, so the session bills the login the
+  probe reads and the scheduler routes by, never a key the server's environment carries (Daemon, "Codex sessions").
 - **Identity, quota and login health come over Codex's API, never from the home's files.** The probe
   (`daemon/src/codex/probe.ts`) is `codex --version` and then a `codex app-server` child on stdio, both argv arrays
   with no frame, config or file value in them, a bare env (`HOME`, `PATH`, `USER`/`LOGNAME`, `CODEX_HOME`: so no
@@ -892,9 +896,36 @@ nothing checked it. The last is the gap they leave.
   `agent` and nulls the spec over the sentinel without it or over an agent it does not know. A client writes `agent`
   only to a verified leader advertising `CAPABILITIES.codex` (the broker refuses it otherwise, before a write), and the
   leader sends it in a spawn only to a machine advertising `codex` (`agent_unsupported` otherwise), since an older
-  daemon would drop it and start Claude. A daemon with no Codex driver refuses a spawn carrying `agent` as malformed,
-  never runs it as Claude. What V1 refuses beside it (`codexSpecRefusal`) is refused before a write and, in a record
+  daemon would drop it and start Claude. A daemon not advertising `codex` refuses a wire spawn carrying `agent` as
+  malformed (`isSpawnRequest`), never runs it as Claude: item 6 built the driver but keeps that refusal until the
+  session's events and close land (item 7). What V1 refuses beside it (`codexSpecRefusal`) is refused before a write and, in a record
   that carries it anyway, placed nowhere.
+- **A Codex pane's server socket** (Daemon, "Codex sessions"; docs/codex.md threat-model item 4). The pane's
+  `codex app-server --listen` path is `s.sock` in a run dir the daemon made: `/tmp/seance-cx-<mkdtemp>`, `chmod`ed
+  0700 and then held by `lstat` to a real directory of the daemon's uid at 0700 before anything is written in it.
+  Codex links that path to a 0600 socket in its own 0700 `/tmp/codex-daemon-<uid>/`; the daemon dials only once
+  `socketState` (`daemon/src/codex/client.ts`) shows a socket of its uid bound directly in the run dir, or a link
+  whose target is absolute and is a socket of its uid in a real directory of its uid at 0700 (a link to a link, a
+  relative link, a looser directory or another owner's is refused and the launch ends), and only for a pane this
+  process launched. The server's `initialize` must answer the home's own realpath as `codexHome`, or the launch ends.
+  Any same-uid process can dial the socket too, as it can drive tmux: the boundary is unchanged. `run.sh` is constant
+  text written 0600 with `wx`, every path in it through `shq()`; the pane's one shell string is
+  `exec [caffeinate -is ]/bin/sh '<run>/run.sh'`.
+- **What the daemon sends a Codex server, and keeps** (docs/codex.md threat-model items 5 and 6, the launch's half).
+  Constant method names (`initialize`, the `initialized` notification, `thread/start`, `turn/start`); `cwd` the
+  worktree path the spawn path made; `approvalPolicy`, `sandbox` and `approvalsReviewer` from the machine's own
+  `config.json` only, never a frame, autonomy level or session; `model` from the parsed spec (else
+  `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input, never argv, a file or
+  `developerInstructions`. Nothing reaches the pane's argv but daemon paths and the thread id, the id only after
+  `isAgentSessionId` passed it and then as a shell variable's value after `--`. The daemon keeps only the answers to
+  its own requests (a result, or an error's code: never its message), each frame bounded at 16 MiB; it ignores every
+  notification and server request, so it never answers an approval. Nothing the server sent reaches a log, an audit
+  line or a frame.
+- **A Codex launch's thread id** (docs/codex.md threat-model item 10). The launch ledger notes as a Codex task's
+  `session` only the thread id this daemon's own `thread/start` answered, beside `agent: "codex"`
+  (`TaskNote.agent`), never a claimed one; a continuation refuses a note carrying `agent` until Codex continue lands
+  (item 10), so `--resume` is never handed a thread id. Spawn and despawn audit lines carry `agent=codex` for a Codex
+  session (Daemon, "Codex sessions"): the spawn's from the request, the despawn's from the pane's own start mark.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -3813,8 +3844,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   older leader holds a Codex record unreadable instead of re-sealing it without the field and running Claude. A
   leader advertising `CAPABILITIES.codex` parses, keeps and routes the field, and its dispatch copies it into
   `SpawnRequest.agent`; the route filter is what sends it only to a machine advertising `codex` too. No daemon
-  advertises it yet (item 7), and a daemon refuses any spawn carrying `agent` as malformed until its driver lands
-  (item 6), so nothing starts a Codex task as Claude.
+  advertises it yet (item 7), and a daemon refuses any wire spawn carrying `agent` as malformed until then (the
+  driver landed in item 6, Daemon, "Codex sessions"), so nothing starts a Codex task as Claude.
   - **The account is the machine's login** (`accountOf(machine, exclave, agent)`): the exclave still supplies the
     clone, but a Codex candidate bills `logins`' Codex `accountId`, for its quota, pause holds, account pin and
     predecessor check alike. `accountInFlight` resolves each in-flight task's account by that task's own agent, so a
@@ -6633,8 +6664,10 @@ of this section built.
   that imports nothing, because `sessions.ts` and `tmux.ts` read every driver's (`AGENT_PANES`; `OURS` is folded from
   them) and must load no module that logs (`claude-process.ts`'s closure, `message-layering.test.ts`).
   `CLAUDE_PANES.command` is also what `sessionOf` and the adapter feed call a `claude` process: that is session
-  identity, Claude's until a second driver lands. `driverFor` in `spawn.ts` and despawn's close answer Claude alone
-  until a task carries its agent. The shape is Codex's session (docs/codex.md, "The session") as a second
+  identity, Claude's until a Codex session's events land (item 7). `driverFor` in `spawn.ts` picks the driver by the
+  spawn's `agent` (Codex only on a machine with a `codex` block, `launch_error` otherwise), and despawn's close by the
+  pane's own start mark (`PaneInfo.agent`, read through the `AGENT` tmux format, never a field of the request). The
+  shape is Codex's session (docs/codex.md, "The session") as a second
   implementation: its run dir and script are `launch`, its `thread/start` is `started` (the thread id is the daemon's
   own call's answer, so `started` returns the id rather than `launch` choosing it), its `turn/interrupt` is `close`,
   its run-dir mark is `panes`. A driver whose agent does not make its own worktree is handed one the spawn path made,
@@ -7546,6 +7579,52 @@ of this section built.
     daemon made (refused `no_home` before it exists, so it never races the daemon's write) and prints the health,
     version, id, display fields, both windows and the credits state. The daemon notices a sign-in within a minute
     through the signature. On only through `RunOpts.codex`, which `main.ts` always passes, like `githubRate`.
+- **Codex sessions** (`daemon/src/agents/codex.ts`, `daemon/src/codex/client.ts`; built 2026-11-24, docs/codex.md
+  "A pane that hosts its own server" and build order item 6): the Codex driver's launch. No wire spawn reaches it yet:
+  the daemon does not advertise `CAPABILITIES.codex` and `isSpawnRequest` refuses `agent` until the session's events,
+  graceful close and reconnect land (item 7). The threat model's "A Codex pane's server socket", "What the daemon sends
+  a Codex server, and keeps" and "A Codex launch's thread id" hold it.
+  - **Before any pane.** `driverFor` gives a spawn carrying `agent: "codex"` the driver only on a machine whose
+    `config.json` has a `codex` block (`SpawnOptions.codex`: that block and `codexHome()`, set by `createBackend`),
+    `launch_error` otherwise. The driver refuses what V1 cannot run, before a write: a resume (`not_continuable`),
+    attachments, effort `max`, no prompt (the TUI can join a thread only once it has had a turn, and the seed is that
+    turn), and a home that is not a real 0700 directory of the daemon's uid (`launch_error` each).
+  - **The worktree** is the spawn path's own, as for a stack: `addStackedWorktree` at `origin/<default>`'s tip after
+    the fetch (`defaultBaseTip`, `base-fetch.ts`; `no_default_branch` when it cannot be read), at
+    `.claude/worktrees/<slug>` on `worktree-<slug>`, so reap, the custodian, continue and `pushTaskBranch` find it
+    where they find Claude's. A stacked Codex spawn uses the stack's worktree unchanged. The preamble names Codex and
+    "AGENTS.md or CLAUDE.md" (`prepareWorktree`'s `AGENT_WORDS`), and the autonomy note is Codex's
+    (`CODEX_AUTONOMY_PREAMBLE`: a question ends the turn, since Codex has no `AskUserQuestion`).
+  - **The run dir and script.** `/tmp/seance-cx-<mkdtemp>` (the literal `/tmp`, as the custodian's, so the start
+    command and its mark are the same on every host), holding `run.sh` (constant text, 0600, `wx`), `thread` and the
+    `--listen` path `s.sock`. The script exports `CODEX_HOME`, unsets the API-key variables, starts the server in the
+    background with its output discarded, and waits for `thread` (at most 180 s, past the daemon's own wait, and only
+    while the server lives); then runs `codex resume --remote unix://<run>/s.sock -- <thread>` in the foreground.
+    The TUI is waited on, never `exec`ed: an `exec`ed TUI's exit would leave the server orphaned to init, so the
+    shell's `EXIT` trap ends the server and removes the run dir, whether the TUI ended or the pane hung up, and the
+    shell exits with the TUI's status for harvest. The run dir lives exactly as long as the session; `dispose` removes
+    it only for a launch whose `started` never answered.
+  - **The connection** (`connectCodex`): the `ws` package, a daemon dependency, dialling `ws+unix://<run>/s.sock:/`,
+    since Bun's own WebSocket cannot dial a unix socket (S3); `maxPayload` 16 MiB, no compression, a 10 s handshake
+    and a 30 s bound on each request. Rejected: a minimal client over `Bun.connect({ unix })`, a second WebSocket
+    framing to keep, for nothing `ws` lacks (it was already in the lockfile through raycast). `started(window)` waits
+    up to 30 s for `socketState` to read ready (a dead or missing pane reads `claude_died`, the spawn path's word for
+    a session that died starting), then sends `initialize` (the answer's `codexHome` must be the home's realpath),
+    `initialized`, `thread/start` and the first `turn/start`, and only then writes `thread` (`thread.tmp`, renamed).
+    Any failure throws, and the spawn path kills the window, whose script then ends the server. The connection is held
+    per thread id for the pane's life, so the thread always has a subscriber; item 7 reads its notifications. The
+    thread id is the outcome's `session` and `agent: "codex"`, which the launch ledger notes.
+  - **Recognition.** `CODEX_PANES.startMark` is a glob for the run dir prefix in `pane_start_command`, and `OURS` and
+    the `AGENT` format (`agentFormat`, `agents/panes.ts`) fold it: `PaneInfo.agent` is `codex` only for a pane of
+    ours whose start command carries that mark, `claude` otherwise. `CODEX_PANES.command` is null: a hand-started
+    `codex` runs on the owner's own home and is no session of Séance's to list, close or bind. A Codex pane
+    registers by its title like a Claude pane (the TUI titles its pane).
+  - **Close.** No graceful close until `turn/interrupt` lands (item 7): `closeCodex` answers false and despawn kills
+    the pane; the thread stays in the home's store. Despawn picks it by the pane's agent, so a machine whose `codex`
+    block has since gone still closes one.
+  - **Audit.** The spawn request line carries `agent=codex` after any `client=`, with Codex's default model when none
+    was named; the despawn `ok` line ends ` agent=codex`. A Claude spawn's and despawn's lines are byte-identical to
+    before.
 - **GitHub rate limits** (`daemon/src/github-rate.ts`, `gh.ts`; added 2026-11-17): this machine's own `gh`'s GitHub
   API budget, in the status's `gh`. Every Claude session on every machine signs in as one GitHub user, so all of them
   share one 5,000-an-hour REST budget and one 5,000-point GraphQL one. On 2026-11-17 sessions' own `gh` polling spent

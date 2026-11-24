@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { AGENT_PANES, oursFormat } from "./agents/panes.ts";
+import { AGENT_PANES, agentFormat, oursFormat } from "./agents/panes.ts";
 import { exec, type ExecResult } from "./exec.ts";
 
 /**
@@ -63,6 +63,9 @@ export const PANE_TITLED = "#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}
  * `--remote-control`). Reduced to 0/1 inside tmux: the raw command carries wire-supplied values (model, effort).
  */
 export const OURS = oursFormat(AGENT_PANES);
+
+/** The agent whose mark a pane's start command carries (`agentFormat`): a constant word, never the command itself. */
+export const AGENT = agentFormat(AGENT_PANES);
 
 /**
  * Pane user option holding the spawn's `taskId`. On the pane, not in daemon

@@ -10,6 +10,7 @@ import {
   brokerAudit,
   cliSink,
   custodianAudit,
+  despawnAudit,
   drainAskAudit,
   ensureAuditLog,
   enqueueAudit,
@@ -77,6 +78,24 @@ describe("spawn audit lines", () => {
   test("defaults are recorded as they will be applied, not as absent", async () => {
     await audit.request({ repo: "myrepo", mode: "here" });
     expect(emitted()).toContain('model="opus" effort="medium"');
+  });
+
+  test("a Codex spawn says so, with Codex's default model, and a Claude one stays byte-identical", async () => {
+    await audit.request({ repo: "myrepo", mode: "worktree", agent: "codex", prompt: "p" });
+    expect(emitted()).toContain('agent=codex repo="myrepo"');
+    expect(emitted()).toContain('model="gpt-6.2-sol"');
+    collected.length = 0;
+    await audit.request({ repo: "myrepo", mode: "worktree", prompt: "p" });
+    expect(emitted()).not.toContain("agent=");
+  });
+
+  test("a despawn of a Codex pane names its agent; a Claude one's line is unchanged", async () => {
+    const despawn = despawnAudit("relay", collect);
+    await despawn.ok({ window: "w", outcome: "killed", agent: "codex" });
+    expect(emitted()).toBe('audit despawn origin=relay ok window="w" outcome=killed agent=codex');
+    collected.length = 0;
+    await despawn.ok({ window: "w", outcome: "exited" });
+    expect(emitted()).toBe('audit despawn origin=relay ok window="w" outcome=exited');
   });
 
   test("origin separates a spawn typed at the machine from one that arrived over the relay", async () => {

@@ -223,13 +223,15 @@ describe("the Claude driver's launch", () => {
 });
 
 describe("Claude's panes", () => {
-  test("a séance pane is marked by --remote-control in its start command, as before the seam", () => {
-    expect(OURS).toBe("#{m:*--remote-control*,#{pane_start_command}}");
+  test("a séance pane is marked by --remote-control in its start command, as before the seam; Codex's run dir beside it", () => {
+    expect(OURS).toBe(
+      "#{||:#{m:*--remote-control*,#{pane_start_command}},#{m:*/tmp/seance-cx-*,#{pane_start_command}}}",
+    );
   });
 
   test("a hand-started claude is known by its process name: the symlink or the versioned binary", () => {
-    for (const name of ["claude", "2.1.267"]) expect(claudeDriver.panes.command.test(name)).toBe(true);
+    for (const name of ["claude", "2.1.267"]) expect(claudeDriver.panes.command?.test(name)).toBe(true);
     for (const name of ["node", "zsh", "claude-code", "bwrap"])
-      expect(claudeDriver.panes.command.test(name)).toBe(false);
+      expect(claudeDriver.panes.command?.test(name)).toBe(false);
   });
 });

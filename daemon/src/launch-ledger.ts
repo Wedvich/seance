@@ -10,6 +10,7 @@ import {
   parseTaskProgressList,
   parseSpawnRef,
   SIGKILL_STATUS,
+  type AgentLoginKind,
   type TaskProgress,
 } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
@@ -67,8 +68,13 @@ export function launchLedgerPath(): string {
 export interface LaunchSite {
   readonly repo: string;
   readonly worktree: string;
-  /** The Claude session id this daemon chose for the launch (`--session-id`), or a continuation resumed. */
+  /**
+   * The Claude session id this daemon chose for the launch (`--session-id`), or a continuation resumed; for a Codex
+   * launch, the thread id the daemon's own `thread/start` answered.
+   */
   readonly session?: string;
+  /** The launch's agent when not Claude (`SpawnOutcome.agent`): `session` is then a Codex thread, no `--resume` id. */
+  readonly agent?: AgentLoginKind;
   /**
    * The PR URL this launch inherited: a continuation's, from the launch it continued in this ledger, or a
    * successor's, from its scheduler-sealed spawn (`SpawnRequest.inheritedPr`). Noted on the new launch
@@ -96,6 +102,11 @@ export interface TaskNote {
    * continuation resumes. Sticky; internal, never in `TaskProgress`, never read from a frame.
    */
   readonly session?: string;
+  /**
+   * The launch's agent when not Claude (`LaunchSite.agent`): a continuation refuses it, since a Codex thread is no
+   * Claude session to resume. Sticky like `session`; internal, never in `TaskProgress`.
+   */
+  readonly agent?: AgentLoginKind;
   readonly branch?: string;
   /** The last tip that held own work (not in the default, and a net change from its fork), 40 or 64 hex: what merged and pushed are judged on once the branch is reset or gone. */
   readonly tip?: string;
@@ -223,6 +234,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     repo,
     path,
     session,
+    agent,
     branch,
     tip,
     ahead,
@@ -257,6 +269,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(repoText === undefined ? {} : { repo: repoText }),
     ...(pathText === undefined ? {} : { path: pathText }),
     ...(isSessionId(session) ? { session } : {}),
+    ...(agent === "codex" ? { agent } : {}),
     ...(branchText === undefined ? {} : { branch: branchText }),
     ...(tipText === undefined ? {} : { tip: tipText }),
     ...(ahead === true ? { ahead: true as const } : {}),
@@ -353,6 +366,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
       : base?.session !== undefined
         ? { session: base.session }
         : {}),
+    ...(patch.agent !== undefined ? { agent: patch.agent } : base?.agent !== undefined ? { agent: base.agent } : {}),
     ...(patch.branch !== undefined
       ? { branch: patch.branch }
       : base?.branch !== undefined
@@ -420,7 +434,7 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
   );
 }
 
-/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr`, `stackedOn`, `session` and `ref` write but are no progress: they never move `at`. */
+/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr`, `stackedOn`, `session`, `agent` and `ref` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
   return (
     sameProgress(a, b) &&
@@ -432,6 +446,7 @@ function sameNote(a: NotedTask, b: NotedTask): boolean {
     a.continuedPr === b.continuedPr &&
     a.stackedOn === b.stackedOn &&
     a.session === b.session &&
+    a.agent === b.agent &&
     a.ref?.ref === b.ref?.ref &&
     a.ref?.url === b.ref?.url
   );
@@ -701,6 +716,7 @@ export class LaunchLedger {
       readonly repo: string;
       readonly path: string;
       readonly session?: string;
+      readonly agent?: AgentLoginKind;
       readonly continuedPr?: string;
       readonly stackedOn?: string;
     },
@@ -722,6 +738,7 @@ export class LaunchLedger {
         at,
         ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
         ...(isSessionId(site?.session) ? { session: site.session } : {}),
+        ...(site?.agent === undefined ? {} : { agent: site.agent }),
         ...(site?.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
         ...(site?.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
         ...(prUrl === undefined ? {} : { prUrl }),
