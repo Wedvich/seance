@@ -60,3 +60,15 @@ export function codexRefusalText(refusal: string): string {
     ? `a Codex task runs only at autonomy auto for now, not ${refusal.slice("autonomy ".length)}`
     : `a Codex task can't run with ${refusal} yet`;
 }
+
+/**
+ * `codexSpecRefusal`'s clause an amendment of `spec` would bring in, or null. Of the fields an amend changes only
+ * `effort` meets a refusal, so a Codex task amended to `max` is refused before a write: by `sendAmend` on the spec it
+ * reads, and by the leader's `amendSpec` on the one it holds, as a create would be, instead of being placed nowhere.
+ */
+export function codexAmendRefusal(
+  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments" | "succeeds">,
+  amend: { readonly effort?: string | null },
+): string | null {
+  return amend.effort === "max" ? codexSpecRefusal({ ...spec, effort: amend.effort }) : null;
+}

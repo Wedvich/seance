@@ -6,6 +6,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   CAPABILITIES,
+  codexRefusalText,
   CODEX_MODELS,
   isRecord,
   promptBasis,
@@ -4169,6 +4170,7 @@ describe("get_queue, not before", () => {
 
 describe("amend_task", () => {
   const waiting = task({ id: "t-1", state: "queued", spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" } });
+  const codexWaiting = task({ ...waiting, spec: { ...waiting.spec, agent: "codex", autonomy: "auto" } });
 
   function amendMachines(leader = true): Machine[] {
     const [first, ...rest] = autoMachines();
@@ -4260,6 +4262,8 @@ describe("amend_task", () => {
       [{ model: "" }, {}, "model must be 1 to"],
       [{ title: "t" }, { machines: amendMachines(false) }, "cannot amend a queued task yet"],
       [{ append: "x" }, { stored: null }, "amend_task refused (task_not_found)"],
+      [{ effort: "max" }, { stored: codexWaiting }, `refused (agent_unsupported): ${codexRefusalText("effort max")}`],
+      [{ effort: "max", append: "x" }, { stored: codexWaiting }, codexRefusalText("effort max")],
     ] as const;
     for (const [args, opts, said] of cases) {
       // oxlint-disable-next-line no-await-in-loop -- one relay per case

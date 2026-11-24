@@ -49,6 +49,7 @@ import {
   type RegistryView,
   parsePushAlert,
   promptBasis,
+  codexRefusalText,
   type SessionsResponse,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
@@ -3515,6 +3516,7 @@ describe("amend", () => {
         },
       }),
     );
+    await store.put("cdx", 0, task("cdx", { state: "queued", spec: { ...spec, agent: "codex", autonomy: "auto" } }));
     const { leader, replies } = leaderOver(relay, store);
     const ids: Record<string, string> = {};
     const basis = await promptBasis(SECRET);
@@ -3569,6 +3571,12 @@ describe("amend", () => {
           ok: false,
           code: "append_only",
         });
+        // The leader's own check behind the clients': a known code, worded as a create's refusal.
+        expect(await ask("codex", { taskId: "cdx", effort: "max" })).toEqual({
+          ok: false,
+          code: "invalid_request",
+          message: codexRefusalText("effort max"),
+        });
         const long = { mode: "append", text: "x".repeat(8_192) };
         expect(await ask("long", { taskId: "q1", prompt: long, basis })).toMatchObject({
           ok: false,
@@ -3604,6 +3612,7 @@ describe("amend", () => {
       ["run", "run", "placed"],
       ["stale", "q1", "prompt_changed"],
       ["succ", "succ", "append_only"],
+      ["codex", "cdx", "agent_unsupported"],
       ["long", "q1", "prompt_too_long"],
     ] as const) {
       expect(audits).toContainEqual(

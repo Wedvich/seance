@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { promptBasis } from "./amend.ts";
-import { AMEND_READ_FAILURES, parseAmendDraft, sendAmend, type AmendDraft, type AmendSender } from "./amend-client.ts";
+import { codexRefusalText } from "./codex.ts";
+import {
+  AMEND_CLIENT_REFUSALS,
+  parseAmendDraft,
+  sendAmend,
+  type AmendDraft,
+  type AmendSender,
+} from "./amend-client.ts";
 import type { StoreRefusal, TaskLookup } from "./app-client.ts";
 import type { AmendRequest, Task, TaskReply } from "./types.ts";
 
@@ -88,7 +95,7 @@ describe("sendAmend", () => {
   });
 
   test("a read that fails sends nothing, and says why", async () => {
-    const cases: readonly [TaskLookup | StoreRefusal | null, keyof typeof AMEND_READ_FAILURES][] = [
+    const cases: readonly [TaskLookup | StoreRefusal | null, keyof typeof AMEND_CLIENT_REFUSALS][] = [
       [null, "unread"],
       [{ ok: false, code: "rate_limited" }, "unread"],
       [{ ok: true, task: null }, "task_not_found"],
@@ -97,9 +104,46 @@ describe("sendAmend", () => {
     for (const [read, code] of cases) {
       const c = client([read], [landed]);
       // oxlint-disable-next-line no-await-in-loop -- one case at a time
-      expect(await sendAmend(c, append)).toEqual({ ok: false, code, message: AMEND_READ_FAILURES[code] });
+      expect(await sendAmend(c, append)).toEqual({ ok: false, code, message: AMEND_CLIENT_REFUSALS[code] });
       expect(c.sent).toEqual([]);
     }
+  });
+
+  test("effort max on a Codex task is refused unsent, in codexRefusalText's words; on a Claude one it is sent", async () => {
+    const codex: TaskLookup = {
+      ok: true,
+      task: {
+        version: 1,
+        task: { ...task("do it"), spec: { ...task("do it").spec, agent: "codex", autonomy: "auto" } },
+      },
+    };
+    for (const draft of [
+      { taskId: "t-1", effort: "max" },
+      { ...append, effort: "max" },
+      { ...append, basis: "a".repeat(64), effort: "max" },
+    ] satisfies AmendDraft[]) {
+      const c = client([codex], [landed]);
+      // oxlint-disable-next-line no-await-in-loop -- one case at a time
+      expect(await sendAmend(c, draft)).toEqual({
+        ok: false,
+        code: "agent_unsupported",
+        message: `${codexRefusalText("effort max")}, so nothing was sent`,
+      });
+      expect(c.sent).toEqual([]);
+    }
+
+    const high = client([codex], [landed]);
+    expect(await sendAmend(high, { taskId: "t-1", effort: "high" })).toEqual(landed);
+    expect(high.reads).toBe(0);
+
+    const claude = client([found("do it")], [landed]);
+    expect(await sendAmend(claude, { taskId: "t-1", effort: "max" })).toEqual(landed);
+    expect(claude.reads).toBe(1);
+    expect(claude.sent).toEqual([{ taskId: "t-1", effort: "max" }]);
+
+    const unread = client([null], [landed]);
+    expect(await sendAmend(unread, { taskId: "t-1", effort: "max" })).toMatchObject({ code: "unread" });
+    expect(unread.sent).toEqual([]);
   });
 });
 

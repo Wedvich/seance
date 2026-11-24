@@ -13,6 +13,7 @@ import {
 } from "@seance/scheduler";
 import {
   APP_ID,
+  codexRefusalText,
   MAX_PAUSE_HOLDS,
   parseAmendRequest,
   parseDiscardRequest,
@@ -267,6 +268,8 @@ const AMEND_REFUSALS: Record<Exclude<AmendResult, { readonly ok: true }>["code"]
   prompt_too_long: schedulerError("prompt_too_long", "the amended prompt is past the task's bound; nothing changed"),
   append_only: schedulerError("append_only", "a successor's prompt is the leader's; it takes an append only"),
   tags_full: schedulerError("invalid_request", "the task's record has no room for another owner tag; clear one first"),
+  // A code every build words, as `tags_full`'s: clients refuse it first, so only an older one or a bare relay client reads it.
+  agent_unsupported: schedulerError("invalid_request", codexRefusalText("effort max")),
   conflict: schedulerError("conflict", "the task changed while it was amended; ask again"),
 };
 

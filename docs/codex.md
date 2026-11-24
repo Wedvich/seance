@@ -608,8 +608,8 @@ nothing.
    picker grouped by agent (picking a GPT model sets `agent`), effort per agent, an agent badge on the Queue and the
    task view; MCP `spawn_session` and `queue_batch` take `agent`; `seance spawn --agent codex`. _Corrected at build:_
    a brokered enqueue sends `AGENT_DEP_SENTINEL` ahead, since an older broker daemon's parser would drop `agent` and
-   queue Claude; `--now` refuses `--agent codex`. _Left:_ MCP `amend_task` can still set effort `max`
-   on a waiting Codex task, which then places nowhere (`agent_unsupported`) until amended back; refuse it in amend.
+   queue Claude; `--now` refuses `--agent codex`. An amend to effort `max` on a Codex task is refused before a write,
+   by `sendAmend` and again by the leader (`codexAmendRefusal`; DESIGN.md, "Amending a waiting task").
 
 **Phase 3: parity.** Checks S5 and S7 first.
 

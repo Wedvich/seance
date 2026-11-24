@@ -1,4 +1,5 @@
 import { promptBasis } from "./amend.ts";
+import { codexAmendRefusal, codexRefusalText } from "./codex.ts";
 import { isRecord, parseAmendRequest } from "./parse.ts";
 import type { StoreRefusal, TaskLookup } from "./app-client.ts";
 import type { AmendRequest, TaskReply } from "./types.ts";
@@ -13,24 +14,26 @@ export interface AmendSender {
 }
 
 /**
- * `sendAmend` could not read the prompt to name its `basis`, worded here since no leader was asked: the
- * store refused or did not answer (`unread`), holds no such task (`task_not_found`), or holds one it
- * cannot read (`unreadable`). Shaped as a `SchedulerError`, so it crosses the broker as one.
+ * `sendAmend` refused before any leader was asked, worded here since none was: the store refused or did not
+ * answer the read (`unread`), holds no such task (`task_not_found`) or one it cannot read (`unreadable`), or the
+ * task's agent refuses the effort asked (`agent_unsupported`: `codexAmendRefusal`, whose one clause is `effort max`).
+ * Shaped as a `SchedulerError`, so it crosses the broker as one.
  */
-export const AMEND_READ_FAILURES = {
+export const AMEND_CLIENT_REFUSALS = {
   unread: "the task's prompt could not be read from the store, so nothing was sent; try again",
   task_not_found: "the store holds no such task",
   unreadable: "the task's record cannot be read with this key, so nothing was sent",
+  agent_unsupported: `${codexRefusalText("effort max")}, so nothing was sent`,
 } as const;
 
-export interface AmendReadFailure {
+export interface AmendClientRefusal {
   readonly ok: false;
-  readonly code: keyof typeof AMEND_READ_FAILURES;
+  readonly code: keyof typeof AMEND_CLIENT_REFUSALS;
   readonly message: string;
 }
 
-function readFailure(code: AmendReadFailure["code"]): AmendReadFailure {
-  return { ok: false, code, message: AMEND_READ_FAILURES[code] };
+function clientRefusal(code: AmendClientRefusal["code"]): AmendClientRefusal {
+  return { ok: false, code, message: AMEND_CLIENT_REFUSALS[code] };
 }
 
 /** An append whose prompt moved first is sent again on the new one, this many times in all. */
@@ -40,26 +43,37 @@ const APPEND_ATTEMPTS = 3;
  * Sends `draft`, naming as `basis` the prompt the store holds now when the draft names none (an
  * append, or a replace of whatever is there). Only then is a `prompt_changed` sent again, on the
  * prompt read afresh: the refusal says it did not land. A lost answer (null) is never retried — it
- * may have landed, and a second append would add the text twice. A draft with no prompt needs no read.
+ * may have landed, and a second append would add the text twice. Effort `max` reads the task too, and
+ * is refused unsent on a Codex one (`codexAmendRefusal`), which the leader would only refuse again. Any
+ * other draft with no prompt needs no read.
  */
-export async function sendAmend(client: AmendSender, draft: AmendDraft): Promise<TaskReply | AmendReadFailure | null> {
-  if (draft.prompt === undefined || draft.basis !== undefined) {
-    return client.amend(draft.basis === undefined ? withoutBasis(draft) : { ...draft, basis: draft.basis });
-  }
+export async function sendAmend(
+  client: AmendSender,
+  draft: AmendDraft,
+): Promise<TaskReply | AmendClientRefusal | null> {
+  const readsBasis = draft.prompt !== undefined && draft.basis === undefined;
+  if (!readsBasis && draft.effort !== "max") return client.amend(asRequest(draft));
   let reply: TaskReply | null = null;
   for (let attempt = 0; attempt < APPEND_ATTEMPTS; attempt += 1) {
     // oxlint-disable-next-line no-await-in-loop -- each read follows the refusal before it
     const read = await client.getTask(draft.taskId);
-    if (read === null || !read.ok) return readFailure("unread");
-    if (read.task === null) return readFailure("task_not_found");
-    if (!("task" in read.task)) return readFailure("unreadable");
+    if (read === null || !read.ok) return clientRefusal("unread");
+    if (read.task === null) return clientRefusal("task_not_found");
+    if (!("task" in read.task)) return clientRefusal("unreadable");
+    const { spec } = read.task.task;
+    if (codexAmendRefusal(spec, draft) !== null) return clientRefusal("agent_unsupported");
+    if (!readsBasis) return client.amend(asRequest(draft));
     // oxlint-disable-next-line no-await-in-loop -- as above
-    const basis = await promptBasis(read.task.task.spec.prompt);
+    const basis = await promptBasis(spec.prompt);
     // oxlint-disable-next-line no-await-in-loop -- as above
     reply = await client.amend({ ...draft, basis });
     if (reply === null || "task" in reply || reply.code !== "prompt_changed") return reply;
   }
   return reply;
+}
+
+function asRequest(draft: AmendDraft): AmendRequest {
+  return draft.basis === undefined ? withoutBasis(draft) : { ...draft, basis: draft.basis };
 }
 
 function withoutBasis({ basis: _basis, ...rest }: AmendDraft): AmendRequest {

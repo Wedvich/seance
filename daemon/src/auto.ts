@@ -1,5 +1,5 @@
 import {
-  AMEND_READ_FAILURES,
+  AMEND_CLIENT_REFUSALS,
   amendedFields,
   parseAmendDraft,
   type AmendDraft,
@@ -922,8 +922,8 @@ export async function amendAuto(
     return failed(`${label}: the scheduler's answer was unreadable (a seanced version mismatch?) — ${mayHave}`);
   }
   if ("ok" in reply) {
-    // Refused before any leader was asked: the store read for `basis` failed.
-    const read = Object.entries(AMEND_READ_FAILURES).find(([code]) => code === reply.code)?.[1];
+    // Refused before any leader was asked: the store read failed, or the task's agent refuses the effort.
+    const read = Object.entries(AMEND_CLIENT_REFUSALS).find(([code]) => code === reply.code)?.[1];
     const said = `${label} refused (${reply.code}): ${read ?? schedulerErrorText(reply.code)}`;
     return failed(isTransportError(reply.code) ? `${said} — ${mayHave}` : said);
   }
