@@ -83,17 +83,19 @@ export const MODEL_GROUPS: readonly { readonly agent: FormAgent; readonly picks:
 
 export const AGENT_LABELS: Record<FormAgent, string> = { claude: "Claude", ...AGENT_NAMES };
 
-/** `gpt-6.2-sol` → `GPT-6.2 Sol`: the wire's id, cased for a tile. */
-function codexModelLabel(model: CodexModel): string {
-  return model
-    .split("-")
-    .map((word, i) => (i === 0 ? word.toUpperCase() : `${word.charAt(0).toUpperCase()}${word.slice(1)}`))
-    .join(" ")
-    .replace(/^GPT /u, "GPT-");
-}
+/**
+ * A tile names a Codex model by its family alone: `CODEX_MODELS` holds one version per family, and the version is
+ * noise on a phone. A `Record`, so a model added to the list cannot ship without a name.
+ */
+const CODEX_MODEL_LABELS: Record<CodexModel, string> = {
+  "gpt-6.2-sol": "Sol",
+  "gpt-6.2-astra": "Astra",
+  "gpt-6.1-terra": "Terra",
+  "gpt-6-luna": "Luna",
+};
 
 export function modelLabel(pick: ModelPick): string {
-  return pick.agent === "claude" ? MODEL_LABELS[pick.model] : codexModelLabel(pick.model);
+  return pick.agent === "claude" ? MODEL_LABELS[pick.model] : CODEX_MODEL_LABELS[pick.model];
 }
 
 /**

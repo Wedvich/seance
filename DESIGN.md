@@ -3890,7 +3890,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     model string, only to a verified leader advertising `CAPABILITIES.codex`, and refuses `codexSpecRefusal`'s
     combinations before a write in one wording (`codexRefusalText`, `shared/src/codex.ts`).
     - _The PWA:_ the model sheet groups its rows by agent (`MODEL_GROUPS`), and a row is a `ModelPick`, agent and
-      model together, so picking a GPT model sets `form.agent: "codex"`. The saved form keeps both and falls back to
+      model together, so picking a GPT model sets `form.agent: "codex"`. A Codex row is named by its family alone (Sol, not
+      GPT-6.2 Sol), since the list holds one version per family. The saved form keeps both and falls back to
       the default when they disagree. Effort is offered per agent (`OFFERED_EFFORTS_BY_AGENT`, no `max` for either).
       `deriveCodexProblem` blocks the button and names why: an autonomy other than Auto (the form never switches it on
       its own), attached files, or no verified leader advertising `codex`. A held Codex task is checked against the

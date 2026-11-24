@@ -5901,7 +5901,7 @@ describe("a Codex pick", () => {
     const store = new Store(client, form);
     store.setModel(codex);
     store.setAutonomy("auto");
-    expect(deriveView(store.getState(), 0).modelTile).toMatchObject({ value: "GPT-6.2 Sol", tag: "Codex" });
+    expect(deriveView(store.getState(), 0).modelTile).toMatchObject({ value: "Sol", tag: "Codex" });
     await store.spawn();
     expect(firstCreate(client).spec).toMatchObject({ agent: "codex", model: DEFAULT_CODEX_MODEL, autonomy: "auto" });
 
