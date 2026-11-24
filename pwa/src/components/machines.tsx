@@ -530,9 +530,6 @@ function AccountCardView(props: {
           ))}
         </div>
       )}
-      {account.credits !== null && (
-        <p className={`fleet-note fleet-credits-${account.credits.level}`}>{account.credits.text}</p>
-      )}
       {ask?.kind === "failed" && (
         <p className="fleet-note fleet-warn" role="alert">
           {ask.text}

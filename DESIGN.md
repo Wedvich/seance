@@ -11193,12 +11193,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
     repeated titles gain the workspace (else the plan), then the machines, then the account id. The meta line is
     `[<label> ·] <workspace> · <plan> plan · on <machines>`, the label leading only under an alias; the rename sheet
     reads `<label> · Codex` and empties back to the email (`AccountCard.unnamed`, `members`).
-  - **Credits are a line, never a bar or an amount** (docs/codex.md, "Credits and spill"): while the newest reading
-    carries `c` (the daemon sends it only beside `AgentLogin.credits`), "Credits available" at 0, "Credits: N% of the
-    member limit used" between (warn from 75, err from 90), "Credits spent" at 100 (err), whether or not a window
-    is full. _Decided: a line, because_ two of the three states have no fill to show, and "0%" beside "available"
-    would read as none left; and always shown, because it is a state the owner checks before a spill, with no
-    monthly figure to go stale (no `sameCreditMonth`). A full window adds no Credits bar for a login.
+  - **Credits are Claude's bar, never an amount** (docs/codex.md, "Credits and spill"): shown only while a window is
+    full and the newest reading carries `c` (the daemon sends it only beside `AgentLogin.credits`), never green, with
+    the state where Claude's dollar note goes: `available` at 0, `member limit` between, `spent` at 100.
+    `sameCreditMonth` is not applied, since `c` is no monthly figure. _Decided: the bar, at Claude's rule, because_
+    one card reads like the other, and the bar shows only while credits are being spent, where an empty "0%" is
+    named `available` rather than read as none left (owner, 2026-11-24; a line, always shown, was built first).
   - **No reading yet** says the machine has not read the login, since a login's quota comes from the probe, not a
     session.
   - **The Machines card's login row**: one per login while connected (none asleep, as for exclave rows), always

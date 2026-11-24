@@ -2356,15 +2356,6 @@
   color: var(--warn);
 }
 
-/* A login's credits state: no amount, so no bar; the level carries how close to spent it is. */
-.fleet-credits-warn {
-  color: var(--warn);
-}
-
-.fleet-credits-err {
-  color: var(--err);
-}
-
 /* A closed machine's Drain / Drain now, under its drain row: small, so the card stays a status card. */
 .fleet-drain-actions {
   display: flex;

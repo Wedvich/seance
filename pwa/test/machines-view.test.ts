@@ -891,7 +891,6 @@ describe("an agent login", () => {
       agent: { kind: "codex", name: "Codex" },
       detail: "PengeFix · team plan · on a, b",
       historyFrom: "b",
-      credits: null,
     });
     expect(codex?.bars.map((bar) => [bar.label, bar.pct])).toEqual([
       ["5h", 45],
@@ -918,20 +917,21 @@ describe("an agent login", () => {
     }
   });
 
-  test("credits are a state, never an amount: available, a share of the member limit, or spent; no Credits bar", () => {
-    const creditsOf = (c: number | undefined) => {
-      const lq = [{ x: 0, h: 100, s: "cache" as const, at: S - 60, ...(c === undefined ? {} : { c }) }];
+  test("credits are a bar only while a window is full, as Claude's, and never an amount: available, a share, or spent", () => {
+    const barsOf = (c: number | undefined, h = 100) => {
+      const lq = [{ x: 0, h, s: "cache" as const, at: S - 60, ...(c === undefined ? {} : { c }) }];
       const m = withLogin({ status: { at: S, scan: 1, lq } }, login({ credits: true }));
       const card = deriveMachines([m], NOW, NO_LEADER).accounts.find((a) => a.agent.kind === "codex");
-      // A full window spills a Claude account into a Credits bar; a login's credits are the line alone.
-      expect(card?.bars.map((bar) => bar.label)).toEqual(["5h"]);
-      return card?.credits;
+      return card?.bars.map((bar) => [bar.label, bar.pct, bar.level, bar.note]);
     };
-    expect(creditsOf(0)).toEqual({ text: "Credits available", level: "ok" });
-    expect(creditsOf(40)).toEqual({ text: "Credits: 40% of the member limit used", level: "ok" });
-    expect(creditsOf(80)).toEqual({ text: "Credits: 80% of the member limit used", level: "warn" });
-    expect(creditsOf(100)).toEqual({ text: "Credits spent", level: "err" });
-    expect(creditsOf(undefined)).toBeNull();
+    const credits = (c: number) => barsOf(c)?.[1];
+    expect(credits(0)).toEqual(["Credits", 0, "warn", ["available"]]);
+    expect(credits(40)).toEqual(["Credits", 40, "warn", ["member limit"]]);
+    expect(credits(95)).toEqual(["Credits", 95, "err", ["member limit"]]);
+    expect(credits(100)).toEqual(["Credits", 100, "err", ["spent"]]);
+    // No full window, or no `c`: the windows alone.
+    expect(barsOf(40, 60)?.map(([label]) => label)).toEqual(["5h"]);
+    expect(barsOf(undefined)?.map(([label]) => label)).toEqual(["5h"]);
   });
 
   test("an alias titles it and its email leads the meta line; renaming goes back to the email", () => {

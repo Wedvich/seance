@@ -197,7 +197,7 @@ stateDir()/codex/              0700, the daemon's own
 - **On the wire, `c` and never `cu`/`cl`.** `c` is `100 − individualLimit.remainingPercent` when a member limit is
   reported, else `0` while the account can spend and `100` once it cannot, so routing's `creditsSpent` reads it
   unchanged. `cu` and `cl` are USD cents; Codex's `balance`, `used` and `limit` are strings in a unit no response states.
-  _Decided: no amount shown, because_ O2 leaves the unit to the first real spill: the account card shows credits as
+  _Decided: no amount shown, because_ O2 leaves the unit to the first real spill: the account card's Credits bar notes
   available, a percent of the member limit, or spent. The Business login in S6 reported `hasCredits: false`, so it
   cannot spill today.
 

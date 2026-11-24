@@ -529,11 +529,6 @@ export interface AccountCard {
   /** Named, what the title no longer says leads it; an agent login's workspace and plan follow its name. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
-  /**
-   * An agent login's credits state (docs/codex.md, "Credits and spill"): available, a percent of the member limit, or
-   * spent, never an amount, while its newest reading carries `c`. Null for Claude, whose credits are a bar.
-   */
-  readonly credits: { readonly text: string; readonly level: Level } | null;
   readonly observed: Timed;
   /** The machine to read this account's quota history from without the archive; null when none online can serve it. */
   readonly historyFrom: string | null;
@@ -865,17 +860,18 @@ function quotaBar(label: string, pct: number, resetsAt: number | undefined, now:
 
 /**
  * Credits show only while a window is full: that is when use spills into them,
- * and until then they are a monthly figure nothing on the card is spending.
- * Last month's figure says nothing about this one's, so it shows no bar.
- * An agent login's credits are a line, not a bar (`loginCredits`): `withCredits` is false for one.
+ * and until then they are a figure nothing on the card is spending.
+ * Last month's Claude figure says nothing about this one's, so it shows no bar;
+ * an agent login's `c` is no monthly figure (`loginCreditsBar`).
  */
-function quotaBars(observation: QuotaReading, now: number, withCredits = true): QuotaBar[] {
+function quotaBars(observation: QuotaReading, now: number, login: boolean): QuotaBar[] {
   const bars: QuotaBar[] = [];
   if (observation.h !== undefined) bars.push(quotaBar("5h", observation.h, observation.hr, now));
   if (observation.d !== undefined) bars.push(quotaBar("7d", observation.d, observation.dr, now));
   for (const window of observation.w ?? []) bars.push(quotaBar(`7d ${window.m}`, window.p, window.r, now));
-  if (!withCredits || observation.c === undefined || !sameCreditMonth(observation.at, now / 1000)) return bars;
-  if (!bars.some((bar) => bar.pct >= 100)) return bars;
+  if (observation.c === undefined || !bars.some((bar) => bar.pct >= 100)) return bars;
+  if (login) return [...bars, loginCreditsBar(observation.c)];
+  if (!sameCreditMonth(observation.at, now / 1000)) return bars;
   return [...bars, creditsBar(observation)];
 }
 
@@ -897,17 +893,17 @@ function creditsBar({ c, cu, cl }: QuotaReading): QuotaBar {
 }
 
 /**
- * An agent login's credits state (docs/codex.md, "Credits and spill"): `c` is 100 less the member limit's remaining
- * percent where one is reported, else 0 while the account can spend and 100 once it cannot. So 0 is available (a
- * member limit untouched reads the same, and is), 100 spent, and between them the member limit's share. Never an
- * amount: Codex's unit is unstated until a real spill settles it (O2). A line, not a bar, since two of the three
- * states have no fill to show and "0%" beside "available" would read as none left.
+ * An agent login's Credits bar (docs/codex.md, "Credits and spill"): `c` is 100 less the member limit's remaining
+ * percent where one is reported, else 0 while the account can spend and 100 once it cannot. So the note names the
+ * state where the dollar note would go: available at 0 (a member limit untouched reads the same, and is), spent at
+ * 100, the member limit's share between. Never an amount: Codex's unit is unstated until a real spill settles it (O2).
  */
-function loginCredits(c: number): NonNullable<AccountCard["credits"]> {
-  if (c >= 100) return { text: "Credits spent", level: "err" };
-  if (c <= 0) return { text: "Credits available", level: "ok" };
-  const pct = Math.round(c);
-  return { text: `Credits: ${pct}% of the member limit used`, level: levelFor(pct) };
+function loginCreditsBar(c: number): QuotaBar {
+  const base = gauge("Credits", c);
+  // As Claude's (`creditsBar`): on screen only while spending, so never green.
+  const bar = base.level === "ok" ? { ...base, level: "warn" as const } : base;
+  const note = bar.pct >= 100 ? "spent" : bar.pct <= 0 ? "available" : "member limit";
+  return { ...bar, note: [note] };
 }
 
 /**
@@ -1030,7 +1026,6 @@ function deriveAccounts(
     const on = `on ${[...group.machines].join(", ")}`;
     const historyFrom = historyHost(group, observer);
     const held = holds.known ? accountHold(holds.holds, group.accountId, now) : undefined;
-    const c = quota?.observation.c;
     return {
       accountId: group.accountId,
       alias: alias ?? null,
@@ -1048,8 +1043,7 @@ function deriveAccounts(
               ...(group.plan === undefined ? [] : [`${group.plan} plan`]),
               on,
             ].join(" · "),
-      bars: quota === undefined ? [] : quotaBars(quota.observation, now, group.agent === null),
-      credits: group.agent === null || c === undefined ? null : loginCredits(c),
+      bars: quota === undefined ? [] : quotaBars(quota.observation, now, group.agent !== null),
       observed: observedLine(quota, observer, now, group.agent),
       historyFrom,
       charts: archived || historyFrom !== null,
