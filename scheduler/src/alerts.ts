@@ -1,6 +1,7 @@
 import {
   quote,
   taskPrBlock,
+  type AgentLoginKind,
   type FleetQuotaEntry,
   type FlagReason,
   type Machine,
@@ -8,7 +9,7 @@ import {
   type QuotaAlertReason,
   type SpillStamp,
 } from "@seance/shared";
-import { SPAN_MS, windowResetOf, type Decision } from "./route.ts";
+import { accountOfPlacement, SPAN_MS, windowResetOf, type Decision } from "./route.ts";
 import type { Task } from "./task.ts";
 
 /**
@@ -236,6 +237,8 @@ export class SpillAlerts {
     machines: readonly Machine[],
     now: number,
     fleetQuota: readonly FleetQuotaEntry[] = [],
+    /** The task's agent: a Codex task spills on the machine's Codex account, never the exclave's. */
+    agent?: AgentLoginKind,
   ): { readonly alert: SchedulerAlert; readonly stamp: SpillStamp } | null {
     const { chosen } = decision;
     if (chosen === null) return null;
@@ -243,10 +246,8 @@ export class SpillAlerts {
       (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave,
     )?.spill;
     if (spill === undefined) return null;
-    const accountId = machines
-      .find((m) => m.deviceId === chosen.deviceId)
-      ?.exclaves?.find((x) => x.id === chosen.exclave)?.accountId;
-    if (accountId === undefined || accountId === null) return null;
+    const accountId = accountOfPlacement(machines, chosen, agent);
+    if (accountId === null) return null;
     const spending = spill.spending === true;
     const key = alertKey(accountId, spill.window, spending);
     const resetS = windowResetOf(accountId, machines, spill.window, fleetQuota);

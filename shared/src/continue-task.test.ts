@@ -65,6 +65,8 @@ describe("continueOffer", () => {
       ["another failure", failed({ failure: { code: "lost_expired", message: "lost" } }), able],
       ["no failure at all", failed({ failure: undefined }), able],
       ["here mode", failed({}, { mode: "here" }), able],
+      // Phase 3: Codex's resume is its own driver's.
+      ["a Codex task", failed({}, { agent: "codex", autonomy: "auto" }), able],
       ["never placed", failed({ assignment: undefined }), able],
       ["machine unlisted", failed(), [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession], "dev-other")]],
       ["machine lacks the capability", failed(), [machine([CAPABILITIES.taskId])]],

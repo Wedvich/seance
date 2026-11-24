@@ -81,7 +81,8 @@ describe("key grammar", () => {
 describe("known keys", () => {
   test.each([
     ["agent.kind", "claude", "claude", "conversation"],
-    ["agent.kind", "codex", null, "conversation"],
+    ["agent.kind", "codex", "codex", "conversation"],
+    ["agent.kind", "agy", null, "conversation"],
     ["agent.session", UUID, UUID, "conversation"],
     ["agent.session", UUID.toUpperCase(), null, "conversation"],
     ["agent.session", "not-a-uuid", null, "conversation"],

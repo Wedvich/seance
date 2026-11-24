@@ -14,6 +14,7 @@ import {
 } from "./messages.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  AGENT_DEP_SENTINEL,
   AGENT_LOGIN_KINDS,
   AGENT_LOGIN_TEXT_MAX,
   ATTACHMENT_HASH_PATTERN,
@@ -218,6 +219,7 @@ import {
   type TaskRequest,
   type Envelope,
   type AgentLogin,
+  type AgentLoginKind,
   type ExclaveInfo,
   type MachineInfo,
   type CustodianStatus,
@@ -1287,6 +1289,8 @@ function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRe
   if (plan !== undefined && typeof plan !== "boolean") return null;
   if (autonomy !== undefined && !isAutonomyLevel(autonomy)) return null;
   if (skill !== undefined && !isSkillName(skill)) return null;
+  const agent = parseTaskAgent(value["agent"]);
+  if (agent === null) return null;
   // Normalised, not just checked: `steer` gains `plan: true`, so an older leader that drops
   // `autonomy` from the record still dispatches plan mode; `plan` beside another level is refused.
   return withAutonomy({
@@ -1299,7 +1303,18 @@ function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRe
     ...(plan === undefined ? {} : { plan }),
     ...(autonomy === undefined ? {} : { autonomy }),
     ...(skill === undefined ? {} : { skill }),
+    ...(agent === undefined ? {} : { agent }),
   });
+}
+
+/**
+ * A request's `agent`: Codex kept, `"claude"` dropped (absent already means Claude, so no Claude record changes by a
+ * byte), anything else null. Never dropped silently: a task for an agent this build does not know must not run as
+ * Claude.
+ */
+function parseTaskAgent(value: unknown): AgentLoginKind | null | undefined {
+  if (value === undefined || value === "claude") return undefined;
+  return AGENT_LOGIN_KINDS.find((kind) => kind === value) ?? null;
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -1402,6 +1417,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
           succeeding: follows !== undefined,
           // The raw field, not `tags`: a record whose every tag this build drops still carries its sentinel.
           tagged: value["tags"] !== undefined,
+          agented: request.agent !== undefined,
         });
   const issue = linear === undefined ? undefined : parseLinear(linear);
   const notBefore = value["notBefore"];
@@ -1442,8 +1458,8 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
 }
 
 /**
- * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`, `TAGS_DEP_SENTINEL`) is
- * dropped before the bound applies, and only beside its field: one without it is a record
+ * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`, `TAGS_DEP_SENTINEL`,
+ * `AGENT_DEP_SENTINEL`) is dropped before the bound applies, and only beside its field: one without it is a record
  * something stripped the field from — or a sentinel with nothing it guards — and fails
  * `isTaskId`, nulling the spec. A requirement stripped is the reverse, `requires` without its
  * sentinel, and reads fine: no leader older than this one wrote it. Deps that were
@@ -1454,6 +1470,7 @@ type DepGuards = {
   readonly required: boolean;
   readonly succeeding: boolean;
   readonly tagged: boolean;
+  readonly agented: boolean;
 };
 
 function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null | undefined {
@@ -1463,11 +1480,16 @@ function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null
       !(guards.attached && isAttachmentsSentinel(dep)) &&
       !(guards.required && isRequiresSentinel(dep)) &&
       !(guards.succeeding && isSuccessorSentinel(dep)) &&
-      !(guards.tagged && isTagsSentinel(dep)),
+      !(guards.tagged && isTagsSentinel(dep)) &&
+      !(guards.agented && isAgentSentinel(dep)),
   );
   if (real.length === 0 && value.length > 0) return undefined;
   const edges = parseList(real, parseDep);
   return edges === null || edges.length > TASK_SPEC_LIMITS.deps ? null : edges;
+}
+
+function isAgentSentinel(value: unknown): boolean {
+  return isRecord(value) && value["task"] === AGENT_DEP_SENTINEL.task && value["after"] === AGENT_DEP_SENTINEL.after;
 }
 
 function isTagsSentinel(value: unknown): boolean {
@@ -1588,6 +1610,10 @@ function parseReason(value: unknown): Reason | null {
     case "predecessor_account":
     case "continue_unsupported":
     case "attachments_unsupported":
+    case "agent_unsupported":
+    case "login_absent":
+    case "login_outdated":
+    case "login_blocked":
     case "base_unsupported":
     case "auth_missing":
     case "auth_expired":

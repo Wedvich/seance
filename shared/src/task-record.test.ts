@@ -4,6 +4,7 @@ import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } 
 import { isTaskId } from "./parse.ts";
 import { joinTags, taskTagEntries } from "./tags.ts";
 import {
+  AGENT_DEP_SENTINEL,
   APP_ID,
   AT_REST_OPS,
   ATTACHMENTS_DEP_SENTINEL,
@@ -330,6 +331,62 @@ describe("task records at rest", () => {
     const id = crypto.randomUUID();
     const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", { version: 1, task: { id } });
     expect(await openTaskRecord(key, { key: taskKey(id), version: 1, env }, NOW)).toBe("malformed");
+  });
+
+  describe("`agent`", () => {
+    const open = async (payload: unknown, id: string): Promise<unknown> => {
+      const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", payload);
+      return openTaskRecord(key, { key: taskKey(id), version: 1, env }, NOW);
+    };
+    const sealed = async (task: Task): Promise<unknown> => {
+      const env = await sealTaskRecord(key, APP_ID, { version: 1, task });
+      return (await openAtRest(key, env, "task")).payload;
+    };
+    const codex = (over: Partial<Task["spec"]> = {}): Task => {
+      const base = queued();
+      return { ...base, spec: { ...base.spec, agent: "codex", autonomy: "auto", ...over } };
+    };
+    // The previous release's dep reader (`parseDep`): a dep is a task id and an `after` it knows.
+    const olderDepParses = (dep: unknown): boolean =>
+      isTaskId(field(dep, "task")) && ["opened", "merged", "done"].includes(String(field(dep, "after")));
+
+    test("seals the sentinel after the others, an older dep reader refuses it, and it reads back equal", async () => {
+      const task = codex();
+      const deps = field(field(field(await sealed(task), "task"), "spec"), "deps");
+      expect(deps).toEqual([AGENT_DEP_SENTINEL]);
+      expect(Array.isArray(deps) && deps.every(olderDepParses)).toBe(false);
+      expect(await open(await sealed(task), task.id)).toEqual({ version: 1, task });
+      const real = [{ task: "t-1", after: "done" as const }];
+      const tagged = codex({ deps: real, requires: ["atlas"], tags: { "creator.ref": "linear:ENG-1" } });
+      expect(field(field(field(await sealed(tagged), "task"), "spec"), "deps")).toEqual([
+        ...real,
+        REQUIRES_DEP_SENTINEL,
+        TAGS_DEP_SENTINEL,
+        AGENT_DEP_SENTINEL,
+      ]);
+      expect(await open(await sealed(tagged), tagged.id)).toEqual({ version: 1, task: tagged });
+    });
+
+    test("a Claude record seals byte for byte as before: `claude` is dropped and no sentinel is added", async () => {
+      const task = queued();
+      const said = { ...task, spec: { ...task.spec, agent: "claude" } };
+      expect(await sealed(task)).toEqual({ version: 1, task });
+      expect(await open({ version: 1, task: said }, task.id)).toEqual({ version: 1, task });
+    });
+
+    test("the sentinel without `agent` is malformed, and an agent this build does not know nulls the spec", async () => {
+      const task = codex();
+      const { agent: _agent, ...bare } = task.spec;
+      const stripped = { ...task, spec: { ...bare, deps: [AGENT_DEP_SENTINEL] } };
+      expect(await open({ version: 1, task: stripped }, task.id)).toBe("malformed");
+      const unknown = { ...task, spec: { ...task.spec, agent: "agy", deps: [AGENT_DEP_SENTINEL] } };
+      expect(await open({ version: 1, task: unknown }, task.id)).toBe("malformed");
+    });
+
+    test("a record carrying what V1 refuses beside it stays readable", async () => {
+      const task = codex({ effort: "max", autonomy: "checkpoint" });
+      expect(await open(await sealed(task), task.id)).toEqual({ version: 1, task });
+    });
   });
 });
 

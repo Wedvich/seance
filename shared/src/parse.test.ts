@@ -1232,6 +1232,14 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
 
+  test("a Codex task's reasons survive the decision record", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default" };
+    const codes = ["agent_unsupported", "login_absent", "login_outdated", "login_blocked"] as const;
+    const rejected: Reason[] = codes.map((code) => ({ code }));
+    const parsed = parseDecision({ at: 1, chosen: null, candidates: [{ ...candidate, rejected }] });
+    expect(parsed?.candidates[0]?.rejected).toEqual(rejected);
+  });
+
   test("a score's keepFree component round-trips, is optional (an older leader omits it) and is dropped, not the score, when not finite", () => {
     const components = { accountPressure: 0.1, machinePressure: 0.2, dependencyDistance: 0, queuePressure: 0 };
     const decision = (score: unknown) => ({

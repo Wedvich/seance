@@ -1,10 +1,11 @@
 import { stat } from "node:fs/promises";
+import { CODEX_MIN_VERSION, versionAtLeast } from "@seance/shared";
 import { homedir } from "node:os";
 import { codexOwnerAudit, cliSink, type CodexOwnerOp, type CodexOwnerOutcome } from "../audit.ts";
 import { usageLine } from "../commands.ts";
 import { loadConfig } from "../config.ts";
 import { codexBin, codexEnv, codexHome, prepareCodexHome } from "./home.ts";
-import { CODEX_MIN_VERSION, probeCodex, readCodexVersion, versionAtLeast, type ProbeResult } from "./probe.ts";
+import { probeCodex, readCodexVersion, type ProbeResult } from "./probe.ts";
 import { printable } from "../custodian-owner-cli.ts";
 import { childEnv } from "../exec.ts";
 

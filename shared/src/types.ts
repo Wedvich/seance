@@ -99,6 +99,25 @@ export function isEffort(value: unknown): value is Effort {
 }
 
 /**
+ * The Codex models the clients offer (DESIGN.md, Scheduler, "Codex tasks"): `model/list` from `codex app-server`
+ * 0.171.0 on 2026-11-24, every entry it lists with no `upgrade` (one it names an upgrade for is superseded), in its
+ * order. A constant, not each login's own list: one picker does not justify growing every register. The wire keeps
+ * `model` a free bounded string, so a model added later needs no wire change.
+ */
+export const CODEX_MODELS = [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
+  "gpt-6.1-terra",
+  "gpt-6.1-sol",
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
+] as const;
+
+/** The entry 0.171.0's `model/list` marks `isDefault`: what a Codex task with no `model` runs. */
+export const DEFAULT_CODEX_MODEL = "gpt-6.2-sol";
+
+/**
  * Encrypted envelope — all the relay sees besides routing. The 12-byte GCM
  * IV doubles as the replay nonce; `v|to|from` are bound as AAD so the relay
  * cannot re-address a captured blob.
@@ -1268,6 +1287,12 @@ export interface MachineInfo {
  * `AmendRequest.ownerTags`, and sends `SpawnRequest.ref` to a daemon advertising it; as a daemon, takes
  * `SpawnRequest.ref`. A client writes `tags` or `ownerTags` only to a verified leader advertising it (a continuation
  * drops its copied tags instead of refusing), since an older leader holds a tagged record unreadable.
+ * `codex`: as a leader, parses, keeps and re-seals `TaskSpec.agent` behind `AGENT_DEP_SENTINEL`, routes a Codex task on
+ * the machine's Codex login (DESIGN.md, Scheduler, "Codex tasks") and sends `SpawnRequest.agent` only to a machine
+ * advertising it; as a daemon, launches `agent: "codex"` and is placed on only while its `logins` holds a signed-in
+ * Codex login at or above the floor. One build does both halves; no daemon advertises it before the Codex launch
+ * (docs/codex.md, build order item 7), so until then no Codex task is placed. A client writes `agent` only to a verified
+ * leader advertising it.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1302,6 +1327,7 @@ export const CAPABILITIES = {
   watches: "watches",
   taskTags: "taskTags",
   sessionTag: "sessionTag",
+  codex: "codex",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1975,6 +2001,13 @@ export interface SpawnRequest {
    * ignores it. Each value as `parseTagValue` holds it, else it is ignored. Display only, never logged.
    */
   readonly ref?: { readonly ref: string; readonly url?: string };
+  /**
+   * The agent to run, absent meaning Claude (DESIGN.md, Scheduler, "Codex tasks"). In a spawn, set only by the leader's
+   * dispatch from `TaskSpec.agent`, and only to a daemon advertising `CAPABILITIES.codex`: an older daemon would drop
+   * it and start Claude. A daemon with no driver for it refuses the spawn as malformed, never starts Claude instead.
+   * A parsed `"claude"` is dropped, so no Claude record or spawn changes by a byte.
+   */
+  readonly agent?: AgentLoginKind;
 }
 
 /**
@@ -2886,7 +2919,7 @@ export type TaskState = (typeof TASK_STATES)[number];
  */
 export interface TaskRequest extends Pick<
   SpawnRequest,
-  "mode" | "prompt" | "title" | "model" | "effort" | "plan" | "autonomy"
+  "mode" | "prompt" | "title" | "model" | "effort" | "plan" | "autonomy" | "agent"
 > {
   readonly repo: string;
   /**
@@ -3090,6 +3123,14 @@ export const SUCCESSOR_DEP_SENTINEL = { task: "", after: "done" } as const;
  * sentinels of the other three fields. This build's parser drops it only beside `tags`, and refuses it without.
  */
 export const TAGS_DEP_SENTINEL = { task: "", after: "tags" } as const;
+
+/**
+ * Sealed into `spec.deps` whenever a spec carries `agent` (`taskRecordAtRest`), as `TAGS_DEP_SENTINEL` is: an older
+ * leader's dep parser refuses the empty `task` (and `after: "agent"`, outside `DEP_AFTER`), so it holds a Codex record
+ * unreadable rather than seal it back without the field and hand the task to `claude`. This build's parser drops it
+ * only beside `agent`, and refuses it without.
+ */
+export const AGENT_DEP_SENTINEL = { task: "", after: "agent" } as const;
 
 /** What a session may send as the record of a pass, UTF-16 units: the successor's prompt below the preamble. */
 export const SUCCESSOR_RECORD_MAX = 7_168;
@@ -3327,8 +3368,20 @@ export type Reason =
    * from the default branch silently. Judged from the spec, so routing and the dispatch after it agree.
    */
   | { readonly code: "base_unsupported" }
+  /**
+   * A task carrying `agent`: the machine does not advertise `CAPABILITIES.codex`, or the spec asks what V1 refuses
+   * beside it (`codexSpecRefusal`), then on every candidate (DESIGN.md, Scheduler, "Codex tasks").
+   */
+  | { readonly code: "agent_unsupported" }
+  /** A Codex task: the machine's `logins` is absent or holds no Codex login. */
+  | { readonly code: "login_absent" }
+  /** A Codex task: the login reports no `version`, or one below `CODEX_MIN_VERSION`. */
+  | { readonly code: "login_outdated" }
+  /** A Codex task: the login is in its status's `lb` (the backend refuses its included usage). */
+  | { readonly code: "login_blocked" }
+  /** Signed out or unidentified: the exclave's Claude login, or for a Codex task the machine's Codex login. */
   | { readonly code: "auth_missing" }
-  /** M4, Auth health: the exclave is listed in its status's `ax`. */
+  /** M4, Auth health: the exclave is listed in its status's `ax`; for a Codex task, the login in `lx`. */
   | { readonly code: "auth_expired" }
   /**
    * M4, Skills: the task needs `skill` (declared, or its prompt's `/name`), the

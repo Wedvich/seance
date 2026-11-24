@@ -20,6 +20,19 @@ describe("specError", () => {
     ).toBeNull();
   });
 
+  test("a Codex task is refused before a write with each field V1 does not run, and accepted with none", () => {
+    const codex: AutoSpec = { ...BASE, agent: "codex", autonomy: "auto" };
+    expect(specError(codex)).toBeNull();
+    expect(specError({ ...codex, effort: "max" })).toBe("a Codex task can't run with effort max yet");
+    expect(specError({ ...BASE, agent: "codex" })).toBe("a Codex task can't run with autonomy checkpoint yet");
+    expect(specError({ ...BASE, agent: "codex", plan: true })).toBe("a Codex task can't run with autonomy steer yet");
+    expect(
+      specError({ ...codex, continues: { task: ID, at: { deviceId: "d", exclave: "main", clone: "app" } } }),
+    ).toContain("continuing a session");
+    // The same fields on a Claude task are untouched.
+    expect(specError({ ...BASE, effort: "max", plan: true })).toBeNull();
+  });
+
   test("the request bounds keep their wording", () => {
     expect(specError({ ...BASE, prompt: "x".repeat(TASK_REQUEST_LIMITS.prompt + 1) })).toStartWith("the prompt is");
   });

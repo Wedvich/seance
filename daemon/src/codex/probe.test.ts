@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { parseCodexVersion, versionAtLeast } from "@seance/shared";
 import {
   codexAccountId,
   creditView,
   parseAccountRead,
-  parseCodexVersion,
   parseRateLimits,
   probeResultOf,
   quotaReadingOf,
-  versionAtLeast,
   type RpcAnswer,
 } from "./probe.ts";
 

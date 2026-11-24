@@ -153,6 +153,14 @@ export function reasonText(reason: Reason): string {
       return "its daemon can't fetch attachments yet (needs seance update)";
     case "base_unsupported":
       return "its daemon can't stack on another task's branch yet (needs seance update)";
+    case "agent_unsupported":
+      return "it can't run this agent, or not with what the task asks";
+    case "login_absent":
+      return "no Codex login there";
+    case "login_outdated":
+      return "its Codex is too old (needs an upgrade)";
+    case "login_blocked":
+      return "its Codex account's usage is blocked";
     case "auth_missing":
       return "not signed in";
     case "auth_expired":

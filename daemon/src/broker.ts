@@ -1,6 +1,7 @@
 import {
   APP_ID,
   CAPABILITIES,
+  codexSpecRefusal,
   isRecord,
   isTaskId,
   MACHINES_ID,
@@ -198,6 +199,11 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
   if (spec.lineage !== undefined || spec.base !== undefined) {
     return { code: "invalid_request", message: "lineage and base are not brokered" };
   }
+  // As `specError`'s: the leader would hold it and place it nowhere, so it is refused before a write.
+  const unsupported = codexSpecRefusal(spec);
+  if (unsupported !== null) {
+    return { code: "invalid_request", message: `a Codex task can't run with ${unsupported} yet` };
+  }
   if (!isBrokerEnqueueClient(spec.client)) {
     return { code: "invalid_request", message: "a brokered task's client must be mcp or cli" };
   }
@@ -314,6 +320,17 @@ export function createBroker(opts: BrokerOpts): Broker {
               id,
               "invalid_request",
               "the scheduler's leader does not route on requires yet, or no verified scheduler is leading",
+            );
+          }
+        }
+        // An older leader holds a Codex record unreadable (`AGENT_DEP_SENTINEL`), so none is written to one, or to none.
+        if (request.spec.agent !== undefined) {
+          const { machines, scheduler } = client.getState();
+          if (!advertises(machines, scheduler, CAPABILITIES.codex)) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not run Codex tasks yet, or no verified scheduler is leading",
             );
           }
         }
