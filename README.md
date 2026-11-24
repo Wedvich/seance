@@ -755,9 +755,10 @@ daemon connects again. `seance uninstall` deletes it for you on the way out; und
 
 There is no title field: the daemon names the tmux window after the prompt.
 
-The machine's repo list comes from its daemon's last scan. **↻ Rescan** sits on that
-machine's row in the Machine picker (offline machines can't answer it, and one rescan runs
-at a time); it refreshes the list and the row shows when it last scanned.
+Each machine's repo list comes from its daemon's last scan. **↻** beside the repository
+picker's filter asks every connected machine to rescan at once (offline machines can't
+answer it, and one rescan runs at a time); the picker names any machine that failed, and
+each row in the Machine picker shows when that machine last scanned.
 
 The **Machine** and **Account** pickers each start on **Auto**, which lets the scheduler
 choose; picking a machine or an account pins the task to it. The repository picker lists

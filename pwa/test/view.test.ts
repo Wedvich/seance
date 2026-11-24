@@ -733,33 +733,35 @@ describe("the pickers", () => {
     expect(choice?.sub).toBe("offline · last seen 5m ago");
   });
 
-  test("a rescan shows on its own row only: offered while connected, disabled while any runs", () => {
+  test("a rescan marks the rows it asked, and the Repo sheet's button and failure line", () => {
     const asleep = machine({ ...wsl, connected: false });
     const idle = deriveView(state({ relay: leader([mac, asleep, bare]) }), NOW);
-    const idleRows = Object.fromEntries(idle.machineChoices.map((c) => [c.machine.name, c]));
-    expect(idleRows["Mac"]).toMatchObject({ canRescan: true, rescanDisabled: false, rescan: null });
-    expect(idleRows["WSL"]).toMatchObject({ canRescan: false, rescanDisabled: false, rescan: null });
+    expect(idle.repoRescan).toEqual({ disabled: false, scanning: false, failure: null });
 
     const scanning = deriveView(
-      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "scanning", deviceId: "mac" } }),
+      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "scanning", deviceIds: ["mac"] } }),
       NOW,
     );
     const rows = Object.fromEntries(scanning.machineChoices.map((c) => [c.machine.name, c]));
-    expect(rows["Mac"]).toMatchObject({ rescan: "scanning", rescanDisabled: true, sub: "scanning…" });
-    expect(rows["Bare"]).toMatchObject({ rescan: null, rescanDisabled: true, canRescan: true });
-    expect(rows["WSL"]).toMatchObject({ rescan: null, canRescan: false });
+    expect(rows["Mac"]?.sub).toBe("scanning…");
+    expect(rows["Bare"]?.sub).not.toBe("scanning…");
+    expect(scanning.repoRescan).toEqual({ disabled: true, scanning: true, failure: null });
 
     const failed = deriveView(
-      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "failed", deviceId: "bare" } }),
+      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "failed", deviceIds: ["bare"] } }),
       NOW,
     );
     const failedRows = Object.fromEntries(failed.machineChoices.map((c) => [c.machine.name, c]));
-    expect(failedRows["Bare"]).toMatchObject({
-      rescan: "failed",
-      rescanDisabled: false,
-      sub: "couldn't rescan — last known list",
+    expect(failedRows["Bare"]?.sub).toBe("couldn't rescan — last known list");
+    expect(failedRows["Mac"]?.sub).toBe("online · 2 repos · last scanned just now");
+    expect(failed.repoRescan).toEqual({
+      disabled: false,
+      scanning: false,
+      failure: "Couldn't rescan Bare — showing the last known list.",
     });
-    expect(failedRows["Mac"]).toMatchObject({ rescan: null, sub: "online · 2 repos · last scanned just now" });
+
+    // Nothing connected can answer, so the button is off.
+    expect(deriveView(state({ relay: leader([asleep]) }), NOW).repoRescan.disabled).toBe(true);
   });
 
   test("an Account row's dot is green while a machine signed in to it is connected, grey when all are asleep", () => {

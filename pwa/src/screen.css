@@ -1618,13 +1618,20 @@
   padding-bottom: 14px;
 }
 
+.sheet-search-row {
+  display: flex;
+  gap: 8px;
+  flex: none;
+  margin-bottom: 8px;
+}
+
 .sheet-search {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: none;
+  flex: 1;
+  min-width: 0;
   min-height: 2.75rem;
-  margin-bottom: 8px;
   padding: 0 6px 0 12px;
   border-radius: 11px;
   background: var(--sur2);
@@ -1660,6 +1667,42 @@
 .sheet-search-input::-webkit-search-decoration {
   appearance: none;
   display: none;
+}
+
+.sheet-search-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 2.75rem;
+  border: 0;
+  border-radius: 11px;
+  background: var(--sur2);
+  color: var(--fg2);
+}
+
+.sheet-search-action:disabled {
+  opacity: 0.5;
+}
+
+.sheet-search-action-busy:disabled {
+  opacity: 1;
+}
+
+.sheet-search-action-busy svg {
+  animation: sheet-search-spin 0.9s linear infinite;
+}
+
+@keyframes sheet-search-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-search-action-busy svg {
+    animation: none;
+  }
 }
 
 .sheet-search-clear {

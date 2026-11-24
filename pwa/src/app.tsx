@@ -357,7 +357,7 @@ function useSpawnActions(store: Store): SpawnActions {
       pickAccount: (accountId) => store.pickAccount(accountId),
       removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
-      rescan: (deviceId) => void store.rescan(deviceId),
+      rescan: () => void store.rescan(),
       setModel: (model) => store.setModel(model),
       setEffort: (effort) => store.setEffort(effort),
       setAutonomy: (autonomy) => store.setAutonomy(autonomy),

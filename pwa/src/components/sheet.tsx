@@ -23,8 +23,16 @@ export function Sheet(props: {
   onClose: () => void;
   /** A form rather than a list: still a bottom sheet on a phone, a centred dialog on a desk. */
   variant?: "dialog";
-  /** A filter field pinned under the head; the sheet then keeps one height and tracks the visible viewport. */
-  search?: { readonly label: string; readonly query: string; readonly onQuery: (query: string) => void } | null;
+  /**
+   * A filter field pinned under the head; the sheet then keeps one height and tracks the visible viewport.
+   * `action` sits beside the field, outside it, for a command on the whole list.
+   */
+  search?: {
+    readonly label: string;
+    readonly query: string;
+    readonly onQuery: (query: string) => void;
+    readonly action?: ComponentChildren;
+  } | null;
   /** Pinned under the list, outside its scroll. */
   footer?: ComponentChildren;
   children: ComponentChildren;
@@ -197,64 +205,67 @@ export function Sheet(props: {
           </button>
         </div>
         {search !== null && (
-          <div className="sheet-search">
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="11" cy="11" r="7" />
-              <path d="M20 20l-4-4" />
-            </svg>
-            <input
-              ref={searchInput}
-              type="search"
-              enterKeyHint="search"
-              aria-controls={listId}
-              className="sheet-search-input"
-              aria-label={search.label}
-              placeholder={search.label}
-              value={search.query}
-              autoComplete="off"
-              autoCapitalize="off"
-              spellcheck={false}
-              onInput={(event) => search.onQuery(event.currentTarget.value)}
-            />
-            {search.query !== "" && (
-              <button
-                type="button"
-                className="sheet-search-clear"
-                aria-label="Clear filter"
-                // Keeps focus where it was, so a tap neither opens nor drops the keyboard.
-                onPointerDown={(event) => event.preventDefault()}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={(event) => {
-                  // The button unmounts under a keyboard activation (detail 0); focus would fall to body and escape the
-                  // Tab trap. A tap or click never moves focus.
-                  search.onQuery("");
-                  if (event.detail === 0) searchInput.current?.focus();
-                }}
+          <div className="sheet-search-row">
+            <div className="sheet-search">
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
               >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.2"
-                  stroke-linecap="round"
-                  aria-hidden="true"
+                <circle cx="11" cy="11" r="7" />
+                <path d="M20 20l-4-4" />
+              </svg>
+              <input
+                ref={searchInput}
+                type="search"
+                enterKeyHint="search"
+                aria-controls={listId}
+                className="sheet-search-input"
+                aria-label={search.label}
+                placeholder={search.label}
+                value={search.query}
+                autoComplete="off"
+                autoCapitalize="off"
+                spellcheck={false}
+                onInput={(event) => search.onQuery(event.currentTarget.value)}
+              />
+              {search.query !== "" && (
+                <button
+                  type="button"
+                  className="sheet-search-clear"
+                  aria-label="Clear filter"
+                  // Keeps focus where it was, so a tap neither opens nor drops the keyboard.
+                  onPointerDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    // The button unmounts under a keyboard activation (detail 0); focus would fall to body and escape the
+                    // Tab trap. A tap or click never moves focus.
+                    search.onQuery("");
+                    if (event.detail === 0) searchInput.current?.focus();
+                  }}
                 >
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
-              </button>
-            )}
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="14"
+                    height="14"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                    stroke-linecap="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
+              )}
+            </div>
+            {search.action}
           </div>
         )}
         <div className="sheet-items" ref={list} id={listId}>
@@ -356,11 +367,6 @@ export function SheetItem(props: {
   /** Trailing remove button. A nested button would be invalid, so this splits the row in two. */
   onRemove?: (() => void) | null;
   removeLabel?: string;
-  /** A second trailing button beside `onRemove`: a row-level command, shown as `actionText`. */
-  onAction?: (() => void) | null;
-  actionLabel?: string;
-  actionText?: string;
-  actionDisabled?: boolean;
   onClick: () => void;
 }): JSX.Element {
   const {
@@ -374,10 +380,6 @@ export function SheetItem(props: {
     match = null,
     onRemove = null,
     removeLabel = `Remove ${label}`,
-    onAction = null,
-    actionLabel = label,
-    actionText = "↻",
-    actionDisabled = false,
     onClick,
   } = props;
   const classes = ["sheet-item"];
@@ -410,26 +412,13 @@ export function SheetItem(props: {
     </button>
   );
 
-  if (onRemove === null && onAction === null) return item;
+  if (onRemove === null) return item;
   return (
     <div className="sheet-item-row">
       {item}
-      {onAction !== null && (
-        <button
-          type="button"
-          className="sheet-item-remove"
-          onClick={onAction}
-          disabled={actionDisabled}
-          aria-label={actionLabel}
-        >
-          {actionText}
-        </button>
-      )}
-      {onRemove !== null && (
-        <button type="button" className="sheet-item-remove" onClick={onRemove} aria-label={removeLabel}>
-          <TrashIcon />
-        </button>
-      )}
+      <button type="button" className="sheet-item-remove" onClick={onRemove} aria-label={removeLabel}>
+        <TrashIcon />
+      </button>
     </div>
   );
 }
