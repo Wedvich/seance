@@ -7,9 +7,9 @@ import {
   parseRateLimits,
   probeResultOf,
   quotaReadingOf,
-  versionAtLeast,
   type RpcAnswer,
 } from "./probe.ts";
+import { versionAtLeast } from "@seance/shared";
 
 const window = (usedPercent: number, windowDurationMins: number | null, resetsAt: number | null = 1_760_000_000) => ({
   usedPercent,

@@ -4848,7 +4848,13 @@ error.
   one, though the registry carries none, so an aliased account's unaliased twin is tagged all the
   same and one account's label reads alike in every client, whether or not it could read the
   aliases (`accountName` in `shared/src/account-record.ts`, the rule every client shares —
-  `seance mcp` and Raycast name accounts through it too).
+  `seance mcp` and Raycast name accounts through it too). A twin of another kind (one person's Claude login
+  and Codex login under one email; the kind read off the id's prefix, `AGENT_ACCOUNT_PREFIXES`) is told apart
+  by kind instead (Codex item 3, 2026-11-24): the agent login's label gains its agent's name, `(Codex)`, and the
+  Claude one gains nothing, so signing a machine in to Codex never retags a Claude account; twins of one kind
+  still take the org tag, an agent login's after its name and on its id less the prefix (`(Codex, org
+  ws-1aaaa)`). _Corrected at build:_ item 2 had tagged both with their org halves, the Codex one as
+  `org codex:ab`.
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
@@ -7394,7 +7400,7 @@ of this section built.
     `main.ts` always passes, like `usageRefresh`.
 - **Codex login** (`daemon/src/codex/`: `home.ts`, `probe.ts`, `account.ts`, `codex-cli.ts`; added 2026-11-23, Codex
   phase 1 item 1, docs/codex.md "The account"): the machine's one ChatGPT login for Codex, named, measured and watched.
-  No Codex task runs yet. The fleet's readers (item 2) are "Fleet readers" below; the PWA is item 3.
+  No Codex task runs yet. The fleet's readers (item 2) are "Fleet readers" below; the PWA (item 3) is "PWA", its bullet "An agent login is an account like a Claude one".
   - **Config.** `config.json`'s `codex` block, the machine's own, parsed strictly like `adapters` (`parseCodex`: an
     unknown key or value fails the load): `approvalPolicy` (`untrusted`, `on-request`, `never`; default
     `on-request`), `sandbox` (`read-only`, `workspace-write`; default `workspace-write`; `danger-full-access` refused
@@ -11174,6 +11180,33 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   last, where history may just not reach or the next tick not be due), and a point alone between two breaks is a dot — a laptop in clamshell
   sleep leaves exactly that, one tick per dark wake. Quota holds its level between
   observations, since a sample carries the observation's time, not the tick's.
+- **An agent login is an account like a Claude one** (Codex item 3, 2026-11-24; Daemon, "Codex login";
+  `pwa/src/machines-view.ts`). `deriveAccounts` groups a login's account (`Machine.logins`, signed in and
+  identified) beside the exclaves', so it gets the same card: its 5-hour and weekly windows from `lq` through
+  `newestQuotaByAccount`, history, rename through the `account:` record and the "Open for work" switch through the
+  account hold (Closing an account), none of which reads the agent. What differs:
+  - **An agent badge** (`AGENT_NAMES`, "Codex") beside the title, neutral in colour; a Claude card has none, Claude
+    being the default everywhere. _Decided: no Claude badge, because_ a fleet with no login reads as it did.
+  - **Titled by its email**, not by exclave ids it has none of, and with no twin tag (the badge says its kind);
+    repeated titles gain the workspace (else the plan), then the machines, then the account id. The meta line is
+    `[<label> ·] <workspace> · <plan> plan · on <machines>`, the label leading only under an alias; the rename sheet
+    reads `<label> · Codex` and empties back to the email (`AccountCard.unnamed`, `members`).
+  - **Credits are a line, never a bar or an amount** (docs/codex.md, "Credits and spill"): while the newest reading
+    carries `c` (the daemon sends it only beside `AgentLogin.credits`), "Credits available" at 0, "Credits: N% of the
+    member limit used" between (warn from 75, err from 90), "Credits spent" at 100 (err), whether or not a window
+    is full. _Decided: a line, because_ two of the three states have no fill to show, and "0%" beside "available"
+    would read as none left; and always shown, because it is a state the owner checks before a spill, with no
+    monthly figure to go stale (no `sameCreditMonth`). A full window adds no Credits bar for a login.
+  - **No reading yet** says the machine has not read the login, since a login's quota comes from the probe, not a
+    session.
+  - **The Machines card's login row**: one per login while connected (none asleep, as for exclave rows), always
+    drawn, since a login is configured on purpose and the card is where a signed-out one shows: the agent, the
+    account's label (`not signed in` without an id, `signed in` unidentified), then `loginHealth` in words —
+    `expired: run seance codex login` (err), `run seance codex login` (signed out, warn), `account not identified`
+    (warn), `included usage blocked` (err), nothing for ok or unknown — and, below the floor (`loginOutdated`,
+    `CODEX_MIN_VERSION` in `shared/src/agent-version.ts`, moved from the daemon so every reader holds the one floor),
+    `codex <version>: needs <floor>` (err) whatever the health, since the daemon reports an outdated binary as
+    unknown.
 - **Machines say who leads and what each runs** (2026-10-18). A line above the cards names
   the scheduler leader, an unverified nominee (by registry name, or a short id when its entry
   did not open), or that nobody leads; the leader's card carries a SCHEDULER badge and an

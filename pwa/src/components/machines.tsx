@@ -260,6 +260,7 @@ function MachineCardView(props: {
   const menu = useMenu();
   // Kept while a chart is open even if its source drops: the item is the chart's only close.
   const offersHistory = card.charts || history !== null;
+  const attention = card.exclaves.filter((row) => row.auth !== null || row.probes !== null);
 
   return (
     <section className="fleet-card card">
@@ -375,21 +376,32 @@ function MachineCardView(props: {
         </p>
       )}
 
-      {card.connected && card.exclaves.some((row) => row.auth !== null || row.probes !== null) && (
+      {card.connected && (attention.length > 0 || card.logins.length > 0) && (
         <ul className="exclaves">
-          {card.exclaves
-            .filter((row) => row.auth !== null || row.probes !== null)
-            .map((row) => (
-              <li key={row.id} className="exclave">
-                <span className="exclave-id">{row.id}</span>
-                {row.auth !== null && (
-                  <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
-                )}
-                {row.probes !== null && (
-                  <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
-                )}
-              </li>
-            ))}
+          {attention.map((row) => (
+            <li key={row.id} className="exclave">
+              <span className="exclave-id">{row.id}</span>
+              {row.auth !== null && (
+                <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
+              )}
+              {row.probes !== null && (
+                <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
+              )}
+            </li>
+          ))}
+          {/* One login per agent per machine (D1), so the agent is the row's identity. */}
+          {card.logins.map((row) => (
+            <li key={`login:${row.agent}`} className="exclave">
+              <span className="exclave-id">{row.agent}</span>
+              <span className="exclave-account">{row.account}</span>
+              {row.health !== null && (
+                <span className={`exclave-auth exclave-auth-${row.health.level}`}>{row.health.text}</span>
+              )}
+              {row.outdated !== null && (
+                <span className={`exclave-auth exclave-auth-${row.outdated.level}`}>{row.outdated.text}</span>
+              )}
+            </li>
+          ))}
         </ul>
       )}
 
@@ -479,6 +491,7 @@ function AccountCardView(props: {
         <div className="fleet-card-title">
           <div className="fleet-name-row">
             <h2 className="fleet-name">{account.title}</h2>
+            {account.agent !== null && <span className="fleet-badge fleet-badge-agent">{account.agent}</span>}
             {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
           <p className="fleet-meta">{account.detail}</p>
@@ -519,6 +532,9 @@ function AccountCardView(props: {
             <Bar key={bar.label} gauge={bar} note={bar.note} />
           ))}
         </div>
+      )}
+      {account.credits !== null && (
+        <p className={`fleet-note fleet-credits-${account.credits.level}`}>{account.credits.text}</p>
       )}
       {ask?.kind === "failed" && (
         <p className="fleet-note fleet-warn" role="alert">
@@ -634,7 +650,7 @@ function RenameDialog(props: {
         }}
       >
         <p className="rename-account">
-          {account.plainName} · {account.exclaves}
+          {account.plainName} · {account.members}
         </p>
         <label className="rename-label" htmlFor={inputId}>
           Account name
@@ -657,7 +673,7 @@ function RenameDialog(props: {
             <span>
               {blocked
                 ? "Another account's name is still saving. Save is on hold until it lands."
-                : `Shown as the card title. Leave it empty to go back to “${account.exclaves}”.`}
+                : `Shown as the card title. Leave it empty to go back to “${account.unnamed}”.`}
             </span>
             <span className="rename-count">
               {draft.length}/{ACCOUNT_ALIAS_MAX_LENGTH}

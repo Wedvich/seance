@@ -44,7 +44,8 @@ a **Status** line (built, spec, draft); trust it over memory.
   second agent or making the launch path agent-neutral.
 - **docs/codex.md** — Codex as a first-class account; every question decided by the owner. Built so far: item 1
   (the daemon's login: `codex` block, home, probe, `logins`/`lq`, `seance codex`, DESIGN.md "Codex login"), item 2
-  (the fleet's readers: quota fold, `knownAccounts`, `loginHealth`, archive series, MCP, the login alert) and item 5
+  (the fleet's readers: quota fold, `knownAccounts`, `loginHealth`, archive series, MCP, the login alert), item 3 (the
+  PWA: the account card's badge, windows and credits, the Machines card's login row) and item 5
   (the driver seam: `AgentDriver`, `daemon/src/agents/`, DESIGN.md "Agent drivers"). Read it, and docs/agents.md,
   before any Codex work.
 - **docs/orchestrator.md** — draft, nothing decided: tracker projects as task graphs. Read before amend

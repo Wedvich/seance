@@ -4,6 +4,7 @@ import {
   CAPABILITIES,
   METRIC_NAMES,
   MIN_FREE_MIB,
+  type AgentLogin,
   type ArchiveStatusResponse,
   type ArchivistEntry,
   type ExclaveInfo,
@@ -573,7 +574,7 @@ describe("deriveMachines", () => {
       ["personal", "personal", "default · me@example.com · on a"],
       ["client", "client", "work · acct acct-bbb · on a"],
     ]);
-    expect(accounts.map((account) => [account.exclaves, account.plainName])).toEqual([
+    expect(accounts.map((account) => [account.members, account.plainName])).toEqual([
       ["default", "me@example.com"],
       ["work", "acct acct-bbb"],
     ]);
@@ -851,6 +852,163 @@ describe("deriveMachines", () => {
     const [old] = deriveMachines([machine()], NOW, NO_LEADER).cards;
     expect(old?.build).toBeNull();
     expect(old?.updateNote).toBeNull();
+  });
+});
+
+describe("an agent login", () => {
+  const CODEX = "codex:acc-1111:user-2222";
+  const login = (overrides: Partial<AgentLogin> = {}): AgentLogin => ({
+    agent: "codex",
+    accountId: CODEX,
+    email: "me@example.com",
+    plan: "team",
+    workspace: "PengeFix",
+    authOk: true,
+    version: "0.170.0",
+    ...overrides,
+  });
+  const withLogin = (overrides: Partial<Machine> = {}, entry: AgentLogin = login()): Machine =>
+    machine({ logins: [entry], ...overrides });
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "dev-1", term: 1 };
+
+  test("its account is a card like a Claude one: badged, titled by its email, its windows from lq, its machines", () => {
+    const a = withLogin({
+      deviceId: "a",
+      name: "a",
+      status: { at: S, scan: 1, lq: [{ x: 0, h: 20, d: 30, hr: S + 3600, s: "cache", at: S - 600 }] },
+    });
+    const b = withLogin({
+      deviceId: "b",
+      name: "b",
+      status: { at: S, scan: 1, lq: [{ x: 0, h: 45, d: 31, s: "cache", at: S - 60 }] },
+    });
+    const { accounts } = deriveMachines([a, b], NOW, NO_LEADER);
+    const codex = accounts.find((account) => account.accountId === CODEX);
+    expect(codex).toMatchObject({
+      title: "me@example.com",
+      unnamed: "me@example.com",
+      members: "Codex",
+      agent: "Codex",
+      detail: "PengeFix · team plan · on a, b",
+      historyFrom: "b",
+      credits: null,
+    });
+    expect(codex?.bars.map((bar) => [bar.label, bar.pct])).toEqual([
+      ["5h", 45],
+      ["7d", 31],
+    ]);
+    expect(plain(codex?.observed ?? [])).toBe("cache · 1m ago on b");
+    // The Claude card beside it is unchanged and unbadged.
+    expect(accounts.find((account) => account.accountId === ACCOUNT)).toMatchObject({ title: "default", agent: null });
+  });
+
+  test("no reading yet says the machine has not read the login; a signed-out or unidentified login has no card", () => {
+    expect(
+      plain(deriveMachines([withLogin()], NOW, NO_LEADER).accounts.find((a) => a.agent !== null)?.observed ?? []),
+    ).toBe("No quota seen yet. It shows once its machine has read the login.");
+    for (const entry of [login({ accountId: null, authOk: false }), login({ accountId: null })]) {
+      expect(deriveMachines([withLogin({}, entry)], NOW, NO_LEADER).accounts.map((a) => a.accountId)).toEqual([
+        ACCOUNT,
+      ]);
+    }
+  });
+
+  test("credits are a state, never an amount: available, a share of the member limit, or spent; no Credits bar", () => {
+    const creditsOf = (c: number | undefined) => {
+      const lq = [{ x: 0, h: 100, s: "cache" as const, at: S - 60, ...(c === undefined ? {} : { c }) }];
+      const m = withLogin({ status: { at: S, scan: 1, lq } }, login({ credits: true }));
+      const card = deriveMachines([m], NOW, NO_LEADER).accounts.find((a) => a.agent !== null);
+      // A full window spills a Claude account into a Credits bar; a login's credits are the line alone.
+      expect(card?.bars.map((bar) => bar.label)).toEqual(["5h"]);
+      return card?.credits;
+    };
+    expect(creditsOf(0)).toEqual({ text: "Credits available", level: "ok" });
+    expect(creditsOf(40)).toEqual({ text: "Credits: 40% of the member limit used", level: "ok" });
+    expect(creditsOf(80)).toEqual({ text: "Credits: 80% of the member limit used", level: "warn" });
+    expect(creditsOf(100)).toEqual({ text: "Credits spent", level: "err" });
+    expect(creditsOf(undefined)).toBeNull();
+  });
+
+  test("an alias titles it and its email leads the meta line; renaming goes back to the email", () => {
+    const { accounts, cards } = deriveMachines([withLogin()], NOW, NO_LEADER, { [CODEX]: "chatgpt" });
+    expect(accounts.find((a) => a.accountId === CODEX)).toMatchObject({
+      title: "chatgpt",
+      alias: "chatgpt",
+      unnamed: "me@example.com",
+      plainName: "me@example.com",
+      detail: "me@example.com · PengeFix · team plan · on mac",
+    });
+    expect(cards[0]?.logins[0]?.account).toBe("chatgpt");
+  });
+
+  test("its title carries no twin tag beside a Claude account of the same email; two logins of one email differ by workspace", () => {
+    const claude = { ...exclave("default", ACCOUNT), email: "me@example.com" };
+    const plus = login({ accountId: "codex:acc-3333:user-2222", workspace: undefined, plan: "plus" });
+    const { accounts } = deriveMachines(
+      [withLogin({ deviceId: "a", name: "a", exclaves: [claude] }), withLogin({ deviceId: "b", name: "b" }, plus)],
+      NOW,
+      NO_LEADER,
+    );
+    expect(accounts.map((account) => [account.title, account.agent])).toEqual([
+      ["default", null],
+      ["me@example.com (PengeFix)", "Codex"],
+      ["me@example.com (plus)", "Codex"],
+    ]);
+    // The plain name, every client's label, tells them apart by kind, then by workspace; the Claude one keeps its email.
+    expect(accounts.map((account) => account.plainName)).toEqual([
+      "me@example.com",
+      "me@example.com (Codex, org acc-1111)",
+      "me@example.com (Codex, org acc-3333)",
+    ]);
+  });
+
+  test("its Open for work switch is the account hold, as for a Claude account", () => {
+    const accountOf = (holds: readonly PauseHold[]) =>
+      deriveMachines([withLogin()], NOW, ready, {}, [], undefined, true, undefined, holds).accounts.find(
+        (a) => a.accountId === CODEX,
+      );
+    expect(accountOf([])?.openSwitch).toBe("on");
+    const closed = accountOf([{ account: CODEX, until: "resume", at: NOW - 60_000 }]);
+    expect(closed?.openSwitch).toBe("off");
+    expect(plain(closed?.hold ?? [])).toBe("Closed to new work 1m ago. Running sessions keep going.");
+  });
+
+  describe("the Machines card's row", () => {
+    const rowOf = (status: Partial<MachineStatus>, entry: AgentLogin = login(), connected = true) =>
+      deriveMachines([withLogin({ connected, status: { at: S - 10, scan: 1, ...status } }, entry)], NOW, NO_LEADER)
+        .cards[0]?.logins;
+
+    test("one row per login, always drawn: agent, account, and ok or unknown says nothing", () => {
+      expect(rowOf({})).toEqual([{ agent: "Codex", account: "me@example.com", health: null, outdated: null }]);
+      expect(rowOf({ lu: [0] })?.[0]?.health).toBeNull();
+      expect(deriveMachines([machine()], NOW, NO_LEADER).cards[0]?.logins).toEqual([]);
+    });
+
+    test("expired, signed out, unidentified and blocked each say so, with the verb that fixes a sign-in", () => {
+      expect(rowOf({ lx: [0] })?.[0]?.health).toEqual({ text: "expired: run seance codex login", level: "err" });
+      expect(rowOf({}, login({ accountId: null, authOk: false }))?.[0]).toMatchObject({
+        account: "not signed in",
+        health: { text: "run seance codex login", level: "warn" },
+      });
+      expect(rowOf({}, login({ accountId: null }))?.[0]).toMatchObject({
+        account: "signed in",
+        health: { text: "account not identified", level: "warn" },
+      });
+      expect(rowOf({ lb: [0] })?.[0]?.health).toEqual({ text: "included usage blocked", level: "err" });
+    });
+
+    test("a binary below the floor is named with the floor, whatever the health", () => {
+      expect(rowOf({ lu: [0] }, login({ version: "0.166.0" }))?.[0]?.outdated).toEqual({
+        text: "codex 0.166.0: needs 0.170.0",
+        level: "err",
+      });
+      expect(rowOf({}, login({ version: "0.171.0" }))?.[0]?.outdated).toBeNull();
+      expect(rowOf({ lu: [0] }, login({ version: undefined }))?.[0]?.outdated).toBeNull();
+    });
+
+    test("an asleep machine draws no login row, as it draws no exclave row", () => {
+      expect(rowOf({ lx: [0] }, login(), false)).toEqual([]);
+    });
   });
 });
 
