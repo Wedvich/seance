@@ -22,7 +22,9 @@ import {
   LIMITS_UNREADABLE,
   parseLimitDraft,
   primaryAction,
+  sectionOf,
 } from "../src/queue-view.ts";
+import { sessionRowId } from "../src/machines-view.ts";
 import { NEEDS_INPUT_SCREEN_MS, nextReveal } from "../src/input-debounce.ts";
 import { plain as lineText } from "../src/timed.ts";
 import {
@@ -1876,6 +1878,10 @@ describe("sessions on the queue screen", () => {
       ["Idle", ["session:dev-a:%3"]],
       ["Asleep", ["session:dev-b:%9"]],
     ]);
+    // The drain row's link names a session row by `sessionRowId`; the screen finds its section to reveal it, Asleep too.
+    expect(sectionOf(view.sections, sessionRowId("dev-b", { id: "%9", window: "w" }))).toBe("Asleep");
+    expect(sectionOf(view.sections, sessionRowId("dev-a", { id: "%3", window: "w" }))).toBe("Idle");
+    expect(sectionOf(view.sections, "session:dev-a:%404")).toBeUndefined();
     const unknown = view.sections[1]?.sessions[1];
     expect(lineText(unknown?.state ?? [])).toBe("State unknown");
   });

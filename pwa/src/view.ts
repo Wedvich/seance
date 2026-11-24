@@ -305,7 +305,10 @@ export interface AppState {
   readonly wide: boolean;
   /** What the screen last read; null until it was opened. */
   readonly queueView: QueueState | null;
-  /** A notification's task: the Queue screen scrolls to its row once it is listed, then clears this. */
+  /**
+   * A row id, a notification's task or a drain row's session (`sessionRowId`): the Work screen scrolls to the row once
+   * it is listed, then clears this.
+   */
   readonly focusedTask: string | null;
   /** The cancel or mark-done in flight, if any. */
   readonly taskAction: TaskAction | null;

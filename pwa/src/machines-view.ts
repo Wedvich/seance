@@ -9,17 +9,15 @@ import {
   drainSummary,
   drainView,
   displayName,
-  joinTags,
-  parseTags,
+  DISPLAY_NAME_MARKS,
+  joinSessionTags,
   splitTagKey,
   displayLine,
   httpsUrl,
   taskTagEntries,
   TAG_NAMESPACES,
   type TagScope,
-  type DisplayNameSource,
   type JoinedTag,
-  type SessionTag,
   leaderCloseNote,
   leadsQueue,
   knownAccounts,
@@ -243,20 +241,17 @@ function tagGroups(joined: Readonly<Record<string, JoinedTag>>, now: number): re
     }));
 }
 
-const NAME_MARKS: Record<DisplayNameSource, string | null> = {
-  owner: null,
-  task: null,
-  self: "(self-named)",
-  window: "(window)",
-};
-
-/** `SessionEntry.tags` by scope and its task's record's tags, then `joinTags`: the task's `owner.label` wins. */
+/** `SessionEntry.tags` joined under its task's record's tags: the task's `owner.label` wins. */
 function sessionTagsJoined(entry: SessionEntry, task: Task | undefined): Readonly<Record<string, JoinedTag>> {
-  const tags = parseTags(entry.tags, { scope: "session" }) ?? {};
-  const at = (scope: "conversation" | "process"): Record<string, SessionTag> =>
-    Object.fromEntries(Object.entries(tags).filter(([, tag]) => tag.scope === scope));
-  const taskLayer = task === undefined ? null : taskTagEntries(task.spec, task.createdAt);
-  return joinTags(taskLayer, at("conversation"), at("process"));
+  return joinSessionTags(entry.tags, task === undefined ? null : taskTagEntries(task.spec, task.createdAt));
+}
+
+/**
+ * A session's row on the Work screen (`SessionQueueRow.id`): `session:<deviceId>:<pane>`, the window for a daemon too
+ * old to send the pane. Never a task id, so no task act can name it; the drain row's link focuses it (WS7).
+ */
+export function sessionRowId(deviceId: string, entry: Pick<SessionEntry, "id" | "window">): string {
+  return `session:${deviceId}:${entry.id ?? entry.window}`;
 }
 
 export function sessionRows(
@@ -274,7 +269,7 @@ export function sessionRows(
     return {
       pane,
       name: name.text,
-      mark: NAME_MARKS[name.source],
+      mark: DISPLAY_NAME_MARKS[name.source],
       rename:
         renameable && pane !== null && entry.taskId === undefined && session?.verified === true
           ? { pane, session: session.value, label: joined["owner.label"]?.value ?? "" }
@@ -353,7 +348,13 @@ export interface DrainRow {
   /** `drainSummary`: "moving 2 · 1 stuck", "empty", or soft "running 2 · 1 idle at its prompt". */
   readonly summary: string;
   /** One line per session the drain cannot move. */
-  readonly stuck: readonly string[];
+  readonly stuck: readonly DrainStuckLine[];
+}
+
+export interface DrainStuckLine {
+  readonly text: string;
+  /** A session that is not a task: its Work row (`sessionRowId`), where Close is (docs/work.md WS7). Null for a task. */
+  readonly row: string | null;
 }
 
 /** What the drain rows are computed from; absent (the default) draws none. */
@@ -375,9 +376,15 @@ function sessionsOf(inputs: DrainInputs, deviceId: string): readonly SessionEntr
   return read === undefined || read === "unknown" ? null : read.sessions;
 }
 
+/** A task's line leads with its title, an untasked session's with its name as the owner's surfaces give it (WS7). */
 function stuckLine(tasks: readonly Task[], stuck: DrainStuck): string {
-  const task = stuck.taskId === undefined ? undefined : tasks.find((t) => t.id === stuck.taskId);
   const text = drainStuckText(stuck);
+  if (stuck.session !== undefined) {
+    const name = displayName(joinSessionTags(stuck.session.tags), null, stuck.session.window);
+    const mark = DISPLAY_NAME_MARKS[name.source];
+    return `${name.text}${mark === null ? "" : ` ${mark}`}: ${text}`;
+  }
+  const task = stuck.taskId === undefined ? undefined : tasks.find((t) => t.id === stuck.taskId);
   return task === undefined ? text : `${taskTitle(task)}: ${text}`;
 }
 
@@ -395,7 +402,10 @@ function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
   return {
     draining: view.draining,
     summary: reading ? "reading sessions" : drainSummary(view),
-    stuck: view.stuck.map((entry) => stuckLine(inputs.tasks ?? [], entry)),
+    stuck: view.stuck.map((entry) => ({
+      text: stuckLine(inputs.tasks ?? [], entry),
+      row: entry.session === undefined ? null : sessionRowId(machine.deviceId, entry.session),
+    })),
   };
 }
 

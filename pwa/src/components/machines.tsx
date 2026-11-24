@@ -6,6 +6,7 @@ import type {
   ArchivistCard,
   CustodianRow,
   DrainAction,
+  DrainStuckLine,
   Gauge,
   GaugeIcon,
   MachineCard,
@@ -97,6 +98,8 @@ export function MachinesScreen(props: {
   drainSheet: (machine: Machine) => readonly string[];
   /** Reads a machine's sessions and the queue afresh: asked as the confirm sheet opens. */
   onReadDrain: (deviceId: string) => void;
+  /** Opens the Work screen on a session's row (`sessionRowId`), where Close is: a drain row's "Not a task" line. */
+  onOpenSession: (row: string) => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
   onOpenRename: (accountId: string) => void;
@@ -122,6 +125,7 @@ export function MachinesScreen(props: {
     closeSheet,
     drainSheet,
     onReadDrain,
+    onOpenSession,
     onShowHistory,
     onHideHistory,
     onOpenRename,
@@ -173,6 +177,7 @@ export function MachinesScreen(props: {
               onReadDrain(card.deviceId);
               setClosing({ deviceId: card.deviceId, act });
             }}
+            onOpenSession={onOpenSession}
           />
         ))}
         {archivist !== null && <ArchivistCardView card={archivist} />}
@@ -232,6 +237,7 @@ function MachineCardView(props: {
   onToggleOpen: (open: boolean) => void;
   /** Drain or Drain now on a closed machine: asks for confirmation first. */
   onDrain: (act: DrainAction) => void;
+  onOpenSession: (row: string) => void;
 }): JSX.Element {
   const {
     card,
@@ -244,6 +250,7 @@ function MachineCardView(props: {
     onHideHistory,
     onToggleOpen,
     onDrain,
+    onOpenSession,
   } = props;
   // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
   const here = availability[card.deviceId] ?? null;
@@ -346,9 +353,20 @@ function MachineCardView(props: {
           <p>
             {card.drain.draining ? "Draining" : "Closed"}: {card.drain.summary}
           </p>
-          {keyed(card.drain.stuck).map(({ key, line }) => (
+          {keyed(card.drain.stuck).map(({ key, line: { text, row } }) => (
             <p key={key} className="fleet-warn">
-              {line}
+              {row === null ? (
+                text
+              ) : (
+                <button
+                  type="button"
+                  className="fleet-stuck-link"
+                  title="Open its row on the Work screen"
+                  onClick={() => onOpenSession(row)}
+                >
+                  {text}
+                </button>
+              )}
             </p>
           ))}
           {drainActions.length > 0 && (
@@ -684,13 +702,14 @@ function RenameDialog(props: {
   );
 }
 
-/** Lines made unique for keys: two panes can read the same ("Not a task: close it yourself"). */
-function keyed(lines: readonly string[]): { readonly key: string; readonly line: string }[] {
+/** Lines made unique for keys: two can read the same ("Not a task: close it yourself" in a sheet). */
+function keyed<T extends string | DrainStuckLine>(lines: readonly T[]): { readonly key: string; readonly line: T }[] {
   const seen = new Map<string, number>();
   return lines.map((line) => {
-    const nth = (seen.get(line) ?? 0) + 1;
-    seen.set(line, nth);
-    return { key: `${line}#${nth}`, line };
+    const base = typeof line === "string" ? line : (line.row ?? line.text);
+    const nth = (seen.get(base) ?? 0) + 1;
+    seen.set(base, nth);
+    return { key: `${base}#${nth}`, line };
   });
 }
 

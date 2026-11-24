@@ -1069,7 +1069,10 @@ export class Store {
     this.#readQueueSessions();
   }
 
-  /** Marks a task for the Queue screen to bring into view (a notification's link); `clearFocus` ends it. */
+  /**
+   * Marks a row for the Work screen to bring into view: a task (a notification's link) or a session row by its
+   * `sessionRowId` (a drain row's "Not a task" line); `clearFocus` ends it.
+   */
   focusTask(taskId: string): void {
     this.#patch({ focusedTask: taskId });
   }

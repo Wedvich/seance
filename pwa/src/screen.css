@@ -2418,6 +2418,19 @@
   color: var(--warn);
 }
 
+/* A drain row's "Not a task" line: a link to its Work row, read as the line it replaces. */
+.fleet-stuck-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
 /* A closed machine's Drain / Drain now, under its drain row: small, so the card stays a status card. */
 .fleet-drain-actions {
   display: flex;

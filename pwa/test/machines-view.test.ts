@@ -24,6 +24,7 @@ import {
   deriveDrainSheet,
   custodianMenu,
   deriveMachines,
+  sessionRowId,
   type CustodianRow,
   type DrainInputs,
 } from "../src/machines-view.ts";
@@ -146,8 +147,31 @@ describe("the drain row and the close sheet", () => {
     expect(draw(inputs())?.drain).toEqual({
       draining: true,
       summary: "moving 1 · 2 stuck",
-      stuck: ["t2: Can't move: runs in the clone", "Not a task: close it yourself"],
+      stuck: [
+        { text: "t2: Can't move: runs in the clone", row: null },
+        { text: "w (window): Not a task: close it yourself", row: "session:dev-1:w" },
+      ],
     });
+  });
+
+  test("a session that is not a task is named as the owner's surfaces name it and links to its Work row (WS7)", () => {
+    const labelled: SessionEntry = {
+      ...pane(),
+      id: "%7",
+      tags: { "owner.label": { value: "notes", at: 1, scope: "conversation" } },
+    };
+    const selfNamed: SessionEntry = {
+      ...pane(),
+      id: "%8",
+      tags: { "self.name": { value: "fixing ci", at: 1, scope: "process" } },
+    };
+    const sessions = { "dev-1": { sessions: [labelled, selfNamed] } };
+    expect(draw(inputs({ tasks: [], sessions }))?.drain?.stuck).toEqual([
+      { text: "notes: Not a task: close it yourself", row: "session:dev-1:%7" },
+      { text: "fixing ci (self-named): Not a task: close it yourself", row: "session:dev-1:%8" },
+    ]);
+    // The row id is the one the Work screen gives the session's row.
+    expect(sessionRowId("dev-1", labelled)).toBe("session:dev-1:%7");
   });
 
   test("no row without a drainPass leader, an unread queue, or a closed machine", () => {
@@ -186,7 +210,7 @@ describe("the drain row and the close sheet", () => {
       "Closing mac stops new work landing on it.",
       "1 running task will be passed to other machines in 10 minutes unless you reopen it.",
       "t2: Can't move: runs in the clone",
-      "Not a task: close it yourself",
+      "w (window): Not a task: close it yourself",
     ]);
     expect(deriveCloseSheet(open, inputs({ tasks: null }))[1]).toContain("10 minutes");
   });

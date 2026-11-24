@@ -8,6 +8,7 @@ import {
   armTap,
   disarmRow,
   parseLimitDraft,
+  sectionOf,
   type ArmOp,
   type CloseTarget,
   type LimitView,
@@ -228,7 +229,7 @@ export function QueueScreen(props: {
   onOpenLimits: () => void;
   onCloseLimits: () => void;
   onSetLimit: (fleet: number | null) => void;
-  /** A notification's task: scrolled to and marked once its row is listed. */
+  /** A row id, a notification's task or the drain row's session (`sessionRowId`): scrolled to and marked once listed. */
   focusedTask: string | null;
   /**
    * The focus was acted on: the store forgets it. Only here, never on unmount: a callback that is a new
@@ -324,8 +325,8 @@ export function QueueScreen(props: {
   // The row a notification named, marked while it fades; one view, never again on a re-render.
   const [marked, setMarked] = useState<string | null>(null);
   const { focusedTask, onFocused } = props;
-  const focusedIn =
-    focusedTask === null ? undefined : view.sections.find((s) => s.rows.some((r) => r.id === focusedTask))?.title;
+  // A task's row, or a session's (the drain row's link, WS7).
+  const focusedIn = focusedTask === null ? undefined : sectionOf(view.sections, focusedTask);
 
   useEffect(() => {
     if (focusedTask === null || focusedIn === undefined) return;
@@ -493,6 +494,7 @@ export function QueueScreen(props: {
                   <SessionCard
                     key={row.id}
                     row={row}
+                    marked={marked === row.id}
                     armed={armed}
                     closing={closing === row.id}
                     onClose={closeTap}
@@ -941,6 +943,8 @@ function CloseItem(props: {
  */
 function SessionCard(props: {
   row: SessionQueueRow;
+  /** The row the drain row's link opened: marked while it fades, as a notification's task is. */
+  marked: boolean;
   armed: string | null;
   closing: boolean;
   onClose: (row: SessionQueueRow) => void;
@@ -966,7 +970,11 @@ function SessionCard(props: {
   }, [hasMenu, row.id, onMenuClosed]);
 
   return (
-    <section className="fleet-card card" tabIndex={-1}>
+    <section
+      className={props.marked ? "fleet-card card fleet-card-marked" : "fleet-card card"}
+      data-task={row.id}
+      tabIndex={-1}
+    >
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <h3 className="fleet-name">
