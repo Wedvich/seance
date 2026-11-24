@@ -308,12 +308,14 @@ const SESSIONS_READ_SPACING_MS = 10_000;
 /**
  * What a change of means a machine's sessions moved: `sg` where the Queue screen shows and the machine sends one
  * (compared for inequality only: it is seeded with boot time), else its per-exclave session counts. `sg` is absent
- * for a tick whose own session read failed, so the key falls back to the counts for that tick.
+ * for a tick whose own session read failed: that tick keeps the `sg` key last seen, so a daemon whose listing fails
+ * now and then does not alternate keys and read each time.
  */
-function sessionsKey(machine: Machine, queueShown: boolean): string {
-  const sg = machine.status?.sg;
-  if (queueShown && sg !== undefined && machine.capabilities?.includes(CAPABILITIES.sessionLive) === true) {
-    return `sg:${sg}`;
+function sessionsKey(machine: Machine, queueShown: boolean, seen?: string): string {
+  if (queueShown && machine.capabilities?.includes(CAPABILITIES.sessionLive) === true) {
+    const sg = machine.status?.sg;
+    if (sg !== undefined) return `sg:${sg}`;
+    if (seen?.startsWith("sg:") === true) return seen;
   }
   return `sess:${JSON.stringify(machine.status?.sess ?? null)}`;
 }
@@ -348,6 +350,8 @@ export class Store {
    * screen shows), so a change re-reads its sessions (`#readMovedSessions`).
    */
   #sessKey = new Map<string, string>();
+  /** Whether the last `#readMovedSessions` saw the screen shown: its closing re-keys without reading. */
+  #sessShown = false;
   /** deviceId -> when the Queue screen last read its sessions: its re-reads are spaced per machine. */
   #sessReadAt = new Map<string, number>();
   /** deviceId -> the one trailing read for changes dropped inside its spacing, so the last is never lost. */
@@ -492,6 +496,7 @@ export class Store {
         const relay = this.#client.getState();
         if (relay.status !== "open") return;
         this.#queue.onShown(relay);
+        if (this.#queueShown()) this.#readQueueSessions();
         this.#accounts.onShown();
         this.#archive.sync();
         this.#older.sync();
@@ -571,6 +576,7 @@ export class Store {
       // connect saw.
       this.#wokenAt = new Map();
       this.#sessKey = new Map();
+      this.#sessShown = false;
       this.#sessReadAt = new Map();
       this.#clearSessTimers();
       this.#nudgeReadAt = 0;
@@ -660,8 +666,9 @@ export class Store {
     this.#nudgeTimer = null;
   }
 
+  /** A hidden document shows nothing: its socket may stay live, and no read is made for a screen nobody sees. */
   #queueShown(): boolean {
-    return this.#state.queue || this.#state.wide;
+    return (this.#state.queue || this.#state.wide) && document.visibilityState === "visible";
   }
 
   /**
@@ -674,6 +681,8 @@ export class Store {
     const { relay } = this.#state;
     const drains = deriveDrainAvailability(relay);
     const shown = this.#queueShown();
+    const flippedHidden = this.#sessShown && !shown;
+    this.#sessShown = shown;
     const justRead = new Set(woken.map((machine) => machine.deviceId));
     const due: string[] = [];
     for (const machine of relay.machines) {
@@ -682,9 +691,11 @@ export class Store {
         this.#sessKey.delete(deviceId);
         continue;
       }
-      const key = sessionsKey(machine, shown);
       const seen = this.#sessKey.get(deviceId);
+      const key = sessionsKey(machine, shown, seen);
       this.#sessKey.set(deviceId, key);
+      // The screen just closed: the key's kind changed with it, not the sessions.
+      if (flippedHidden && seen?.startsWith("sg:") === true && key.startsWith("sess:")) continue;
       if (justRead.has(deviceId)) {
         if (shown) this.#sessReadAt.set(deviceId, Date.now());
         continue;
@@ -711,7 +722,7 @@ export class Store {
         this.#sessTimers.delete(deviceId);
         const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
         // Asleep or gone since: it keeps its last read, and its wake reads it again.
-        if (this.#state.relay.status !== "open" || machine?.connected !== true) return;
+        if (this.#state.relay.status !== "open" || machine?.connected !== true || !this.#queueShown()) return;
         this.#sessReadAt.set(deviceId, Date.now());
         void this.#fetchSessions([deviceId]);
       }, wait),
@@ -732,6 +743,7 @@ export class Store {
     if (relay.status !== "open") return;
     const due = relay.machines.filter((machine) => machine.connected);
     const now = Date.now();
+    this.#sessShown = true;
     for (const machine of due) {
       this.#sessKey.set(machine.deviceId, sessionsKey(machine, true));
       this.#sessReadAt.set(machine.deviceId, now);

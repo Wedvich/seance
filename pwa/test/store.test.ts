@@ -5142,6 +5142,97 @@ describe("the Queue screen's session reads", () => {
     expect(asked(client, "dev-b")).toBe(base);
     detach();
   });
+
+  test("a trailing read is dropped when the screen closed meanwhile", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ machines: [live("dev-b", 7)] });
+    const store = new Store(client, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    const { advance, timers } = fakeClock();
+    store.setWide(true);
+    await drain();
+    const base = asked(client, "dev-b");
+    advance(4_000);
+    client.emit({ machines: [live("dev-b", 8)] });
+    store.setWide(false);
+    advance(6_000);
+    timers.fire(6_000);
+    await drain();
+    expect(asked(client, "dev-b")).toBe(base);
+    detach();
+  });
+
+  test("a hidden document reads nothing on an sg change, and reads once it shows again", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ machines: [live("dev-b", 7)] });
+    const store = new Store(client, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    const { advance } = fakeClock();
+    store.setWide(true);
+    await drain();
+    const base = asked(client, "dev-b");
+    try {
+      setVisibility("hidden");
+      advance(11_000);
+      client.emit({ machines: [live("dev-b", 8)] });
+      await drain();
+      expect(asked(client, "dev-b")).toBe(base);
+      setVisibility("visible");
+      await drain();
+      expect(asked(client, "dev-b")).toBe(base + 1);
+    } finally {
+      setVisibility("visible");
+      detach();
+    }
+  });
+
+  test("a status tick without sg keeps the key: it reads nothing, and nothing again when sg returns unmoved", async () => {
+    fake = fakeHistory();
+    const noSg = (): Machine => live("dev-b", 7, { status: { at: 1, scan: 1, cpu: 0, mem: 0, free: 1, sess: [1] } });
+    const client = new ScriptedClient({ machines: [live("dev-b", 7)] });
+    const store = new Store(client, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    const { advance } = fakeClock();
+    store.openQueue();
+    await drain();
+    const base = asked(client, "dev-b");
+    advance(11_000);
+    client.emit({ machines: [noSg()] });
+    await drain();
+    client.emit({ machines: [live("dev-b", 7)] });
+    await drain();
+    expect(asked(client, "dev-b")).toBe(base);
+    detach();
+  });
+
+  test("closing the screen under a drain leader reads a closed machine's sessions no more for the key's change", async () => {
+    fake = fakeHistory();
+    const closed = (sg: number): Machine =>
+      autoMachine("dev-b", {
+        capabilities: [CAPABILITIES.close, CAPABILITIES.sessionLive],
+        status: { at: 1, scan: 1, cpu: 0, mem: 0, free: 1, sess: [1], sg, cl: 5 },
+      });
+    const client = new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.drainPass] }), closed(1)],
+    });
+    const store = new Store(client, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    const { advance } = fakeClock();
+    store.setWide(true);
+    await drain();
+    store.setWide(false);
+    await drain();
+    const base = asked(client, "dev-b");
+    advance(11_000);
+    client.emit({ machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.drainPass] }), closed(1)] });
+    await drain();
+    expect(asked(client, "dev-b")).toBe(base);
+    detach();
+  });
 });
 
 describe("the archivist's counts", () => {
