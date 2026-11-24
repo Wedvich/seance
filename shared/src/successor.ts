@@ -46,6 +46,7 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
   if (task.spec.mode === "here") {
     return { ok: false, reason: "a task run in place has no branch of its own to pass on" };
   }
+  if (task.spec.agent !== undefined) return { ok: false, reason: "a Codex task can't be passed to a successor yet" };
   const { assignment } = task;
   if (assignment === undefined) return { ok: false, reason: "the task was never placed on a machine" };
   if (!leaderSuccessor) {
@@ -106,6 +107,8 @@ export function successorSpec(
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(creator === undefined ? {} : { tags: creator }),
+    // Never another agent: a successor runs what its predecessor ran (V1 places a Codex one nowhere, `codexSpecRefusal`).
+    ...(spec.agent === undefined ? {} : { agent: spec.agent }),
     succeeds: {
       task: task.id,
       account,

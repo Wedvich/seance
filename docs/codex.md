@@ -1,6 +1,8 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3) and item 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
+**Status: phase 1 (items 1, 2, 3), phase 2 item 4 and item 5 built, the rest design.** Item 4 (2026-11-24), the task
+field `agent` and its routing, is in DESIGN.md: Scheduler, "Codex tasks"; Wire protocol's compatibility list; and the
+threat model's "The task field `agent`" (this doc's threat-model item 9). Item 1 (2026-11-23), the daemon's side of the account — the
 `codex` config block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login |
 logout | status`, `MachineInfo.logins` and `MachineStatus.lq`/`lx`/`lu`/`lb` — is recorded in DESIGN.md: Daemon, "Codex
 login"; Presence & identity (the status fields and their trim); and the threat model's "A second credential store, never
@@ -306,8 +308,8 @@ the machine's Codex login instead of the exclave's Claude login (`accountOf(mach
 - **Model and effort.** `model` stays a free bounded string; a Codex task's default is `DEFAULT_CODEX_MODEL` and the
   clients' list is a constant `CODEX_MODELS` in `shared/` beside the PWA's `MODELS`. _Decided: a constant, not each
   login's `model/list` in the blob, because_ one picker does not justify growing every register. Effort keeps Séance's
-  `EFFORTS`; `max` beside `agent: "codex"` is refused (Codex has no `max`; mapping it silently to `xhigh` would run
-  something nobody asked for). The record always says `agent` explicitly; no reader infers it from a model name.
+  `EFFORTS`; `max` beside `agent: "codex"` is refused (0.170.0 had no `max`; mapping it silently to `xhigh` would run
+  something nobody asked for. 0.171.0 lists `max` on most models: lifting the refusal is a later choice, per model). The record always says `agent` explicitly; no reader infers it from a model name.
 - **Refused beside `agent: "codex"` in V1:** effort `max`, `steer`/`plan` (no plan mode reaches the app-server's
   `turn/start` in 0.170, and only a tightening may stand in), any level but `auto` in phase 2 (D6), `attachments`,
   `continues` and `succeeds` (phase 3). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
@@ -552,9 +554,14 @@ task (2026-11-23) after the ones it names.
 **Phase 2: auto tasks run.** Checks S1's and S4's rest and S8's macOS half first; they need the owner, and decide
 nothing.
 
-4. **The field** (after 2): `TaskRequest.agent`, `SpawnRequest.agent`, `AGENT_DEP_SENTINEL`, `CAPABILITIES.codex`'s
+4. **Built 2026-11-24** (DESIGN.md, Scheduler, "Codex tasks"). **The field** (after 2): `TaskRequest.agent`, `SpawnRequest.agent`, `AGENT_DEP_SENTINEL`, `CAPABILITIES.codex`'s
    leader half, the route filters, account-by-agent counting and the spill, the V1 refusals, `CODEX_MODELS`. Nothing
-   places a Codex task yet: no daemon launches one.
+   places a Codex task yet: no daemon launches one. _Corrected at build:_ the version floor (`CODEX_MIN_VERSION`,
+   `parseCodexVersion`, `versionAtLeast`) moved from `daemon/src/codex/probe.ts` to `shared/src/codex.ts`, because the
+   scheduler may not import the daemon and `login_outdated` needs it; a login with no `version` reads outdated. A
+   daemon refuses a spawn carrying `agent` as malformed until item 6, so even a wrongly advertised `codex` never starts
+   Claude. Codex 0.171.0 lists `max` effort on most models (below), so "Codex has no `max`" is out of date; the
+   refusal stands for V1, since the floor's 0.170.0 and some models lack it.
 5. **Built 2026-11-23: the driver seam, no behaviour change** (at once, beside 1): Claude's argv, pane recognition,
    graceful close, trust and resume move behind an `AgentDriver` interface (`daemon/src/agents/claude.ts`), the command
    line byte-identical under test (`agents/claude.test.ts`). (Named driver, not adapter: "adapter" is messaging's.)
@@ -607,7 +614,9 @@ Still to run, each before the phase named; each checks a fact the design already
 - ~~`lq`'s place in `fitStatus`'s trim order, and the bound on `lx`/`lu`/`lb`~~: built (DESIGN.md, Presence &
   identity): `lq` loses detail with the exclaves' quota, then goes whole before any Claude entry; `lx`/`lu`/`lb` are
   never trimmed and bounded with `lq` by `STATUS_MAX_LOGINS` (4).
-- `DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version.
+- ~~`DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version~~: built from `model/list` on
+  `codex app-server` 0.171.0 (2026-11-24), every model it lists with no `upgrade` in its order, the default its
+  `isDefault` one (DESIGN.md, Scheduler, "Codex tasks").
 - The daemon's WebSocket client over a unix socket: `ws` as a daemon dependency, or a minimal one over
   `Bun.connect({ unix })`.
 - Recognising a Codex pane: its `AgentPanes.startMark` (`agents/panes.ts`, read by `sessions.ts` through `OURS`), a

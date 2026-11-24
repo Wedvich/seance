@@ -113,6 +113,13 @@ describe("reasonText", () => {
     expect(reasonText({ code: "continue_unsupported" })).toContain("seance update");
   });
 
+  test("a Codex task's reasons name the login, not Claude's", () => {
+    expect(reasonText({ code: "login_absent" })).toBe("no Codex login there");
+    expect(reasonText({ code: "login_outdated" })).toContain("upgrade");
+    expect(reasonText({ code: "login_blocked" })).toContain("blocked");
+    expect(reasonText({ code: "agent_unsupported" })).toContain("can't run this agent");
+  });
+
   test("a missing trait names it; an unhealthy one says its probe fails", () => {
     expect(reasonText({ code: "trait_absent", trait: "atlas" })).toBe("it lacks the atlas trait");
     expect(reasonText({ code: "trait_unhealthy", trait: "atlas" })).toBe("its atlas trait's probe is failing");

@@ -116,6 +116,16 @@ describe("relay ops are audited", () => {
     expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
+  // No driver yet (docs/codex.md, item 6): a spawn naming an agent must never start as Claude instead.
+  test("a spawn naming an agent is rejected, codex included", async () => {
+    for (const agent of ["codex", "claude", 1]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope({ agent }));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+  });
+
   // The level reaches the window's environment, so anything outside the closed set must stop here.
   test("an autonomy outside the levels, or contradicting plan, is rejected", async () => {
     for (const fields of [

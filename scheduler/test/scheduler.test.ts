@@ -132,6 +132,36 @@ describe("dispatch", () => {
     expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "repo_not_found" } });
   });
 
+  describe("a Codex task", () => {
+    const codex = spec({ agent: "codex", autonomy: "auto" });
+
+    test("is spawned carrying its agent, on the machine's Codex login", async () => {
+      const capable = machine("a", {
+        capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.codex],
+        logins: [{ agent: "codex", accountId: "codex:ws:user", authOk: true, version: "0.171.0" }],
+        status: status({ quota: [obs(0)], lq: [obs(0)] }),
+      });
+      const { fleet, scheduler, store } = setup(new FakeFleet([capable]));
+      const task = await enqueue(store, scheduler, codex);
+      await pass(scheduler);
+      expect(fleet.spawns).toEqual([
+        {
+          deviceId: "a",
+          request: expect.objectContaining({ agent: "codex", autonomy: "auto", taskId: task.id }),
+        },
+      ]);
+    });
+
+    test("waits on a fleet whose daemons don't advertise codex, and is never spawned there", async () => {
+      const { fleet, scheduler, store } = setup();
+      const task = await enqueue(store, scheduler, codex);
+      await pass(scheduler);
+      expect(fleet.spawns).toEqual([]);
+      expect(scheduler.task(task.id)?.state).toBe("ready");
+      expect(scheduler.lastDecision(task.id)?.candidates[0]?.rejected).toEqual([{ code: "agent_unsupported" }]);
+    });
+  });
+
   describe("a task carrying attachments", () => {
     const files = [attachment(0), attachment(1)];
     const capable = (): ReturnType<typeof machine> =>

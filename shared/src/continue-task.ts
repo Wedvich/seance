@@ -192,6 +192,7 @@ export function continueOffer(
   tasks: readonly Task[],
   context?: OfferContext,
 ): ContinueOffer {
+  if (task.spec.agent !== undefined) return { ok: false, reason: "a Codex task's session can't be continued yet" };
   if (task.state === "cancelled") {
     if (task.assignment === undefined) {
       return { ok: false, reason: "a task cancelled before it started has no session to continue" };
@@ -353,6 +354,8 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.requires === undefined ? {} : { requires: spec.requires }),
     ...(creator === undefined ? {} : { tags: creator }),
+    // Never another agent: a Codex continuation is refused before a write (`codexSpecRefusal`), never run as Claude.
+    ...(spec.agent === undefined ? {} : { agent: spec.agent }),
     continues: { task: continues, at },
   };
 }

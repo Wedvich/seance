@@ -1,7 +1,14 @@
 import {
   CAPABILITIES,
+  codexSpecRefusal,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_MODEL,
   exclaveAuth,
+  loginHealth,
+  versionAtLeast,
+  type AgentLogin,
+  type AgentLoginKind,
+  type TaskSpec,
   isQuotaTrimmed,
   isSkillName,
   isStatusStale,
@@ -96,7 +103,7 @@ interface Pass {
   readonly config: SchedulerConfig;
   readonly inFlight: readonly Task[];
   readonly quotaOf: (accountId: string) => AccountQuota;
-  readonly accountAt: (placement: Placement) => string | null;
+  readonly accountAt: (placement: Placement, agent: AgentLoginKind | undefined) => string | null;
   readonly capReached: Reason | null;
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
@@ -116,7 +123,7 @@ export function route(input: RouteInput): Decision {
     config,
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
-    accountAt: (placement) => accountOfPlacement(machines, placement),
+    accountAt: (placement, agent) => accountOfPlacement(machines, placement, agent),
     capReached:
       input.runNow !== true && fleetMax !== undefined && inFlight.length >= fleetMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: fleetMax }
@@ -135,6 +142,7 @@ export function route(input: RouteInput): Decision {
       ...machineFilter(machine, now, config),
       ...continueFilter(task, machine),
       ...attachmentsFilter(attached, machine),
+      ...agentFilter(task, machine, now),
       ...stackFilter(task, machine),
       ...caps,
     ];
@@ -185,7 +193,10 @@ function judge(
     at === undefined
       ? (clones.find((r) => lacking(r) === undefined) ?? clones[0])
       : clones.find((r) => r.name === at.clone);
-  const rejected: Reason[] = [...machineReasons, ...placementFilter(task, machine, exclave)];
+  // A Codex task bills the machine's Codex login, never the exclave's Claude one; the exclave supplies only the clone.
+  const { agent } = task.spec;
+  const accountId = accountOf(machine, exclave, agent);
+  const rejected: Reason[] = [...machineReasons, ...placementFilter(task, machine, accountId)];
   // Once per candidate: another machine already carries it from `continueFilter`.
   if (at !== undefined && exclave.id !== at.exclave && !rejected.some((r) => r.code === "continue_elsewhere")) {
     rejected.push({ code: "continue_elsewhere" });
@@ -194,21 +205,27 @@ function judge(
   const elsewhere = rejected.some((r) => r.code === "continue_elsewhere");
   if (clone === undefined && !elsewhere)
     rejected.push({ code: at === undefined ? "repo_absent" : "continue_clone_gone" });
-  const missing = lacking(clone);
-  if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
+  // The skill inventory, seats and gated models are Claude's: none applies to a Codex task, whose login's own
+  // health is `agentFilter`'s (machine-wide, since every exclave shares the one login).
+  if (agent === undefined) {
+    const missing = lacking(clone);
+    if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
+  }
   rejected.push(...traitFilter(task, machine, exclave, index, pass.now));
   // One code per exclave: signed out says everything an expired login would. Only `expired` filters —
   // `expiring` and `unknown` (an older daemon, an unreadable store) still route.
-  if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
-  else if (exclaveAuth(machine, index, pass.now).state === "expired") rejected.push({ code: "auth_expired" });
-  const seat = seatOf(config, exclave.seatTier);
-  const gated = gatedModel(task.spec.model ?? DEFAULT_MODEL, config);
+  if (agent === undefined) {
+    if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
+    else if (exclaveAuth(machine, index, pass.now).state === "expired") rejected.push({ code: "auth_expired" });
+  }
+  const seat = agent === undefined ? seatOf(config, exclave.seatTier) : config.unknownSeat;
+  const gated = agent === undefined ? gatedModel(task.spec.model ?? DEFAULT_MODEL, config) : null;
   if (gated !== null && !seat.includes.includes(gated)) rejected.push({ code: "model_not_included", model: gated });
-  const sharing = exclave.accountId === null ? 0 : accountInFlight(pass, exclave.accountId);
-  const account =
-    exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
+  const sharing = accountId === null ? 0 : accountInFlight(pass, accountId);
+  const credits = spillsInto(machine, exclave, agent);
+  const account = accountId === null ? null : judgeAccount(pass, credits, accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
+  const paused = accountId === null ? null : accountPause(pass.holds, accountId);
   if (paused !== null) rejected.push(paused);
 
   const base: Candidate = {
@@ -264,22 +281,82 @@ function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = ne
 }
 
 /**
- * In-flight tasks billed to `accountId`, by where each is placed: what
- * projected usage counts. A task whose machine has left
+ * In-flight tasks billed to `accountId`, by where each is placed and its own agent: what
+ * projected usage counts. A running Codex task counts against the machine's Codex account,
+ * never its exclave's Claude one. A task whose machine has left
  * the registry has no account to read, so it counts toward neither.
  */
 function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: string): number {
   return pass.inFlight.filter((t) => {
     const at = t.assignment ?? t.reservation;
-    return at !== undefined && pass.accountAt(at) === accountId;
+    return at !== undefined && pass.accountAt(at, t.spec.agent) === accountId;
   }).length;
 }
 
-export function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
-  return (
-    machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
-      ?.accountId ?? null
-  );
+/** The account a task of `agent` placed at `placement` bills (`accountOf`); null when the machine or exclave is gone. */
+export function accountOfPlacement(
+  machines: readonly Machine[],
+  placement: Placement,
+  agent: AgentLoginKind | undefined,
+): string | null {
+  const machine = machines.find((m) => m.deviceId === placement.deviceId);
+  const exclave = machine?.exclaves?.find((x) => x.id === placement.exclave);
+  return machine === undefined || exclave === undefined ? null : accountOf(machine, exclave, agent);
+}
+
+/**
+ * The account a candidate bills (docs/codex.md, "Routing a Codex task"): the exclave's Claude login for a Claude
+ * task, the machine's own login of `agent` for any other, whatever exclave supplies the clone. Null when signed out,
+ * unidentified, or (for an agent) the machine has no such login. A Claude task never reads `logins`.
+ */
+export function accountOf(machine: Machine, exclave: ExclaveInfo, agent: AgentLoginKind | undefined): string | null {
+  if (agent === undefined) return exclave.accountId;
+  return loginOf(machine, agent)?.login.accountId ?? null;
+}
+
+/** The machine's login of `agent` and its index in `logins` (what `lq`, `lx`, `lu` and `lb` index). */
+function loginOf(
+  machine: Machine,
+  agent: AgentLoginKind,
+): { readonly login: AgentLogin; readonly index: number } | undefined {
+  const index = machine.logins?.findIndex((l) => l.agent === agent) ?? -1;
+  const login = machine.logins?.[index];
+  return login === undefined ? undefined : { login, index };
+}
+
+/** Whether past the quota line the account may spill into credits: Claude's extra usage, a Codex login's credits. */
+function spillsInto(machine: Machine, exclave: ExclaveInfo, agent: AgentLoginKind | undefined): boolean {
+  if (agent === undefined) return exclave.extraUsageEnabled === true;
+  return loginOf(machine, agent)?.login.credits === true;
+}
+
+/** The model a task runs, by its agent's default when it names none: what its quota windows are matched against. */
+function modelOf(spec: Pick<TaskSpec, "model" | "agent">): string {
+  return spec.model ?? (spec.agent === undefined ? DEFAULT_MODEL : DEFAULT_CODEX_MODEL);
+}
+
+/**
+ * A task carrying `agent`, judged per machine (docs/codex.md, "Routing a Codex task"): what V1 refuses beside it, or a
+ * daemon that does not launch it, is `agent_unsupported` (so a record carrying a refused field stays readable and is
+ * placed nowhere); then the login's presence, version floor and health, one auth code per candidate as for Claude.
+ * `unknown` health (no probe yet, a stale status) still routes, as an exclave's does. A Claude task: nothing.
+ */
+function agentFilter(task: Task, machine: Machine, now: number): Reason[] {
+  const { agent } = task.spec;
+  if (agent === undefined) return [];
+  if (codexSpecRefusal(task.spec) !== null || machine.capabilities?.includes(CAPABILITIES.codex) !== true) {
+    return [{ code: "agent_unsupported" }];
+  }
+  const found = loginOf(machine, agent);
+  if (found === undefined) return [{ code: "login_absent" }];
+  const reasons: Reason[] = [];
+  if (found.login.version === undefined || !versionAtLeast(found.login.version))
+    reasons.push({ code: "login_outdated" });
+  const health = loginHealth(machine, found.index, now);
+  if (health === "signed_out" || health === "unidentified") reasons.push({ code: "auth_missing" });
+  else if (health === "expired") reasons.push({ code: "auth_expired" });
+  else if (health === "blocked") reasons.push({ code: "login_blocked" });
+  return reasons;
 }
 
 /**
@@ -288,14 +365,14 @@ export function accountOfPlacement(machines: readonly Machine[], placement: Plac
  */
 function judgeAccount(
   pass: Pass,
-  exclave: ExclaveInfo,
+  extraUsage: boolean,
   accountId: string,
   sharing: number,
   capacity: number,
 ): AccountJudgement {
   const account = pass.quotaOf(accountId);
   if (!account.known) return { reason: { code: "quota_unknown", why: account.why }, pressure: 0 };
-  const windows = account.windows.filter((w) => windowAppliesTo(w, pass.task.spec.model ?? DEFAULT_MODEL));
+  const windows = account.windows.filter((w) => windowAppliesTo(w, modelOf(pass.task.spec)));
   // Only another model's weekly was read: nothing says how full this task's windows are.
   if (windows.length === 0) return { reason: { code: "quota_unknown", why: "unobserved" }, pressure: 0 };
   const { observation, deviceId } = account.newest;
@@ -308,13 +385,13 @@ function judgeAccount(
   // stop every spill until the fleet upgrades.
   const spent = creditsSpent(observation, pass.now);
   // A successor is on the account because the old one ran out: it waits for headroom, it never bills credits for it.
-  if (exclave.extraUsageEnabled === true && !spent && pass.task.spec.succeeds === undefined) {
+  if (extraUsage && !spent && pass.task.spec.succeeds === undefined) {
     // Past the line is a forecast: the estimate is a fixed guess, and credits bill only once a window is full.
     const full = fullWindow(windows, added, pass.now, pass.config);
     return { quota, spill: full === null ? over : { ...full, spending: true }, pressure };
   }
   return {
-    reason: { code: "quota_over_line", ...over, ...(exclave.extraUsageEnabled === true ? { creditsSpent: true } : {}) },
+    reason: { code: "quota_over_line", ...over, ...(extraUsage ? { creditsSpent: true } : {}) },
     quota,
     pressure,
   };
@@ -429,18 +506,20 @@ function knownSkills(task: Task, machines: readonly Machine[]): readonly string[
   return [...new Set(skillCandidates(task).filter(known))];
 }
 
-/** The task's own restrictions: its pin, and the machines it avoids. An exclave signed in to no account matches no account pin. */
-function placementFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
+/**
+ * The task's own restrictions: its pin, and the machines it avoids. `accountId` is the account the candidate bills
+ * (`accountOf`); one signed in to no account matches no account pin.
+ */
+function placementFilter(task: Task, machine: Machine, accountId: string | null): Reason[] {
   const { pin, avoid } = task.spec;
   const reasons: Reason[] = [];
   if (pin?.deviceId !== undefined && pin.deviceId !== machine.deviceId)
     reasons.push({ code: "pin_mismatch", field: "deviceId" });
-  if (pin?.account !== undefined && pin.account !== exclave.accountId)
-    reasons.push({ code: "pin_mismatch", field: "account" });
+  if (pin?.account !== undefined && pin.account !== accountId) reasons.push({ code: "pin_mismatch", field: "account" });
   if (avoid?.includes(machine.deviceId) === true) reasons.push({ code: "avoided" });
   // The successor of a task whose account ran out never lands on that account, whatever its headroom reads.
   const { succeeds } = task.spec;
-  if (succeeds?.trigger === "quota" && succeeds.account === exclave.accountId) {
+  if (succeeds?.trigger === "quota" && succeeds.account === accountId) {
     reasons.push({ code: "predecessor_account" });
   }
   return reasons;
@@ -498,7 +577,7 @@ export function accountResetAt(
   const sharing = accountInFlight(
     {
       inFlight: holdingSlots(tasks, released),
-      accountAt: (placement) => accountOfPlacement(machines, placement),
+      accountAt: (placement, agent) => accountOfPlacement(machines, placement, agent),
     },
     accountId,
   );
@@ -555,17 +634,17 @@ export function exhaustion(
 ): Exhaustion | null {
   const { assignment } = task;
   if (assignment === undefined) return null;
-  const exclave = machines
-    .find((m) => m.deviceId === assignment.deviceId)
-    ?.exclaves?.find((x) => x.id === assignment.exclave);
-  const accountId = exclave?.accountId;
-  if (exclave === undefined || accountId === undefined || accountId === null) return null;
+  const machine = machines.find((m) => m.deviceId === assignment.deviceId);
+  const exclave = machine?.exclaves?.find((x) => x.id === assignment.exclave);
+  if (machine === undefined || exclave === undefined) return null;
+  const accountId = accountOf(machine, exclave, task.spec.agent);
+  if (accountId === null) return null;
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   if (!account.known) return null;
   const observer = machines.find((m) => m.deviceId === account.newest.deviceId);
   const status = observer === undefined ? undefined : liveStatus(observer);
   if (status === undefined || isStatusStale(status, now)) return null;
-  const windows = account.windows.filter((w) => windowAppliesTo(w, task.spec.model ?? DEFAULT_MODEL));
+  const windows = account.windows.filter((w) => windowAppliesTo(w, modelOf(task.spec)));
   const full = fullWindow(windows, () => 0, now, config);
   if (full === null) return null;
   const { observation } = account.newest;
@@ -575,7 +654,7 @@ export function exhaustion(
     window: full.window,
     reset: resetsAt === undefined ? 0 : resetsAt * 1000,
     since: Math.min(observation.at * 1000, now),
-    spending: exclave.extraUsageEnabled === true && !creditsSpent(observation, now),
+    spending: spillsInto(machine, exclave, task.spec.agent) && !creditsSpent(observation, now),
   };
 }
 
@@ -601,12 +680,19 @@ function gatedModel(model: string, config: SchedulerConfig): string | null {
   return config.gatedModels.find((family) => lower.includes(family)) ?? null;
 }
 
+/** An exclave or an agent login of the machine is signed in to it: the ids are disjoint by construction. */
 function hosts(machine: Machine, accountId: string): boolean {
-  return machine.exclaves?.some((x) => x.accountId === accountId) === true;
+  return (
+    machine.exclaves?.some((x) => x.accountId === accountId) === true ||
+    machine.logins?.some((l) => l.accountId === accountId) === true
+  );
 }
 
 function carries(machine: Machine, status: MachineStatus, accountId: string): boolean {
-  return (status.quota ?? []).some((q) => machine.exclaves?.[q.x]?.accountId === accountId);
+  return (
+    (status.quota ?? []).some((q) => machine.exclaves?.[q.x]?.accountId === accountId) ||
+    (status.lq ?? []).some((q) => machine.logins?.[q.x]?.accountId === accountId)
+  );
 }
 
 /** Percent `tasks` add to a window on a seat of `capacity`: the span's estimate, scaled to the seat. */

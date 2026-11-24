@@ -886,7 +886,15 @@ nothing checked it. The last is the gap they leave.
   the `account:` store key (A15), never the raw id. Its login alert rides the exclave's: the same step, record field,
   cap and `auth` push, under the fixed key `login.codex` (`LOGIN_ALERT_KEYS`), which the service worker turns into one
   fixed sentence and never shows. MCP `list_machines` shows a login's agent, account id, email, name, version and
-  health, as it shows an exclave's; no task runs on a login yet, so no reader places, pins or holds by one.
+  health, as it shows an exclave's. Routing places, pins and holds a Codex task by the login's id (next item).
+- **The task field `agent`** (Scheduler, "Codex tasks"; docs/codex.md item 4) is sealed only through the one task
+  sealer, behind `AGENT_DEP_SENTINEL`, which an older leader's parser refuses; the parser drops the sentinel only beside
+  `agent` and nulls the spec over the sentinel without it or over an agent it does not know. A client writes `agent`
+  only to a verified leader advertising `CAPABILITIES.codex` (the broker refuses it otherwise, before a write), and the
+  leader sends it in a spawn only to a machine advertising `codex` (`agent_unsupported` otherwise), since an older
+  daemon would drop it and start Claude. A daemon with no Codex driver refuses a spawn carrying `agent` as malformed,
+  never runs it as Claude. What V1 refuses beside it (`codexSpecRefusal`) is refused before a write and, in a record
+  that carries it anyway, placed nowhere.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -2436,6 +2444,14 @@ an old peer's frames parse as before. Mixed versions:
   tagged task pruned before the archivist updates is lost from history: update it with the fleet. An older keyless
   broker daemon drops `tags` from an enqueue (its `parseTaskSpec`), so the task queues untagged: display data only, and
   no `staleDaemonOf` check guards it.
+- `TaskSpec.agent`, `SpawnRequest.agent`, `CAPABILITIES.codex` and the reasons `agent_unsupported`, `login_absent`,
+  `login_outdated`, `login_blocked` (2026-11-24, Scheduler, "Codex tasks"): a record carrying `agent` carries
+  `AGENT_DEP_SENTINEL` (`{ task: "", after: "agent" }`), which an older leader's dep parser refuses, so it holds the
+  record unreadable rather than run it as Claude; an older archivist reads it `malformed` and skips it, as a tagged
+  one. The broker writes `agent` only to a verified leader advertising `codex`, and the leader sends it in a spawn only
+  to a machine advertising it: an older `isSpawnRequest` would ignore the field and start Claude. An older reader of a
+  decision drops the four reasons as any unknown code. No daemon advertises `codex` yet; rollout is leaders first, as
+  for any field a leader routes.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -3790,6 +3806,39 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reason. The successor carries the old task's `requires` (`successorSpec`), so the traits filter
   ("Traits filter") applies to it unchanged: a trait is a machine capability the work needs, not
   a place the old task happened to run, and the old machine had it.
+- **Codex tasks** (built 2026-11-24, docs/codex.md item 4; the logins they bill are Daemon, "Codex login").
+  `TaskSpec.agent?: "codex"`, absent meaning Claude: a parser drops a stored `"claude"`, so no Claude record
+  changes by a byte, and nulls the spec over any other value. The one task sealer appends `AGENT_DEP_SENTINEL`
+  (`{ task: "", after: "agent" }`) last, after the tags sentinel, and the parser drops it only beside `agent`, so an
+  older leader holds a Codex record unreadable instead of re-sealing it without the field and running Claude. A
+  leader advertising `CAPABILITIES.codex` parses, keeps and routes the field, and its dispatch copies it into
+  `SpawnRequest.agent`; the route filter is what sends it only to a machine advertising `codex` too. No daemon
+  advertises it yet (item 7), and a daemon refuses any spawn carrying `agent` as malformed until its driver lands
+  (item 6), so nothing starts a Codex task as Claude.
+  - **The account is the machine's login** (`accountOf(machine, exclave, agent)`): the exclave still supplies the
+    clone, but a Codex candidate bills `logins`' Codex `accountId`, for its quota, pause holds, account pin and
+    predecessor check alike. `accountInFlight` resolves each in-flight task's account by that task's own agent, so a
+    running Codex task counts against the Codex account and never its exclave's Claude one, and the reverse.
+  - **Its filters** (`agentFilter`, per machine): `agent_unsupported` (the machine lacks `CAPABILITIES.codex`, or the
+    spec carries what V1 refuses, below), `login_absent` (no Codex login in `logins`), `login_outdated` (the login's
+    `version` missing or below `CODEX_MIN_VERSION`, now in `shared/src/codex.ts` beside the parser it moved with),
+    then by `loginHealth`: `auth_missing` (signed out or unidentified), `auth_expired` (`lx`), `login_blocked` (`lb`).
+    `unknown` health (no probe yet, `lu`, a stale status) routes, as an exclave's does. The exclave's own
+    `auth_missing`/`auth_expired`, `skill_absent` and `model_not_included` are not applied: the skill inventory, seats
+    and gated models are Claude's. Quota, the line and the spill read the login account's newest reading (`lq`,
+    folded by `newestQuotaByAccount`), windows matched against `DEFAULT_CODEX_MODEL` when the task names none, the
+    spill gated on `AgentLogin.credits` and spent credits on the reading's `c`, as Claude's on extra usage. Every
+    Codex plan is estimated at `unknownSeat` (capacity 1) until observed deltas say otherwise. A Claude task's
+    candidates never read `logins`: its decision is unchanged by a machine's login and capability (under test).
+  - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max`, any autonomy but an explicit `auto` (so
+    `steer`, `plan`, and an absent level, which reads `checkpoint`), `attachments`, `continues` and `succeeds`.
+    `specError` refuses them before a write for MCP, the broker and the CLI; a record carrying one anyway stays
+    readable and is placed nowhere (`agent_unsupported` on every candidate), so a later build can run it.
+    `passOffer`, `continueOffer` and the leader's own pass refuse a Codex task (phase 3), and `successorSpec` and
+    `continuationSpec` copy `agent`, so a task never silently becomes Claude.
+  - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
+    `codex app-server` 0.171.0 (2026-11-24): every model it lists with no `upgrade`, in its order, and the one it marks
+    `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
 - **Stacking** (built 2026-11-16, docs/scheduler.md M4 _Stacking_, decisions #4 and #15; the daemon's
   half, the worktree made from `origin/<b>`, is Daemon, "Stacked worktrees"). A dependent task's worktree
   starts from its predecessor's branch, so B `after: "opened"` on A builds on A's commit, not on a

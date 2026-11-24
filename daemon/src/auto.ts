@@ -4,6 +4,7 @@ import {
   parseAmendDraft,
   type AmendDraft,
   CAPABILITIES,
+  codexSpecRefusal,
   withAutonomy,
   offeredSpec,
   continueOffer,
@@ -454,6 +455,9 @@ export function specError(spec: AutoSpec, surface: EnqueueSurface = "mcp"): stri
   if (pin !== undefined && pin.deviceId === undefined && pin.account === undefined) {
     return "pin names neither a machine nor an account";
   }
+  // The leader would hold such a record readable and place it nowhere (`agent_unsupported`): say why before a write.
+  const unsupported = codexSpecRefusal(spec);
+  if (unsupported !== null) return `a Codex task can't run with ${unsupported} yet`;
   if (tags !== undefined) {
     if (Object.keys(tags).some((key) => !key.startsWith("creator.")))
       return "tags: only creator tags are set at create";

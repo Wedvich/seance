@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine, type SchedulerLimits } from "@seance/shared";
+import {
+  CAPABILITIES,
+  parseTask,
+  type AgentLogin,
+  type ExclaveInfo,
+  type Machine,
+  type MachineStatus,
+  type SchedulerLimits,
+  type TaskSpec,
+} from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt, exhaustion } from "../src/route.ts";
 import { traitsHolding } from "../src/traits.ts";
@@ -1648,5 +1657,131 @@ describe("exhaustion — the leader's reading of a running task's account", () =
   test("nothing for a task that was never placed, or whose exclave is unknown", () => {
     expect(read([on(obs(0, { h: 100 }))], task())).toBeNull();
     expect(read([on(obs(0, { h: 100 }))], running({ assignment: { ...target, exclave: "gone" } }))).toBeNull();
+  });
+});
+
+describe("a Codex task", () => {
+  const CODEX = "codex:ws-a:user-a";
+  const CODEX_CAPS = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.codex];
+  const target = { deviceId: "a", exclave: "main", clone: "app" };
+
+  function login(fields: Partial<AgentLogin> = {}): AgentLogin {
+    return { agent: "codex", accountId: CODEX, authOk: true, version: "0.171.0", ...fields };
+  }
+
+  /**
+   * Machine `a` advertising codex, its Codex login observed at 10% beside a standard Claude exclave whose own reading is
+   * full: a decision reading the exclave's account, seat or quota would show it.
+   */
+  function codexMachine(fields: Partial<Machine> = {}, statusFields: Partial<MachineStatus> = {}): Machine {
+    return machine("a", {
+      capabilities: CODEX_CAPS,
+      exclaves: [exclave("main", "org:a", { seatTier: "team_standard" })],
+      logins: [login()],
+      status: status({ quota: [obs(0, { h: 100 })], lq: [obs(0, { h: 10 })], ...statusFields }),
+      ...fields,
+    });
+  }
+
+  function codexTask(fields: Partial<TaskSpec> = {}, rest: Partial<Task> = {}): Task {
+    return task({ spec: spec({ agent: "codex", autonomy: "auto", ...fields }), ...rest });
+  }
+
+  function codexHeld(id: string): Task {
+    return codexTask({}, { id, state: "running", assignment: target });
+  }
+
+  test("a Claude task's decision is unchanged by a machine's Codex login and capability", () => {
+    const tasks = [held("x", "a"), codexHeld("c")];
+    const claude = task({ spec: spec({ skill: "ship" }) });
+    const fields = { exclaves: [exclave("main", "org:a", { skills: ["ship"], extraUsageEnabled: true })] };
+    const before = decide([machine("a", fields)], { tasks, task: claude });
+    const after = decide(
+      [
+        machine("a", {
+          ...fields,
+          capabilities: CODEX_CAPS,
+          logins: [login({ credits: true })],
+          status: status({ quota: [obs(0)], lq: [obs(0, { h: 100 })], lx: [0], lb: [0] }),
+        }),
+      ],
+      { tasks, task: claude },
+    );
+    expect(after).toEqual(before);
+    expect(after.chosen).toEqual(target);
+  });
+
+  test("routes on the Codex login: no skill, gated-model or Claude auth gate from the exclave", () => {
+    const signedOut = codexMachine({ exclaves: [exclave("main", null)] });
+    expect(only(decide([signedOut], { task: codexTask() })).rejected).toEqual([]);
+    const decision = decide([codexMachine()], { task: codexTask({ skill: "ship", model: "fable" }) });
+    expect(decision.chosen).toEqual(target);
+  });
+
+  test("agent_unsupported: a machine not advertising codex, and a spec V1 refuses, on every candidate", () => {
+    const older = codexMachine({ capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
+    expect(codes(only(decide([older], { task: codexTask() })))).toEqual(["agent_unsupported"]);
+    // No level reads `checkpoint`, and `plan` alone `steer`: a Codex task says `auto` explicitly.
+    const refused: Partial<TaskSpec>[] = [
+      { autonomy: "auto", effort: "max" },
+      { autonomy: "checkpoint" },
+      {},
+      { plan: true },
+      { autonomy: "auto", attachments: [attachment(1)] },
+    ];
+    for (const fields of refused) {
+      const decision = decide([codexMachine({ capabilities: [...CODEX_CAPS, CAPABILITIES.attachments] })], {
+        task: task({ spec: spec({ agent: "codex", ...fields }) }),
+      });
+      expect(decision.chosen).toBeNull();
+      expect(codes(only(decision))).toContain("agent_unsupported");
+    }
+  });
+
+  test("the login's presence, version floor and health each filter; unreadable health routes", () => {
+    const reasons = (fields: Partial<Machine>, statusFields: Partial<MachineStatus> = {}): string[] =>
+      codes(only(decide([codexMachine(fields, statusFields)], { task: codexTask() })));
+    expect(reasons({ logins: [] })).toContain("login_absent");
+    expect(reasons({ logins: [login({ version: "0.169.9" })] })).toEqual(["login_outdated"]);
+    expect(reasons({ logins: [{ agent: "codex", accountId: CODEX, authOk: true }] })).toEqual(["login_outdated"]);
+    expect(reasons({ logins: [login({ authOk: false, accountId: null })] })).toContain("auth_missing");
+    expect(reasons({ logins: [login({ accountId: null })] })).toContain("auth_missing");
+    expect(reasons({}, { lx: [0] })).toEqual(["auth_expired"]);
+    expect(reasons({}, { lb: [0] })).toEqual(["login_blocked"]);
+    expect(reasons({}, { lu: [0] })).toEqual([]);
+  });
+
+  test("over the line on the login's own reading: filtered, or a spill only when the login has credits", () => {
+    const over = { lq: [obs(0, { h: 95 })] };
+    expect(codes(only(decide([codexMachine({}, over)], { task: codexTask() })))).toEqual(["quota_over_line"]);
+    const credits = only(decide([codexMachine({ logins: [login({ credits: true })] }, over)], { task: codexTask() }));
+    expect(credits.rejected).toEqual([]);
+    expect(credits.spill).toEqual({ window: "5h", projectedPct: 100 });
+    // Claude's extra usage on the exclave says nothing about the Codex account.
+    const extra = codexMachine({ exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })] }, over);
+    expect(codes(only(decide([extra], { task: codexTask() })))).toEqual(["quota_over_line"]);
+  });
+
+  test("in-flight tasks count against the account each one bills, by its own agent", () => {
+    // Both accounts at 71%: three in flight plus this one at the 5h estimate of 5% each reach 91%, past the line.
+    const m = codexMachine(
+      { exclaves: [exclave("main", "org:a")] },
+      { quota: [obs(0, { h: 71 })], lq: [obs(0, { h: 71 })] },
+    );
+    const codex = [codexHeld("x"), codexHeld("y"), codexHeld("z")];
+    const claude = [held("x", "a"), held("y", "a"), held("z", "a")];
+    expect(codes(only(decide([m], { task: codexTask(), tasks: codex })))).toEqual(["quota_over_line"]);
+    expect(only(decide([m], { task: codexTask(), tasks: codex.slice(1) })).rejected).toEqual([]);
+    // Claude tasks on the same exclave bill `org:a`, and leave the Codex account alone; the reverse holds too.
+    expect(only(decide([m], { task: codexTask(), tasks: claude })).rejected).toEqual([]);
+    expect(only(decide([m], { tasks: codex })).rejected).toEqual([]);
+    expect(codes(only(decide([m], { tasks: claude })))).toEqual(["quota_over_line"]);
+  });
+
+  test("an account pin matches the Codex login, never the exclave's", () => {
+    expect(only(decide([codexMachine()], { task: codexTask({ pin: { account: CODEX } }) })).rejected).toEqual([]);
+    expect(codes(only(decide([codexMachine()], { task: codexTask({ pin: { account: "org:a" } }) })))).toEqual([
+      "pin_mismatch",
+    ]);
   });
 });

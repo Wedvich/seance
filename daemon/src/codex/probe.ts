@@ -2,7 +2,9 @@ import {
   AGENT_ACCOUNT_PREFIXES,
   AGENT_LOGIN_TEXT_MAX,
   isRecord,
+  parseCodexVersion,
   TASK_SPEC_LIMITS,
+  versionAtLeast,
   type QuotaReading,
   type ScopedWindow,
 } from "@seance/shared";
@@ -15,9 +17,6 @@ import { childEnv, exec } from "../exec.ts";
  * may carry account data, so nothing either child writes reaches a log, and no error message is kept past the one
  * fixed test that tells an expired login from any other failure.
  */
-
-/** The version the spikes ran (S1–S9): 0.166.0's `account/read` has no `userId`. */
-export const CODEX_MIN_VERSION = "0.170.0";
 
 export const PROBE_TIMEOUT_MS = 30_000;
 export const PROBE_KILL_AFTER_MS = 5_000;
@@ -48,26 +47,6 @@ const CREDITS_BLOCKED = new Set([
   "workspace_owner_usage_limit_reached",
   "workspace_member_usage_limit_reached",
 ]);
-
-const VERSION_PATTERN = /\b(\d{1,6})\.(\d{1,6})\.(\d{1,6})(-[0-9A-Za-z.-]{1,32})?\b/u;
-
-/** `codex --version`'s `codex-cli 0.170.0` → `0.170.0`; null for anything without a version in it. */
-export function parseCodexVersion(stdout: string): string | null {
-  const match = VERSION_PATTERN.exec(stdout);
-  return match === null ? null : match[0];
-}
-
-/** Semver order on the numeric triple; a prerelease of the floor itself is below it. */
-export function versionAtLeast(version: string, floor: string = CODEX_MIN_VERSION): boolean {
-  const a = VERSION_PATTERN.exec(version);
-  const b = VERSION_PATTERN.exec(floor);
-  if (a === null || b === null) return false;
-  for (const i of [1, 2, 3]) {
-    const diff = Number(a[i]) - Number(b[i]);
-    if (diff !== 0) return diff > 0;
-  }
-  return a[4] === undefined || b[4] !== undefined;
-}
 
 /** One JSON-RPC answer, an error reduced to its code and the one fact the health test needs. */
 export type RpcAnswer =

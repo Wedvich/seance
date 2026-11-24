@@ -104,6 +104,11 @@ describe("passOffer", () => {
     const { assignment: _assignment, ...unplaced } = running();
     expect(offer(unplaced)).toMatchObject({ ok: false });
     expect(offer(running({ successor: "t-new" }))).toMatchObject({ ok: false });
+    // Phase 3: a successor of a Codex task would need Codex's own preamble and resume.
+    expect(offer(running({}, { agent: "codex", autonomy: "auto" }))).toEqual({
+      ok: false,
+      reason: "a Codex task can't be passed to a successor yet",
+    });
   });
 
   test("a finished task is worded as finished, and a reserved one as still starting", () => {

@@ -14,6 +14,7 @@ import {
   quote,
   successorPrompt,
   successorSpec,
+  type AgentLoginKind,
   type AmendRefusal,
   type AmendRequest,
   type BranchState,
@@ -813,8 +814,8 @@ export class Scheduler {
    * a pass is still pushing, never all count the one free slot: the rest are judged on a later tick, when
    * routing itself counts the first successor. Restates no cap.
    */
-  #slotKeys(target: Target): readonly string[] {
-    const account = accountOfPlacement(this.#fleet.machines(), target);
+  #slotKeys(target: Target, agent: AgentLoginKind | undefined): readonly string[] {
+    const account = accountOfPlacement(this.#fleet.machines(), target, agent);
     return [`device:${target.deviceId}`, ...(account === null ? [] : [`account:${account}`])];
   }
 
@@ -1592,7 +1593,13 @@ export class Scheduler {
     const fleet = this.#fleet;
     const create = this.#create;
     // Before any push: an older host answers an unknown op `invalid_request`, which would read as a failure to push.
-    if (create === undefined || (session === undefined ? fleet.pushBranch : fleet.passClose) === undefined) {
+    // A Codex task's pass is phase 3 (docs/codex.md, "Parity"): its successor would carry `succeeds` beside `agent`,
+    // which V1 places nowhere, so nothing is pushed for one.
+    if (
+      create === undefined ||
+      (session === undefined ? fleet.pushBranch : fleet.passClose) === undefined ||
+      task.spec.agent !== undefined
+    ) {
       return { ok: false, code: "successor_unsupported" };
     }
     const machine = fleet.machines().find((m) => m.deviceId === assignment.deviceId);
@@ -1991,7 +1998,7 @@ export class Scheduler {
       // An auto task whose successor routing would not place now would strand it `ready`: it alerts like the rest.
       const target = offered && auto ? this.#successorTarget(task, ex.accountId, now) : null;
       if (target !== null) {
-        const keys = this.#slotKeys(target);
+        const keys = this.#slotKeys(target, task.spec.agent);
         // Another pass is out for the same slot: judged again next tick, once routing counts its successor.
         if (keys.some((key) => taken.has(key))) continue;
         for (const key of keys) taken.add(key);
@@ -2419,6 +2426,8 @@ export class Scheduler {
         ? {}
         : { inheritedPr: task.prUrl }),
       ...(ref === undefined ? {} : { ref }),
+      // Routing placed it only on a machine advertising `codex` (`agent_unsupported`): an older daemon would start Claude.
+      ...(spec.agent === undefined ? {} : { agent: spec.agent }),
       client: SCHEDULER_CLIENT,
       // This leader routes a `machine_closed` refusal again; an older one would fail the task.
       routesClosed: true,
@@ -2427,7 +2436,7 @@ export class Scheduler {
     // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.
     // Before the awaits: `on` remembers the window at once, so two dispatches of one pass cannot both alert.
     const spill = reply.ok
-      ? this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota())
+      ? this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota(), spec.agent)
       : null;
     // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
     await this.#update(task.id, (current) =>

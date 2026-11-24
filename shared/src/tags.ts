@@ -44,7 +44,7 @@ export const TASK_TAG_BUDGET = { creator: 3, owner: 2, scheduler: 1 } as const s
 >;
 
 /** Agents séance knows; an `agent.kind` value is one of them. */
-export const AGENT_KINDS = ["claude"] as const;
+export const AGENT_KINDS = ["claude", "codex"] as const;
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
 /** Claude's conversation id is a lowercase UUID; Codex's thread id joins with its spike (docs/agents.md). */
