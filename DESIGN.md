@@ -14738,10 +14738,12 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   daemon it cannot reach (`the daemon is not running`).
 - **The agent's checklist (`daemon/custodian/agent.md`)** is the real one: `sessions`, judge each pane from its
   facts and, where it must, its screen through `seance custodian capture` and its PR through `pr` (it has no tmux,
-  no `gh` and no network), `close` the finished ones, for an idle session whose PR is open with a failed check and that is not on it (a closed or merged PR's checks are never
-  its to fix)
+  no `gh` and no network), `close` the finished ones, for an idle session whose PR is open with a failed check and that is not on it
   one `nudge` naming the failed checks and asking it to fix them and push to the same PR, never to merge it (that
-  session is not finished, so it is never closed while the check is red), and for a `busy`
+  session is not finished, so it is never closed while the check is red; a `CLOSED` or `MERGED` PR's failed checks
+  are never a nudge and never hold a close, by the owner's decision of 2026-11-24 after a round nudged a session about
+  a PR closed unmerged by design, one opened to fail: a closed PR was abandoned on purpose and its checks are the
+  owner's business), and for a `busy`
   session that is stuck the stuck path (C26–C28): `nudge` it with what it observed, `interrupt` only one hung inside a
   command and then nudge it in the same round, and once its nudges are spent (`limit`) `flag` it `stuck` and leave it;
   write `notes` as `## <pane or task id>` sections plus `## standing`, `flag` a session it leaves that needs its owner

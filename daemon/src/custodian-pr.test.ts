@@ -158,6 +158,19 @@ describe("createPrReader", () => {
     }
   });
 
+  test("a closed PR with a failed check keeps the PR's state apart from the checks'", async () => {
+    // The round's red-CI case keys on the PR's own `state`: a closed PR's failed checks never earn a nudge.
+    const r = rig();
+    r.answer = ok(pullRequest({ state: "CLOSED" }));
+    const view = await r.read(URL_1);
+    expect(view).toMatchObject({ state: "CLOSED", checks: { state: "PENDING" } });
+    expect(view === "unreadable" ? [] : view.checks.contexts).toContainEqual({
+      name: "ci/legacy",
+      status: null,
+      conclusion: "FAILURE",
+    });
+  });
+
   test("an answer is cached for the TTL and read again after it", async () => {
     const r = rig();
     const first = await r.read(URL_1);

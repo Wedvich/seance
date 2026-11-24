@@ -82,6 +82,15 @@ describe("the committed agent definition", () => {
       expect((await underNoWrites("seance custodian done <<'EOF'\nx\nEOF")).code).not.toBe(0);
     }
   });
+
+  test("nudges about red CI only on an open PR: a closed or merged one's failed checks are the owner's", async () => {
+    const parsed: unknown = JSON.parse(await loadAgent());
+    const custodian = isRecord(parsed) ? parsed["custodian"] : undefined;
+    const prompt = isRecord(custodian) && typeof custodian["prompt"] === "string" ? custodian["prompt"] : "";
+    const redCi = (/- red CI:[\s\S]*?\n {3}- finished/u.exec(prompt)?.[0] ?? "").replaceAll(/\s+/gu, " ");
+    expect(redCi).toContain("shows `state` `OPEN`");
+    expect(redCi).toContain("A PR whose `state` is `CLOSED` or `MERGED` is never red CI");
+  });
 });
 
 describe("parseAgent", () => {
