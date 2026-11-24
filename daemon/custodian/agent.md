@@ -30,8 +30,11 @@ commands.
    above were cut (normal: judge from the bottom you get, never capture again to see more). For each pane it lists as `ours` whose `close`
    is `ok`, decide which one case applies:
    - `dead`: `seance custodian close <pane>`.
-   - red CI: an idle session whose `prUrl` is set, where `seance custodian pr <pane>` shows a check that
-     failed and its screen shows it is not working on it (it reported done, or stopped on the failure).
+   - red CI: an idle session whose `prUrl` is set, where `seance custodian pr <pane>` shows `state` `OPEN`
+     and a check that failed, and its screen shows it is not working on it (it reported done, or stopped on
+     the failure). A PR whose `state` is `CLOSED` or `MERGED` is never red CI, whatever its checks say: the
+     session has nothing left to fix there, so judge it by the other cases (closed on purpose and reported
+     done is finished).
      Nudge it (step 4's limits and `limit` rule apply) with the PR and the names of the checks that failed,
      asking it to fix them, push to the same PR and stop there, never merging it:
 
