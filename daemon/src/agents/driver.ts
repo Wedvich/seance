@@ -36,6 +36,12 @@ export interface AgentPanes {
   readonly startMark: string;
   /** What tmux or `ps` calls the agent's process in a pane séance did not start; null when no such pane is a session. */
   readonly command: RegExp | null;
+  /**
+   * What a session's own process is called on a peer's chain (`sessionProcessOf`): the process a local-socket frame
+   * from that pane binds to. Claude's is its `command`; Codex's is the pane's `codex app-server`, the parent of every
+   * hook, tool and MCP server the session runs.
+   */
+  readonly process: RegExp;
 }
 
 export interface LaunchSpec {

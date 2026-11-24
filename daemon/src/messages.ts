@@ -41,7 +41,7 @@ import {
   type MessageFrameRoute,
   type MessageReply,
 } from "./message-frame.ts";
-import { claudeProcessOf, nestedClaude, sessionAlive, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
+import { nestedClaude, sessionAlive, sessionProcessOf, type ClaudeProcess, type SessionKey } from "./claude-process.ts";
 import { ancestorBelow, peerPidSupported } from "./peer.ts";
 import type { Conversations } from "./conversations.ts";
 import type { BoundPane } from "./session-events.ts";
@@ -278,7 +278,8 @@ export type WatchNoteFate = (outcome: "delivered" | "ended" | "nolistener" | "dr
  * The live pane a peer's pid sits in and the `claude` process above it: replies by handle and watches bind the same
  * way (DESIGN.md, "Replies by handle"; "Watches"), by the kernel-reported pid and never a field. Null when the host
  * names no peer, the pid came back null or it is in no live pane; `session` is null when no `claude` stands on the
- * chain between the peer and the pane process.
+ * chain between the peer and the pane process. In a Codex pane (its start mark) the session is the innermost `codex`,
+ * the pane's server (`sessionProcessOf`; docs/codex.md, "Tools").
  */
 export async function bindPeer(
   peer: number | null,
@@ -293,7 +294,11 @@ export async function bindPeer(
   const live = panes.filter((pane) => !pane.dead);
   const found = await ancestorBelow(peer, new Map(live.map((pane) => [pane.pid, pane])));
   if (found === null) return null;
-  return { pane: found.hit, below: found.below, session: await claudeProcessOf([...found.below, found.hit.pid]) };
+  return {
+    pane: found.hit,
+    below: found.below,
+    session: await sessionProcessOf([...found.below, found.hit.pid], found.hit.agent),
+  };
 }
 
 /** A peer bound to its pane, and to the session process inside it. */

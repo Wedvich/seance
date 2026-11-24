@@ -186,6 +186,8 @@ export interface Started {
   readonly local?: LocalSurfaces;
   /** The leader's `pass-close`, once session events run: the handler context reads it late (`run.ts`). */
   readonly armPassClose?: SessionEvents["armPassClose"];
+  /** A Codex session's states into the session-event step, once session events run: `run.ts` hands it to `codexSessions`. */
+  readonly codexState?: SessionEvents["codex"];
   /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
   readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
   /** The watch table's intake for the leader's `watch-event`, once session events run: the handler context reads it late (`run.ts`). */
@@ -482,6 +484,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     },
     local: { sessionEvents: events.handle, messages, watches: watches.handle, keepOpen: keepOpen.handle },
     armPassClose: events.armPassClose,
+    codexState: events.codex,
     messages,
     watches,
     conversations,
@@ -1121,6 +1124,7 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
 
 export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
+  readonly codexState?: SessionEvents["codex"];
   /** The leader's forwarded messages and receipts, once session events run: the handler context reads it late (`run.ts`). */
   readonly messages?: Pick<Messages, "deliverRouted" | "receipt">;
   readonly watches?: Pick<Watches, "onEvent">;
@@ -1148,6 +1152,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
   try {
     let local: LocalSurfaces = {};
     let armPassClose: Started["armPassClose"];
+    let codexState: Started["codexState"];
     let messages: Started["messages"];
     let watches: Started["watches"];
     let drainAsk: Started["drainAsk"];
@@ -1160,6 +1165,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       started.push(entry);
       local = mergeSurfaces(local, entry);
       armPassClose ??= entry.armPassClose;
+      codexState ??= entry.codexState;
       messages ??= entry.messages;
       watches ??= entry.watches;
       drainAsk ??= entry.drainAsk;
@@ -1176,6 +1182,7 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
       afterLocal,
       stop,
       ...(armPassClose === undefined ? {} : { armPassClose }),
+      ...(codexState === undefined ? {} : { codexState }),
       ...(messages === undefined ? {} : { messages }),
       ...(watches === undefined ? {} : { watches }),
       ...(drainAsk === undefined ? {} : { drainAsk }),

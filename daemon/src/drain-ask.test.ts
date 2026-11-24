@@ -22,6 +22,7 @@ const pane = (id: string, taskId: string | null, extra: Partial<BoundPane> = {})
   dead: false,
   taskId,
   ours: true,
+  agent: "claude",
   path: "/work",
   ...extra,
 });

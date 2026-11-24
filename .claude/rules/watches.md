@@ -17,7 +17,7 @@ W1–W11. CLAUDE.md's recurring rules hold throughout; the leader's side (the po
   fields) is bound only by peer pid, to the pane, its pane process and the innermost `claude` on the
   peer's chain (`bindPeer`): refused `unbound` where the host names no peer (`peerPidSupported`) or the
   pid came back null, `nosession` with no `claude` on the chain and `nolistener` for a pane no inbox
-  listener serves, never by a field. It carries a URL, a head and an id and nothing that names a pane,
+  listener serves (a Codex pane always), never by a field. It carries a URL, a head and an id and nothing that names a pane,
   task or session; it is on neither `LOCAL_OPS` nor the broker.
 - A `remove` is honoured only from the session that made the watch (a wrong, foreign or unknown id all
   answer `unknown`).

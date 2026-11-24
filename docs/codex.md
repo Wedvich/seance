@@ -1,9 +1,13 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 items 4, 6 and 8 and item 5 built, the rest design.** Item 8 (2026-11-24),
+**Status: phase 1 (items 1, 2, 3) and phase 2 (items 4 to 8) built, the rest design.** Item 8 (2026-11-24),
 the clients (the PWA's picker grouped by agent, effort per agent, the agent badge; MCP's and the CLI's `agent`; the
 gates and the broker leg's sentinel), is in DESIGN.md: Scheduler, "Codex tasks", "Clients"; Wire protocol's
-compatibility list; and the threat model's "The task field `agent`". Item 6 (2026-11-24),
+compatibility list; and the threat model's "The task field `agent`". Item 7 (2026-11-24), the Codex
+session's state and life, is in DESIGN.md: Daemon, "Codex session events" (beside "Session events") and "Codex
+sessions" (its close); "Codex login" (a session's rate-limit reading); the binding's `sessionOf` (Session messages);
+the custodian's verbs; and the threat model's "A Codex session's events" (this doc's threat-model items 5 and 6, the
+session's half). Item 6 (2026-11-24),
 the Codex launch, is in DESIGN.md: Daemon, "Codex sessions"; and the threat model's "A Codex pane's server socket",
 "What the daemon sends a Codex server, and keeps" and "A Codex launch's thread id" (this doc's threat-model items 4, 5
 and 10, and 12's spawn and despawn lines). Item 4 (2026-11-24), the task
@@ -408,8 +412,10 @@ sequenceDiagram
 - **Hooks: none in V1.** _Rejected for V1:_ `seance session-event --hook` from a generated `hooks.json`: each hook
   needs a trust hash Séance would compute against Codex internals (`[hooks.state…] trusted_hash`), costs a process per
   event, and says nothing the notifications do not.
-- **A daemon restart reconnects** to every live Codex pane's socket (its run dir is noted beside the launch) and reads
-  `thread/read` to resync. A lost connection is no session end; a pane death is.
+- **A daemon restart reconnects** to every live Codex pane's socket (its run dir read from the pane's start command)
+  and sends `thread/resume` with `excludeTurns` to resync. A lost connection is no session end; a pane death is.
+  _Corrected at build (item 7):_ `thread/read` was the plan, but a connection that only reads a thread hears none of
+  its turns or rate limits (the item 7 spike, 0.170.0); the running turn's id comes from `thread/turns/list`.
 - **Not in V1:** `stop` notes (background work), `tool` on a permission wait (the approval request carries it; display
   only, later).
 - **Questions read as idle.** In Codex's default mode a question is prose, so it reads as an idle turn end, as with
@@ -586,8 +592,14 @@ nothing.
    recognition. Not advertised: a wire spawn of `agent: "codex"` is refused. _Corrected at build:_ the ledger notes
    `agent` beside the thread id (`TaskNote.agent`) and a continuation refuses such a note, so item 10's continue is
    the only thing that may resume a thread; `close` kills the pane until item 7's `turn/interrupt`.
-7. **The Codex session** (after 6): notifications into the pipeline, the graceful close, reconnect at start, the tools'
-   binding, the custodian's view; then the daemon advertises `codex` while a login is configured.
+7. **Built 2026-11-24** (DESIGN.md, Daemon, "Codex session events"). **The Codex session** (after 6): notifications
+   into the pipeline, the graceful close, reconnect at start, the tools' binding, the custodian's view; then the daemon
+   advertises `codex` while a login is configured, signed in and at the floor. _Corrected at build:_ the reconnect
+   resumes the thread (`thread/resume`, `excludeTurns`) rather than reading it (above); a run dir is found from the
+   pane's start command, not a note beside the launch; `account/rateLimits/updated` is a nudge to read
+   `account/rateLimits/read` over the session's connection (at most once a minute), not a reading itself, so the
+   account parses one shape; and the session's process (`sessionOf`'s innermost `codex`) is the server's pid, which
+   `run.sh` writes to the run dir.
 8. **Built 2026-11-24** (DESIGN.md, Scheduler, "Codex tasks", "Clients"). **Clients** (after 4): the PWA's model
    picker grouped by agent (picking a GPT model sets `agent`), effort per agent, an agent badge on the Queue and the
    task view; MCP `spawn_session` and `queue_batch` take `agent`; `seance spawn --agent codex`. _Corrected at build:_
@@ -654,5 +666,6 @@ Still to run, each before the phase named; each checks a fact the design already
 | Routing by agent, the spill                                                                     | `scheduler/src/route.ts`                                                             |
 | The home, generated config, probe, verbs                                                        | `daemon/src/codex/` (`home.ts`, `probe.ts`, `account.ts`, `codex-cli.ts`)            |
 | The connection and the driver                                                                   | `daemon/src/codex/client.ts`, `daemon/src/agents/codex.ts`                           |
+| A session's events, close and reconnect                                                         | `daemon/src/codex/sessions.ts`, `daemon/src/codex/events.ts`                         |
 | The seam                                                                                        | `daemon/src/agents/driver.ts`, `daemon/src/agents/claude.ts`                         |
 | Clients                                                                                         | `pwa/src/` (picker, account card, Machines row), `daemon/src/mcp*.ts`, the CLI       |

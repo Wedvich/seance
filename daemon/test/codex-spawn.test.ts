@@ -1,14 +1,17 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CODEX_MODEL, isAgentSessionId, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { CODEX_RUN_PREFIX } from "../src/agents/panes.ts";
 import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
+import type { ClaudeProcess } from "../src/claude-process.ts";
+import { codexSessions } from "../src/codex/sessions.ts";
 import type { CodexConfig } from "../src/config.ts";
 import { despawnSession } from "../src/despawn.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
+import type { CodexState } from "../src/session-events.ts";
 import { listClaudeSessions, paneInfo } from "../src/sessions.ts";
 import { spawnSession, type SpawnOptions } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
@@ -141,7 +144,7 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
     const listed = await listClaudeSessions(repos);
     expect(listed.some((entry) => entry.window === "Codex Hello")).toBe(true);
 
-    // No graceful close yet: the pane is killed, and its shell ends the server and removes the run dir.
+    // Idle, no turn to interrupt: the pane is killed, and its shell ends the server and removes the run dir.
     const closed = await despawnSession(pane, { force: false, graceMs: 200, reapWaitMs: 2_000 });
     expect(closed).toEqual({ window: "Codex Hello", outcome: "killed", agent: "codex" });
     await pollUntil(async () => !(await runDirs()).includes(runDir), "the run dir to go");
@@ -208,5 +211,112 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
     await stub.scenario({ listenExit: 3 });
     expect((await refusal(spawnSession(codex("Dies"), repos, opts))).code).toBe("claude_died");
     expect(await windowNames()).not.toContain("Dies");
+  });
+});
+
+interface Heard {
+  readonly pane: string;
+  readonly thread: string;
+  readonly process: ClaudeProcess | null;
+  readonly state: CodexState;
+}
+
+describe("a Codex session's life: its server's notifications (codex/sessions.ts, docs/codex.md item 7)", () => {
+  const heard: Heard[] = [];
+  const readings: unknown[] = [];
+  const configure = async (): Promise<void> => {
+    codexSessions.configure({
+      sink: {
+        state: async (pane, thread, process, state) => {
+          heard.push({ pane: pane.id, thread, process, state });
+        },
+        rateLimits: (value) => void readings.push(value),
+      },
+      home: await realpath(codexHome),
+      launchSession: () => undefined,
+    });
+  };
+  const states = (pane: string): readonly CodexState[] => heard.filter((h) => h.pane === pane).map((h) => h.state);
+  const methods = async (): Promise<readonly string[]> => (await stub.rpc()).map((call) => call.method);
+
+  beforeEach(async () => {
+    heard.length = 0;
+    readings.length = 0;
+    await configure();
+  });
+
+  afterEach(() => {
+    codexSessions.stop();
+  });
+
+  test("a turn reads busy, then idle and its end; another thread's approval is dropped; the login's reading follows", async () => {
+    const reading = { rateLimits: { limitId: "codex", primary: { usedPercent: 9 } }, rateLimitsByLimitId: null };
+    await stub.scenario({ turn: "complete", rateLimits: { result: reading } });
+    const outcome = await spawnSession(codex("Codex Turn"), repos, opts);
+    const pane = await paneOf(outcome);
+    await pollUntil(() => states(pane).some((s) => s.turnEnded === true), "the turn's end", 10_000);
+    expect(states(pane)).toEqual([{ state: "busy" }, { state: "idle" }, { state: "idle", turnEnded: true }]);
+    expect(heard.every((h) => h.thread === outcome.session)).toBe(true);
+    // Its server, as `seance mcp` from inside the pane binds it (`sessionOf`'s innermost `codex`).
+    expect(heard[0]?.process?.pid).toBeGreaterThan(1);
+    await pollUntil(() => readings.length === 1, "the session's own rate-limit read");
+    expect(readings).toEqual([reading]);
+    expect(await methods()).toContain("account/rateLimits/read");
+    await despawnSession(pane, { force: true });
+  });
+
+  test("an approval is the pane's needs-input, never answered; a close interrupts the turn before killing the pane", async () => {
+    await stub.scenario({ turn: "approval" });
+    const outcome = await spawnSession(codex("Codex Approval"), repos, opts);
+    const pane = await paneOf(outcome);
+    await pollUntil(() => states(pane).some((s) => s.state === "needs-input"), "the approval's wait", 10_000);
+    expect(states(pane).at(-1)).toEqual({ state: "needs-input", reason: "permission" });
+    const closed = await despawnSession(pane, { force: false, graceMs: 2_000, reapWaitMs: 2_000 });
+    expect(closed).toMatchObject({ window: "Codex Approval", outcome: "killed", agent: "codex" });
+    const rpc = await stub.rpc();
+    expect(rpc.find((call) => call.method === "turn/interrupt")?.params).toEqual({
+      threadId: outcome.session,
+      turnId: "turn-1",
+    });
+    // The server's request carries an id: the daemon read it as nothing and sent no response.
+    expect(rpc.map((call) => call.method)).not.toContain("(response)");
+    await pollUntil(
+      () => states(pane).some((s) => s.turnEnded === true),
+      "the interrupted turn's end to reach the session-event step",
+    );
+  });
+
+  test("a daemon restart re-joins a running session: its thread resumed, its status and running turn re-read", async () => {
+    await stub.scenario({ turn: "hold" });
+    const outcome = await spawnSession(codex("Codex Rejoin"), repos, opts);
+    const pane = await paneOf(outcome);
+    await pollUntil(() => states(pane).length > 0, "the turn's start", 10_000);
+    expect(codexSessions.holds(pane)).toBe(true);
+
+    codexSessions.stop();
+    expect(codexSessions.holds(pane)).toBe(false);
+    heard.length = 0;
+    await configure();
+    await codexSessions.reconnectAll();
+    expect(codexSessions.holds(pane)).toBe(true);
+    expect(states(pane)).toEqual([{ state: "busy" }]);
+    const rpc = await stub.rpc();
+    expect(rpc.find((call) => call.method === "thread/resume")?.params).toEqual({
+      threadId: outcome.session,
+      excludeTurns: true,
+    });
+    expect(rpc.map((call) => call.method)).toContain("thread/turns/list");
+    // Twice is one: a held pane is not dialled again.
+    await codexSessions.reconnectAll();
+    expect((await methods()).filter((m) => m === "thread/resume")).toHaveLength(1);
+
+    // The turn id came back with it: the close still interrupts it.
+    await despawnSession(pane, { force: false, graceMs: 2_000, reapWaitMs: 2_000 });
+    expect((await stub.rpc()).findLast((call) => call.method === "turn/interrupt")?.params).toEqual({
+      threadId: outcome.session,
+      turnId: "turn-1",
+    });
+    // The pane's death, not the connection's loss, ends the session here.
+    await pollUntil(() => !codexSessions.holds(pane), "the dead pane's session to go", 10_000);
   });
 });

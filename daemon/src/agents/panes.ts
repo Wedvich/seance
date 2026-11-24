@@ -15,6 +15,7 @@ export const CLAUDE_PANES = {
   agent: "claude",
   startMark: "*--remote-control*",
   command: /^(?:claude|\d+\.\d+\.\d+)$/u,
+  process: /^(?:claude|\d+\.\d+\.\d+)$/u,
 } as const satisfies AgentPanes;
 
 /**
@@ -32,7 +33,15 @@ export const CODEX_PANES: AgentPanes = {
   agent: "codex",
   startMark: `*${CODEX_RUN_PREFIX}*`,
   command: null,
+  // The native binary's own name on every install (the npm package's `node` wrapper execs it): the server and the
+  // TUI both carry it, and the server is the innermost on any chain from a tool or an MCP server.
+  process: /^codex$/u,
 };
+
+/** The panes of one agent. */
+export function panesOf(agent: AgentKind): AgentPanes {
+  return AGENT_PANES.find((pane) => pane.agent === agent) ?? CLAUDE_PANES;
+}
 
 /** Every driver's panes (`AgentDriver.panes`): what the pane readers recognise. */
 export const AGENT_PANES: readonly AgentPanes[] = [CLAUDE_PANES, CODEX_PANES];

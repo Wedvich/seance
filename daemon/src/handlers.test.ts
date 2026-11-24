@@ -116,9 +116,9 @@ describe("relay ops are audited", () => {
     expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
-  // No driver yet (docs/codex.md, item 6): a spawn naming an agent must never start as Claude instead.
-  test("a spawn naming an agent is rejected, codex included", async () => {
-    for (const agent of ["codex", "claude", 1]) {
+  // Claude is the field's absence: any agent but `codex` must never start as Claude instead.
+  test("a spawn naming an agent other than codex is rejected", async () => {
+    for (const agent of ["claude", "Codex", 1]) {
       lines.length = 0;
       // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
       await createHandler(ctx)(spawnNope({ agent }));

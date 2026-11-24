@@ -11,7 +11,8 @@ import {
 } from "@seance/shared";
 import { bunNamed, pollUntil, underClaude, writeAgentSessionFile } from "../test/fixtures.ts";
 import { LaunchLedger, LEDGER_MAX } from "./launch-ledger.ts";
-import { parseProcStatPpid, parsePsParents } from "./peer.ts";
+import { createConversations } from "./conversations.ts";
+import { parseProcStatPpid, parsePsParents, processStart } from "./peer.ts";
 import {
   createSessionEvents,
   ENDED_MAX,
@@ -90,8 +91,8 @@ describe("parseSessionEventFrame", () => {
 
 describe("activity", () => {
   const panes: readonly BoundPane[] = [
-    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home/u/work/repo" },
-    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home/u/repo" },
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, agent: "claude", path: "/home/u/work/repo" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home/u/repo" },
   ];
   const exclaves = [
     { id: "default", root: "/home/u", configDir: "/home/u/.claude", configFile: "/home/u/.claude.json" },
@@ -125,8 +126,8 @@ describe("activity", () => {
 
 describe("per-pane retention (custodian C15)", () => {
   const panes: readonly BoundPane[] = [
-    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home" },
-    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home" },
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
   ];
 
   function setup() {
@@ -188,20 +189,23 @@ describe("per-pane retention (custodian C15)", () => {
   });
 });
 
-test("parsePanePids dedupes grouped panes, validates the task, reads ours, and keeps a separator in the path", () => {
+test("parsePanePids dedupes grouped panes, validates the task, reads ours and the agent, and keeps a separator in the path", () => {
   const raw = [
-    "%1|100|0|task-1|1||/a|b",
-    "%1|100|0|task-1|1||/a|b",
-    "%2|200|1||0||/c",
-    "%3|300|0|bad task|1||/d",
+    "%1|100|0|task-1|1||claude|/a|b",
+    "%1|100|0|task-1|1||claude|/a|b",
+    "%2|200|1||0||codex|/c",
+    "%3|300|0|bad task|1|||/d",
     // The seat's round binds nothing (C10).
-    "%4|400|0|||1|1|/e",
+    "%4|400|0|||1|1||/e",
+    // The agent from the pane's own start mark; only an `ours` pane's counts.
+    "%5|500|0|task-5|1||codex|/f",
     "junk",
   ].join("\n");
   expect(parsePanePids(raw)).toEqual([
-    { id: "%1", pid: 100, dead: false, taskId: "task-1", ours: true, path: "/a|b" },
-    { id: "%2", pid: 200, dead: true, taskId: null, ours: false, path: "/c" },
-    { id: "%3", pid: 300, dead: false, taskId: null, ours: true, path: "/d" },
+    { id: "%1", pid: 100, dead: false, taskId: "task-1", ours: true, agent: "claude", path: "/a|b" },
+    { id: "%2", pid: 200, dead: true, taskId: null, ours: false, agent: "claude", path: "/c" },
+    { id: "%3", pid: 300, dead: false, taskId: null, ours: true, agent: "claude", path: "/d" },
+    { id: "%5", pid: 500, dead: false, taskId: "task-5", ours: true, agent: "codex", path: "/f" },
   ]);
 });
 
@@ -217,8 +221,8 @@ test("parent parsing survives a comm with spaces and parens", () => {
 
 describe("idle notes (the settings Stop hook)", () => {
   const panes: readonly BoundPane[] = [
-    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home" },
-    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home" },
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
   ];
 
   function setup() {
@@ -331,7 +335,7 @@ describe("idle notes (the settings Stop hook)", () => {
       expect(events.awaitsWake("%1")).toBe(true);
       // A tmux server restart reused `%1` for another process.
       live = [
-        { id: "%1", pid: 11, dead: false, taskId: null, ours: true, path: "/home" },
+        { id: "%1", pid: 11, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" },
         ...panes.filter((pane) => pane.id !== "%1"),
       ];
       await events.handle(frame({ pane: "%2", state: "busy" }), null);
@@ -393,7 +397,10 @@ describe("a claude another claude started in the pane", () => {
   function setup(pane: number) {
     const forwarded: SessionEvent[] = [];
     const events = createSessionEvents({
-      panes: () => Promise.resolve([{ id: "%9", pid: pane, dead: false, taskId: "t1", ours: true, path: "/home" }]),
+      panes: () =>
+        Promise.resolve([
+          { id: "%9", pid: pane, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
+        ]),
       exclaves: () => [{ id: "default", root: "/home", configDir: join(base, "config"), configFile: "/x" }],
       forward: (event) => void forwarded.push(event),
       ended: new EndedTasks(),
@@ -1039,7 +1046,15 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("a bound ended event from the pane of an interrupted task clears its mark", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" });
+      const events = paneEvents(restarted, {
+        id: "%1",
+        pid: 10,
+        dead: false,
+        taskId: "t1",
+        ours: true,
+        agent: "claude",
+        path: "/home",
+      });
       try {
         await events.handle(frame({ pane: "%1", state: "ended" }), null);
         await pollUntil(() => restarted.ledger.interrupted().length === 0, "the mark cleared");
@@ -1053,7 +1068,15 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("a bound busy or stateless event leaves the mark: a live session is cleared by the listing", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" });
+      const events = paneEvents(restarted, {
+        id: "%1",
+        pid: 10,
+        dead: false,
+        taskId: "t1",
+        ours: true,
+        agent: "claude",
+        path: "/home",
+      });
       try {
         await events.handle(frame({ pane: "%1", state: "busy" }), null);
         await events.handle(frame({ pane: "%1" }), null);
@@ -1068,7 +1091,15 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("an ended event after the ingest stopped leaves the mark", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" });
+      const events = paneEvents(restarted, {
+        id: "%1",
+        pid: 10,
+        dead: false,
+        taskId: "t1",
+        ours: true,
+        agent: "claude",
+        path: "/home",
+      });
       events.stop();
       await events.handle(frame({ pane: "%1", state: "ended" }), null);
       await Bun.sleep(30); // a non-event can't be polled
@@ -1085,6 +1116,7 @@ describe("EndedTasks interrupted launches and the drain", () => {
         dead: false,
         taskId: "other",
         ours: true,
+        agent: "claude",
         path: "/home",
       });
       try {
@@ -1136,7 +1168,7 @@ describe("coalescing", () => {
     jest.useRealTimers();
   });
 
-  const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
+  const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" };
 
   function setup(coalesceMs: number) {
     const forwarded: SessionEvent[] = [];
@@ -1221,7 +1253,7 @@ describe("the PR URL is kept for the scheduler's progress", () => {
   function setup(taskId: string) {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
-    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId, ours: true, path: "/home" };
+    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId, ours: true, agent: "claude", path: "/home" };
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
       exclaves: () => [],
@@ -1273,7 +1305,15 @@ describe("an ended event carries the PR its own launch noted", () => {
   function setup() {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
-    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
+    const pane: BoundPane = {
+      id: "%1",
+      pid: 10,
+      dead: false,
+      taskId: "t1",
+      ours: true,
+      agent: "claude",
+      path: "/home",
+    };
     const forwarded: SessionEvent[] = [];
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
@@ -1332,8 +1372,16 @@ describe("an ended event carries the PR its own launch noted", () => {
 });
 
 describe("a session's done report (#21)", () => {
-  const tasked: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
-  const bare: BoundPane = { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" };
+  const tasked: BoundPane = {
+    id: "%1",
+    pid: 10,
+    dead: false,
+    taskId: "t1",
+    ours: true,
+    agent: "claude",
+    path: "/home",
+  };
+  const bare: BoundPane = { id: "%2", pid: 20, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" };
 
   function setup(coalesceMs = 0, ledger = LaunchLedger.memory()) {
     const ended = new EndedTasks(ledger);
@@ -1520,8 +1568,8 @@ describe("a session's hand-off", () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
-      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" },
-      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" },
+      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" },
     ];
     const forwarded: SessionEvent[] = [];
     const closed: [string, string][] = [];
@@ -1676,10 +1724,10 @@ describe("a session's hand-off", () => {
       expect(closed).toEqual([]);
 
       await send("%1", { handoff: true });
-      panes[0] = { id: "%1", pid: 11, dead: false, taskId: "t2", ours: true, path: "/home" };
+      panes[0] = { id: "%1", pid: 11, dead: false, taskId: "t2", ours: true, agent: "claude", path: "/home" };
       await ledger.record("t2");
       await send("%1", { state: "idle", turnEnded: true });
-      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
+      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" };
       await send("%1", { state: "idle", turnEnded: true });
       expect(closed).toEqual([]);
     } finally {
@@ -1723,8 +1771,8 @@ describe("a session's own pass", () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
-      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" },
-      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" },
+      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" },
     ];
     const pushes: { taskId: string; hasPr: boolean }[] = [];
     const passes: SessionPass[] = [];
@@ -1949,7 +1997,10 @@ describe("a session's own pass", () => {
     try {
       await launch();
       const throwing = createSessionEvents({
-        panes: () => Promise.resolve([{ id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" }]),
+        panes: () =>
+          Promise.resolve([
+            { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
+          ]),
         exclaves: () => [],
         forward: () => {},
         ended: new EndedTasks(ledger),
@@ -2103,9 +2154,9 @@ describe("a session's own pass", () => {
         await launch();
         await ledger.record("t2");
         await send("%1", { pass: true, record: RECORD });
-        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t2", ours: true, path: "/home" };
+        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t2", ours: true, agent: "claude", path: "/home" };
         await send("%1", { state: "idle", turnEnded: true });
-        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
+        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" };
         // A pass-close for t1 now finds no entry of the pane's: it is made anew, and needs a later turn end.
         await events.armPassClose("t1");
         expect(closed).toEqual([]);
@@ -2117,9 +2168,9 @@ describe("a session's own pass", () => {
     test("a pass-close for a task no live pane carries is no_pane, and a stopped ingest arms nothing", async () => {
       const { panes, events } = setup();
       expect(await events.armPassClose("nobody")).toMatchObject({ ok: false, code: "no_pane" });
-      panes[0] = { id: "%1", pid: 10, dead: true, taskId: "t1", ours: true, path: "/home" };
+      panes[0] = { id: "%1", pid: 10, dead: true, taskId: "t1", ours: true, agent: "claude", path: "/home" };
       expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "no_pane" });
-      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
+      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" };
       events.stop();
       // Not no_pane: that tells the leader the session is gone, which a stopping daemon cannot say.
       expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "unsupported" });
@@ -2175,8 +2226,8 @@ describe("the drain ask's hooks", () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
-      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" },
-      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" },
+      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, agent: "claude", path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, agent: "claude", path: "/home" },
     ];
     const states: State[] = [];
     const passes: SessionPass[] = [];
@@ -2342,5 +2393,136 @@ describe("the drain ask's hooks", () => {
     await ledger.note("handed", SITE);
     await ended.handingOff("handed");
     expect(ended.askable("handed")).toBe(false);
+
+    // A Codex pane's TUI takes none of the ask's keys as Claude's does, and its pass is phase 3.
+    await ledger.record("codex");
+    await ledger.note("codex", { ...SITE, agent: "codex" });
+    expect(ended.askable("codex")).toBe(false);
+  });
+});
+
+describe("a Codex pane (its server's notifications, docs/codex.md item 7)", () => {
+  const THREAD = "019a7f3e-5b2c-7d4e-8f6a-1b2c3d4e5f60";
+  const codexPane: BoundPane = {
+    id: "%3",
+    pid: 30,
+    dead: false,
+    taskId: "t3",
+    ours: true,
+    agent: "codex",
+    path: "/r/.claude/worktrees/x",
+  };
+
+  async function setup(panes: BoundPane[] = [codexPane]) {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    await ledger.record("t3");
+    await ledger.note("t3", { repo: "/r", path: codexPane.path, session: THREAD, agent: "codex" });
+    const forwarded: SessionEvent[] = [];
+    const endedPanes: [string, string][] = [];
+    const handedOff: [string, string][] = [];
+    const conversations = createConversations({
+      configDirs: () => [],
+      launchSession: (taskId) => ended.launchSession(taskId),
+      panes: () => Promise.resolve(panes),
+    });
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended,
+      conversations,
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+      onEnded: (pane, taskId) => void endedPanes.push([pane, taskId]),
+      handOff: (pane, taskId) => {
+        handedOff.push([pane, taskId]);
+        return Promise.resolve();
+      },
+    });
+    const send = (fields: object): Promise<unknown> => events.handle(frame({ pane: "%3", ...fields }), null);
+    return { panes, ended, forwarded, endedPanes, handedOff, conversations, events, send };
+  }
+
+  test("its states come from its server: a peer's state is dropped, a pass refused, a done report and a hand-off taken", async () => {
+    const { forwarded, handedOff, events, send } = await setup();
+    try {
+      // A `claude -p` one of its tools ran, with hooks of its own, never speaks for the pane.
+      expect(await send({ state: "busy" })).toEqual({ ok: true });
+      expect(await send({ state: "idle", turnEnded: true })).toEqual({ ok: true });
+      expect(forwarded).toEqual([]);
+      expect(await send({ pass: true, record: "carry on" })).toEqual({ ok: false, code: "unsupported" });
+
+      await events.codex(codexPane, THREAD, null, { state: "busy" });
+      await events.codex(codexPane, THREAD, null, { state: "needs-input", reason: "permission" });
+      await events.codex(codexPane, THREAD, null, { state: "idle", turnEnded: true });
+      expect(forwarded.map((e) => [e.session, e.taskId, e.state, e.reason])).toEqual([
+        ["%3", "t3", "busy", undefined],
+        ["%3", "t3", "needs-input", "permission"],
+        ["%3", "t3", "idle", undefined],
+      ]);
+
+      expect(await send({ state: "done", prUrl: "https://github.com/a/b/pull/7" })).toEqual({ ok: true });
+      expect(forwarded.at(-1)).toMatchObject({ state: "done", taskId: "t3", prUrl: "https://github.com/a/b/pull/7" });
+      expect(events.marked("%3")).toBe(false);
+      expect(await send({ handoff: true })).toEqual({ ok: true });
+      expect(events.marked("%3")).toBe(true);
+      // The server's turn end closes it, as a Claude pane's `Stop` does; its status's own idle does not.
+      await events.codex(codexPane, THREAD, null, { state: "idle" });
+      expect(handedOff).toEqual([]);
+      await events.codex(codexPane, THREAD, null, { state: "idle", turnEnded: true });
+      expect(handedOff).toEqual([["%3", "t3"]]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a state reaches only the pane it was bound to: one gone, under another pid or task, or a Claude pane's, is dropped", async () => {
+    const panes: BoundPane[] = [codexPane];
+    const { forwarded, events } = await setup(panes);
+    try {
+      await events.codex({ ...codexPane, pid: 31 }, THREAD, null, { state: "busy" });
+      await events.codex({ ...codexPane, taskId: "t9" }, THREAD, null, { state: "busy" });
+      panes[0] = { ...codexPane, agent: "claude" };
+      await events.codex(codexPane, THREAD, null, { state: "busy" });
+      panes[0] = { ...codexPane, dead: true };
+      await events.codex(codexPane, THREAD, null, { state: "busy" });
+      panes.length = 0;
+      await events.codex(codexPane, THREAD, null, { state: "ended" });
+      expect(forwarded).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("an ended from the server ends the task's session here, as a bound frame's does", async () => {
+    const { forwarded, endedPanes, events } = await setup();
+    try {
+      await events.codex(codexPane, THREAD, null, { state: "ended" });
+      expect(forwarded.map((e) => e.state)).toEqual(["ended"]);
+      // Messaging and the watch table drop the pane's inbox and watches on it.
+      expect(endedPanes).toEqual([["%3", "t3"]]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("its state is kept against its server, the thread its conversation, verified by the launch ledger", async () => {
+    const { conversations, events } = await setup();
+    const start = processStart(process.pid);
+    if (start === null) throw new Error("no start time for this process");
+    try {
+      const server = { pid: process.pid, start, key: `${process.pid}:${start}` };
+      await events.codex(codexPane, THREAD, server, { state: "busy" });
+      await pollUntil(
+        () => conversations.process("%3")?.session?.verified === true,
+        "the thread to verify against the ledger",
+      );
+      expect(conversations.process("%3")).toMatchObject({ kind: "codex", state: "busy", key: server.key });
+      expect(conversations.process("%3")?.session).toEqual({ id: THREAD, verified: true, conflict: false });
+    } finally {
+      events.stop();
+      conversations.stop();
+    }
   });
 });

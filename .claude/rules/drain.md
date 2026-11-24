@@ -42,7 +42,7 @@ The drain trigger's pass rules are scheduler.md's "Successors and passes".
 - The drain's session ask (`daemon/src/drain-ask.ts`) sends a pane only constant keys — `DRAIN_PROMPT` by
   `send-keys -l`, then Enter, and Escape and Ctrl+C, the Ctrl+C once and never a second, no Escape in the
   draft clear, never a field of any frame.
-- Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`),
+- Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`; never a Codex launch),
   once per pane and task per `cl` per process (a repeated close at the same `cl` asks and Escapes nothing
   already asked), only while this machine is draining at the `cl` the ask began under (checked before an
   Escape goes, not after).

@@ -1,8 +1,15 @@
-import type { AgentLogin, QuotaReading } from "@seance/shared";
+import { versionAtLeast, type AgentLogin, type QuotaReading } from "@seance/shared";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { codexBin, codexEnv, prepareCodexHome } from "./home.ts";
-import { probeCodex, type ProbeFailure, type ProbeResult } from "./probe.ts";
+import {
+  creditView,
+  parseRateLimits,
+  probeCodex,
+  quotaReadingOf,
+  type ProbeFailure,
+  type ProbeResult,
+} from "./probe.ts";
 import { log } from "../log.ts";
 import { inRefreshLane } from "../refresh-lane.ts";
 import { CHECK_INTERVAL_MS, DEBOUNCE_MS, STALE_AFTER_MS } from "../usage-refresh.ts";
@@ -49,9 +56,17 @@ export interface CodexAccountDeps extends CodexAccountOpts {
 }
 
 export interface CodexAccount {
+  /** The prepared home (`codexHome()`): what a session's server must answer it runs on. */
+  readonly home: string;
   /** The register blob's entry. */
   readonly login: () => AgentLogin;
   readonly view: () => LoginView;
+  /**
+   * A running session's own `account/rateLimits/read` answer (`codex/sessions.ts`), over its pane's server on this
+   * home: taken as a probe's reading while the login reads `ok` and the answer names the same account, and the next
+   * probe waits its full stale interval from now. Anything else is dropped: never a health, never an identity.
+   */
+  readonly observe: (value: unknown) => void;
   /** Probes now, then whenever due on the timer. */
   readonly start: () => void;
   /** Stops the timer and kills a probe in flight by group. */
@@ -202,9 +217,27 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     })();
   };
 
+  const observe = (value: unknown): void => {
+    if (stopped || health !== "ok" || identity.accountId === null) return;
+    const read = parseRateLimits(value);
+    // The account half only: the answer names no user, and the identity's user half came from `account/read`.
+    if (read === null || read.accountId === null) return;
+    if (!identity.accountId.startsWith(`codex:${read.accountId}:`)) return;
+    const infoBefore = JSON.stringify(login());
+    const viewBefore = JSON.stringify(view());
+    attemptedAt = now();
+    quota = quotaReadingOf(read, Math.floor(now() / 1000));
+    credits = creditView(read).credits;
+    blocked = read.ordinaryUsageAllowed === false;
+    if (JSON.stringify(login()) !== infoBefore) deps.onInfoChange();
+    if (JSON.stringify(view()) !== viewBefore) deps.onStatusChange();
+  };
+
   return {
+    home: deps.home,
     login,
     view,
+    observe,
     start: (): void => {
       if (stopped || timer !== null) return;
       timer = setInterval(check, deps.checkIntervalMs ?? CHECK_INTERVAL_MS);
@@ -233,6 +266,15 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
       for (let pending = probing; pending !== null; pending = probing) await pending;
     },
   };
+}
+
+/**
+ * Whether this machine may take Codex tasks (`CAPABILITIES.codex`; docs/codex.md, "Phase 2"): its login signed in,
+ * identified (the account the scheduler routes by) and at or above the floor. From the register blob's entry alone, so
+ * the capability moves with the entry it is read beside, and a change re-registers both.
+ */
+export function codexRunnable(login: AgentLogin): boolean {
+  return login.authOk && login.accountId !== null && login.version !== undefined && versionAtLeast(login.version);
 }
 
 /**

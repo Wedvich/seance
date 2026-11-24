@@ -846,7 +846,10 @@ export interface CodexCall {
 }
 
 export interface CodexStub {
-  /** The executable: a `scriptStub` running `codex-stub.ts` under this bun. */
+  /**
+   * The executable: a `scriptStub` running `codex-stub.ts` under a bun named `codex` (`bunNamed`), so a server it
+   * runs is a `codex` process, as `sessionOf` and a session's server check (`codex/sessions.ts`) require.
+   */
   readonly path: string;
   /** Replaces the scenario every later call reads (`codex-stub.ts`'s `Scenario`). */
   readonly scenario: (scenario: Record<string, unknown>) => Promise<void>;
@@ -872,7 +875,8 @@ export async function makeCodexStub(dir: string): Promise<CodexStub> {
       .split("\n")
       .filter((line) => line !== "");
   await writeFile(scenarioPath, "{}");
-  const path = await scriptStub(dir, "codex", `exec "${process.execPath}" "${CODEX_STUB}" "${scenarioPath}" "$@"`);
+  const bun = await bunNamed("codex");
+  const path = await scriptStub(dir, "codex", `exec "${bun}" "${CODEX_STUB}" "${scenarioPath}" "$@"`);
   // The warm-up stops at the stub's own flag; this first real call pays bun's start before any timed probe.
   await exec([path, "--version"]);
   await rm(callsPath, { force: true });

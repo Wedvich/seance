@@ -568,9 +568,13 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         // an owner composing a reply there would lose it. Read after the stats, the slow awaits, so the screen and the
         // facts below are both the last thing read before the act. Any typed text, or a box that cannot be found, fails
         // closed; a prompt suggestion, which the styled read tells apart by its faint cells, is not a draft.
-        const screen = await capture(pane);
-        const draft = screen === null ? null : inputBoxDraft(screen);
-        if (draft !== "") return await refuseClose(pane, info.taskId, "waiting");
+        // A Codex pane has no box this read knows, and no remote to type into it from: phase 2 runs it unattended
+        // (docs/codex.md, "Phase 2"), and its close interrupts the turn rather than clearing a box.
+        if (info.agent === "claude") {
+          const screen = await capture(pane);
+          const draft = screen === null ? null : inputBoxDraft(screen);
+          if (draft !== "") return await refuseClose(pane, info.taskId, "waiting");
+        }
         // The awaits above are a window in which the owner may have sent a prompt, from claude.ai say: the despawn's
         // Escape would interrupt that turn and `/exit` end it. `inFlight` is left out of the re-read, since it holds
         // this very pane.
@@ -787,6 +791,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       taskId = info.taskId;
       if (info.custodian || pane === deps.roundPane()) return await refuse("marked", taskId);
       if (!info.ours) return await refuse("foreign", taskId);
+      // A Codex pane has no inbox mod to deliver through (docs/codex.md, "V1 refusals").
+      if (info.agent !== "claude") return await refuse("unsupported", taskId);
       if (deps.untouchable(pane)) return await refuse("marked", taskId);
       // C7: a session waiting on the owner is the needs-input alert's.
       if (deps.activity(pane)?.state === "needs-input") return await refuse("waiting", taskId);
@@ -851,6 +857,9 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       const info = await infoOf(pane);
       if (info === null || info.dead || info.pid === null) return await refuse("gone", null);
       taskId = info.taskId;
+      // Escape is Claude's interrupt, read against Claude's screen: a Codex pane's turn is interrupted only by its
+      // own server, which no custodian verb reaches.
+      if (info.agent !== "claude") return await refuse("unsupported", taskId);
       const key = taskId ?? pane;
       const all = await panesNow();
       if (sharesTask(all, info)) return await refuse("marked", taskId);
@@ -1030,6 +1039,8 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     try {
       const info = await infoOf(pane);
       if (info === null || !info.ours || info.dead || info.pid === null || info.custodian) return false;
+      // Neither a nudge nor an interrupt reaches a Codex pane.
+      if (info.agent !== "claude") return false;
       // What the verbs would refuse and refund never counts, or a round would be due for good over a pane nothing can
       // act on: two panes under one task id (`marked`), a screen that is not a live prompt, a nudge nobody can receive.
       if (sharesTask(await panesNow(), info)) return false;

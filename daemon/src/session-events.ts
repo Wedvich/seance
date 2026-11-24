@@ -15,6 +15,7 @@ import {
   type NeedsInputReason,
   type PassCloseResponse,
   type PushBranchResponse,
+  type AgentKind,
   type SessionEvent,
   type SessionPass,
   type SessionState,
@@ -24,7 +25,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterTaskEvent } from "@seance/shared";
-import { claudeProcessOf, nestedClaude } from "./claude-process.ts";
+import { claudeProcessOf, nestedClaude, type ClaudeProcess } from "./claude-process.ts";
 import type { AgentClaim, Conversations } from "./conversations.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
@@ -39,7 +40,8 @@ import {
   type SessionEventReply,
 } from "./session-event-frame.ts";
 import type { TrackedState } from "./pane-activity.ts";
-import { CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, TASK_FIELD, tmux } from "./tmux.ts";
+import { AGENT, CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, TASK_FIELD, tmux } from "./tmux.ts";
+import { agentOf } from "./agents/panes.ts";
 
 /**
  * The `session-event` frame kind on the local op socket (DESIGN.md, "Session
@@ -225,6 +227,8 @@ export interface BoundPane {
   readonly taskId: string | null;
   /** Started by séance (`OURS`): only these are retained per pane (`pane-activity.ts`). */
   readonly ours: boolean;
+  /** The agent whose mark its start command carries (`AGENT`): which process on a peer's chain is its session. */
+  readonly agent: AgentKind;
   readonly path: string;
 }
 
@@ -235,6 +239,7 @@ const PANE_PID_FORMAT = [
   TASK_FIELD,
   OURS,
   CUSTODIAN_FIELD,
+  AGENT,
   "#{pane_current_path}",
 ].join(FIELD_SEP);
 
@@ -247,7 +252,7 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
   const seen = new Set<string>();
   const panes: BoundPane[] = [];
   for (const line of raw.split("\n")) {
-    const [id, pid, dead, task, ours, custodian, ...rest] = line.split(FIELD_SEP);
+    const [id, pid, dead, task, ours, custodian, agent, ...rest] = line.split(FIELD_SEP);
     if (
       id === undefined ||
       pid === undefined ||
@@ -255,6 +260,7 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
       task === undefined ||
       ours === undefined ||
       custodian === undefined ||
+      agent === undefined ||
       rest.length === 0
     )
       continue;
@@ -268,6 +274,8 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
       dead: dead === "1",
       taskId: isTaskId(task) ? task : null,
       ours: ours === "1",
+      // Only a pane of ours carries another agent's mark; anything else is Claude's to be.
+      agent: ours === "1" ? agentOf(agent) : "claude",
       path: rest.join(FIELD_SEP),
     });
   }
@@ -675,12 +683,13 @@ export class EndedTasks {
   /**
    * Whether the drain ask may type into this task's pane: a worktree launch this ledger holds (`passSite`),
    * not yet reported done (a pass would be refused `not_running`) and not being closed here (`closedHere`:
-   * a close's own keys are going in).
+   * a close's own keys are going in), and a Claude launch: a Codex pane's TUI takes none of the ask's keys as Claude's
+   * does, and its pass is phase 3 (docs/codex.md, "V1 refusals").
    */
   askable(taskId: string): boolean {
     if (!("site" in this.passSite(taskId))) return false;
     const note = this.#ledger.notes().find((n) => n.taskId === taskId);
-    return note?.reported !== true && note?.closedHere !== true;
+    return note?.agent === undefined && note?.reported !== true && note?.closedHere !== true;
   }
 
   /** Whether this launch noted a PR (`handoffCheck`'s lookup, a continuation's or successor's inherited one included), for a pass: a branch with no upstream then has to be the PR's. */
@@ -1092,7 +1101,23 @@ export interface SessionEvents {
    * caller's own read of the pane), a note held for another task is another session's, and reads none.
    */
   readonly awaitsWake: (pane: string, taskId?: string | null) => boolean;
+  /**
+   * A Codex session's state, read from its own server's notifications (`codex/sessions.ts`; DESIGN.md, Daemon, "Codex
+   * session events"). Bound by construction: `pane` is the snapshot this daemon's launch (or its reconnect) took and
+   * `thread` the id its own `thread/start` answered, never a frame's. Reaches the step a bound local-socket frame does
+   * (`ingest`) only while that pane is live under the same pid, task and agent; retained against `process` (the pane's
+   * `codex app-server`, the process `seance mcp` binds to) with `agent: {kind: "codex", session: thread}`, which the
+   * launch ledger's own note verifies. Callers serialize per session: ingest's order is the notifications'.
+   */
+  readonly codex: (pane: BoundPane, thread: string, process: ClaudeProcess | null, state: CodexState) => Promise<void>;
   readonly stop: () => void;
+}
+
+/** A Codex notification's session state, as `codex/events.ts` reads it. */
+export interface CodexState {
+  readonly state: Exclude<SessionState, "done">;
+  readonly turnEnded?: true;
+  readonly reason?: NeedsInputReason;
 }
 
 /** Panes a `stop` note or a forwarded idle is held for: far above any machine's live sessions, so only a gone pane's entry goes. */
@@ -1351,6 +1376,115 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     })().catch((err: unknown) => log.warn(`local socket: session identity read failed (${String(err)})`));
   };
 
+  /**
+   * The step every bound state reaches past its binding, whatever its source: a local-socket frame bound by peer pid
+   * (`handle`), or a Codex session's notification, bound by construction (`codex`). The leader forwarding, the idle
+   * release, the hand-off and pass closes, the drain ask's timing and pane activity are the one path for both.
+   */
+  const ingest = async (
+    frame: SessionEventFrame,
+    pane: BoundPane,
+    exclave: string,
+    at: number,
+  ): Promise<SessionEventReply> => {
+    if (frame.stop !== undefined) return takeNote(pane, exclave, frame.stop, at);
+    // Before the untasked return: an untasked pane's state is retained too, and goes nowhere else.
+    if (!stopped && frame.state !== undefined && frame.state !== "done") {
+      deps.retain?.(pane, frame.state, frame.state === "idle" && frame.turnEnded === true);
+    }
+    // Any state but an idle is a turn the note was not for; before the untasked return, since `awaitsWake` reads those too.
+    if (frame.state !== undefined && frame.state !== "idle") notes.delete(pane.id);
+    if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
+    if (frame.state === undefined || pane.taskId === null) return { ok: true };
+    // A stopped ingest sends nothing, so a report must not be told it went.
+    if (stopped) return frame.state === "done" ? { ok: false, code: "stopping" } : { ok: true };
+    // Ingest, not a new act: the id is the kernel-bound pane's own, never the frame's. Only `ended` and `done`
+    // prove the session ran and may leave no exit note (a clean exit closes the window); a live one is cleared
+    // by the `sessions` listing once it registers, which a bare `running` frame does not show.
+    if (frame.state === "ended" || frame.state === "done") void deps.ended.sessionSeen(pane.taskId);
+    if (frame.state === "ended") {
+      deps.ended.ended(pane.taskId);
+      deps.onEnded?.(pane.id, pane.taskId);
+    }
+    // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
+    let reported: NoteOutcome | null = null;
+    if (frame.state === "done") {
+      reported = await deps.ended.noteReported(pane.taskId).catch((): NoteOutcome => "unwritten");
+      // No launch of this task here: nothing this machine could settle, and nothing to recover it from.
+      if (reported === "refused") return { ok: false, code: "unrecorded" };
+    }
+    const prUrl = frame.prUrl === undefined ? null : httpsUrl(frame.prUrl);
+    if (frame.prUrl !== undefined && prUrl === null) {
+      log.warn(`local socket: session-event pane=${quote(pane.id)} carried a PR URL that is not https — dropped it`);
+    }
+    if (prUrl !== null) void deps.ended.notePr(pane.taskId, prUrl);
+    // An `ended` the leader cannot match to a PR waits for the exit, and settles `done` if the machine goes
+    // first: so it carries the PR this pane's own launch noted, in case the event that carried it was lost.
+    const sentPr = prUrl ?? (frame.state === "ended" ? (deps.ended.notedPr(pane.taskId) ?? null) : null);
+    // `agent.remote` first, `remoteSession` its fallback (DESIGN.md, "Tags and session identity"): one rule, `isRemoteSessionId`, for both.
+    const remoteSession = frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null);
+    if (frame.agent?.remote === undefined && frame.remoteSession !== undefined && remoteSession === null) {
+      log.warn(`local socket: session-event pane=${quote(pane.id)} carried a malformed remote session id — dropped it`);
+    }
+    // A pane killed without its `ended` never clears its entry: the cap is what bounds that.
+    if (frame.state === "idle") setNewest(idleNow, pane.id, pane.taskId);
+    else idleNow.delete(pane.id);
+    // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
+    if (reported !== "same") {
+      enqueue({
+        ...(frame.state === "idle" ? noteOf(pane.id, pane.taskId) : {}),
+        session: pane.id,
+        taskId: pane.taskId,
+        exclave,
+        state: frame.state,
+        at,
+        ...(sentPr === null ? {} : { prUrl: sentPr }),
+        ...(remoteSession === null ? {} : { remoteSession }),
+        ...(frame.reason === undefined ? {} : { reason: frame.reason }),
+        ...(frame.tool === undefined ? {} : { tool: frame.tool }),
+      });
+    }
+    // After the enqueue, so the idle is in the outbox before the close; a coalesced one may still give way to
+    // the `ended`, which carries the PR as well. Only the task the pane handed off: a pane id tmux reused for
+    // another task's window carries a different one. Only an idle the turn's own end raised: one from a
+    // hooks-worker respawn mid-turn would close the session before its final message.
+    const handedOff = handoffs.get(pane.id);
+    const turnEnd = frame.state === "idle" && frame.turnEnded === true;
+    let closingNow = false;
+    if (handedOff !== undefined && (frame.state === "ended" || turnEnd || handedOff !== pane.taskId)) {
+      handoffs.delete(pane.id);
+      if (turnEnd && handedOff === pane.taskId) {
+        closingNow = true;
+        startClose(pane.id, deps.handOff?.(pane.id, handedOff));
+      }
+    }
+    const passed = passes.get(pane.id);
+    if (passed !== undefined) {
+      if (frame.state === "ended" || passed.taskId !== pane.taskId) {
+        passes.delete(pane.id);
+      } else if (turnEnd) {
+        if (!passed.confirmed) passed.turnEnded = true;
+        else {
+          passes.delete(pane.id);
+          closingNow = true;
+          startClose(pane.id, deps.pass?.close(pane.id, passed.taskId));
+        }
+      } else if (frame.state === "busy" || frame.state === "needs-input") {
+        passed.turnEnded = false;
+      }
+    }
+    deps.onState?.(
+      pane.id,
+      pane.taskId,
+      frame.state,
+      turnEnd,
+      frame.state === "needs-input" ? frame.reason : undefined,
+      closingNow,
+    );
+    // Forwarded either way: only the proof that survives a restart is missing.
+    return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };
+  };
+
   return {
     handle: async (raw, peer, caller): Promise<SessionEventReply> => {
       const frame = parseSessionEventFrame(raw);
@@ -1365,6 +1499,20 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         return { ok: false, code: "unbound" };
       }
       const { pane } = bound;
+      // A Codex pane's state is its own server's (`codex`), never a peer's: the only frames its tools send are
+      // `report_task_done`'s and `hand_off_task`'s, and a pass is phase 3 (docs/codex.md, "V1 refusals"). Anything
+      // else — a `claude -p` one of its tools ran, with hooks of its own — is that process's, never the pane's.
+      if (pane.agent !== "claude") {
+        if (frame.pass === true) return { ok: false, code: "unsupported" };
+        if (frame.handoff === true) return markHandoff(pane);
+        if (frame.state !== "done") return { ok: true };
+        return ingest(
+          { v: frame.v, kind: frame.kind, state: "done", ...(frame.prUrl === undefined ? {} : { prUrl: frame.prUrl }) },
+          pane,
+          exclaveOf(pane.path, deps.exclaves()),
+          now(),
+        );
+      }
       // A `claude -p` a tool ran in this pane reports its own start, turns and exit: the outer task read idle mid-turn,
       // and settled `done` when the inner one exited. Its claims are still retained, under its own process.
       if (
@@ -1383,105 +1531,37 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (frame.handoff === true) return markHandoff(pane);
       if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
       retainClaims(pane, bound.below, frame);
-      if (frame.stop !== undefined) return takeNote(pane, exclave, frame.stop, at);
-      // Before the untasked return: an untasked pane's state is retained too, and goes nowhere else.
-      if (!stopped && frame.state !== undefined && frame.state !== "done") {
-        deps.retain?.(pane, frame.state, frame.state === "idle" && frame.turnEnded === true);
-      }
-      // Any state but an idle is a turn the note was not for; before the untasked return, since `awaitsWake` reads those too.
-      if (frame.state !== undefined && frame.state !== "idle") notes.delete(pane.id);
-      if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
-      if (frame.state === undefined || pane.taskId === null) return { ok: true };
-      // A stopped ingest sends nothing, so a report must not be told it went.
-      if (stopped) return frame.state === "done" ? { ok: false, code: "stopping" } : { ok: true };
-      // Ingest, not a new act: the id is the kernel-bound pane's own, never the frame's. Only `ended` and `done`
-      // prove the session ran and may leave no exit note (a clean exit closes the window); a live one is cleared
-      // by the `sessions` listing once it registers, which a bare `running` frame does not show.
-      if (frame.state === "ended" || frame.state === "done") void deps.ended.sessionSeen(pane.taskId);
-      if (frame.state === "ended") {
-        deps.ended.ended(pane.taskId);
-        deps.onEnded?.(pane.id, pane.taskId);
-      }
-      // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
-      let reported: NoteOutcome | null = null;
-      if (frame.state === "done") {
-        reported = await deps.ended.noteReported(pane.taskId).catch((): NoteOutcome => "unwritten");
-        // No launch of this task here: nothing this machine could settle, and nothing to recover it from.
-        if (reported === "refused") return { ok: false, code: "unrecorded" };
-      }
-      const prUrl = frame.prUrl === undefined ? null : httpsUrl(frame.prUrl);
-      if (frame.prUrl !== undefined && prUrl === null) {
-        log.warn(`local socket: session-event pane=${quote(pane.id)} carried a PR URL that is not https — dropped it`);
-      }
-      if (prUrl !== null) void deps.ended.notePr(pane.taskId, prUrl);
-      // An `ended` the leader cannot match to a PR waits for the exit, and settles `done` if the machine goes
-      // first: so it carries the PR this pane's own launch noted, in case the event that carried it was lost.
-      const sentPr = prUrl ?? (frame.state === "ended" ? (deps.ended.notedPr(pane.taskId) ?? null) : null);
-      // `agent.remote` first, `remoteSession` its fallback (DESIGN.md, "Tags and session identity"): one rule, `isRemoteSessionId`, for both.
-      const remoteSession =
-        frame.agent?.remote ?? (isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null);
-      if (frame.agent?.remote === undefined && frame.remoteSession !== undefined && remoteSession === null) {
-        log.warn(
-          `local socket: session-event pane=${quote(pane.id)} carried a malformed remote session id — dropped it`,
-        );
-      }
-      // A pane killed without its `ended` never clears its entry: the cap is what bounds that.
-      if (frame.state === "idle") setNewest(idleNow, pane.id, pane.taskId);
-      else idleNow.delete(pane.id);
-      // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
-      if (reported !== "same") {
-        enqueue({
-          ...(frame.state === "idle" ? noteOf(pane.id, pane.taskId) : {}),
-          session: pane.id,
-          taskId: pane.taskId,
-          exclave,
-          state: frame.state,
-          at,
-          ...(sentPr === null ? {} : { prUrl: sentPr }),
-          ...(remoteSession === null ? {} : { remoteSession }),
-          ...(frame.reason === undefined ? {} : { reason: frame.reason }),
-          ...(frame.tool === undefined ? {} : { tool: frame.tool }),
-        });
-      }
-      // After the enqueue, so the idle is in the outbox before the close; a coalesced one may still give way to
-      // the `ended`, which carries the PR as well. Only the task the pane handed off: a pane id tmux reused for
-      // another task's window carries a different one. Only an idle the turn's own end raised: one from a
-      // hooks-worker respawn mid-turn would close the session before its final message.
-      const handedOff = handoffs.get(pane.id);
-      const turnEnd = frame.state === "idle" && frame.turnEnded === true;
-      let closingNow = false;
-      if (handedOff !== undefined && (frame.state === "ended" || turnEnd || handedOff !== pane.taskId)) {
-        handoffs.delete(pane.id);
-        if (turnEnd && handedOff === pane.taskId) {
-          closingNow = true;
-          startClose(pane.id, deps.handOff?.(pane.id, handedOff));
-        }
-      }
-      const passed = passes.get(pane.id);
-      if (passed !== undefined) {
-        if (frame.state === "ended" || passed.taskId !== pane.taskId) {
-          passes.delete(pane.id);
-        } else if (turnEnd) {
-          if (!passed.confirmed) passed.turnEnded = true;
-          else {
-            passes.delete(pane.id);
-            closingNow = true;
-            startClose(pane.id, deps.pass?.close(pane.id, passed.taskId));
-          }
-        } else if (frame.state === "busy" || frame.state === "needs-input") {
-          passed.turnEnded = false;
-        }
-      }
-      deps.onState?.(
-        pane.id,
-        pane.taskId,
-        frame.state,
-        turnEnd,
-        frame.state === "needs-input" ? frame.reason : undefined,
-        closingNow,
+      return ingest(frame, pane, exclave, at);
+    },
+    codex: async (pane, thread, process, signal): Promise<void> => {
+      if (stopped) return;
+      // Re-read, never trusted from the snapshot alone: a pane gone, or its `%n` under another process or task, is
+      // another session's, and a late notification of this one must not speak for it.
+      const live = (await deps.panes()).find((p) => p.id === pane.id && !p.dead);
+      if (stopped || live === undefined || live.pid !== pane.pid || live.taskId !== pane.taskId) return;
+      if (live.agent !== "codex") return;
+      const at = now();
+      const exclave = exclaveOf(live.path, deps.exclaves());
+      deps.conversations
+        ?.report(live, process, false, {
+          state: signal.state,
+          ...(signal.turnEnded === true ? { turnEnded: true } : {}),
+          ...(signal.reason === undefined ? {} : { reason: signal.reason }),
+          agent: { kind: "codex", session: thread },
+        })
+        .catch((err: unknown) => log.warn(`codex: session identity read failed (${String(err)})`));
+      await ingest(
+        {
+          v: SESSION_EVENT_VERSION,
+          kind: SESSION_EVENT_KIND,
+          state: signal.state,
+          ...(signal.turnEnded === true ? { turnEnded: true } : {}),
+          ...(signal.reason === undefined ? {} : { reason: signal.reason }),
+        },
+        live,
+        exclave,
+        at,
       );
-      // Forwarded either way: only the proof that survives a restart is missing.
-      return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };
     },
     armPassClose,
     marked: (pane): boolean => handoffs.has(pane) || passes.has(pane) || closing.has(pane),
