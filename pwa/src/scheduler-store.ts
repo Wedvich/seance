@@ -38,6 +38,7 @@ import {
   deriveRunNowAvailability,
   deriveTaskTagsAvailability,
   deriveTraitsAvailability,
+  deriveCodexAvailability,
   TASK_TAGS_UNAVAILABLE,
   previewAsked,
   resolveRepo,
@@ -659,7 +660,14 @@ export class SchedulerStore {
     this.#previewedLeader = schedulerKey(relay.scheduler);
     this.#previewedFleet = fleetKey(relay.machines);
     const repo = resolveRepo(scopedRepos(relay.machines, form), form);
-    if (!previewAsked(form, this.#state.notBefore) || !deriveAutoAvailability(relay).available || repo === null) {
+    // An older leader's parser drops `agent` and would preview Claude's routing: no card, as the form says why.
+    const codexUnrouted = form.agent !== "claude" && !deriveCodexAvailability(relay);
+    if (
+      !previewAsked(form, this.#state.notBefore) ||
+      !deriveAutoAvailability(relay).available ||
+      repo === null ||
+      codexUnrouted
+    ) {
       this.#patch({ preview: null });
       return;
     }

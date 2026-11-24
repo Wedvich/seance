@@ -894,7 +894,10 @@ nothing checked it. The last is the gap they leave.
 - **The task field `agent`** (Scheduler, "Codex tasks"; docs/codex.md item 4) is sealed only through the one task
   sealer, behind `AGENT_DEP_SENTINEL`, which an older leader's parser refuses; the parser drops the sentinel only beside
   `agent` and nulls the spec over the sentinel without it or over an agent it does not know. A client writes `agent`
-  only to a verified leader advertising `CAPABILITIES.codex` (the broker refuses it otherwise, before a write), and the
+  only by an explicit pick (never inferred from a model) and only to a verified leader advertising `CAPABILITIES.codex`:
+  the PWA (`deriveCodexAvailability`, checked again when a held task is sent), MCP and the CLI (`codexGateError`), and
+  the broker, which refuses it otherwise before a write; a brokered enqueue sends the sentinel ahead, so a daemon older
+  than the field refuses it rather than queueing Claude (docs/codex.md item 8). The
   leader sends it in a spawn only to a machine advertising `codex` (`agent_unsupported` otherwise), since an older
   daemon would drop it and start Claude. A daemon refuses a wire spawn carrying an `agent` other than
   `codex` as malformed (`isSpawnRequest`), and advertises `codex` only while its login is configured, signed in,
@@ -1197,6 +1200,17 @@ nothing checked it. The last is the gap they leave.
   no hand-off, pass, drain or reap waits on it. The audit origin `watch` carries closed enums only (op, kind, event,
   reason, outcome): never a URL, owner, repo, number, head, check name or watch id, and `watches.ts` imports neither a
   scheduler module nor `audit.ts`'s other writers.
+- **A session's hold on the custodian binds its own `claude` process and holds nothing but the custodian's `close`**
+  (2026-11-24, "Keep open"). A hold is made only by the local socket's `keep-open` frame (`{v, kind, keep}`, exactly
+  those fields), bound by the kernel-reported peer pid to the innermost `claude` on the peer's chain (`bindPeer`),
+  refused `unbound` where the host names no peer or the pid came back null and `nosession` with no `claude` on the
+  chain; it names no pane, task or session. It ends with that process (`sessionAlive`: a restart or resume holds
+  nothing), lives in `keep-open.json` (0600, atomic rename, pane id and process identity only, at most 64 holds,
+  reloaded only while the process runs with the saved start time) and makes the custodian's `close` answer
+  `held_open` and the seat count no round due for that pane. Nothing else reads it: the owner's despawn, the drain's
+  ask, a hand-off, a pass, reap and the round's `nudge` and `interrupt` act as before. What a session gains is the
+  power to keep one window of its own open, which it already had (a cron or background work does the same); the
+  audit origin `keep-open` carries closed values only.
 - **A daemon reads a forge only for reap's nothing-lost rule, and its own GitHub budget** (2026-11-13, Reap, "Nothing lost";
   docs/custodian.md C36; `.claude/rules/github.md` carries the requirement). Until then only the leader read GitHub.
   The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
@@ -2498,7 +2512,9 @@ an old peer's frames parse as before. Mixed versions:
   `login_outdated`, `login_blocked` (2026-11-24, Scheduler, "Codex tasks"): a record carrying `agent` carries
   `AGENT_DEP_SENTINEL` (`{ task: "", after: "agent" }`), which an older leader's dep parser refuses, so it holds the
   record unreadable rather than run it as Claude; an older archivist reads it `malformed` and skips it, as a tagged
-  one. The broker writes `agent` only to a verified leader advertising `codex`, and the leader sends it in a spawn only
+  one. Every client (the PWA, MCP, the CLI, the broker) writes `agent` only to a verified leader advertising `codex`,
+  and a brokered enqueue sends the sentinel ahead so an older broker daemon refuses the spec rather than drop the
+  field (2026-11-24, docs/codex.md item 8). The leader sends it in a spawn only
   to a machine advertising it: an older `isSpawnRequest` would ignore the field and start Claude. An older reader of a
   decision drops the four reasons as any unknown code. No daemon advertises `codex` yet; rollout is leaders first, as
   for any field a leader routes.
@@ -3856,7 +3872,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reason. The successor carries the old task's `requires` (`successorSpec`), so the traits filter
   ("Traits filter") applies to it unchanged: a trait is a machine capability the work needs, not
   a place the old task happened to run, and the old machine had it.
-- **Codex tasks** (built 2026-11-24, docs/codex.md item 4; the logins they bill are Daemon, "Codex login").
+- **Codex tasks** (built 2026-11-24, docs/codex.md items 4 and 8; the logins they bill are Daemon, "Codex login").
   `TaskSpec.agent?: "codex"`, absent meaning Claude: a parser drops a stored `"claude"`, so no Claude record
   changes by a byte, and nulls the spec over any other value. The one task sealer appends `AGENT_DEP_SENTINEL`
   (`{ task: "", after: "agent" }`) last, after the tags sentinel, and the parser drops it only beside `agent`, so an
@@ -3887,8 +3903,29 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     `passOffer`, `continueOffer` and the leader's own pass refuse a Codex task (phase 3), and `successorSpec` and
     `continuationSpec` copy `agent`, so a task never silently becomes Claude.
   - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
-    `codex app-server` 0.171.0 (2026-11-24): every model it lists with no `upgrade`, in its order, and the one it marks
-    `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
+    `codex app-server` 0.171.0 (2026-11-24): the models it lists with no `upgrade`, only the newest version in each
+    family (an older one stays runnable by name), in its order, and the one it marks `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
+  - **Clients** (built 2026-11-24, docs/codex.md item 8). Each writes `agent` only by an explicit pick, never from a
+    model string, only to a verified leader advertising `CAPABILITIES.codex`, and refuses `codexSpecRefusal`'s
+    combinations before a write in one wording (`codexRefusalText`, `shared/src/codex.ts`).
+    - _The PWA:_ the model sheet groups its rows by agent (`MODEL_GROUPS`), and a row is a `ModelPick`, agent and
+      model together, so picking a GPT model sets `form.agent: "codex"`. A Codex row is named by its family alone (Sol, not
+      GPT-6.2 Sol), since the list holds one version per family. The saved form keeps both and falls back to
+      the default when they disagree. Effort is offered per agent (`OFFERED_EFFORTS_BY_AGENT`, no `max` for either).
+      `deriveCodexProblem` blocks the button and names why: an autonomy other than Auto (the form never switches it on
+      its own), attached files, or no verified leader advertising `codex`. A held Codex task is checked against the
+      leader when sent and fails there, never sent without `agent`. The model tile tags the agent; the Queue row and
+      the queued verdict show an agent badge for a non-Claude task (`AGENT_NAMES`); absent reads as Claude, as autonomy
+      omits checkpoint.
+    - _MCP:_ `spawn_session` and each `queue_batch` member take `agent` (`"codex"`; omitted is Claude), refused by
+      `specError` and then by `codexGateError` before any create (a batch before its first); `get_queue` shows a
+      non-Claude agent.
+    - _CLI:_ `seance spawn --agent <claude|codex>`, queued only: `--now` spawns Claude directly and refuses it. The
+      CLI has no `--model` or `--effort`, so a Codex task runs `DEFAULT_CODEX_MODEL`.
+    - _The broker leg:_ a brokered enqueue carrying `agent` sends `AGENT_DEP_SENTINEL` ahead in its deps, which this
+      build's parser drops beside `agent`. A daemon older than the field nulls that spec (`malformed task spec`)
+      where it would otherwise drop `agent` and queue Claude; `brokerScheduler` reads that answer as
+      `OLDER_DAEMON_CODEX`.
 - **Stacking** (built 2026-11-16, docs/scheduler.md M4 _Stacking_, decisions #4 and #15; the daemon's
   half, the worktree made from `origin/<b>`, is Daemon, "Stacked worktrees"). A dependent task's worktree
   starts from its predecessor's branch, so B `after: "opened"` on A builds on A's commit, not on a
@@ -10365,7 +10402,8 @@ decision is recorded here.
   as the machine stays closed), never counts, since no verb may
   touch it and it would otherwise keep a round due for ever. Nor does a pane whose last turn left background work or
   a cron pending (`SessionEvents.awaitsWake`, Session events, "Settings hooks"), or one a live watch waits on
-  (`Watches.holds`, "Watches"): `close` answers it `busy`. **So does every pane no built verb could act on**
+  (`Watches.holds`, "Watches"): `close` answers it `busy`. Nor does one whose session asked to be left open
+  (`KeepOpen.holds`, "Keep open"): `close` answers it `held_open`. **So does every pane no built verb could act on**
   (plan review F4 and code review F3, custodian 4): one with no observed state (`state` null: a restart's retention
   gap, or an exclave without the `session-events` mod), one `idle` without `turnEnded` (a session
   started, resumed or cleared and never prompted, from the settings `SessionStart` hook; until mod 0.6.0 the
@@ -13248,6 +13286,49 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   `wake` note into a turn the model acts on, about 20 s after the run's end (the messaging spikes had measured minutes,
   not a CI's length).
 
+### Keep open (`daemon/src/keep-open.ts`, `keep-open-frame.ts`, `keep-session-open.ts`) — built 2026-11-24
+
+The custodian closes a session it judges finished: one that gave its final report, asks nothing and waits on nothing
+it is responsible for. A session meant to stay open (a standing assistant, a long-lived watcher, one the owner comes
+back to) looks exactly like that between turns, and one was closed so. Its owner asked for a way for the session to
+say so. MCP's `keep_session_open` (`keep`, default true; false releases) is that way.
+
+- **The frame** (`keep-open-frame.ts`): `{ v: 1, kind: "keep-open", keep: boolean }`, exactly those fields, a frame
+  kind of the socket's own, routed on `kind` ahead of the `Plain` check and answered by `startLocalSocket`'s
+  `keepOpen` seam (`unsupported` without one, `internal` on a throw). Bound by the kernel-reported peer pid only
+  (`bindPeer`): `unbound` where the host names no peer, the pid came back null or the peer sits in no live pane;
+  `nosession` with no `claude` on its chain. The reply is `{ ok: true, held }` or one of `invalid`, `unbound`,
+  `nosession`, `too_many`, `unsupported`, `stopping`, `internal`. An older daemon closes the unknown kind as malformed,
+  which `keep_session_open` reports as a daemon that predates it. `keep-open-frame.ts` and `keep-session-open.ts` are
+  in `message-layering.test.ts`'s entry list.
+- **The table** (`keep-open.ts`): one hold per `claude` process (`<pid>:<start time>`), naming the pane it was made in.
+  A hold lasts while that process runs (`sessionAlive`, read at each `holds`), so a restarted or resumed `claude` in the
+  same pane holds nothing and a `/clear` keeps it. A frame sweeps the holds of gone processes first (audited
+  `op=end`), then sets or drops its own; a release of a session holding nothing is `ok`. At most 64 holds a machine
+  (`too_many` for a new session's, never a repeat's). `keep-open.json` under `stateDir()` (0600, atomic rename, one
+  write chain per path per process, nothing written once stopped; shutdown awaits it beside the watch table's) holds
+  pane ids, process identity and a time; at start an entry is reloaded only while its process runs with the saved start
+  time, so a self-update keeps the holds and a reboot drops them. A frame waits for that reload before it binds (the
+  socket serves frames while `start` still reads the file, and a frame's save or release would otherwise be undone by
+  it), the reload stops at 64 holds, and a stop during the frame's sweep refuses it `stopping` rather than answer a
+  hold it will never save.
+- **What it holds.** The custodian's `close` (`closeVerdict`: `held_open`, after `foreign` and `marked`) and the seat's
+  due check (`seatHolds`, `pane-holds.ts`), and nothing else: the owner's despawn, the drain's ask, a hand-off, a pass
+  and reap never read it, and the round's `nudge` and `interrupt` still reach a held session, since a long-lived session
+  can hang like any other. The round sees `held_open` in `sessions`' `close` and is told to leave such a session
+  unflagged.
+- **Why a session may say it.** A hold costs the owner one window, which the session could already keep by leaving a
+  cron or background work (`awaitsWake`), and nothing a hold does acts on anything; a session that holds itself open
+  without cause is the owner's to end. So the tool is offered to every session, untasked ones included, under the
+  "Text never reaches a log" and peer-pid rules like the watch. The audit origin `keep-open` writes `op` (`hold`,
+  `release`, `end`) and an outcome, never a pane, task or session id.
+- **Rejected.** **A flag the owner sets at spawn** (a "long-lived" switch on the form or task): the right shape for a
+  session planned so up front, but it misses one that becomes long-lived after its start, which is the case reported;
+  it can come later and feed the same table. **A tmux pane option** (`@seance-keep`): binds the pane, not the process,
+  so a restarted `claude` would inherit a hold it never asked for. **Binding to the conversation id** (so a resume keeps
+  it): the claim is verifiable only through `agent.session`'s checks, a widening the reported case does not need.
+  **Suppressing `nudge` and `interrupt` too**: they rescue a hung session and never close one.
+
 ### Adapters (`daemon/src/adapter-supervisor.ts`, `adapter-feed.ts`, `adapter-host.ts`, `adapter-subscriptions.ts`, `adapter-cli.ts`) — built 2026-11-18 (3a, 3b and 3c), docs/messaging.md
 
 An adapter is a program the machine's owner names in that machine's `config.json`, run by the daemon as a supervised
@@ -14781,8 +14862,10 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   unreadable one never.
 - **`close` (C24, `closeVerdict`)** is a pure function of the daemon's own facts, in this order: the round's own pane
   and anything marked (hand-off, pass, drain ask, or a close already under way for that pane) are `marked`; a
-  hand-started pane is `foreign`; a `dead` task pane that registered is **harvested** (`EndedTasks.harvestExits`
-  notes its exit status, then closes it: killed first it would lose the status), any other dead pane is `too_soon`
+  hand-started pane is `foreign`; a pane whose session asked to be left open is `held_open` whatever its state (the
+  hold lasts only while that `claude` runs, so a dead pane never carries one: "Keep open"); a `dead` task pane that
+  registered is **harvested** (`EndedTasks.harvestExits` notes its exit status, then closes it: killed first it would
+  lose the status), any other dead pane is `too_soon`
   while younger than reap's `DEAD_PANE_MIN_AGE_MS` (spawn's own dying pane's guard) or of unknown age, else killed
   (`closing` first, so the leader reads a close, not a death); a
   `shell` or `starting` pane is `unobserved`; a `background-prompt` is `waiting`; an `exit-prompt` is despawned

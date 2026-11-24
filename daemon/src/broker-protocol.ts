@@ -14,6 +14,8 @@ import {
   type StoreRefusal,
   type TaskCreated,
   type TaskSpec,
+  type TaskDep,
+  AGENT_DEP_SENTINEL,
 } from "@seance/shared";
 import { CONNECT_TIMEOUT_MS } from "./app-relay.ts";
 
@@ -100,6 +102,22 @@ export type BrokerRequest =
       readonly remoteOp: BrokerOp;
       readonly payload: unknown;
     };
+
+/**
+ * An enqueue's spec as a peer sends it: `deps` may end in `AGENT_DEP_SENTINEL` beside `agent`, so a broker older than
+ * the field nulls the spec over it instead of dropping `agent` and queueing the task for Claude. This build's parser
+ * drops it beside `agent` (`parseTaskSpec`), so the parsed `BrokerRequest` carries a plain `TaskSpec`.
+ */
+export type EnqueueSpecOut = Omit<TaskSpec, "deps"> & {
+  readonly deps?: readonly (TaskDep | typeof AGENT_DEP_SENTINEL)[];
+};
+
+type EnqueueRequest = Extract<BrokerRequest, { readonly schedulerOp: "enqueue" }>;
+
+/** A frame as a peer sends it: a `BrokerRequest`, an enqueue's spec as `EnqueueSpecOut`. */
+export type BrokerRequestOut =
+  | Exclude<BrokerRequest, EnqueueRequest>
+  | (Omit<EnqueueRequest, "spec"> & { readonly spec: EnqueueSpecOut });
 
 /**
  * Structured refusals, so the MCP side can tell "fix the request" from "the

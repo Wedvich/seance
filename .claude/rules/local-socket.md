@@ -5,6 +5,7 @@ paths:
   - "daemon/src/{launch-ledger*,pane-activity*,conversations,claude-process,agent-session-file*}.ts"
   - "daemon/src/owner-labels*.ts"
   - "daemon/src/codex/{sessions,events}.ts"
+  - "daemon/src/{keep-open,keep-open-frame,keep-session-open}.ts"
   - "shared/src/tags.ts"
 ---
 
@@ -160,6 +161,22 @@ the `codex app-server` of a pane it launched (or, on a restart, of a pane of our
 - A Codex pane's own local `session-event` frames take `done` and `handoff` only; `pass` is `unsupported`
   and a state is dropped, so nothing else running in the pane speaks for it. `sessionOf`'s session for a
   Codex pane is the innermost `codex` (`CODEX_PANES.process`), the pane's server.
+
+## `keep-open`: a session's hold on the custodian
+
+DESIGN.md, "Keep open". `keep-open.ts`, `keep-open-frame.ts`, `keep-session-open.ts` (MCP's `keep_session_open`).
+
+- The frame is exactly `{v, kind, keep}`, on neither `LOCAL_OPS` nor the broker, bound only by peer pid to the
+  innermost `claude` on the peer's chain (`bindPeer`): `unbound` where the host names no peer, the pid came back null
+  or no live pane holds the peer, `nosession` with no `claude`, never a field.
+- A hold ends with its `claude` process (`sessionAlive` at each read) and acts on nothing: it only makes the
+  custodian's `close` answer `held_open` and the seat's due check skip the pane. Giving it any other effect (a despawn,
+  drain, hand-off, pass, reap or the round's `nudge` or `interrupt` reading it) is a threat-model change.
+- `keep-open.json` is 0600, written by atomic rename through one write chain per path per process and never once
+  stopped, holds pane ids, process identity and a time only, at most `KEEP_OPEN_MACHINE_MAX` holds, and an entry is
+  reloaded only while its process runs with the saved start time.
+- Its audit lines (`origin=keep-open`) carry `op` and an outcome only; `keep-open-frame.ts` and
+  `keep-session-open.ts` are in `seance mcp`'s closure (`message-layering.test.ts`).
 
 ## A session's name is the owner's sealed act
 

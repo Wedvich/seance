@@ -1563,6 +1563,25 @@
   flex: none;
 }
 
+/* A heading over a run of items, such as the model sheet's agents; worn with .label, the tiles' voice. */
+.sheet-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 2px;
+  padding: 0 13px;
+}
+
+/* The agent's logo before the group's name, faded as on the account card (`.fleet-agent-logo`). */
+.sheet-group-logo {
+  flex: none;
+  opacity: 0.6;
+}
+
+.sheet-group:first-child {
+  margin-top: 0;
+}
+
 .sheet-note {
   margin: 6px 0 0;
   padding: 0 13px;
@@ -3261,6 +3280,10 @@
   text-decoration: none;
 }
 
+.verdict-agent {
+  margin: 10px 0 0;
+}
+
 .verdict-tags {
   margin: 12px 0 0;
   font-size: 0.8125rem;
@@ -3282,6 +3305,8 @@
   overflow-wrap: anywhere;
 }
 
+/* The agent and autonomy chips: the same small fact beside the age, one after the other. */
+.queue-agent,
 .queue-autonomy {
   display: inline-block;
   margin-left: 6px;

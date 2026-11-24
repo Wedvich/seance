@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENT_DEP_SENTINEL,
   CAPABILITIES,
   failureReasonText,
   importPsk,
@@ -21,6 +22,7 @@ import {
   brokerFleet,
   DaemonFault,
   FleetUnreachable,
+  OLDER_DAEMON_CODEX,
   selectFleet,
   UNCONFIRMED_DAEMON_TRAITS,
   type Fleet,
@@ -335,6 +337,44 @@ describe("brokerFleet", () => {
         expect(lease.scheduler?.staleDaemonRequires).toBe(UNCONFIRMED_DAEMON_TRAITS);
       } finally {
         await unknown.stop();
+      }
+    });
+  });
+
+  describe("a Codex spec, through the broker", () => {
+    const CODEX: Task = { ...TASK, spec: { ...TASK.spec, agent: "codex", autonomy: "auto" } };
+    const specOf = (raw: Record<string, unknown>): unknown => (isRecord(raw["spec"]) ? raw["spec"]["deps"] : undefined);
+
+    test("carries the agent sentinel in deps, and a Claude spec carries none", async () => {
+      const deps: unknown[] = [];
+      const double = await schedulerDaemon((id, raw) => {
+        deps.push(specOf(raw));
+        return brokerOk(id, { ok: true, landedEarlier: false });
+      });
+      try {
+        const scheduler = (await brokerFleet({ path: double.path }).open()).scheduler;
+        expect(await scheduler?.enqueue(CODEX)).toEqual({ ok: true, landedEarlier: false });
+        expect(await scheduler?.enqueue(TASK)).toEqual({ ok: true, landedEarlier: false });
+        expect(deps).toEqual([[AGENT_DEP_SENTINEL], undefined]);
+      } finally {
+        await double.stop();
+      }
+    });
+
+    test("an older daemon's malformed-spec answer reads as that daemon being older, never as a Claude task", async () => {
+      const double = await schedulerDaemon((id) => brokerFail(id, "invalid_request", "malformed task spec"));
+      try {
+        const scheduler = (await brokerFleet({ path: double.path }).open()).scheduler;
+        expect(await rejection(scheduler?.enqueue(CODEX) ?? Promise.resolve())).toMatchObject({
+          reason: "refused",
+          message: OLDER_DAEMON_CODEX,
+        });
+        // A Claude spec's same answer is not rewritten.
+        expect(await rejection(scheduler?.enqueue(TASK) ?? Promise.resolve())).toMatchObject({
+          message: "malformed task spec",
+        });
+      } finally {
+        await double.stop();
       }
     });
   });

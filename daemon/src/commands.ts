@@ -158,7 +158,7 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     summary: "queue a session for the scheduler",
     usage:
       "[--now | [--start | --at <HH:MM|ISO> | --in <duration>] [--machine <name|here>] [--account <alias|email|id>] " +
-      "[--not <machine|here>]... [--requires <trait>]... [--ref <source:id> [--ref-url <url>]]] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
+      "[--not <machine|here>]... [--requires <trait>]... [--ref <source:id> [--ref-url <url>]] [--agent <claude|codex>]] [--autonomy <steer|checkpoint|auto>] <repo> [--here] [-t <title>] [[-p] <task>]",
     details: [RELAY_NOTE],
     arg: "repo",
     flags: [
@@ -201,8 +201,14 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
         help: "how much the session decides on its own (default checkpoint; steer is plan mode)",
       },
       {
+        flag: "--agent",
+        value: "agent",
+        choices: ["claude", "codex"],
+        help: "what runs it (default claude); codex runs on a machine's ChatGPT sign-in, at its default model, and for now only with --autonomy auto, to a scheduler leader that runs Codex tasks",
+      },
+      {
         flag: "--now",
-        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires, --ref, --start, --at or --in",
+        help: "spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires, --ref, --agent codex, --start, --at or --in",
       },
     ],
   },

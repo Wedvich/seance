@@ -55,7 +55,8 @@ commands.
      note what you are watching.
    - anything else: leave it (steps 4 and 5 say when to nudge or flag it).
      A pane whose `close` is a refusal is never closed: do not try. A close that succeeds says whether
-     the session's worktree was removed or kept, and why.
+     the session's worktree was removed or kept, and why. A `close` of `held_open` means the session asked to stay
+     open: leave it, and never flag it for sitting idle.
 3. Never type into a pane, kill a process, push, or change a worktree yourself. No verb ends, requeues
    or continues a task: closing a finished session is all `close` does.
 4. A session that is `busy` and stuck (its screen has not changed for many minutes, or it repeats the

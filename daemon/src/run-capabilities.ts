@@ -10,6 +10,7 @@ import {
   custodianAudit,
   daemonSink,
   drainAskAudit,
+  keepOpenAudit,
   messageAudit,
   watchAudit,
   pushAudit,
@@ -93,11 +94,13 @@ import {
   custodianActivityPath,
   custodianRoundsPath,
   custodianSessionsPath,
+  keepOpenPath,
   pruneLogPath,
   reapRefusalsPath,
   watchesPath,
 } from "./paths.ts";
 import { readSavedActivity, writeSavedActivity } from "./pane-activity-store.ts";
+import { createKeepOpen, type KeepOpen } from "./keep-open.ts";
 import { paneHolds } from "./pane-holds.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
@@ -176,7 +179,7 @@ export interface WiringCtx {
 }
 
 /** A local op socket surface a capability brings; the socket starts after every capability, with all of them. */
-export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages" | "watches">;
+export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents" | "messages" | "watches" | "keepOpen">;
 
 export interface Started {
   readonly stop: () => void;
@@ -279,6 +282,8 @@ const sendEventOf = new WeakMap<WiringCtx, (event: CustodianEvent) => Promise<bo
 const messagesOf = new WeakMap<WiringCtx, Messages>();
 /** The session-events capability's watch table, which the custodian's `awaitsWake` reads: a live watch holds its session open. */
 const watchesOf = new WeakMap<WiringCtx, Watches>();
+/** The session-events capability's keep-open table, which the custodian's `heldOpen` reads. */
+const keepOpenOf = new WeakMap<WiringCtx, KeepOpen>();
 /** The session-events capability's conversation table, which the adapters' state feed reads. */
 const conversationsOf = new WeakMap<WiringCtx, Conversations>();
 const subscriptionsOf = new WeakMap<WiringCtx, Subscriptions>();
@@ -373,6 +378,14 @@ const sessionEvents: DaemonCapability = (ctx) => {
     audit: watchAudit(daemonSink),
     now: ctx.now,
   });
+  // Beside watches because it binds panes the same way; read by the custodian's `close` (DESIGN.md, "Keep open").
+  const keepOpen = createKeepOpen({
+    panes: listPanePids,
+    path: keepOpenPath(),
+    audit: keepOpenAudit(daemonSink),
+    now: ctx.now,
+    warn: (line) => log.warn(line),
+  });
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
@@ -448,6 +461,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   eventsOf.set(ctx, events);
   messagesOf.set(ctx, messages);
   watchesOf.set(ctx, watches);
+  keepOpenOf.set(ctx, keepOpen);
   conversationsOf.set(ctx, conversations);
   subscriptionsOf.set(ctx, store);
   if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
@@ -455,6 +469,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   // The daemon's own read for sessions that were running before it started and have not reported since.
   void conversations.sweep().catch((err: unknown) => log.warn(`conversations: ${String(err)}`));
   void watches.start().catch((err: unknown) => log.warn(`watches: ${String(err)}`));
+  void keepOpen.start().catch((err: unknown) => log.warn(`keep-open: ${String(err)}`));
   return {
     stop: (): void => {
       drainAsk?.stop();
@@ -463,9 +478,11 @@ const sessionEvents: DaemonCapability = (ctx) => {
       // Before messaging stops, so no note is placed into a stopped messaging; its last writes are awaited by `watchesSettled`.
       const watchStop = watches.stop().finally(() => watchStops.delete(watchStop));
       watchStops.add(watchStop);
+      const keepStop = keepOpen.stop().finally(() => watchStops.delete(keepStop));
+      watchStops.add(keepStop);
       messages.stop();
     },
-    local: { sessionEvents: events.handle, messages, watches: watches.handle },
+    local: { sessionEvents: events.handle, messages, watches: watches.handle, keepOpen: keepOpen.handle },
     armPassClose: events.armPassClose,
     codexState: events.codex,
     messages,
@@ -475,7 +492,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   };
 };
 
-/** Watch tables' stops in flight: their last `watches.json` writes, which a restart's reload reads. */
+/** Watch and keep-open tables' stops in flight: their last file writes, which a restart's reload reads. */
 const watchStops = new Set<Promise<void>>();
 
 /** Resolves once every watch table a stopped daemon instance ran has written what it held. */
@@ -705,10 +722,11 @@ const custodianSeat: DaemonCapability = (ctx) => {
   };
   // One expression each for the seat's due check and the `close` verb. A live watch holds a pane as `awaitsWake`, since its
   // note is what wakes the session and has yet to arrive, and is no part of `untouchable`.
-  const { untouchable, awaitsWake, seatHolds } = paneHolds({
+  const { untouchable, awaitsWake, heldOpen, seatHolds } = paneHolds({
     events: () => eventsOf.get(ctx),
     drain: () => drainHoldsOf.get(ctx),
     watches: () => watchesOf.get(ctx),
+    keepOpen: () => keepOpenOf.get(ctx),
   });
 
   /** The seat's checks failed, it refused this host or it could not start: no round will ever run here. */
@@ -764,6 +782,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
             retainedSince === null ? null : Math.min(retainedSince, paneActivity.restoredSince() ?? retainedSince),
           untouchable,
           awaitsWake,
+          heldOpen,
           tasks: ctx.endedTasks,
           readPr: createPrReader({ now: ctx.now }),
           worktree: createWorktreeRule({ tasks: ctx.endedTasks, repos: ctx.repos, listPanes }),

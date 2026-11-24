@@ -1,6 +1,7 @@
 import {
   APP_ID,
   CAPABILITIES,
+  codexRefusalText,
   codexSpecRefusal,
   isRecord,
   isTaskId,
@@ -202,7 +203,7 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
   // As `specError`'s: the leader would hold it and place it nowhere, so it is refused before a write.
   const unsupported = codexSpecRefusal(spec);
   if (unsupported !== null) {
-    return { code: "invalid_request", message: `a Codex task can't run with ${unsupported} yet` };
+    return { code: "invalid_request", message: codexRefusalText(unsupported) };
   }
   if (!isBrokerEnqueueClient(spec.client)) {
     return { code: "invalid_request", message: "a brokered task's client must be mcp or cli" };

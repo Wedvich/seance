@@ -6,6 +6,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   CAPABILITIES,
+  CODEX_MODELS,
   isRecord,
   promptBasis,
   QUEUE_MAX_TASKS,
@@ -53,6 +54,7 @@ import {
   type WatchClient,
   watchGate,
 } from "./mcp.ts";
+import type { keepSessionOpen } from "./keep-session-open.ts";
 import type { WatchGate } from "./watch-github.ts";
 
 interface FakeLocal extends LocalMachine {
@@ -91,6 +93,7 @@ async function connectedClient(
   sendMsg?: typeof sendMessage,
   ownPane: () => string | undefined = () => undefined,
   watchClient?: WatchClient,
+  keepOpen?: typeof keepSessionOpen,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -104,7 +107,19 @@ async function connectedClient(
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   serveStdio(
     () =>
-      buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll, sendMsg, ownPane, watchClient),
+      buildMcpServer(
+        fleet,
+        local,
+        audit,
+        report,
+        handOffTask,
+        passOwnTask,
+        passPoll,
+        sendMsg,
+        ownPane,
+        watchClient,
+        keepOpen,
+      ),
     { transport: serverTransport },
   );
   await client.connect(clientTransport);
@@ -1593,6 +1608,15 @@ function taggingMachines(): Machine[] {
   return [machine({ ...leader, capabilities: [CAPABILITIES.reportedDone, CAPABILITIES.taskTags] }), ...rest];
 }
 
+/** A leader that reports, takes task tags and runs Codex tasks. */
+function codexMachines(): Machine[] {
+  const [leader, ...rest] = autoMachines();
+  return [
+    machine({ ...leader, capabilities: [CAPABILITIES.reportedDone, CAPABILITIES.taskTags, CAPABILITIES.codex] }),
+    ...rest,
+  ];
+}
+
 async function callTool(
   fake: ReturnType<typeof fakeRelay>,
   name: string,
@@ -1669,6 +1693,37 @@ describe("spawn_session on auto, authoring fields", () => {
     expect(fake.creates).toEqual([]);
     expect((await callAuto(fake, {})).error).toBe(false);
     expect(fake.creates).toHaveLength(1);
+  });
+
+  test("agent codex is written explicitly to a leader that runs Codex tasks, with the model as given", async () => {
+    const fake = leaderRelay([], codexMachines());
+    const { error } = await callAuto(fake, { agent: "codex", model: CODEX_MODELS[0], autonomy: "auto" });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec).toMatchObject({ agent: "codex", model: CODEX_MODELS[0], autonomy: "auto" });
+    // A GPT model with no agent stays a Claude task: no client infers the agent from a model.
+    expect((await callAuto(fake, { model: CODEX_MODELS[0] })).error).toBe(false);
+    expect(fake.creates[1]?.spec).not.toHaveProperty("agent");
+  });
+
+  test("a leader that does not run Codex tasks refuses agent, by field, before any create", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const refused = await callAuto(fake, { agent: "codex", autonomy: "auto" });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("does not run Codex tasks yet");
+    expect(refused.text).toContain("retry without agent");
+    expect(fake.creates).toEqual([]);
+  });
+
+  test.each([
+    [{}, "a Codex task runs only at autonomy auto for now, not checkpoint"],
+    [{ autonomy: "steer" }, "a Codex task runs only at autonomy auto for now, not steer"],
+    [{ autonomy: "auto", effort: "max" }, "a Codex task can't run with effort max yet"],
+  ])("a Codex spawn V1 refuses (%o) is refused before the relay is dialled", async (fields, text) => {
+    const fake = leaderRelay([], codexMachines());
+    const refused = await callAuto(fake, { agent: "codex", ...fields });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain(text);
+    expect(fake.creates).toEqual([]);
   });
 
   test("a bound the scheduler would null the task on is refused here, by name, before the relay is dialled", async () => {
@@ -2611,6 +2666,28 @@ describe("trait probes", () => {
 
 describe("queue_batch", () => {
   const member = (extra: Record<string, unknown> = {}) => ({ repo: "seance", prompt: "do it", ...extra });
+
+  test("a member's agent is gated before any create: one Codex member refuses the batch to a leader without it", async () => {
+    const tasks = [member(), member({ agent: "codex", autonomy: "auto" })];
+    const refused = leaderRelay([], taggingMachines());
+    const answer = await callTool(refused, "queue_batch", { tasks });
+    expect(answer.error).toBe(true);
+    expect(answer.text).toContain("queue_batch task 2 refused");
+    expect(answer.text).toContain("does not run Codex tasks yet");
+    expect(refused.creates).toEqual([]);
+
+    const fake = leaderRelay([], codexMachines());
+    expect((await callTool(fake, "queue_batch", { tasks })).error).toBe(false);
+    expect(fake.creates.map((t) => t.spec.agent)).toEqual([undefined, "codex"]);
+  });
+
+  test("a Codex member V1 refuses names its member, before any create", async () => {
+    const fake = leaderRelay([], codexMachines());
+    const answer = await callTool(fake, "queue_batch", { tasks: [member(), member({ agent: "codex" })] });
+    expect(answer.error).toBe(true);
+    expect(answer.text).toContain("queue_batch refused: task 2: a Codex task runs only at autonomy auto");
+    expect(fake.creates).toEqual([]);
+  });
 
   test("queues the members in order under one batch, resolving refs to the ids it minted", async () => {
     const fake = leaderRelay([], taggingMachines());
@@ -3636,6 +3713,52 @@ describe("watch_github and unwatch_github", () => {
       };
       await refusedWith(watchGate(fleet, fakeLocal(undefined, { deviceId: "device-2" }))(), "can't confirm");
     });
+  });
+});
+
+describe("keep_session_open", () => {
+  test("is offered with one optional boolean, holds by default, releases on false, and a refusal is a tool error", async () => {
+    const asked: boolean[] = [];
+    const client: typeof keepSessionOpen = (keep) => {
+      asked.push(keep);
+      return Promise.resolve(asked.length < 3 ? { ok: true, text: `held=${keep}` } : { ok: false, text: "not held" });
+    };
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    try {
+      const c = await connectedClient(
+        lazy,
+        null,
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        client,
+      );
+      const { tools } = await c.listTools();
+      const tool = tools.find((t) => t.name === "keep_session_open");
+      expect(tool?.annotations?.idempotentHint).toBe(true);
+      expect(tool?.inputSchema.required ?? []).toEqual([]);
+      expect(tool?.description).toContain("never to avoid being cleaned up");
+
+      const held = await c.callTool({ name: "keep_session_open", arguments: {} });
+      expect(held.isError).not.toBe(true);
+      expect(toolText(held)).toBe("held=true");
+      const released = await c.callTool({ name: "keep_session_open", arguments: { keep: false } });
+      expect(toolText(released)).toBe("held=false");
+      const refused = await c.callTool({ name: "keep_session_open", arguments: { keep: true } });
+      expect(refused.isError).toBe(true);
+      expect(asked).toEqual([true, false, true]);
+
+      const extra = await c.callTool({ name: "keep_session_open", arguments: { pane: "%1" } });
+      expect(extra.isError).toBe(true);
+      expect(asked).toHaveLength(3);
+    } finally {
+      lazy.stop();
+    }
   });
 });
 

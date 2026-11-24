@@ -154,6 +154,14 @@ export function watchesPath(): string {
   return join(stateDir(), "watches.json");
 }
 
+/**
+ * The sessions that asked the custodian to leave them open (`keep-open.ts`; DESIGN.md, "Keep open"): under `stateDir()`
+ * beside `watches.json`, for the same reason, and masked from the round with it.
+ */
+export function keepOpenPath(): string {
+  return join(stateDir(), "keep-open.json");
+}
+
 /** `seance custodian round` writes it, the seat reads and drops it. */
 export function custodianRoundRequestPath(): string {
   return join(custodianDir(), "round-request");

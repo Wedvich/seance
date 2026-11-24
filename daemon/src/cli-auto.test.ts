@@ -617,6 +617,44 @@ describe("spawnAuto's placement flags", () => {
     });
   });
 
+  describe("--agent", () => {
+    const leading = (leaderCaps: readonly Capability[]) => {
+      const fake = fakeRelay([
+        machine({
+          repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: ORIGIN }],
+          capabilities: leaderCaps,
+        }),
+      ]);
+      fake.setState({ scheduler: LEADING });
+      return fake;
+    };
+
+    test("codex is written explicitly, with no model, to a leader that runs Codex tasks", async () => {
+      const fake = leading([CAPABILITIES.codex]);
+      const { ok } = await run(fake, { agent: "codex", autonomy: "auto" });
+      expect(ok).toBe(true);
+      expect(fake.creates[0]?.spec.agent).toBe("codex");
+      expect(fake.creates[0]?.spec).not.toHaveProperty("model");
+    });
+
+    test("is refused, before anything is created, by a leader that does not run Codex tasks", async () => {
+      const fake = leading([]);
+      const { ok, text } = await run(fake, { agent: "codex", autonomy: "auto" });
+      expect(ok).toBe(false);
+      expect(text).toContain("does not run Codex tasks yet");
+      expect(text).toContain("retry without --agent");
+      expect(fake.creates).toEqual([]);
+    });
+
+    test("a V1 refusal is named before the relay is dialled: Codex runs at auto only", async () => {
+      const fake = leading([CAPABILITIES.codex]);
+      const { ok, text } = await run(fake, { agent: "codex" });
+      expect(ok).toBe(false);
+      expect(text).toContain("a Codex task runs only at autonomy auto for now, not checkpoint");
+      expect(fake.started).toBe(0);
+    });
+  });
+
   test("here without a state file is refused before the relay is dialled", async () => {
     const fake = placingRelay();
     const { ok, text } = await run(fake, { not: ["here"] }, async () => null);

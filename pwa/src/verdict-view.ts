@@ -1,4 +1,4 @@
-import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
+import { AGENT_NAMES, isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
 import { notBeforeLine, pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
 import type { FollowEnd, StartNowRefusal, Verdict } from "./state.ts";
 import { taskTagLines } from "./task-tags.ts";
@@ -21,6 +21,8 @@ export interface VerdictContent {
   readonly headline: string;
   readonly body: string;
   readonly detail: string | null;
+  /** A queued verdict's agent, for a chip under the body; null for Claude Code, the default, and every other verdict. */
+  readonly agent: string | null;
   /** Every task tag with its full key (a queued verdict's task), for a list under the body; empty for any other verdict. */
   readonly tags: readonly { readonly key: string; readonly value: string }[];
   readonly primary: { readonly label: string; readonly onClick: "retry" | "another" | "back" };
@@ -111,6 +113,7 @@ export function describeVerdict(
       headline: plain(taskHeadline(task, machines, aliases, now)),
       body: `${parts.join(" ")}${followText(verdict.follow)}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
+      agent: task.spec.agent === undefined ? null : AGENT_NAMES[task.spec.agent],
       tags: taskTagLines(task).all,
       // The prompt was cleared when it queued, so "Start another" already lands on the form a back would.
       primary: { label: "Start another", onClick: "another" },
@@ -127,6 +130,7 @@ export function describeVerdict(
       // No background sync: the page sends it, so the app has to be open when the relay comes back.
       body: "The app isn't connected to the relay right now, so it waits here and is queued as soon as it reconnects. Keep the app open, or come back to it.",
       detail: null,
+      agent: null,
       tags: [],
       primary: { label: "Start another", onClick: "another" },
       showBack: true,
@@ -142,6 +146,7 @@ export function describeVerdict(
       ? `${verdict.message} It may have queued anyway — trying again is safe: it re-sends the same task, which can't queue twice.`
       : verdict.message,
     detail: null,
+    agent: null,
     tags: [],
     stage: null,
     primary:

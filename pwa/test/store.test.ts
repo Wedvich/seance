@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "
 import {
   ATTACHMENT_LIMITS,
   CAPABILITIES,
+  DEFAULT_CODEX_MODEL,
   accountRecord,
   METRICS_MAX_POINTS,
   QUEUE_MAX_TASKS,
@@ -5885,5 +5886,83 @@ describe("the not-before choice", () => {
     expect(client.creates).toEqual([]);
     expect(client.runNows).toEqual([]);
     expect(store.getState().verdict?.kind).toBe("unqueued");
+  });
+});
+
+describe("a Codex pick", () => {
+  /** dev-a leads; `capabilities` is what it advertises. */
+  const fleet = (capabilities: string[] = [CAPABILITIES.codex]): ScriptedClient =>
+    new ScriptedClient({ machines: [autoMachine("dev-a", { capabilities }), autoMachine("dev-b")] });
+  const form = { ...DEFAULT_FORM, prompt: "fix it" };
+  const codex = { agent: "codex", model: DEFAULT_CODEX_MODEL } as const;
+
+  test("writes agent codex beside the model at auto, and a Claude pick writes no agent", async () => {
+    const client = fleet();
+    const store = new Store(client, form);
+    store.setModel(codex);
+    store.setAutonomy("auto");
+    expect(deriveView(store.getState(), 0).modelTile).toMatchObject({ value: "Sol", tag: "Codex" });
+    await store.spawn();
+    expect(firstCreate(client).spec).toMatchObject({ agent: "codex", model: DEFAULT_CODEX_MODEL, autonomy: "auto" });
+
+    const claude = fleet();
+    await new Store(claude, form).spawn();
+    expect(firstCreate(claude).spec).not.toHaveProperty("agent");
+    expect(deriveView(new Store(claude, form).getState(), 0).modelTile.tag).toBeNull();
+  });
+
+  test("is refused before anything is written below auto, or to a leader that does not run Codex", async () => {
+    const client = fleet();
+    const store = new Store(client, form);
+    store.setModel(codex);
+    const view = deriveView(store.getState(), 0);
+    expect(view.formStatus).toBe("Codex runs only at Auto autonomy for now. Pick Auto, or a Claude model");
+    expect(view.button.label).toBe("Codex needs Auto");
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+
+    const old = fleet([]);
+    const oldStore = new Store(old, form);
+    oldStore.setModel(codex);
+    oldStore.setAutonomy("auto");
+    expect(deriveView(oldStore.getState(), 0).formStatus).toContain("doesn't run Codex tasks yet");
+    await oldStore.spawn();
+    expect(old.creates).toEqual([]);
+    // The pick is kept, for a retry once the leader updates.
+    expect(oldStore.getState().form).toMatchObject(codex);
+  });
+
+  test("picking the other agent's model keeps an effort both offer", () => {
+    const store = new Store(fleet(), { ...form, effort: "high" });
+    store.setModel(codex);
+    expect(store.getState().form.effort).toBe("high");
+    store.setModel({ agent: "claude", model: "opus" });
+    expect(store.getState().form).toMatchObject({ agent: "claude", effort: "high" });
+  });
+
+  test("a held Codex task is checked against the leader when sent, not when held", async () => {
+    const old = fleet([]);
+    old.emit({ status: "retrying", registrySettled: false });
+    const store = new Store(old, form);
+    store.setModel(codex);
+    store.setAutonomy("auto");
+    store.attach();
+    await store.spawn();
+    expect(store.getState().held).toHaveLength(1);
+    old.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.failure !== null, "the send-time check");
+    expect(store.getState().held[0]?.failure).toContain("doesn't run Codex tasks yet");
+    expect(old.creates).toEqual([]);
+
+    const current = fleet();
+    current.emit({ status: "retrying", registrySettled: false });
+    const sent = new Store(current, form);
+    sent.setModel(codex);
+    sent.setAutonomy("auto");
+    sent.attach();
+    await sent.spawn();
+    current.emit({ status: "open", registrySettled: true });
+    await until(() => current.creates.length === 1, "the held send");
+    expect(firstCreate(current).spec.agent).toBe("codex");
   });
 });

@@ -17,7 +17,11 @@ import {
   fleetTraits,
   parseDateTime,
   traitHealthByMachine,
+  AGENT_LOGIN_KINDS,
   AUTONOMY_LEVELS,
+  CODEX_MODELS,
+  DEFAULT_CODEX_MODEL,
+  type AgentLoginKind,
   autonomyOf,
   DEFAULT_AUTONOMY,
   withAutonomy,
@@ -96,6 +100,7 @@ import {
   startGateError,
   startQueuedAuto,
   taskTagsGateError,
+  codexGateError,
   traitsGateError,
   requiresCheck,
   usesReported,
@@ -124,6 +129,7 @@ import { localRequest, localSocketReachable, LocalUnavailable } from "./local-cl
 import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import { sendMessage, type RouteGate } from "./send-message.ts";
 import { WATCH_TTL_MS } from "./watch-frame.ts";
+import { keepSessionOpen } from "./keep-session-open.ts";
 import { unwatchGithub, watchGithub, type WatchGate } from "./watch-github.ts";
 import { readState } from "./state.ts";
 
@@ -237,6 +243,7 @@ const PASS_SELF_TOOL = "pass_to_successor";
 const SEND_MESSAGE_TOOL = "send_message";
 const WATCH_TOOL = "watch_github";
 const UNWATCH_TOOL = "unwatch_github";
+const KEEP_OPEN_TOOL = "keep_session_open";
 
 /**
  * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
@@ -843,6 +850,13 @@ const AUTONOMY_FIELD = z
     "How much the session decides on its own. steer: it starts in plan mode, plans and waits for approval before changing anything. Set it when the request is to plan, design, investigate or scope work rather than carry it out. checkpoint, the default: it never stops to ask whether to proceed, only for real choices, which it asks with a recommendation. auto: it also makes reversible choices itself and records them as Decided lines for review, stopping only for guardrails (production, money, secrets, deleting, messaging people) and choices it has no recommendation for. Set auto when the user wants the work done unattended, steer when they want to approve a plan first; omit it otherwise",
   );
 
+const AGENT_FIELD = z
+  .enum(AGENT_LOGIN_KINDS)
+  .optional()
+  .describe(
+    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}) and autonomy auto. A model name never chooses the agent. A Codex task takes no effort max, steer, checkpoint, attachments or continuation for now, and is refused unless the scheduler's leader runs Codex tasks`,
+  );
+
 const UNTIL_FIELD = z
   .enum(TASK_UNTIL)
   .optional()
@@ -906,8 +920,9 @@ function requestFields(input: {
   readonly model?: string | undefined;
   readonly effort?: string | undefined;
   readonly autonomy?: AutonomyLevel | undefined;
+  readonly agent?: AgentLoginKind | undefined;
 }): Omit<AutoSpec, "repo"> {
-  const { prompt, title, mode, model, effort, autonomy } = input;
+  const { prompt, title, mode, model, effort, autonomy, agent } = input;
   const fields = {
     mode,
     ...(prompt === undefined ? {} : { prompt }),
@@ -915,6 +930,7 @@ function requestFields(input: {
     ...(model === undefined || model === "" ? {} : { model }),
     ...(effort === undefined || effort === "" ? {} : { effort }),
     ...(autonomy === undefined ? {} : { autonomy }),
+    ...(agent === undefined ? {} : { agent }),
   };
   // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`. Never null: the tools take no `plan`.
   return withAutonomy(fields) ?? fields;
@@ -1039,6 +1055,8 @@ function describeTask(
     ...(spec.until === "reported" ? { until: spec.until } : {}),
     // Only off the default: most tasks run at checkpoint, and `plan: true` alone reads as steer.
     ...(level === DEFAULT_AUTONOMY ? {} : { autonomy: level }),
+    // Only off the default: absent is Claude, as the record says it.
+    ...(spec.agent === undefined ? {} : { agent: spec.agent }),
     // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
     ...(task.merged === true ? { merged: true } : {}),
     ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
@@ -1123,6 +1141,7 @@ export function buildMcpServer(
   /** `pass_to_successor`'s own pane, for its check before the push (`ownSettledTask`). */
   ownPane: () => string | undefined = () => process.env["TMUX_PANE"],
   watchClient: WatchClient = WATCH_CLIENT,
+  keepOpen: typeof keepSessionOpen = keepSessionOpen,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1216,7 +1235,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); a task that ran stacked carries \`stackedOn\` — the task whose work its worktree started from (after any pass, the successor holding it) and \`base\`: \`branch\` (that task's pushed branch), \`merged\` (the default branch, since that task's PR had merged) or \`nothing\` (the default branch, since that task finished with nothing pushed); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, its agent where it is not Claude Code (codex), where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); a task that ran stacked carries \`stackedOn\` — the task whose work its worktree started from (after any pass, the successor holding it) and \`base\`: \`branch\` (that task's pushed branch), \`merged\` (the default branch, since that task's PR had merged) or \`nothing\` (the default branch, since that task finished with nothing pushed); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1407,8 +1426,8 @@ export function buildMcpServer(
   server.registerTool(
     "spawn_session",
     {
-      title: "Spawn a Claude Code session",
-      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the fleet limit when one is set, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. If this session is itself a scheduler task, opened no pull request and queued this one to carry its work on, call report_task_done once nothing of its own is left, or its task holds a slot until it exits. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      title: "Spawn a Claude Code or Codex session",
+      description: `Queue a remote-controlled Claude Code session (or, with agent "codex", a Codex one) in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the fleet limit when one is set, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. If this session is itself a scheduler task, opened no pull request and queued this one to carry its work on, call report_task_done once nothing of its own is left, or its task holds a slot until it exits. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.strictObject({
         machine: z
           .string()
@@ -1429,7 +1448,8 @@ export function buildMcpServer(
             "Name for the spawned Claude session — also names the window the backend runs it in, and the worktree branched for it. Defaults to a slug of the prompt.",
           ),
         mode: z.enum(["worktree", "here"]).default("worktree"),
-        model: z.string().optional().describe('Model for the session, e.g. "opus"'),
+        agent: AGENT_FIELD,
+        model: z.string().optional().describe('Model for the session, e.g. "opus" (with agent "codex", a Codex model)'),
         effort: z.string().optional().describe('Reasoning effort, e.g. "medium"'),
         autonomy: AUTONOMY_FIELD,
         after: z
@@ -1466,6 +1486,7 @@ export function buildMcpServer(
       prompt,
       title,
       mode,
+      agent,
       model,
       effort,
       autonomy,
@@ -1502,7 +1523,7 @@ export function buildMcpServer(
       // scheduler's.
       const spec: AutoSpec = {
         repo,
-        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, autonomy }),
+        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, autonomy, agent }),
         ...authoredFields(
           (after ?? []).map(({ task, when }) => ({ task, after: when })),
           until,
@@ -1530,6 +1551,8 @@ export function buildMcpServer(
         // A create asked for the ref, so a leader that cannot take it refuses; the caller retries without it.
         const tagsGate = spec.tags === undefined ? null : taskTagsGateError(leg, "spawn", "ref");
         if (tagsGate !== null) return errorResult(tagsGate);
+        const codexGate = spec.agent === undefined ? null : codexGateError(leg, "spawn", "agent");
+        if (codexGate !== null) return errorResult(codexGate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
         if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
         // The origin a clone name resolved to is what the leader bounds, not the name.
@@ -1573,6 +1596,7 @@ export function buildMcpServer(
               prompt: z.string().optional().describe("The task for the spawned session"),
               title: z.string().optional().describe("Name for the spawned session, its window and its worktree branch"),
               mode: z.enum(["worktree", "here"]).default("worktree"),
+              agent: AGENT_FIELD.describe("As spawn_session's agent"),
               model: z.string().optional(),
               effort: z.string().optional(),
               autonomy: AUTONOMY_FIELD.describe(
@@ -1702,6 +1726,12 @@ export function buildMcpServer(
         const tagged = planned.findIndex(({ spec }) => spec.tags !== undefined);
         if (tagged !== -1) {
           const gate = taskTagsGateError(leg, `queue_batch task ${tagged + 1}`, "external_ref");
+          if (gate !== null) return errorResult(gate);
+        }
+        // Before any create, as the others: a batch is never half-written for want of a leader that runs Codex.
+        const codex = planned.findIndex(({ spec }) => spec.agent !== undefined);
+        if (codex !== -1) {
+          const gate = codexGateError(leg, `queue_batch task ${codex + 1}`, "agent");
           if (gate !== null) return errorResult(gate);
         }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
@@ -2051,6 +2081,23 @@ export function buildMcpServer(
     },
     async ({ id }) => {
       const result = await watchClient.remove(id);
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    KEEP_OPEN_TOOL,
+    {
+      title: "Keep this session open",
+      description:
+        "Ask this machine's custodian never to close this session, for one meant to stay open after its work looks done: a standing assistant, a long-lived watcher, a session the owner returns to. Only when your task or the owner says the session is long-lived; never to avoid being cleaned up after finishing ordinary work. The hold lasts while this `claude` process runs (a restart or resume drops it) and touches nothing else: the owner can still end the session, and the custodian may still nudge it. `keep: false` releases it.",
+      inputSchema: z.strictObject({
+        keep: z.boolean().optional().describe("false releases the hold; default true"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ keep }) => {
+      const result = await keepOpen(keep !== false);
       return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );

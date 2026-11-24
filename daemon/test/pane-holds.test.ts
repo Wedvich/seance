@@ -6,12 +6,14 @@ const sources = (o: {
   readonly marked?: boolean;
   readonly drain?: boolean;
   readonly watch?: boolean;
+  readonly kept?: boolean;
 }): PaneHoldSources => ({
   events: () => ({ awaitsWake: () => o.stopNote === true, marked: () => o.marked === true }),
   drain: () => () => o.drain === true,
   watches: () => ({
     holds: (pane, taskId) => o.watch === true && pane === "%1" && (taskId === undefined || taskId === "t"),
   }),
+  keepOpen: () => ({ holds: (pane) => o.kept === true && pane === "%1" }),
 });
 
 // The sources are doubles: this holds the composition (which source feeds which hold) and the seat's one expression.
@@ -44,13 +46,25 @@ describe("what holds a pane open", () => {
     expect(paneHolds(sources({ marked: true, drain: true })).awaitsWake("%1")).toBe(false);
   });
 
+  test("a keep-open hold is held open and leaves the seat's due check, and is neither untouchable nor a wake", () => {
+    const { heldOpen, seatHolds, untouchable, awaitsWake } = paneHolds(sources({ kept: true }));
+    expect(heldOpen("%1")).toBe(true);
+    expect(heldOpen("%2")).toBe(false);
+    expect(seatHolds("%1")).toBe(true);
+    expect(untouchable("%1")).toBe(false);
+    expect(awaitsWake("%1")).toBe(false);
+    expect(paneHolds(sources({ watch: true, marked: true })).heldOpen("%1")).toBe(false);
+  });
+
   test("a source that does not exist holds nothing", () => {
-    const { untouchable, awaitsWake } = paneHolds({
+    const { untouchable, awaitsWake, heldOpen } = paneHolds({
       events: () => undefined,
       drain: () => undefined,
       watches: () => undefined,
+      keepOpen: () => undefined,
     });
     expect(untouchable("%1")).toBe(false);
     expect(awaitsWake("%1")).toBe(false);
+    expect(heldOpen("%1")).toBe(false);
   });
 });

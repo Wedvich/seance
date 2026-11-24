@@ -74,7 +74,8 @@ act, no text in logs, a new act is a threat-model change) hold throughout.
   else `foreign_pr`, or `unreadable` where no origin is known; never a title, body or comment; cached
   60 s.
 - `close` re-reads the pane at the act and acts only on a session at rest by the daemon's own facts
-  (`closeVerdict`: never the round's own pane, one that is `foreign` or `marked`, `needs-input`, `busy`,
+  (`closeVerdict`: never the round's own pane, one that is `foreign` or `marked`, one whose live session asked to
+  stay open (`held_open`: `KeepOpen.holds`, local-socket.md), `needs-input`, `busy`,
   unobserved, or whose input box holds any typed text (a faint or grey prompt suggestion, through
   `capture-pane -e`, is not: `inputBoxDraft`; a paste or image placeholder is) or can't be found —
   `waiting`, since the despawn's Escape and Ctrl+C would clear a draft) through the graceful despawn.

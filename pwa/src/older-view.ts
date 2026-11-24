@@ -1,4 +1,5 @@
 import {
+  AGENT_NAMES,
   ARCHIVE_TASK_OUTCOMES,
   ARCHIVE_TASKS_PAGE,
   autonomyOf,
@@ -234,6 +235,7 @@ function archivedRow(
     session: null,
     answer: null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
+    agent: task.spec.agent === undefined ? null : AGENT_NAMES[task.spec.agent],
     // The reason only: the archive keeps no note. What stays on a finished record is the daemon's kept-worktree flag,
     // which is the point of keeping it (work sits in a worktree), so the card says so.
     flag: task.flag === undefined ? null : { label: FLAG_LABELS[task.flag.reason], note: null },

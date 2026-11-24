@@ -8,6 +8,7 @@ import type { Check } from "./check.ts";
 import { isCustodianFrameKind } from "./custodian-frame.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
+import { isKeepOpenFrameKind, type KeepOpenReply } from "./keep-open-frame.ts";
 import { isInboxFrameKind, isMessageFrameKind, type MessageReply } from "./message-frame.ts";
 import { LISTENER_OUTBOUND_MAX, type ListenerSink, type Messages } from "./messages.ts";
 import { runDir, socketPath } from "./paths.ts";
@@ -62,6 +63,10 @@ import { isWatchFrameKind, type WatchReply } from "./watch-frame.ts";
  * `watch` (`watch-frame.ts`, `watches.ts`) is a session's ask to its own daemon to watch a GitHub PR or Actions run:
  * bound to its pane and `claude` process by the peer's pid only, refused `unbound` where the host names no peer, and
  * carrying no pane, task or session field. DESIGN.md's "Watches" records the widening.
+ *
+ * `keep-open` (`keep-open-frame.ts`, `keep-open.ts`) is a session's ask that the custodian leave it open: bound to its
+ * `claude` process by the peer's pid only, refused `unbound` where the host names no peer, carrying one boolean.
+ * DESIGN.md's "Keep open" records the widening.
  *
  * `custodian` is answered `unsupported` here, always: the round's verbs live on the round's own
  * socket (`custodian-socket.ts`), which the round's sandbox can reach and this one it cannot. The branch stays so a
@@ -128,6 +133,11 @@ export interface LocalSocketOpts {
    * by `peer` and never by a field (DESIGN.md, "Watches"). Absent, a `watch` frame is answered `unsupported`.
    */
   readonly watches?: (raw: unknown, peer: number | null) => Promise<WatchReply>;
+  /**
+   * The keep-open table's entry (`createKeepOpen(...).handle`): a session's ask that the custodian leave it open, bound
+   * by `peer` and never by a field (DESIGN.md, "Keep open"). Absent, a `keep-open` frame is answered `unsupported`.
+   */
+  readonly keepOpen?: (raw: unknown, peer: number | null) => Promise<KeepOpenReply>;
   readonly path?: string;
 }
 
@@ -252,6 +262,23 @@ async function dispatchWatch(
   sendLine(sock, conn, JSON.stringify(reply));
 }
 
+/** Always answers, so `keep_session_open` can report what the daemon did. */
+async function dispatchKeepOpen(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  keepOpen: LocalSocketOpts["keepOpen"],
+): Promise<void> {
+  let reply: KeepOpenReply;
+  try {
+    reply = keepOpen === undefined ? { ok: false, code: "unsupported" } : await keepOpen(raw, conn.peer);
+  } catch (err) {
+    log.error(`local socket: keep-open handling crashed: ${String(err)}`);
+    reply = { ok: false, code: "internal" };
+  }
+  sendLine(sock, conn, JSON.stringify(reply));
+}
+
 /** The main socket never serves the round's verbs (`custodian-socket.ts` does): whoever sends one is told so. */
 function dispatchCustodian(sock: Socket<undefined>, conn: Conn): void {
   sendLine(sock, conn, JSON.stringify({ ok: false, code: "unsupported" }));
@@ -296,7 +323,7 @@ async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages" | "watches">,
+  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages" | "watches" | "keepOpen">,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -332,6 +359,10 @@ async function dispatch(
   }
   if (isWatchFrameKind(raw)) {
     await dispatchWatch(sock, conn, raw, opts.watches);
+    return;
+  }
+  if (isKeepOpenFrameKind(raw)) {
+    await dispatchKeepOpen(sock, conn, raw, opts.keepOpen);
     return;
   }
   if (isCustodianFrameKind(raw)) {
