@@ -139,7 +139,9 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
 
 - **daemon** — a throwaway in-process relay, a private tmux server
   (`SEANCE_TMUX_SOCKET`), and a stub claude binary (`SEANCE_CLAUDE_BIN`). Needs real
-  `tmux` and `git` on PATH. Suites (and e2e) get their server from `usePrivateTmux` in
+  `tmux` and `git` on PATH. Codex is never needed: `scripts/test.ts` points
+  `SEANCE_CODEX_BIN` at a path that does not exist, so no shard reaches a developer's
+  own `codex`, and the Codex suites run `makeCodexStub` (`daemon/test/codex-stub.ts`). Suites (and e2e) get their server from `usePrivateTmux` in
   `daemon/test/fixtures.ts`, never by setting the env var by hand: tmux never unlinks
   its socket, so the helper puts it by path in the per-run directory `scripts/test.ts`
   creates (`SEANCE_TEST_RUN_DIR`). When the run ends — normally, on a shard crash, or

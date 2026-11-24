@@ -33,6 +33,7 @@ async function runForeground(): Promise<void> {
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
   const daemon = await startSupervisor({
     authHealth: {},
+    codex: {},
     custodian: {},
     githubRate: {},
     usageRefresh: {},
@@ -82,6 +83,7 @@ const RUN: Record<
   mcp: (cli, rest) => cli.cmdMcp(rest),
   mod: (cli, rest) => cli.cmdMod(rest),
   adapter: async (_cli, rest) => (await import("./adapter-cli.ts")).cmdAdapter(rest),
+  codex: async (_cli, rest) => (await import("./codex/codex-cli.ts")).cmdCodex(rest),
   raycast: (cli, rest) => cli.cmdRaycast(rest),
 };
 

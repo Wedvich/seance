@@ -986,6 +986,41 @@ export interface ExclaveInfo {
   readonly keepFree?: readonly string[];
 }
 
+/** The agents a machine reports a login of beside its Claude exclaves (docs/codex.md, "The account"). */
+export const AGENT_LOGIN_KINDS = ["codex"] as const;
+export type AgentLoginKind = (typeof AGENT_LOGIN_KINDS)[number];
+
+/** `AgentLogin`'s display strings at most: a skewed blob must not carry a large one around. */
+export const AGENT_LOGIN_TEXT_MAX = 256;
+
+/**
+ * A non-Claude agent's login on this machine (DESIGN.md, Daemon, "Codex login"): one per agent in V1, read over the
+ * agent's own API by a short-lived probe, never from its credential file. Indexed by `MachineStatus.lq`, `lx`, `lu`
+ * and `lb`, never by an exclave index.
+ */
+export interface AgentLogin {
+  readonly agent: AgentLoginKind;
+  /**
+   * `codex:<account>:<user>`: `account/rateLimits/read`'s `accountId` and `account/read`'s `userId`. Null when signed
+   * out or when either half is missing (unidentified), never the email. Held to `isAccountId` like a Claude id.
+   */
+  readonly accountId: string | null;
+  /** Display only, as `ExclaveInfo.email`. */
+  readonly email?: string;
+  /** `planType`, display only. */
+  readonly plan?: string;
+  /** `workspaceName`, display only. */
+  readonly workspace?: string;
+  /** The home holds a login: false when signed out or not read yet; true for an expired one (`lx` says so). */
+  readonly authOk: boolean;
+  /** The account can spend credits past its included usage (docs/codex.md, "Credits and spill"). */
+  readonly credits?: true;
+  /** The home is paired with a phone (phase 3); display only, never a routing input. Never set yet. */
+  readonly paired?: true;
+  /** `codex --version`'s number; absent when no `codex` answered. */
+  readonly version?: string;
+}
+
 export interface SessionEntry {
   /**
    * The backend's handle on the session — a tmux pane id (`%12`) — and what
@@ -1089,6 +1124,12 @@ export interface MachineInfo {
    * account a spawn would bill.
    */
   readonly exclaves?: readonly ExclaveInfo[];
+  /**
+   * Agent logins beside the exclaves, in the order `MachineStatus.lq`/`lx`/`lu`/`lb` index them, never an entry in
+   * `exclaves` (an older leader would place Claude tasks on it). Absent from an older daemon (unknown); `[]` when the
+   * machine's `config.json` configures none.
+   */
+  readonly logins?: readonly AgentLogin[];
   /**
    * What this daemon's handlers support beyond the base ops (`"metrics"`,
    * `"taskId"`, later `"baseBranch"`), so no reader relies on a field an old
@@ -1440,7 +1481,29 @@ export interface MachineStatus {
    * last read. A bad `gh` is dropped alone, never the status.
    */
   readonly gh?: GithubRate;
+  /**
+   * Quota per agent login (DESIGN.md, Daemon, "Codex login"): `x` indexes `MachineInfo.logins`, never `exclaves`. At
+   * most `STATUS_MAX_LOGINS`. Trimmed with quota detail (windows, then resets), and its entries go before any Claude
+   * quota entry; a status carrying `tr` may have dropped them, so a login without an entry there is unknown.
+   */
+  readonly lq?: readonly QuotaObservation[];
+  /** Logins whose sign-in the backend refuses (expired), by `logins` index. Never trimmed. */
+  readonly lx?: readonly number[];
+  /** Logins not read yet or unreadable (unknown), by `logins` index. Never trimmed. */
+  readonly lu?: readonly number[];
+  /**
+   * Logins the backend blocks from included usage (`ordinaryUsageAllowed: false`), by `logins` index. Never trimmed.
+   * `lx`, `lu` and `lb` are disjoint and at most `STATUS_MAX_LOGINS` together; a reader refuses more, or a repeat,
+   * and range-checks each index against the `logins` of the info it holds. A login in none of them, signed in, is ok.
+   */
+  readonly lb?: readonly number[];
 }
+
+/**
+ * `MachineStatus.lq` entries at most, and `lx`, `lu` and `lb` entries at most combined. One login per agent in V1 and
+ * two agents designed (docs/agents.md), so four leaves room without a schema change.
+ */
+export const STATUS_MAX_LOGINS = 4;
 
 /** A budget's reading: `[limit, remaining, reset]`, reset in unix seconds, remaining at most limit, limit above 0. */
 export type GithubBudget = readonly [number, number, number];

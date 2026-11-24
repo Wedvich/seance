@@ -848,6 +848,35 @@ nothing checked it. The last is the gap they leave.
   never `expired`. A test holds fake tokens against the view, the status and the log (auth health
   writes no audit line), and others hold the hand-off itself: the file reaches the child as its own
   descriptor and the child's stderr as `/dev/null`.
+- **A second credential store, never opened** (Daemon, "Codex login"; docs/codex.md). A machine with a `codex` block
+  has one Codex home, `stateDir()/codex/home/` (it and its parent 0700), whose `auth.json` holds a ChatGPT refresh
+  token. Codex alone writes and refreshes it (the generated `config.toml` sets the file store, so it never lands in a
+  keychain). The daemon never opens, reads, copies, links or backs it up, not even through a child: its one look is an
+  `lstat` of the directory entry, a signature of inode, size and mtime that says when to probe again. A copy is worse
+  than a leak: the first refresh of a copy logs every other copy out. `stateDir()` is already in the custodian's masks.
+  A backup restoring an older copy logs the machine out: accepted, the owner signs in again. No test, live check or
+  verb points `CODEX_HOME` at the owner's `~/.codex`: every Codex child gets the env `codexEnv` builds (bare, plus
+  `CODEX_HOME`), never an inherited one.
+- **Identity, quota and login health come over Codex's API, never from the home's files.** The probe
+  (`daemon/src/codex/probe.ts`) is `codex --version` and then a `codex app-server` child on stdio, both argv arrays
+  with no frame, config or file value in them, a bare env (`HOME`, `PATH`, `USER`/`LOGNAME`, `CODEX_HOME`: so no
+  `CREDENTIALS_DIRECTORY`), cwd the home, their own process group killed at the timeout (30 s, SIGTERM then SIGKILL
+  after 5 s) and swept when the leader exits, stderr ignored, stdout capped at 64 KiB. Every answer goes through a
+  parser that requires what it keeps and ignores the rest; an error is reduced to its code and whether its message
+  contains the fixed text `401 Unauthorized`, and the message is dropped there, since it quotes the backend's body.
+  Nothing either child writes reaches a log, an audit line or the wire but the parsed values below; a failure warns
+  once per streak with a fixed category.
+- **A second binary.** `codex` is resolved through `PATH` at each use (`SEANCE_CODEX_BIN` in tests), never persisted,
+  and held to `CODEX_MIN_VERSION` (0.170.0): below it the probe reads the version and runs nothing more. The generated
+  `config.toml` turns update checks off and names no hooks; its `[mcp_servers.seance]` entry is bun by its `PATH`
+  name (never `process.execPath`, and omitted, with a warning, when bun is not on `PATH`) and this checkout's
+  `main.ts`, rewritten at every daemon start.
+- The owner's **`seance codex login | logout | status`** are shell acts in the one `COMMANDS` table (so a custodian
+  round's generated fence denies them), never a frame, a local-socket op, a broker action, an app op or MCP. Each
+  writes one audit line, `audit codex origin=cli op=<verb> outcome=<…>`, from a closed set of outcomes
+  (`CODEX_OWNER_OUTCOMES`): never the device code, an email, an account id or anything Codex printed. `login` hands
+  the terminal to Codex's own `login --device-auth` in the home, so Séance never sees the code or a token. The probe
+  writes no audit line: it is not a spawn, as the `/usage` refresh is not.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -1520,7 +1549,17 @@ The Durable Object persists a machine registry:
   cannot disagree. `drn: true` says the daemon's task-launch
   gate is closed ("Restart waits for task launches"), absent otherwise; never trimmed either, and the
   parser takes `true` alone. `gh` is this machine's own `gh`'s GitHub budget (Daemon, "GitHub rate limits"),
-  never trimmed and dropped alone when malformed. Sent every 30s whether or not an app is watching:
+  never trimmed and dropped alone when malformed. `lq`, `lx`, `lu` and `lb` are an agent login's (Daemon,
+  "Codex login"): indices into the register blob's `logins`, never `exclaves`, so an index may sit in both `ax` and
+  `lx`. `lq` holds each login's quota reading, at most `STATUS_MAX_LOGINS` (4) entries; `lx` lists the logins the
+  backend refused (expired), `lu` those unread or unreadable, `lb` those whose included usage the backend blocks
+  (`ordinaryUsageAllowed: false`): disjoint, at most `STATUS_MAX_LOGINS` between them, and a reader nulls the status
+  over a repeat or past the cap, as for `ax`. The trim takes quota detail from `lq` with the exclaves' (scoped weeklies,
+  then resets), then `lq`'s entries, last first, before any Claude quota entry, since a machine's Claude exclaves are
+  what places today's tasks; `tr` still counts Claude quota entries only, so a status carrying `tr` may have dropped
+  `lq` whole. `lx`, `lu` and `lb` are never trimmed, as `ax` is not. Measured (`status.test.ts`): five exclaves' quota
+  beside a Codex reading shaped like S6's Business login (both windows and `c`) fits untrimmed, and so do four beside
+  one with every field set; a sixth exclave trims detail, never an entry. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
   60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
@@ -1626,7 +1665,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `availability` (built 2026-11-13; `now?` with drain 3/3, `soft?` with the soft close)     | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seance close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                                                                                                                      | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
 | op `custodian` (built 2026-11-14, custodian 7)                                               | `pwa/src/store.ts` `custodianControl`, from the Machines card's menu, over the relay as app-role only                                                                                                                                                                                                                                                                                                                                                                          | `daemon/src/handlers.ts` `handleCustodian` → `CustodianControl` in `daemon/src/run.ts` → `ownerAct` (`daemon/src/custodian-owner.ts`); sealed `from: "app"` only; writes `custodian/state.json` or `round-request` and pokes the seat (Daemon, "The custodian's status and the Machines row")                                                                                                           |
 | op `despawn`                                                                                 | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
-| `status` (daemon→relay)                                                                      | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector; `cl` and `dr` through the `closed` collector, from `state.json`)                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
+| `status` (daemon→relay)                                                                      | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector, `lq`/`lx`/`lu`/`lb` from `daemon/src/codex/account.ts` through the `login` collector; `cl` and `dr` through the `closed` collector, from `state.json`)                                                          | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                                         | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                                                                                                                           | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
 | op `metrics`                                                                                 | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                                                                         | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
 | op `archive-status`                                                                          | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                                                                                                                  | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
@@ -7334,6 +7373,77 @@ of this section built.
     `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`) stores nothing and reads `unknown`, and a
     session that dies on auth mid-run, which no hook reports. On only through `RunOpts.authHealth`, which
     `main.ts` always passes, like `usageRefresh`.
+- **Codex login** (`daemon/src/codex/`: `home.ts`, `probe.ts`, `account.ts`, `codex-cli.ts`; added 2026-11-23, Codex
+  phase 1 item 1, docs/codex.md "The account"): the machine's one ChatGPT login for Codex, named, measured and watched.
+  No Codex task runs yet; nothing reads `logins` or `lq` but the parsers (fleet readers, the PWA and MCP are items 2
+  and 3).
+  - **Config.** `config.json`'s `codex` block, the machine's own, parsed strictly like `adapters` (`parseCodex`: an
+    unknown key or value fails the load): `approvalPolicy` (`untrusted`, `on-request`, `never`; default
+    `on-request`), `sandbox` (`read-only`, `workspace-write`; default `workspace-write`; `danger-full-access` refused
+    by name), `approvalsReviewer` (`user`, `auto_review`; default `auto_review`). `{}` takes the defaults. No block,
+    no Codex: no home is written, no probe runs and the blob's `logins` is `[]`. The three values are read by no code
+    yet (each `thread/start` takes them, phase 2).
+  - **The home** (`home.ts`): `stateDir()/codex/home/`, both directories held to 0700 at each write (`mkdir`'s mode
+    applies only to one it creates), `config.toml` generated whole at each daemon start and by `seance codex
+    login`/`logout` before they run (so the file store is set before a sign-in), 0600, through `writeDurable`:
+    `cli_auth_credentials_store = "file"`, `check_for_update_on_startup = false`, `project_doc_fallback_filenames =
+    ["CLAUDE.md"]`, `project_doc_max_bytes = 262144` and `[mcp_servers.seance]` (threat model, "A second binary").
+    Values are written as JSON strings, a valid TOML basic string, so a path cannot break out of its value. A home
+    that cannot be written leaves the machine with no login that run, warned.
+  - **The probe** (`probe.ts`; threat model, "Identity, quota and login health come over Codex's API"). `codex
+    --version`, then the app-server conversation driven line by line: `initialize`, then `initialized`,
+    `account/read` (`refreshToken: false`, so Codex refreshes only under its own rules) and `account/rateLimits/read`
+    (`excludeResetCreditDetails: true`), then stdin closed. _Decided: its own `Bun.spawn`, not `exec.ts`'s, because_
+    the app-server exits at EOF on stdin without answering what is pending (checked on 0.170.0), and `exec` writes
+    stdin whole and closes it up front; the probe still takes `exec.ts`'s `childEnv` (bare) and its group rules. The
+    answers map to a health:
+    - **`ok`**: `account/rateLimits/read` answered and parsed. The id is `codex:<accountId>:<userId>`
+      (`accountId` from that answer, `userId` from `account/read`); either half missing, a failed `account/read`, or
+      an id past `isAccountId`'s bound leaves it unidentified (`accountId: null`), never unknown. `email`,
+      `planType` and `workspaceName` are display fields, each dropped alone when empty, over `AGENT_LOGIN_TEXT_MAX`
+      (256) or holding a control or format character.
+    - **Signed out**: error `-32600` (Codex answers it with no network call for a home with no usable login).
+    - **Expired**: error `-32603` whose message contains `401 Unauthorized`, the backend refusing the login.
+    - **Unknown**: anything else — another error, an answer that fails its parser, a timeout, output past the cap,
+      an exit before answering, no binary, a version it cannot read or one below the floor.
+  - **Quota and credits.** Windows map by `windowDurationMins`, never position: 300 to `h`/`hr`, 10080 to `d`/`dr`,
+    any other dropped; `usedPercent` rounded, `resetsAt` floored (unix seconds). A `rateLimitsByLimitId` bucket with a
+    `normalModelSlug` and a 10080-minute window joins `w` under that slug (at most 8). `s` is `"cache"` (a new
+    `QuotaSource` would make an older daemon read the fleet quota record as unreadable), `at` the probe's time.
+    `AgentLogin.credits` is set while `credits.hasCredits` or `credits.unlimited` is; `c` rides only beside it:
+    `100 − individualLimit.remainingPercent` when a member limit is reported, else 0 while the account can spend and
+    100 once it cannot (`spendControlReached`, or a `rateLimitReachedType` among the four workspace depletion and
+    limit types). Never `cu`/`cl`: those are USD cents, and Codex's amounts are strings in an unstated unit.
+    `ordinaryUsageAllowed: false` puts the login in `lb`; `null` is not `false`.
+  - **What each health keeps** (`account.ts`). `ok` replaces identity, credits, the reading and `lb`. Signed out
+    drops all of them and `authOk`. Expired keeps the identity with `authOk: true` (signed in by its file, refused by
+    the backend, as a Claude exclave in `ax` keeps `authOk`) and drops the reading. Unknown keeps everything it
+    knew, its reading still sent in `lq` with its own `at`: one failed read is not a sign-out. Before the first
+    probe the login is `accountId: null`, `authOk: false` and in `lu`. The version is the last one read, below the
+    floor included, so a reader can say why (`login_outdated`, item 2).
+  - **Cadence.** One probe at start, then a 60 s timer: probed again when the reading is older than
+    `quota.staleAfterMinutes` (floored at 60 s, as the `/usage` refresh's) for `ok` and `unknown`, never on the clock
+    for signed out or expired, and at once, in any health, when the `lstat` signature of `auth.json` changes (a
+    sign-in, a sign-out, Codex's own refresh). Probes run on the `/usage` refresh's lane (`refresh-lane.ts`, moved out
+    of `usage-refresh.ts` for both), one at a time across the process and a reload's two daemons, so a small LXC never
+    carries a Claude refresh and a Codex probe at once. `stop()` kills a probe in flight by group (TERM, then KILL),
+    and a child spawned after it is refused at spawn. A running session's `account/rateLimits/updated` notifications
+    keep a reading fresh without a probe once Codex sessions run (phase 2).
+  - **On the wire.** `MachineInfo.logins: AgentLogin[]` (`[]` with no block; one entry, `agent: "codex"`, with one)
+    beside `exclaves`, never an entry in it: an older leader would read a Codex entry as a Claude exclave, and
+    `quota[].x`, `ax` and `sess` index that list. `parseMachineInfo` reads `logins` leniently (one this build cannot
+    parse, an unknown `agent` included, reads as absent, never nulling the blob; an unknown kind nulls the list, not
+    the entry, so the indices still mean what the sender meant). `Registered` carries the blob's `logins` beside its
+    exclaves, so `lq`/`lx`/`lu`/`lb` (Presence & identity) index the list the reader holds, through one collector
+    (`loginCollector`). A change of identity, a display field, `authOk`, `credits` or `version` re-registers, as a
+    sign-in on a Claude exclave does; a change of health or reading sends a status at once (the launch gate's
+    `refresh`). No metric series yet (item 2, the archivist's).
+  - **The owner's verbs** (`codex-cli.ts`; threat model, "`seance codex`"): `login` and `logout` refuse without a
+    block (`no_config`), write the home's config, check the binary and the floor, then run Codex's `login
+    --device-auth` or `logout` on the owner's terminal with the home's env; `status` runs one probe of the home the
+    daemon made (refused `no_home` before it exists, so it never races the daemon's write) and prints the health,
+    version, id, display fields, both windows and the credits state. The daemon notices a sign-in within a minute
+    through the signature. On only through `RunOpts.codex`, which `main.ts` always passes, like `githubRate`.
 - **GitHub rate limits** (`daemon/src/github-rate.ts`, `gh.ts`; added 2026-11-17): this machine's own `gh`'s GitHub
   API budget, in the status's `gh`. Every Claude session on every machine signs in as one GitHub user, so all of them
   share one 5,000-an-hour REST budget and one 5,000-point GraphQL one. On 2026-11-17 sessions' own `gh` polling spent

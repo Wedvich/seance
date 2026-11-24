@@ -14,6 +14,8 @@ import {
 } from "./messages.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  AGENT_LOGIN_KINDS,
+  AGENT_LOGIN_TEXT_MAX,
   ATTACHMENT_HASH_PATTERN,
   ARCHIVE_INGEST_SOURCES,
   ARCHIVE_MACHINES_MAX,
@@ -50,6 +52,7 @@ import {
   PR_MERGE_STATES,
   PR_STATES,
   PUSH_ALERT_MAX_BYTES,
+  STATUS_MAX_LOGINS,
   PASS_CLOSE_ERROR_CODES,
   DELIVER_OUTCOMES,
   MESSAGE_ROUTE_ERROR_CODES,
@@ -214,6 +217,7 @@ import {
   type Task,
   type TaskRequest,
   type Envelope,
+  type AgentLogin,
   type ExclaveInfo,
   type MachineInfo,
   type CustodianStatus,
@@ -466,6 +470,40 @@ export function parseExclaveList(value: unknown): readonly ExclaveInfo[] | null 
   return parseList(value, parseExclaveInfo);
 }
 
+/**
+ * One `MachineInfo.logins` entry. An agent this build does not know nulls the entry, and with it the list: the
+ * status indexes it, so a gap would shift one login's quota onto the next.
+ */
+export function parseAgentLogin(value: unknown): AgentLogin | null {
+  if (!isRecord(value)) return null;
+  const agent = AGENT_LOGIN_KINDS.find((kind) => kind === value["agent"]);
+  if (agent === undefined) return null;
+  const { accountId, email, plan, workspace, authOk, credits, paired, version } = value;
+  if (accountId !== null && !isAccountId(accountId)) return null;
+  if (typeof authOk !== "boolean") return null;
+  if (credits !== undefined && credits !== true) return null;
+  if (paired !== undefined && paired !== true) return null;
+  const text = (field: unknown): field is string | undefined =>
+    field === undefined || (isBoundedString(field, AGENT_LOGIN_TEXT_MAX) && field !== "");
+  if (!text(email) || !text(plan) || !text(workspace) || !text(version)) return null;
+  return {
+    agent,
+    accountId,
+    ...(email === undefined ? {} : { email }),
+    ...(plan === undefined ? {} : { plan }),
+    ...(workspace === undefined ? {} : { workspace }),
+    authOk,
+    ...(credits === true ? { credits } : {}),
+    ...(paired === true ? { paired } : {}),
+    ...(version === undefined ? {} : { version }),
+  };
+}
+
+export function parseLoginList(value: unknown): readonly AgentLogin[] | null {
+  const logins = parseList(value, parseAgentLogin);
+  return logins !== null && logins.length <= STATUS_MAX_LOGINS ? logins : null;
+}
+
 export function parseRepoList(value: unknown): readonly RepoEntry[] | null {
   return parseList(value, parseRepoEntry);
 }
@@ -519,6 +557,8 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
   // report costs that line. Unknown capability strings pass through — a reader
   // asks for the ones it knows.
   const exclaves = value["exclaves"] === undefined ? undefined : parseExclaveList(value["exclaves"]);
+  // Lenient like `exclaves`: a list this build cannot read reads as an older daemon's (unknown), never costs the tile.
+  const logins = value["logins"] === undefined ? undefined : parseLoginList(value["logins"]);
   const capabilities = value["capabilities"];
   const source = parseSourceInfo(value["source"]);
   const lastUpdate = parseUpdateReport(value["lastUpdate"]);
@@ -529,6 +569,7 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
     repos,
     scannedAt: value["scannedAt"],
     ...(exclaves === undefined || exclaves === null ? {} : { exclaves }),
+    ...(logins === undefined || logins === null ? {} : { logins }),
     ...(isStringArray(capabilities) ? { capabilities } : {}),
     ...(source === null ? {} : { source }),
     ...(lastUpdate === null ? {} : { lastUpdate }),
@@ -673,6 +714,15 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (tf === null || tu === null) return null;
   const traitPairs = [...(tf ?? []), ...(tu ?? [])].map(([x, t]) => `${x}:${t}`);
   if (traitPairs.length > STATUS_MAX_TRAIT_PAIRS || new Set(traitPairs).size !== traitPairs.length) return null;
+  const lq = value["lq"] === undefined ? undefined : parseList(value["lq"], parseQuotaObservation);
+  if (lq === null || (lq !== undefined && lq.length > STATUS_MAX_LOGINS)) return null;
+  const lx = value["lx"] === undefined ? undefined : parseUintList(value["lx"]);
+  const lu = value["lu"] === undefined ? undefined : parseUintList(value["lu"]);
+  const lb = value["lb"] === undefined ? undefined : parseUintList(value["lb"]);
+  if (lx === null || lu === null || lb === null) return null;
+  // As the auth lists: disjoint and bounded together, a login in at most one.
+  const loginIndices = [...(lx ?? []), ...(lu ?? []), ...(lb ?? [])];
+  if (loginIndices.length > STATUS_MAX_LOGINS || new Set(loginIndices).size !== loginIndices.length) return null;
   const { drn } = value;
   if (drn !== undefined && drn !== true) return null;
   const { cl } = value;
@@ -705,6 +755,10 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(dr === undefined ? {} : { dr }),
     ...(cu === null ? {} : { cu }),
     ...(gh === null ? {} : { gh }),
+    ...(lq === undefined ? {} : { lq }),
+    ...(lx === undefined ? {} : { lx }),
+    ...(lu === undefined ? {} : { lu }),
+    ...(lb === undefined ? {} : { lb }),
   };
 }
 

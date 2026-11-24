@@ -57,6 +57,11 @@ export interface Config {
    * other machine can make this one run a program.
    */
   readonly adapters?: AdaptersConfig;
+  /**
+   * Codex on this machine (DESIGN.md, Daemon, "Codex login"): present means the daemon keeps a Codex home and probes
+   * its login; absent means no Codex here (no probe, `logins: []`). Only this file sets it, never a frame.
+   */
+  readonly codex?: CodexConfig;
 }
 
 /** Trait name → where it applies. `exclaves` absent means every exclave of this machine. */
@@ -296,6 +301,52 @@ function parseAdapters(raw: unknown, path: string): AdaptersConfig | undefined {
   return adapters;
 }
 
+/** How a Codex session may leave its sandbox (docs/codex.md D5): this machine's own word, never a frame's. */
+export interface CodexConfig {
+  readonly approvalPolicy: CodexApprovalPolicy;
+  readonly sandbox: CodexSandbox;
+  readonly approvalsReviewer: CodexApprovalsReviewer;
+}
+
+export const CODEX_APPROVAL_POLICIES = ["untrusted", "on-request", "never"] as const;
+export type CodexApprovalPolicy = (typeof CODEX_APPROVAL_POLICIES)[number];
+/** `danger-full-access` is refused, never offered: a session out of every sandbox is not Séance's to grant. */
+export const CODEX_SANDBOXES = ["read-only", "workspace-write"] as const;
+export type CodexSandbox = (typeof CODEX_SANDBOXES)[number];
+export const CODEX_APPROVALS_REVIEWERS = ["user", "auto_review"] as const;
+export type CodexApprovalsReviewer = (typeof CODEX_APPROVALS_REVIEWERS)[number];
+
+export const CODEX_DEFAULTS: CodexConfig = {
+  approvalPolicy: "on-request",
+  sandbox: "workspace-write",
+  approvalsReviewer: "auto_review",
+};
+
+const CODEX_KEYS = Object.keys(CODEX_DEFAULTS);
+
+/** Strict, as `parseAdapters` is: a mistake fails the load, naming where, rather than running Codex looser than named. */
+function parseCodex(raw: unknown, path: string): CodexConfig | undefined {
+  if (raw === undefined) return undefined;
+  const at = `config at ${path}: "codex`;
+  if (!isRecord(raw)) throw new TypeError(`${at}" must be an object (an empty one takes the defaults)`);
+  for (const key of Object.keys(raw)) {
+    if (!CODEX_KEYS.includes(key))
+      throw new TypeError(`${at}.${key}" is not a key (the keys are ${CODEX_KEYS.join(", ")})`);
+  }
+  const pick = <T extends string>(key: keyof CodexConfig, allowed: readonly T[]): T => {
+    const value = key in raw ? raw[key] : CODEX_DEFAULTS[key];
+    const known = allowed.find((candidate) => candidate === value);
+    if (known !== undefined) return known;
+    const refused = key === "sandbox" && value === "danger-full-access" ? " (danger-full-access is refused)" : "";
+    throw new TypeError(`${at}.${key}" must be one of ${allowed.join(", ")}${refused}`);
+  };
+  return {
+    approvalPolicy: pick("approvalPolicy", CODEX_APPROVAL_POLICIES),
+    sandbox: pick("sandbox", CODEX_SANDBOXES),
+    approvalsReviewer: pick("approvalsReviewer", CODEX_APPROVALS_REVIEWERS),
+  };
+}
+
 export interface AuthHealthConfig {
   /**
    * Read the macOS keychain for each exclave's login. Off by default until the item naming and a
@@ -517,8 +568,10 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   const authHealth = parseAuthHealth(obj["authHealth"], path);
   const traits = parseTraits(obj["traits"], path);
   const adapters = parseAdapters(obj["adapters"], path);
+  const codex = parseCodex(obj["codex"], path);
   return {
     ...(adapters === undefined ? {} : { adapters }),
+    ...(codex === undefined ? {} : { codex }),
     ...(reap === undefined ? {} : { reap }),
     ...(custodian === undefined ? {} : { custodian }),
     ...(quota === undefined ? {} : { quota }),

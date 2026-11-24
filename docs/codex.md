@@ -1,7 +1,13 @@
 # Codex as a first-class account — design
 
-**Status: design; item 5 of the build order (the driver seam) is built** (DESIGN.md, Daemon, "Agent drivers"), the rest
-not. Written 2026-11-23 from docs/agents.md (the scoping, both Codex spikes
+**Status: phase 1 items 1 and 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
+`codex` config block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login |
+logout | status`, `MachineInfo.logins` and `MachineStatus.lq`/`lx`/`lu`/`lb` — is recorded in DESIGN.md: Daemon, "Codex
+login"; Presence & identity (the status fields and their trim); and the threat model's "A second credential store, never
+opened", "Identity, quota and login health come over Codex's API", "A second binary" and the `seance codex` verbs (this
+doc's threat-model items 1–3 and 12's login line). Item 5, the driver seam, is in DESIGN.md, Daemon, "Agent drivers".
+Where this doc and DESIGN.md differ on those, DESIGN.md is the record. Nothing reads `logins` or `lq` yet (item 2).
+Written 2026-11-23 from docs/agents.md (the scoping, both Codex spikes
 of 2026-11-19 on 0.166.0, the owner's decisions of 2026-11-19) and a read of the code at `923bb32`. API names were
 checked against the app-server schema that **codex-cli 0.170.0** generates. Spikes S2, S3 and S6 ran on macOS against
 0.170.0, and S8's Linux half ran on Thad (an LXC, 0.166.0), all on 2026-11-23 ("Spikes"). The owner decided every
@@ -168,9 +174,10 @@ stateDir()/codex/              0700, the daemon's own
   LXC never carries a Claude refresh and a Codex probe at once. While a session runs, its server's
   `account/rateLimits/updated` notifications reach the daemon's connection after every model call (S3) and keep the
   reading fresh with no probe at all.
-- **The probe** is a `codex app-server` child on stdio in the home: argv array through `exec.ts`, `bareEnv` plus
+- **The probe** is a `codex app-server` child on stdio in the home: argv array, `exec.ts`'s bare `childEnv` plus
   `CODEX_HOME`, its own process group, `initialize`, `account/read` (`refreshToken: false`), `account/rateLimits/read`,
-  then stdin closed; killed by group at 30 s, output capped at 64 KiB. Every answer goes through a parser that requires
+  then stdin closed — driven line by line on its own `Bun.spawn` rather than through `exec`, since the app-server
+  exits at EOF without answering what is pending (checked at build, 0.170.0), and `exec` closes stdin up front; killed by group at 30 s, output capped at 64 KiB. Every answer goes through a parser that requires
   the fields it keeps (the two id halves, email, plan, workspace name, percents, reset times, the credit fields) and
   ignores any other: 0.170.0 already answers fields its own schema lacks (`workspaceRouting`, `rateLimitResetCredits`,
   `rateLimitUpsell`). Nothing it writes reaches a log; a failure warns once per streak with no excerpt (unlike the usage
@@ -524,7 +531,7 @@ task (2026-11-23) after the ones it names.
 
 **Phase 1: the account.** No Codex task runs, but the ChatGPT account is named, measured and watched.
 
-1. **Daemon:** the `codex` config block, the home and its generated config, `seance codex login | logout | status`, the
+1. **Built 2026-11-23** (DESIGN.md, Daemon, "Codex login"). **Daemon:** the `codex` config block, the home and its generated config, `seance codex login | logout | status`, the
    version floor, the probe, `MachineInfo.logins`, `MachineStatus.lq`/`lx`/`lu`/`lb` with their parsers and the status
    budget. Its PR lists the owner's steps to try it: a `codex` block in a machine's `config.json`, then
    `seance codex login`.
@@ -588,7 +595,9 @@ Still to run, each before the phase named; each checks a fact the design already
 
 ## Left to build time
 
-- `lq`'s place in `fitStatus`'s trim order, and the bound on `lx`/`lu`/`lb`, measured against `STATUS_MAX_CT_LENGTH`.
+- ~~`lq`'s place in `fitStatus`'s trim order, and the bound on `lx`/`lu`/`lb`~~: built (DESIGN.md, Presence &
+  identity): `lq` loses detail with the exclaves' quota, then goes whole before any Claude entry; `lx`/`lu`/`lb` are
+  never trimmed and bounded with `lq` by `STATUS_MAX_LOGINS` (4).
 - `DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version.
 - The daemon's WebSocket client over a unix socket: `ws` as a daemon dependency, or a minimal one over
   `Bun.connect({ unix })`.
@@ -604,7 +613,7 @@ Still to run, each before the phase named; each checks a fact the design already
 | `AGENT_KINDS`                                                                                   | `shared/src/tags.ts`                                                                 |
 | Quota folding, login health reader, `knownAccounts`                                             | `shared/src/quota.ts`, `shared/src/status-reader.ts`, `shared/src/account-record.ts` |
 | Routing by agent, the spill                                                                     | `scheduler/src/route.ts`                                                             |
-| The home, generated config, probe, verbs                                                        | `daemon/src/codex/` (`home.ts`, `probe.ts`, `codex-cli.ts`)                          |
+| The home, generated config, probe, verbs                                                        | `daemon/src/codex/` (`home.ts`, `probe.ts`, `account.ts`, `codex-cli.ts`)            |
 | The connection and the driver                                                                   | `daemon/src/codex/client.ts`, `daemon/src/agents/codex.ts`                           |
 | The seam                                                                                        | `daemon/src/agents/driver.ts`, `daemon/src/agents/claude.ts`                         |
 | Clients                                                                                         | `pwa/src/` (picker, account card, Machines row), `daemon/src/mcp*.ts`, the CLI       |

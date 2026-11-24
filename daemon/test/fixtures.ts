@@ -828,3 +828,49 @@ export async function writeAgentSessionFile(
     JSON.stringify({ pid, sessionId, procStart: procStartOf(pid), ...extra }),
   );
 }
+
+const CODEX_STUB = join(import.meta.dir, "codex-stub.ts");
+
+/** What one call of the Codex stub saw (`codex-stub.ts`). */
+export interface CodexCall {
+  readonly argv: readonly string[];
+  readonly codexHome: string | null;
+  readonly cwd: string;
+  readonly credentials: boolean;
+}
+
+export interface CodexStub {
+  /** The executable: a `scriptStub` running `codex-stub.ts` under this bun. */
+  readonly path: string;
+  /** Replaces the scenario every later call reads (`codex-stub.ts`'s `Scenario`). */
+  readonly scenario: (scenario: Record<string, unknown>) => Promise<void>;
+  readonly calls: () => Promise<readonly CodexCall[]>;
+  /** Forgets the calls so far. */
+  readonly reset: () => Promise<void>;
+}
+
+/** A `codex` for the Codex login's tests; make it in `beforeAll`, which pays its first exec. */
+export async function makeCodexStub(dir: string): Promise<CodexStub> {
+  await mkdir(dir, { recursive: true });
+  const scenarioPath = join(dir, "codex.json");
+  const callsPath = `${scenarioPath}.calls`;
+  await writeFile(scenarioPath, "{}");
+  const path = await scriptStub(dir, "codex", `exec "${process.execPath}" "${CODEX_STUB}" "${scenarioPath}" "$@"`);
+  // The warm-up stops at the stub's own flag; this first real call pays bun's start before any timed probe.
+  await exec([path, "--version"]);
+  await rm(callsPath, { force: true });
+  return {
+    path,
+    scenario: (scenario) => writeFile(scenarioPath, JSON.stringify(scenario)),
+    calls: async () => {
+      const text = await Bun.file(callsPath)
+        .text()
+        .catch(() => "");
+      return text
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line): CodexCall => JSON.parse(line));
+    },
+    reset: () => rm(callsPath, { force: true }),
+  };
+}

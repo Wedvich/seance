@@ -32,14 +32,16 @@ export type PaddedStatus = MachineStatus & { readonly _: string };
  * filler is a trailing `_` of spaces, a field the parser ignores.
  *
  * Trimming takes the least useful fields first: the per-model windows, then
- * the reset stamps, then quota entries from the last exclave down (`default`
- * is index 0 and the one every machine has). Pressure, `ax`/`ae`/`au` (auth
+ * the reset stamps (both from Claude's `quota` and the agent logins' `lq` alike),
+ * then every `lq` entry from the last login down, then quota entries from the
+ * last exclave down (`default` is index 0 and the one every machine has). Pressure, `ax`/`ae`/`au` (auth
  * health, capped together by `STATUS_MAX_AUTH_EXPIRED`), `tf`/`tu` (trait probes, capped together by
- * `STATUS_MAX_TRAIT_PAIRS`), `drn` (the launch gate), `cl` (closed to new work: trimmed, it
- * would read as open), `dr` (a trimmed one would stop a drain the owner started) and `cu` (the custodian seat's view, display-only) are never trimmed and always fit; `sess` goes only past any real exclave count.
- * Any trim sets `tr` to the count of quota entries dropped — 0 when only
- * detail went — so a reader can tell an exclave left out from one with no
- * quota observed; `tr` is absent when nothing was trimmed.
+ * `STATUS_MAX_TRAIT_PAIRS`), `lx`/`lu`/`lb` (agent logins' health, capped together by
+ * `STATUS_MAX_LOGINS`), `drn` (the launch gate), `cl` (closed to new work: trimmed, it
+ * would read as open), `dr` (a trimmed one would stop a drain the owner started), `cu` (the custodian seat's view, display-only) and `gh` are never trimmed and always fit; `sess` goes only past any real exclave count.
+ * Any trim sets `tr` to the count of `quota` entries dropped — 0 when only
+ * detail or `lq` entries went — so a reader can tell an exclave (or a login)
+ * left out from one with no quota observed; `tr` is absent when nothing was trimmed.
  */
 export function fitStatus(status: MachineStatus, budget = STATUS_PAYLOAD_BUDGET): PaddedStatus {
   const room = budget - FILLER_OVERHEAD;
@@ -49,21 +51,39 @@ export function fitStatus(status: MachineStatus, budget = STATUS_PAYLOAD_BUDGET)
 
 function trimStatus(status: MachineStatus, budget: number): MachineStatus {
   if (statusBytes(status) <= budget) return status;
-  if (status.quota !== undefined) {
-    const { quota } = status;
-    let kept = quota;
+  const quota = status.quota ?? [];
+  const lq = status.lq ?? [];
+  if (quota.length > 0 || lq.length > 0) {
+    // Detail goes from Claude's quota and the logins' alike; then the logins' entries, then Claude's from the last.
+    let keptQuota = quota;
+    let keptLq = lq;
+    const fits = (dropped: number): MachineStatus | null => {
+      const trimmed: MachineStatus = {
+        ...withoutQuota(status),
+        ...(keptQuota.length === 0 ? {} : { quota: keptQuota }),
+        ...(keptLq.length === 0 ? {} : { lq: keptLq }),
+        tr: dropped,
+      };
+      return statusBytes(trimmed) <= budget ? trimmed : null;
+    };
     for (const step of [withoutModelWindows, withoutResets]) {
-      kept = step(kept);
-      const trimmed: MachineStatus = { ...status, quota: kept, tr: 0 };
-      if (statusBytes(trimmed) <= budget) return trimmed;
+      keptQuota = step(keptQuota);
+      keptLq = step(keptLq);
+      const trimmed = fits(0);
+      if (trimmed !== null) return trimmed;
     }
-    while (kept.length > 1) {
-      kept = kept.slice(0, -1);
-      const trimmed: MachineStatus = { ...status, quota: kept, tr: quota.length - kept.length };
-      if (statusBytes(trimmed) <= budget) return trimmed;
+    while (keptLq.length > 0) {
+      keptLq = keptLq.slice(0, -1);
+      const trimmed = fits(0);
+      if (trimmed !== null) return trimmed;
+    }
+    while (keptQuota.length > 1) {
+      keptQuota = keptQuota.slice(0, -1);
+      const trimmed = fits(quota.length - keptQuota.length);
+      if (trimmed !== null) return trimmed;
     }
   }
-  const pressureOnly: MachineStatus = { ...withoutQuota(status), tr: status.quota?.length ?? 0 };
+  const pressureOnly: MachineStatus = { ...withoutQuota(status), tr: quota.length };
   if (statusBytes(pressureOnly) <= budget) return pressureOnly;
   // Only an exclave list far past anything real gets here; a frame over the
   // bound is refused whole, so even `sess` goes before the pressure does.
@@ -79,6 +99,6 @@ function withoutResets(quota: readonly QuotaObservation[]): readonly QuotaObserv
   return quota.map(({ hr: _hr, dr: _dr, ...rest }) => rest);
 }
 
-function withoutQuota({ quota: _quota, ...rest }: MachineStatus): MachineStatus {
+function withoutQuota({ quota: _quota, lq: _lq, ...rest }: MachineStatus): MachineStatus {
   return rest;
 }

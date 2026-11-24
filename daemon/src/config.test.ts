@@ -570,3 +570,43 @@ describe("adapters", () => {
     }
   });
 });
+
+describe("codex", () => {
+  const load = async (codex: unknown): Promise<Config> => {
+    const path = join(await tempDir(), "config.json");
+    await writeFile(path, JSON.stringify({ ...VALID, codex }));
+    return loadConfig(path);
+  };
+
+  test("absent is no Codex; an empty block takes the defaults; each key is the machine's own word", async () => {
+    const path = join(await tempDir(), "config.json");
+    await writeFile(path, JSON.stringify(VALID));
+    expect((await loadConfig(path)).codex).toBeUndefined();
+    expect((await load({})).codex).toEqual({
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+      approvalsReviewer: "auto_review",
+    });
+    expect((await load({ approvalPolicy: "never", sandbox: "read-only", approvalsReviewer: "user" })).codex).toEqual({
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      approvalsReviewer: "user",
+    });
+  });
+
+  test("anything else fails the load, naming where; danger-full-access is refused by name", async () => {
+    for (const [codex, message] of [
+      [true, '"codex" must be an object'],
+      [["x"], '"codex" must be an object'],
+      [{ model: "gpt-5" }, '"codex.model" is not a key'],
+      [{ sandbox: "danger-full-access" }, "danger-full-access is refused"],
+      [{ sandbox: "workspace" }, '"codex.sandbox" must be one of read-only, workspace-write'],
+      [{ approvalPolicy: "on-failure" }, '"codex.approvalPolicy" must be one of'],
+      [{ approvalsReviewer: "guardian_subagent" }, '"codex.approvalsReviewer" must be one of user, auto_review'],
+      [{ approvalPolicy: null }, '"codex.approvalPolicy" must be one of'],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one load per case, each its own file
+      expect(load(codex)).rejects.toThrow(message);
+    }
+  });
+});

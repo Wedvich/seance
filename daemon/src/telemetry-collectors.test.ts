@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { METRIC_NAMES, type CustodianStatus, type GithubRate } from "@seance/shared";
 import type { AuthView } from "./auth-health.ts";
+import type { LoginView } from "./codex/account.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import {
   TELEMETRY_COLLECTORS,
@@ -220,6 +221,41 @@ describe("the collector registry", () => {
     expect(await createTelemetry(MetricsStore.memory(), sources).tick(T0)).not.toHaveProperty("au");
     const metrics = new Set(store.query({ from: 0, to: T0 / 1000, step: 30 }).map((s) => s.metric));
     expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
+  });
+
+  test("an agent login's view becomes lq, lx, lu and lb, indexed through the registered blob's logins", async () => {
+    const quota = { s: "cache" as const, at: 1_700_000_000, h: 3, d: 41 };
+    const tick = async (login: { readonly authOk: boolean } | null, view: LoginView | null) => {
+      const withLogins: Registered = {
+        ...registered,
+        logins: login === null ? [] : [{ agent: "codex", accountId: null, ...login }],
+      };
+      return createTelemetry(MetricsStore.memory(), {
+        ...sources,
+        registered: () => withLogins,
+        logins: () => new Map(view === null ? [] : [["codex", view] as const]),
+      }).tick(T0);
+    };
+    const ok = await tick({ authOk: true }, { health: "ok", quota, blocked: false });
+    expect(ok.lq).toEqual([{ x: 0, ...quota }]);
+    for (const key of ["lx", "lu", "lb"]) expect(ok).not.toHaveProperty(key);
+    expect((await tick({ authOk: true }, { health: "ok", quota, blocked: true })).lb).toEqual([0]);
+    const expired = await tick({ authOk: true }, { health: "expired", quota: null, blocked: false });
+    expect(expired.lx).toEqual([0]);
+    expect(expired).not.toHaveProperty("lq");
+    // Unknown keeps its last reading, whose `at` says how old it is.
+    const unknown = await tick({ authOk: true }, { health: "unknown", quota, blocked: false });
+    expect(unknown.lu).toEqual([0]);
+    expect(unknown.lq).toEqual([{ x: 0, ...quota }]);
+    // Signed in by the blob a reader holds but signed out in the view, or missing from it: unread, never ok.
+    expect((await tick({ authOk: true }, { health: "signed_out", quota: null, blocked: false })).lu).toEqual([0]);
+    expect((await tick({ authOk: true }, null)).lu).toEqual([0]);
+    // Signed out in the blob: `authOk: false` says it all.
+    const out = await tick({ authOk: false }, { health: "signed_out", quota: null, blocked: false });
+    for (const key of ["lq", "lx", "lu", "lb"]) expect(out).not.toHaveProperty(key);
+    // A view for a login the blob does not hold indexes nothing.
+    const none = await tick(null, { health: "ok", quota, blocked: true });
+    for (const key of ["lq", "lx", "lu", "lb"]) expect(none).not.toHaveProperty(key);
   });
 
   test("an entry that rejects or throws drops only its own contribution", async () => {

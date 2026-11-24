@@ -224,6 +224,63 @@ describe("fitStatus", () => {
     expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
   });
 
+  test("a login's quota loses detail with the exclaves', then goes whole before any exclave's entry", () => {
+    const full = { ...status(3), lq: [quota(0)] };
+    const noWindows = {
+      ...full,
+      quota: full.quota?.map(({ w: _w, ...rest }) => rest),
+      lq: full.lq.map(({ w: _w, ...rest }) => rest),
+      tr: 0,
+    };
+    expect(unpadded(fitStatus(full, padded(noWindows)))).toEqual(noWindows);
+    const noResets = {
+      ...noWindows,
+      quota: noWindows.quota?.map(({ hr: _hr, dr: _dr, ...rest }) => rest),
+      lq: noWindows.lq.map(({ hr: _hr, dr: _dr, ...rest }) => rest),
+    };
+    expect(unpadded(fitStatus(full, padded(noResets)))).toEqual(noResets);
+    const { lq: _lq, ...noLogins } = noResets;
+    const fitted = fitStatus(full, padded(noLogins));
+    expect(fitted.lq).toBeUndefined();
+    expect(fitted.quota?.map((q) => q.x)).toEqual([0, 1, 2]);
+    expect(fitted.tr).toBe(0);
+  });
+
+  test("the logins' health is never trimmed, and the widest login fields beside every other kept field fit", () => {
+    const lists = { lx: [0], lu: [1], lb: [2, 3] } satisfies Partial<MachineStatus>;
+    const crowded = fitStatus({ ...status(3), ...lists, lq: [quota(0)], sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded).toMatchObject(lists);
+    const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
+    const big = Number.MAX_SAFE_INTEGER;
+    const worst = fitStatus({
+      ...status(12),
+      ae,
+      ...lists,
+      cu: { s: "running", e: 1_763_000_000, n: [999, 999, 999], rc: `session_${"A".repeat(64)}` },
+      gh: { u: big, c: [big, big, big], g: [big, big, big] },
+      drn: true,
+      cl: 1_763_000_000_000,
+      dr: 1_763_000_300_000,
+      sess: [9],
+    });
+    expect(worst).toMatchObject(lists);
+    expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
+  });
+
+  test("the budget beside one login: five exclaves whole with Codex's entry, four with one of every field", () => {
+    // Codex reports no per-model window on its one bucket and no credit amounts (`c` alone): docs/codex.md, "Quota".
+    const codex = { x: 0, h: 100, d: 100, hr: T + 3600, dr: T + 86_400, c: 100, s: "cache" as const, at: T };
+    const five = fitStatus({ ...status(5), lq: [codex], lb: [0] });
+    expect(five.tr).toBeUndefined();
+    expect(five.lq).toEqual([codex]);
+    expect(fitStatus({ ...status(4), lq: [quota(0)], lu: [0] }).tr).toBeUndefined();
+    // Past it, detail goes first and the login's entry before any exclave's.
+    const six = fitStatus({ ...status(6), lq: [codex], lb: [0] });
+    expect(six.tr).toBe(0);
+    expect(six.quota).toHaveLength(6);
+  });
+
   test("an exclave list too long even for sess still says it was trimmed", () => {
     const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);

@@ -37,6 +37,7 @@ export const COMMANDS = [
   "mcp",
   "mod",
   "adapter",
+  "codex",
   "session-event",
   "inbox",
   "custodian",
@@ -321,6 +322,16 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
       remove: { summary: "remove <name> from config.json and end its subscriptions; `seance restart` stops it" },
       restart: { summary: "restart one adapter, or every one, in the running daemon; lifts the failed hold" },
       status: { summary: "each adapter's state, protocol, counts and last exit" },
+    },
+  },
+  codex: {
+    summary: "this machine's Codex login, in séance's own Codex home: login, logout, status",
+    usage: "login | logout | status",
+    details: ["needs a `codex` block in config.json; never touches your own ~/.codex"],
+    verbs: {
+      login: { summary: "sign séance's Codex home in with a device code (works over SSH)" },
+      logout: { summary: "sign séance's Codex home out" },
+      status: { summary: "probe the login now: health, account, quota and credits" },
     },
   },
   "session-event": {
