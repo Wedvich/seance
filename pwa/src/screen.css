@@ -3323,6 +3323,72 @@
   text-decoration: none;
 }
 
+/* A session row's "Not a task": the body face, so it reads as a word about the row, not a reading of it. */
+.queue-kind {
+  font-family: var(--sans);
+}
+
+/* A session's joined tags, folded under its card (the per-namespace view, kept from the Machines card). */
+.session-tags > summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-size: 0.8125rem;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.session-tag-group {
+  padding: 4px 0 6px 12px;
+  font-size: 0.8125rem;
+}
+
+.session-tag-head {
+  margin: 0 0 2px;
+  color: var(--fg2);
+}
+
+.session-tag-list {
+  margin: 0;
+}
+
+.session-tag {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-tag dt {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow-wrap: anywhere;
+  color: var(--fg2);
+}
+
+.session-tag dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  min-width: 0;
+  margin: 0;
+}
+
+.session-tag-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.session-tag-verified {
+  color: var(--ok);
+}
+
+.session-tag-meta {
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
 .verdict-agent {
   margin: 10px 0 0;
 }

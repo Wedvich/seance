@@ -1,6 +1,7 @@
-import { FLEET_LIMIT_MAX, TASK_REQUEST_LIMITS } from "@seance/shared";
+import { displayLine, FLEET_LIMIT_MAX, TAG_VALUE_MAX, TASK_REQUEST_LIMITS } from "@seance/shared";
 import type { ComponentChildren, JSX } from "preact";
 import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
+import type { SessionRow, SessionTagGroup } from "../machines-view.ts";
 import {
   ASLEEP_SECTION,
   armKey,
@@ -8,10 +9,12 @@ import {
   disarmRow,
   parseLimitDraft,
   type ArmOp,
+  type CloseTarget,
   type LimitView,
   type LineageLine,
   type QueueRow,
   type QueueScreenView,
+  type SessionQueueRow,
 } from "../queue-view.ts";
 import { OLDER_TITLE, type OlderSheetView, type OlderView } from "../older-view.ts";
 import { centeredScrollTop } from "../scroll.ts";
@@ -255,9 +258,20 @@ export function QueueScreen(props: {
   /** The archive's tasks past Finished; null while no archivist is online, and nothing of it renders (A35). */
   older: OlderView | null;
   olderActions: OlderActions;
+  /** Ends a session by its pane (the graceful despawn): a task's live one, or one running none. Settles once it is answered. */
+  onCloseSession: (target: CloseTarget) => Promise<void>;
+  /** Names an untasked session's conversation (blank clears); resolves null once it landed, else the refusal to show. */
+  onRenameSession: (deviceId: string, pane: string, session: string, text: string) => Promise<string | null>;
 }): JSX.Element {
   const { view, notice, pausing, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
+  // The row whose close is out: its Close greys until the daemon answers.
+  const [closing, setClosing] = useState<string | null>(null);
+  // The open session rename: a dialog local to this screen, as the Machines card's was.
+  const [sessionRename, setSessionRename] = useState<{
+    readonly row: SessionQueueRow;
+    readonly rename: NonNullable<SessionRow["rename"]>;
+  } | null>(null);
   // Memory only: persist.ts keeps the spawn form's record, no place for a view's open/closed.
   const [asleepOpen, setAsleepOpen] = useState(false);
   const list = useRef<HTMLDivElement>(null);
@@ -343,7 +357,18 @@ export function QueueScreen(props: {
     if (!tap.fire) return;
     if (op === "cancel") onCancel(row.id);
     else if (op === "pass") props.onPass(row.id);
-    else onMarkDone(row.id);
+    else if (op === "mark-done") onMarkDone(row.id);
+  };
+
+  const { onCloseSession } = props;
+  const closeTap = (row: { readonly id: string; readonly close: CloseTarget | null }): void => {
+    const target = row.close;
+    if (target === null) return;
+    const tap = armTap(row, "close", armed);
+    setArmed(tap.armed);
+    if (!tap.fire) return;
+    setClosing(row.id);
+    void onCloseSession(target).finally(() => setClosing((current) => (current === row.id ? null : current)));
   };
 
   // Functional: the popover's toggle lands after a second tap's own update.
@@ -421,6 +446,8 @@ export function QueueScreen(props: {
         {view.sections.map((section) => {
           const collapsible = section.title === ASLEEP_SECTION;
           const shown = !collapsible || asleepOpen;
+          const tasks = `${section.rows.length} ${section.rows.length === 1 ? "task" : "tasks"}`;
+          const sessions = `${section.sessions.length} ${section.sessions.length === 1 ? "session" : "sessions"}`;
           return (
             <section key={section.title} className="queue-section">
               {collapsible ? (
@@ -429,13 +456,13 @@ export function QueueScreen(props: {
                     type="button"
                     className="queue-section-toggle"
                     aria-expanded={asleepOpen}
-                    aria-label={`${section.title}, ${section.rows.length} ${section.rows.length === 1 ? "task" : "tasks"}`}
+                    aria-label={`${section.title}, ${section.sessions.length === 0 ? tasks : `${tasks} and ${sessions}`}`}
                     onClick={() => setAsleepOpen((open) => !open)}
                   >
                     <span className="disclosure-chevron" aria-hidden="true">
                       ▶
                     </span>
-                    {section.title} · {section.rows.length}
+                    {section.title} · {section.rows.length + section.sessions.length}
                   </button>
                 </h2>
               ) : (
@@ -457,6 +484,20 @@ export function QueueScreen(props: {
                     onFollowUp={props.onFollowUp}
                     onOpenLabel={props.onOpenLabel}
                     onReveal={reveal}
+                    closing={closing === row.id}
+                    onClose={closeTap}
+                  />
+                ))}
+              {shown &&
+                section.sessions.map((row) => (
+                  <SessionCard
+                    key={row.id}
+                    row={row}
+                    armed={armed}
+                    closing={closing === row.id}
+                    onClose={closeTap}
+                    onRename={(rename) => setSessionRename({ row, rename })}
+                    onMenuClosed={onMenuClosed}
                   />
                 ))}
             </section>
@@ -482,6 +523,8 @@ export function QueueScreen(props: {
                 onFollowUp={props.onFollowUp}
                 onOpenLabel={props.onOpenLabel}
                 onReveal={revealOpening}
+                closing={false}
+                onClose={closeTap}
               />
             )}
           />
@@ -511,6 +554,22 @@ export function QueueScreen(props: {
           notice={props.labelling.notice}
           onSave={(text) => void props.onLabel(labelled.id, text)}
           onClose={props.onCloseLabel}
+        />
+      )}
+      {sessionRename !== null && (
+        <SessionRenameDialog
+          key={sessionRename.row.id}
+          row={sessionRename.row}
+          label={sessionRename.rename.label}
+          onSave={(text) =>
+            props.onRenameSession(
+              sessionRename.row.deviceId,
+              sessionRename.rename.pane,
+              sessionRename.rename.session,
+              text,
+            )
+          }
+          onClose={() => setSessionRename(null)}
         />
       )}
       {props.limitsOpen && view.limit !== null && (
@@ -636,6 +695,10 @@ function QueueCard(props: {
   onReveal: (taskId: string) => void;
   /** The task a notification opened: the card is marked while it fades. */
   marked: boolean;
+  /** Its session's close is out. */
+  closing: boolean;
+  /** Close session: arms, then despawns its pane. */
+  onClose: (row: QueueRow) => void;
 }): JSX.Element {
   const { row, armed, onAct } = props;
   const { inline, continuing } = row;
@@ -651,7 +714,7 @@ function QueueCard(props: {
   const disabled = !props.available || row.busy;
   const opens =
     row.canFollowUp || row.startNow !== null || row.canContinue || row.canPass || row.canLabel || row.session !== null;
-  const ends = row.canMarkDone || row.canCancel;
+  const ends = row.canMarkDone || row.canCancel || row.close !== null;
   const hasMenu = opens || ends;
   // Removing an open popover fires no `toggle`, so a card that unmounts (a poll moving its task
   // to another section) or drops its menu would leave the row armed for the next open.
@@ -755,6 +818,14 @@ function QueueCard(props: {
               {opens && ends && <MenuDivider />}
               {row.canMarkDone && armItem("mark-done", "Mark done", "Tap again to mark done", <CheckIcon />, false)}
               {row.canCancel && armItem("cancel", "Cancel", "Tap again to cancel", <CrossIcon />, true)}
+              {row.close !== null && (
+                <CloseItem
+                  rowId={row.id}
+                  armed={armed}
+                  disabled={disabled || props.closing}
+                  onClick={() => props.onClose(row)}
+                />
+              )}
             </Menu>
           </>
         )}
@@ -797,6 +868,7 @@ function QueueCard(props: {
           <TimedText line={row.body} />
         </p>
       )}
+      {row.sessionTags.length > 0 && <SessionTags groups={row.sessionTags} />}
       {(row.pr !== null || inline !== null || row.answer !== null) && (
         <div className="queue-actions">
           {row.pr !== null && (
@@ -832,6 +904,247 @@ function QueueCard(props: {
         </div>
       )}
     </section>
+  );
+}
+
+/** What a close does, under its item: the despawn's own terms (`DespawnRequest`). */
+const CLOSE_CONFIRM = "Asks Claude to exit and closes its window; a worktree stays.";
+
+/** Close session: ends a session, so it asks twice like Cancel. */
+function CloseItem(props: {
+  rowId: string;
+  armed: string | null;
+  disabled: boolean;
+  onClick: () => void;
+}): JSX.Element {
+  const armedHere = props.armed === armKey("close", props.rowId);
+  return (
+    <MenuItem
+      label={armedHere ? "Tap again to close" : "Close session"}
+      icon={<CloseSessionIcon />}
+      sub={CLOSE_CONFIRM}
+      disabled={props.disabled}
+      destructive
+      keepOpen={!armTap({ id: props.rowId }, "close", props.armed).fire}
+      onClick={props.onClick}
+    />
+  );
+}
+
+/**
+ * A session the queue's list carries no row for (docs/work.md, "Untasked row"): its name, where it runs, what it is
+ * doing. It has no record, so its menu holds only acts on the session itself: never Continue, Pass, Mark done or Cancel.
+ */
+function SessionCard(props: {
+  row: SessionQueueRow;
+  armed: string | null;
+  closing: boolean;
+  onClose: (row: SessionQueueRow) => void;
+  onRename: (rename: NonNullable<SessionRow["rename"]>) => void;
+  onMenuClosed: (rowId: string) => void;
+}): JSX.Element {
+  const { row, armed, onMenuClosed } = props;
+  const { rename } = row;
+  const menu = useMenu();
+  const handle: MenuHandle<HTMLButtonElement> = {
+    ...menu,
+    onToggle: (newState) => {
+      menu.onToggle(newState);
+      if (newState !== "open") onMenuClosed(row.id);
+    },
+  };
+  const opens = rename !== null || row.session !== null;
+  const hasMenu = opens || row.close !== null;
+  // As QueueCard: an unmount fires no `toggle`, so the arm would outlive the card.
+  useEffect(() => {
+    if (!hasMenu) return;
+    return () => onMenuClosed(row.id);
+  }, [hasMenu, row.id, onMenuClosed]);
+
+  return (
+    <section className="fleet-card card" tabIndex={-1}>
+      <div className="fleet-card-head">
+        <div className="fleet-card-title">
+          <h3 className="fleet-name">
+            {row.session === null ? (
+              row.name
+            ) : (
+              <a
+                className="queue-session"
+                href={row.session}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open the session on claude.ai"
+              >
+                {row.name}
+              </a>
+            )}
+          </h3>
+          <p className="fleet-meta">
+            {row.where}
+            {row.nameMark === null ? "" : ` · ${row.nameMark}`}
+            <span className="fleet-badge queue-kind">{row.kind}</span>
+          </p>
+        </div>
+        {hasMenu && (
+          <>
+            <MoreTrigger menu={handle} label={`More actions for ${row.name}`} />
+            <Menu menu={handle} label={`Actions for ${row.name}`}>
+              {rename !== null && (
+                <MenuItem label="Rename…" icon={<LabelIcon />} onClick={() => props.onRename(rename)} />
+              )}
+              {row.session !== null && (
+                <MenuItem label="Open on claude.ai" icon={<ExternalIcon />} href={row.session} external />
+              )}
+              {opens && row.close !== null && <MenuDivider />}
+              {row.close !== null && (
+                <CloseItem rowId={row.id} armed={armed} disabled={props.closing} onClick={() => props.onClose(row)} />
+              )}
+            </Menu>
+          </>
+        )}
+      </div>
+      <p className="fleet-card-body">
+        <TimedText line={row.state} />
+      </p>
+      {row.tags.length > 0 && <SessionTags groups={row.tags} />}
+    </section>
+  );
+}
+
+/** A session's joined tags, folded: each namespace with its writer, each tag with its scope and age. */
+function SessionTags(props: { groups: readonly SessionTagGroup[] }): JSX.Element {
+  const { groups } = props;
+  const count = groups.reduce((sum, group) => sum + group.tags.length, 0);
+  return (
+    <details className="session-tags">
+      <summary>Tags · {count}</summary>
+      {groups.map((group) => (
+        <div key={group.namespace} className="session-tag-group">
+          <p className="session-tag-head">
+            <code>{group.namespace}.*</code> · by {group.writer}
+          </p>
+          <dl className="session-tag-list">
+            {group.tags.map((tag) => (
+              <div key={tag.suffix} className="session-tag">
+                <dt>{tag.suffix}</dt>
+                <dd>
+                  {tag.url === null ? (
+                    <span className="session-tag-value">{tag.value}</span>
+                  ) : (
+                    <a className="session-tag-value" href={tag.url} target="_blank" rel="noopener noreferrer">
+                      {tag.value}
+                    </a>
+                  )}
+                  {tag.verified && <span className="session-tag-verified">verified</span>}
+                  <span className="session-tag-meta">
+                    {tag.scope} · <TimedText line={tag.age} />
+                  </span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
+    </details>
+  );
+}
+
+/**
+ * The owner's name for an untasked session, kept against its conversation on that machine. Stays open on a refusal,
+ * the reason where the hint was, so the draft is there to send again; closes once the name landed.
+ */
+function SessionRenameDialog(props: {
+  row: SessionQueueRow;
+  /** The owner's label now, `""` for none. */
+  label: string;
+  onSave: (text: string) => Promise<string | null>;
+  onClose: () => void;
+}): JSX.Element {
+  const { row, label, onSave, onClose } = props;
+  const [draft, setDraft] = useState(label);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const noticeId = useId();
+  const inputId = useId();
+  // The daemon refuses what its byte cap would cut (multibyte text reaches it well before the character cap).
+  const tooLong = new TextEncoder().encode(displayLine(draft, Infinity)).length > TAG_VALUE_MAX;
+  // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
+  useEffect(() => {
+    if (!saving) input.current?.focus();
+  }, [saving]);
+
+  return (
+    <Sheet title="Rename session" variant="dialog" onClose={onClose}>
+      <form
+        className="rename"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (saving) return;
+          setSaving(true);
+          setNotice(null);
+          void onSave(draft).then((refusal) => {
+            setSaving(false);
+            if (refusal === null) onClose();
+            else setNotice(refusal);
+          });
+        }}
+      >
+        <p className="rename-account">
+          {row.name}
+          {row.nameMark === null ? "" : ` ${row.nameMark}`}
+        </p>
+        <label className="rename-label" htmlFor={inputId}>
+          Session name
+        </label>
+        <input
+          ref={input}
+          id={inputId}
+          type="text"
+          className="rename-input"
+          placeholder="Name this session"
+          maxLength={TASK_REQUEST_LIMITS.title}
+          value={draft}
+          disabled={saving}
+          aria-invalid={notice !== null}
+          aria-describedby={notice === null ? undefined : noticeId}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        {notice === null ? (
+          <p className="rename-hint">
+            <span>
+              {tooLong
+                ? `Too long: at most ${TAG_VALUE_MAX} bytes, which non-ASCII characters use up faster.`
+                : "Kept for this conversation on its machine. Leave it empty to go back to the session's own name."}
+            </span>
+            <span className="rename-count">
+              {Array.from(draft).length}/{TASK_REQUEST_LIMITS.title}
+            </span>
+          </p>
+        ) : (
+          <p id={noticeId} className="rename-error" role="alert">
+            {notice}
+          </p>
+        )}
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={saving || tooLong}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+function CloseSessionIcon(): JSX.Element {
+  return (
+    <MenuGlyph>
+      <path d="M9 4H5v16h4M15 8l4 4-4 4M19 12H9" />
+    </MenuGlyph>
   );
 }
 
