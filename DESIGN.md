@@ -1760,7 +1760,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `rescan`                                                                                  | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row; `daemon/src/cli.ts` `cmdScan` over the local op socket                                                                                                                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
 | op `availability` (built 2026-11-13; `now?` with drain 3/3, `soft?` with the soft close)     | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seance close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                                                                                                                      | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
 | op `custodian` (built 2026-11-14, custodian 7)                                               | `pwa/src/store.ts` `custodianControl`, from the Machines card's menu, over the relay as app-role only                                                                                                                                                                                                                                                                                                                                                                          | `daemon/src/handlers.ts` `handleCustodian` → `CustodianControl` in `daemon/src/run.ts` → `ownerAct` (`daemon/src/custodian-owner.ts`); sealed `from: "app"` only; writes `custodian/state.json` or `round-request` and pokes the seat (Daemon, "The custodian's status and the Machines row")                                                                                                           |
-| op `despawn`                                                                                 | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
+| op `despawn`                                                                                 | `daemon/src/mcp.ts` and `pwa/src/store.ts` `closeSession` (graceful only) via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
 | `status` (daemon→relay)                                                                      | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector, `lq`/`lx`/`lu`/`lb` from `daemon/src/codex/account.ts` through the `login` collector; `cl` and `dr` through the `closed` collector, from `state.json`)                                                          | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                                         | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                                                                                                                           | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
 | op `metrics`                                                                                 | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                                                                         | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
@@ -8252,8 +8252,8 @@ of this section built.
 - **Despawn** (designed 2026-08-21, built 2026-10-09; `despawn.ts`): ends one
   session — the window only; its worktree and branch are `seance reap`'s. The
   wire op `despawn { id, force?, client? }`, `seance despawn <id> [--force]`
-  and the MCP tool `despawn_session` all reach `SessionBackend.despawn`. No PWA
-  or Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
+  and the MCP tool `despawn_session` all reach `SessionBackend.despawn`. The PWA's
+  Queue screen sends it graceful only (Close, no `force`, since 2026-11-24: docs/work.md); no Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
   the session list now carries (optional on the wire, so an older daemon simply
   omits it). A wire-supplied id must match `^%\d+$` before tmux sees it —
   `-t` would also resolve `main:1.0`, `{marked}` or `=name` — and must name a
@@ -9289,20 +9289,20 @@ wrapper, a receipt, the custodian's `sessions`, MCP) keeps the task's title or t
 session-chosen text. The reader joins, since no single process holds both scopes; the daemon gets only a task's ref
 (`SpawnRequest.ref`, for adapters), never `owner.*`, so there is no stale second copy of the owner's label.
 
-| Surface                                  | Gets                                                                  |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| PWA (Queue, task details)                | a task's label and ref                                                |
-| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included, and `live` |
-| `sessions` op sealed from the scheduler  | none, and no `live`                                                   |
-| MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                 |
-| adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref |
-| custodian `sessions` verb                | no tag                                                                |
-| `MachineStatus`, push, logs, audit, argv | never                                                                 |
-| archive                                  | `creator.ref`, `creator.ref-url` only                                 |
+| Surface                                  | Gets                                                                               |
+| ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| PWA (Queue, task details)                | a task's label and ref; on the Queue screen, each session's joined tags and `live` |
+| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included, and `live`              |
+| `sessions` op sealed from the scheduler  | none, and no `live`                                                                |
+| MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                              |
+| adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref              |
+| custodian `sessions` verb                | no tag                                                                             |
+| `MachineStatus`, push, logs, audit, argv | never                                                                              |
+| archive                                  | `creator.ref`, `creator.ref-url` only                                              |
 
-**The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`; not shown since
-2026-11-19: the owner took the session list off the Machines card until its place is decided, and `sessionRows`, the
-`SessionRow` model and `Store.renameSession` stay for whatever surface takes it): each session row folds its joined tags (`SessionEntry.tags` joined with its task's record, `taskTagEntries`) under a
+**The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`; off the Machines card
+since 2026-11-19, on the Queue screen since 2026-11-24, docs/work.md Order step 2: a session's row there, or the row of
+the task it carries, is built from that model): each session row folds its joined tags (`SessionEntry.tags` joined with its task's record, `taskTagEntries`) under a
 `Tags` disclosure, grouped by namespace, each group naming its writer from this table and each tag its scope and age,
 `verified` shown on a verified `agent.session`. A task tag's age is its task's creation (a record holds no per-key
 time). Values pass `displayLine`; only `creator.ref-url` is linked, and only as `httpsUrl` passes it. Joining the task
@@ -13582,7 +13582,7 @@ of tool close the section; docs/messaging.md keeps the spike evidence and the op
   target: `full`), cleared at each run's handshake (the adapter replays them after its `snapshot`) and on `leave`. A
   conversation's tags show on the process whose verified, unconflicted claim it is. They reach an app's `sessions`
   reply (`SessionEntry.tags`) and that adapter's own records, never another adapter's (`tagsFor`) or MCP
-  (`AGENT_VISIBLE_TAG_KEYS`). The PWA's per-namespace view, which would show them display-only, is not on screen
+  (`AGENT_VISIBLE_TAG_KEYS`). The PWA's per-namespace view shows them display-only on the Queue screen
   ("Tags and session identity").
 - **What never flows out**: a prompt, an attachment, a session-to-session message, a transcript, the screen, an
   account id, an absolute path, the PSK or anything derived from it.
@@ -14622,10 +14622,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
       conversation's claim is verified, not through the `pane` fallback, and has exactly one claimant (a tasked
       process that resumes a labelled conversation keeps its task's title as its name): an unverified or conflicted claimer
       of a labelled id shows its own name. A restart keeps the label and reattaches it at the next verified claim.
-    - **The name, in the PWA.** Not on screen since 2026-11-19: the owner took the session list off the Machines card
-      until its place is decided, so no surface offers Rename and the screen reads no sessions for it (only the drain's
-      reads remain). The model below (`sessionRows`, `Store.renameSession`) is kept for the surface that takes it.
-      A session row is named by `displayName` over
+    - **The name, in the PWA.** On the Queue screen since 2026-11-24 (docs/work.md), after the owner took the session
+      list off the Machines card on 2026-11-19; Rename is on an untasked row's menu there. A session row is named by `displayName` over
       `joinTags(task, conversation, process)`: owner label, then the task's title, then `self.name` (taken as docs/tags.md's open
       question 1 recommends, pending the owner's review; nothing writes it until `set_self_tag`),
       then the window, marked "(self-named)" or "(window)" for the last two. Rename is offered only for a connected
