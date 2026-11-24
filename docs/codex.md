@@ -635,8 +635,8 @@ Still to run, each before the phase named; each checks a fact the design already
   identity): `lq` loses detail with the exclaves' quota, then goes whole before any Claude entry; `lx`/`lu`/`lb` are
   never trimmed and bounded with `lq` by `STATUS_MAX_LOGINS` (4).
 - ~~`DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version~~: built from `model/list` on
-  `codex app-server` 0.171.0 (2026-11-24), every model it lists with no `upgrade` in its order, the default its
-  `isDefault` one (DESIGN.md, Scheduler, "Codex tasks").
+  `codex app-server` 0.171.0 (2026-11-24), the models it lists with no `upgrade`, only the newest version in each
+  family, in its order, the default its `isDefault` one (DESIGN.md, Scheduler, "Codex tasks").
 - ~~The daemon's WebSocket client over a unix socket~~: built on `ws` as a daemon dependency (DESIGN.md, Daemon,
   "Codex sessions"), already in the lockfile through raycast, and verified dialling `ws+unix:` under Bun.
 - ~~Recognising a Codex pane~~: built, `CODEX_PANES.startMark` a glob for `/tmp/seance-cx-` in the start command,

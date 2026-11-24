@@ -3884,8 +3884,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     `passOffer`, `continueOffer` and the leader's own pass refuse a Codex task (phase 3), and `successorSpec` and
     `continuationSpec` copy `agent`, so a task never silently becomes Claude.
   - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
-    `codex app-server` 0.171.0 (2026-11-24): every model it lists with no `upgrade`, in its order, and the one it marks
-    `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
+    `codex app-server` 0.171.0 (2026-11-24): the models it lists with no `upgrade`, only the newest version in each
+    family (an older one stays runnable by name), in its order, and the one it marks `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
   - **Clients** (built 2026-11-24, docs/codex.md item 8). Each writes `agent` only by an explicit pick, never from a
     model string, only to a verified leader advertising `CAPABILITIES.codex`, and refuses `codexSpecRefusal`'s
     combinations before a write in one wording (`codexRefusalText`, `shared/src/codex.ts`).
