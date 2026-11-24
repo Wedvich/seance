@@ -894,7 +894,10 @@ nothing checked it. The last is the gap they leave.
 - **The task field `agent`** (Scheduler, "Codex tasks"; docs/codex.md item 4) is sealed only through the one task
   sealer, behind `AGENT_DEP_SENTINEL`, which an older leader's parser refuses; the parser drops the sentinel only beside
   `agent` and nulls the spec over the sentinel without it or over an agent it does not know. A client writes `agent`
-  only to a verified leader advertising `CAPABILITIES.codex` (the broker refuses it otherwise, before a write), and the
+  only by an explicit pick (never inferred from a model) and only to a verified leader advertising `CAPABILITIES.codex`:
+  the PWA (`deriveCodexAvailability`, checked again when a held task is sent), MCP and the CLI (`codexGateError`), and
+  the broker, which refuses it otherwise before a write; a brokered enqueue sends the sentinel ahead, so a daemon older
+  than the field refuses it rather than queueing Claude (docs/codex.md item 8). The
   leader sends it in a spawn only to a machine advertising `codex` (`agent_unsupported` otherwise), since an older
   daemon would drop it and start Claude. A daemon not advertising `codex` refuses a wire spawn carrying `agent` as
   malformed (`isSpawnRequest`), never runs it as Claude: item 6 built the driver but keeps that refusal until the
@@ -2490,7 +2493,9 @@ an old peer's frames parse as before. Mixed versions:
   `login_outdated`, `login_blocked` (2026-11-24, Scheduler, "Codex tasks"): a record carrying `agent` carries
   `AGENT_DEP_SENTINEL` (`{ task: "", after: "agent" }`), which an older leader's dep parser refuses, so it holds the
   record unreadable rather than run it as Claude; an older archivist reads it `malformed` and skips it, as a tagged
-  one. The broker writes `agent` only to a verified leader advertising `codex`, and the leader sends it in a spawn only
+  one. Every client (the PWA, MCP, the CLI, the broker) writes `agent` only to a verified leader advertising `codex`,
+  and a brokered enqueue sends the sentinel ahead so an older broker daemon refuses the spec rather than drop the
+  field (2026-11-24, docs/codex.md item 8). The leader sends it in a spawn only
   to a machine advertising it: an older `isSpawnRequest` would ignore the field and start Claude. An older reader of a
   decision drops the four reasons as any unknown code. No daemon advertises `codex` yet; rollout is leaders first, as
   for any field a leader routes.
@@ -3848,7 +3853,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reason. The successor carries the old task's `requires` (`successorSpec`), so the traits filter
   ("Traits filter") applies to it unchanged: a trait is a machine capability the work needs, not
   a place the old task happened to run, and the old machine had it.
-- **Codex tasks** (built 2026-11-24, docs/codex.md item 4; the logins they bill are Daemon, "Codex login").
+- **Codex tasks** (built 2026-11-24, docs/codex.md items 4 and 8; the logins they bill are Daemon, "Codex login").
   `TaskSpec.agent?: "codex"`, absent meaning Claude: a parser drops a stored `"claude"`, so no Claude record
   changes by a byte, and nulls the spec over any other value. The one task sealer appends `AGENT_DEP_SENTINEL`
   (`{ task: "", after: "agent" }`) last, after the tags sentinel, and the parser drops it only beside `agent`, so an
@@ -3881,6 +3886,26 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
     `codex app-server` 0.171.0 (2026-11-24): every model it lists with no `upgrade`, in its order, and the one it marks
     `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
+  - **Clients** (built 2026-11-24, docs/codex.md item 8). Each writes `agent` only by an explicit pick, never from a
+    model string, only to a verified leader advertising `CAPABILITIES.codex`, and refuses `codexSpecRefusal`'s
+    combinations before a write in one wording (`codexRefusalText`, `shared/src/codex.ts`).
+    - _The PWA:_ the model sheet groups its rows by agent (`MODEL_GROUPS`), and a row is a `ModelPick`, agent and
+      model together, so picking a GPT model sets `form.agent: "codex"`. The saved form keeps both and falls back to
+      the default when they disagree. Effort is offered per agent (`OFFERED_EFFORTS_BY_AGENT`, no `max` for either).
+      `deriveCodexProblem` blocks the button and names why: an autonomy other than Auto (the form never switches it on
+      its own), attached files, or no verified leader advertising `codex`. A held Codex task is checked against the
+      leader when sent and fails there, never sent without `agent`. The model tile tags the agent; the Queue row and
+      the queued verdict show an agent badge for a non-Claude task (`AGENT_NAMES`); absent reads as Claude, as autonomy
+      omits checkpoint.
+    - _MCP:_ `spawn_session` and each `queue_batch` member take `agent` (`"codex"`; omitted is Claude), refused by
+      `specError` and then by `codexGateError` before any create (a batch before its first); `get_queue` shows a
+      non-Claude agent.
+    - _CLI:_ `seance spawn --agent <claude|codex>`, queued only: `--now` spawns Claude directly and refuses it. The
+      CLI has no `--model` or `--effort`, so a Codex task runs `DEFAULT_CODEX_MODEL`.
+    - _The broker leg:_ a brokered enqueue carrying `agent` sends `AGENT_DEP_SENTINEL` ahead in its deps, which this
+      build's parser drops beside `agent`. A daemon older than the field nulls that spec (`malformed task spec`)
+      where it would otherwise drop `agent` and queue Claude; `brokerScheduler` reads that answer as
+      `OLDER_DAEMON_CODEX`.
 - **Stacking** (built 2026-11-16, docs/scheduler.md M4 _Stacking_, decisions #4 and #15; the daemon's
   half, the worktree made from `origin/<b>`, is Daemon, "Stacked worktrees"). A dependent task's worktree
   starts from its predecessor's branch, so B `after: "opened"` on A builds on A's commit, not on a

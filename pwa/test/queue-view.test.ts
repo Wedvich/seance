@@ -522,6 +522,14 @@ describe("deriveQueue", () => {
     expect(chipOf({ autonomy: "auto" })).toBe("Auto");
   });
 
+  test("the agent chip names Codex, and a Claude task, the default, shows none", () => {
+    const agentOf = (spec: Partial<Task["spec"]>) =>
+      deriveQueue(state(ok([task("a", { spec: { repo: ORIGIN, mode: "worktree", ...spec } })])), NOW).sections[0]
+        ?.rows[0]?.agent;
+    expect(agentOf({})).toBeNull();
+    expect(agentOf({ agent: "codex", autonomy: "auto" })).toBe("Codex");
+  });
+
   test("a custodian flag shows a fixed label per reason and the note as written, and no flag shows none", () => {
     const flagOf = (flag: Task["flag"]) =>
       deriveQueue(state(ok([task("a", flag === undefined ? {} : { flag })])), NOW).sections[0]?.rows[0]?.flag;

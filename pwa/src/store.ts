@@ -31,6 +31,8 @@ import {
   parseCustodianResponse,
   parseSessionTagResponse,
   CAPABILITIES,
+  codexRefusalText,
+  codexSpecRefusal,
   queuedTask,
   RequestFailure,
   sentence,
@@ -75,7 +77,8 @@ import {
   type HistoryView,
   type DeviceAvailability,
   type DeviceCustodian,
-  type Model,
+  type ModelPick,
+  OFFERED_EFFORTS_BY_AGENT,
   type PersistedForm,
   type OlderPick,
   type OlderSheet,
@@ -106,6 +109,8 @@ import {
   derivePinProblem,
   deriveReportedAvailability,
   deriveTaskTagsAvailability,
+  deriveCodexAvailability,
+  deriveCodexProblem,
   deriveTraitsAvailability,
   heldNeedsLeader,
   leaderVerified,
@@ -114,6 +119,7 @@ import {
   refTagsOf,
   settlesOnReport,
   TASK_TAGS_UNAVAILABLE,
+  CODEX_UNAVAILABLE,
   TRAITS_UNAVAILABLE,
 } from "./view.ts";
 
@@ -802,9 +808,15 @@ export class Store {
     void this.refreshPreview();
   }
 
-  setModel(model: Model): void {
-    this.#patch({ form: { ...this.#state.form, model } });
+  /** The agent comes with the model, never from its name; a change of agent routes differently, so it asks again. */
+  setModel(pick: ModelPick): void {
+    const { form } = this.#state;
+    const effort = OFFERED_EFFORTS_BY_AGENT[pick.agent].some((e) => e === form.effort)
+      ? form.effort
+      : DEFAULT_FORM.effort;
+    this.#patch({ form: { ...form, agent: pick.agent, model: pick.model, effort } });
     this.dismissLayer();
+    if (pick.agent !== form.agent) void this.refreshPreview();
   }
 
   setEffort(effort: Effort): void {
@@ -1571,6 +1583,9 @@ export class Store {
     if (reported && form.prompt.trim() === "") {
       return refused("A task that settles on its done report needs a prompt: the session is told in it to report.");
     }
+    // Before the attachments' own check: a Codex pick refuses files outright, which no leader update changes.
+    const codex = deriveCodexProblem(this.#state);
+    if (codex !== null) return refused(`${codex.text}.`);
     const attaching = this.#state.attachments.length > 0;
     if (attaching && !deriveAttachmentsAvailability(relay)) {
       return refused(`${attachmentsRefusal(relay)}.`);
@@ -1597,6 +1612,9 @@ export class Store {
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
     if (level === null) return refused(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
     const request = taskRequest({ ...form, worktree: worktreeFor(form, repo.origin) }, repo.origin, true);
+    // The form's checks above name each refusal in its words; this is the leader's own rule, should they ever differ.
+    const unsupported = codexSpecRefusal({ ...request, ...level });
+    if (unsupported !== null) return refused(sentence(codexRefusalText(unsupported)));
     // Appended here so the length below is the one the leader reads; it never rewrites a prompt.
     const prompt = reported && request.prompt !== undefined ? withReportInstruction(request.prompt) : request.prompt;
     const length = prompt?.length ?? 0;
@@ -1759,6 +1777,11 @@ export class Store {
     // An older leader holds a tagged record unreadable; checked here as the form could not (no leader to ask when held).
     if (task.spec.tags !== undefined && !deriveTaskTagsAvailability(this.#state.relay)) {
       this.#heldFailed(task, `${TASK_TAGS_UNAVAILABLE}. Try again once it does, or discard it.`);
+      return;
+    }
+    // An older leader holds a Codex record unreadable; checked here as the form could not (no leader to ask when held).
+    if (task.spec.agent !== undefined && !deriveCodexAvailability(this.#state.relay)) {
+      this.#heldFailed(task, `${CODEX_UNAVAILABLE}. Try again once it does, or discard it.`);
       return;
     }
     // The same checks the form made, against the registry as it stands when the task is sent.

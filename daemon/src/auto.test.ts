@@ -24,8 +24,12 @@ describe("specError", () => {
     const codex: AutoSpec = { ...BASE, agent: "codex", autonomy: "auto" };
     expect(specError(codex)).toBeNull();
     expect(specError({ ...codex, effort: "max" })).toBe("a Codex task can't run with effort max yet");
-    expect(specError({ ...BASE, agent: "codex" })).toBe("a Codex task can't run with autonomy checkpoint yet");
-    expect(specError({ ...BASE, agent: "codex", plan: true })).toBe("a Codex task can't run with autonomy steer yet");
+    expect(specError({ ...BASE, agent: "codex" })).toBe(
+      "a Codex task runs only at autonomy auto for now, not checkpoint",
+    );
+    expect(specError({ ...BASE, agent: "codex", plan: true })).toBe(
+      "a Codex task runs only at autonomy auto for now, not steer",
+    );
     expect(
       specError({ ...codex, continues: { task: ID, at: { deviceId: "d", exclave: "main", clone: "app" } } }),
     ).toContain("continuing a session");

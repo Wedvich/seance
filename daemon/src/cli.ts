@@ -6,6 +6,8 @@ import {
   DEFAULT_MODEL,
   fromBase64,
   isAutonomyLevel,
+  AGENT_LOGIN_KINDS,
+  type AgentLoginKind,
   resolveNotBefore,
   withAutonomy,
   type AmendDraft,
@@ -171,6 +173,8 @@ export interface SpawnCliArgs {
   readonly start?: true;
   /** The task's autonomy level, queued or `--now`; present only when given. */
   readonly autonomy?: AutonomyLevel;
+  /** Queued spawn only (refused with `--now`): `--agent codex`; `--agent claude` is the default and reads as absent. */
+  readonly agent?: AgentLoginKind;
   /** Queued spawn only (refused with `--now` and `--start`): `--at <HH:MM | ISO>`, resolved by `cli-auto.ts` against its clock; never with `in`. */
   readonly at?: string;
   /** Queued spawn only (refused with `--now` and `--start`): `--in <duration>`, resolved as `at` is; never with `at`. */
@@ -190,17 +194,35 @@ const SPAWN_VALUE_FLAGS = {
   "--ref": "ref",
   "--ref-url": "refUrl",
   "--autonomy": "autonomy",
+  "--agent": "agent",
   "--at": "at",
   "--in": "in",
 } as const;
 
 /** Given at most once each. */
-const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set(["machine", "account", "autonomy", "at", "in", "ref", "refUrl"]);
+const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set([
+  "machine",
+  "account",
+  "autonomy",
+  "agent",
+  "at",
+  "in",
+  "ref",
+  "refUrl",
+]);
 
 type SpawnValueFlag = keyof typeof SPAWN_VALUE_FLAGS;
 
 function isSpawnValueFlag(arg: string): arg is SpawnValueFlag {
   return Object.hasOwn(SPAWN_VALUE_FLAGS, arg);
+}
+
+/** `--agent`'s value: `claude`, the default, or a kind `AGENT_LOGIN_KINDS` names; a model name never stands in for one. */
+function parseAgentFlag(arg: string): AgentLoginKind | "claude" {
+  if (arg === "claude") return arg;
+  const kind = AGENT_LOGIN_KINDS.find((k) => k === arg);
+  if (kind === undefined) throw new Error(`--agent takes claude or ${AGENT_LOGIN_KINDS.join(" or ")}\n${SPAWN_USAGE}`);
+  return kind;
 }
 
 /**
@@ -219,6 +241,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let machine: string | undefined;
   let account: string | undefined;
   let autonomy: AutonomyLevel | undefined;
+  let agent: AgentLoginKind | "claude" | undefined;
   let at: string | undefined;
   let duration: string | undefined;
   let ref: string | undefined;
@@ -240,6 +263,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       else if (expect === "in") duration = arg;
       else if (expect === "ref") ref = arg;
       else if (expect === "refUrl") refUrl = arg;
+      else if (expect === "agent") agent = parseAgentFlag(arg);
       else if (isAutonomyLevel(arg)) autonomy = arg;
       else throw new Error(SPAWN_USAGE);
       expect = null;
@@ -270,6 +294,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     expect === "not" ||
     expect === "requires" ||
     expect === "autonomy" ||
+    expect === "agent" ||
     expect === "at" ||
     expect === "in" ||
     expect === "ref" ||
@@ -300,6 +325,10 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   if (now && ref !== undefined) {
     throw new Error(`--ref needs the scheduler: --now spawns directly and queues no task to tag\n${SPAWN_USAGE}`);
   }
+  // The direct path starts Claude: no daemon here launches another agent outside a scheduler task.
+  if (now && agent === "codex") {
+    throw new Error(`--agent codex needs the scheduler: --now spawns Claude directly\n${SPAWN_USAGE}`);
+  }
   if (now && start) {
     throw new Error(
       `--now spawns here directly; --start starts a queued spawn past the scheduler's limit — give one\n${SPAWN_USAGE}`,
@@ -320,6 +349,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(ref === undefined ? {} : { ref }),
     ...(refUrl === undefined ? {} : { refUrl }),
     ...(autonomy === undefined ? {} : { autonomy }),
+    ...(agent === undefined || agent === "claude" ? {} : { agent }),
     ...(at === undefined ? {} : { at }),
     ...(duration === undefined ? {} : { in: duration }),
   };

@@ -25,10 +25,12 @@ import type {
   Task,
 } from "@seance/shared";
 import {
+  AGENT_LABELS,
   AUTONOMY_LABELS,
   EFFORT_LABELS,
+  modelLabel,
+  modelPickOf,
   HELD_MAX,
-  MODEL_LABELS,
   worktreeFor,
   type AccountsState,
   type HeldTask,
@@ -574,6 +576,44 @@ export function deriveTaskTagsAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.taskTags);
 }
 
+/**
+ * `agent` is written only to a verified leader that advertises `codex`: an older one holds a Codex record unreadable
+ * (the dep sentinel), and one that cannot route it would run nothing (DESIGN.md, Scheduler, "Codex tasks").
+ */
+export function deriveCodexAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.codex);
+}
+
+export const CODEX_UNAVAILABLE = "The scheduler's leader doesn't run Codex tasks yet. Update seanced on its machine";
+
+/**
+ * Why the form's Codex pick can't be queued as it stands, as the status line says it (no full stop), with the
+ * button's short label; null for a Claude pick or one that can. V1's refusals (`codexSpecRefusal`) in the form's own
+ * words, then the leader. Held (no relay), the leader is asked when it is sent (`#sendOne`).
+ */
+export function deriveCodexProblem(
+  state: Pick<AppState, "form" | "autonomy" | "attachments" | "relay">,
+): { readonly text: string; readonly label: string } | null {
+  if (state.form.agent === "claude") return null;
+  const name = AGENT_LABELS[state.form.agent];
+  if (state.autonomy !== "auto") {
+    return {
+      text: `${name} runs only at ${AUTONOMY_LABELS.auto} autonomy for now. Pick ${AUTONOMY_LABELS.auto}, or a Claude model`,
+      label: `${name} needs ${AUTONOMY_LABELS.auto}`,
+    };
+  }
+  if (state.attachments.length > 0) {
+    return {
+      text: `${name} tasks can't take files yet. Remove them, or pick a Claude model`,
+      label: "Can't attach files",
+    };
+  }
+  if (!canHold(state.relay) && !deriveCodexAvailability(state.relay)) {
+    return { text: CODEX_UNAVAILABLE, label: `Can't run ${name}` };
+  }
+  return null;
+}
+
 export const TASK_TAGS_UNAVAILABLE = "The scheduler's leader doesn't take task tags yet. Update seanced on its machine";
 
 export const TRAITS_UNAVAILABLE = "The scheduler's leader can't route on traits yet. Update seanced on its machine";
@@ -999,12 +1039,20 @@ function deriveBanner(state: AppState): Banner | null {
   return null;
 }
 
+/** The model tile's text: a pick's label, or the raw id of a pair `modelPickOf` refuses (the store never writes one). */
+function formModelLabel(form: AppState["form"]): string {
+  const pick = modelPickOf(form.agent, form.model);
+  return pick === null ? form.model : modelLabel(pick);
+}
+
 /** An offline pin is not a block: the task waits for the machine, as `resolvePlacement` notes. */
 function deriveFormStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string | null {
   const { reason, note } = deriveAutoAvailability(state.relay);
   const holding = canHold(state.relay);
   if (!holding && reason !== null) return reason;
   if (problem !== null) return problem.text;
+  const codex = deriveCodexProblem(state);
+  if (codex !== null) return codex.text;
   if (state.attachments.length > 0 && !deriveAttachmentsAvailability(state.relay)) {
     const block = attachmentsBlock(state.relay);
     if (block === "not_held") return ATTACHMENTS_NOT_HELD;
@@ -1054,6 +1102,8 @@ function deriveButton(
   if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
   if (!holding && !deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
   if (problem !== null) return blocked(problem.label);
+  const codex = deriveCodexProblem(state);
+  if (codex !== null) return blocked(codex.label);
   if (state.attachments.length > 0 && !deriveAttachmentsAvailability(relay)) {
     return blocked(attachmentsBlock(relay) === "verifying" ? "Checking leader…" : "Can't attach files");
   }
@@ -1083,11 +1133,16 @@ function deriveIgnoredNote(relay: RelayState): string | null {
 
 /**
  * Whether a held task asks something of the leader that only a verified one can answer (a done
- * report, an account pin): it waits for one rather than failing on a leader that is only asleep or
+ * report, an account pin, an agent): it waits for one rather than failing on a leader that is only asleep or
  * not yet verified.
  */
 export function heldNeedsLeader(task: Task): boolean {
-  return settlesOnReport(task) || task.spec.pin?.account !== undefined || task.spec.requires !== undefined;
+  return (
+    settlesOnReport(task) ||
+    task.spec.pin?.account !== undefined ||
+    task.spec.requires !== undefined ||
+    task.spec.agent !== undefined
+  );
 }
 
 /** Whether a task needs a leader advertising `reportedDone`: it settles on its done report, or waits on another's. */
@@ -1177,10 +1232,11 @@ export function deriveView(state: AppState, now: number): ViewModel {
     },
     modelTile: {
       label: "MODEL",
-      value: MODEL_LABELS[form.model],
+      value: formModelLabel(form),
       mono: false,
       dot: null,
-      tag: null,
+      // The agent the pick runs, named on the tile so a GPT model never reads as Claude's.
+      tag: form.agent === "claude" ? null : AGENT_LABELS[form.agent],
     },
     effortTile: {
       label: "EFFORT",

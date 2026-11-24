@@ -4,6 +4,7 @@ import {
   parseAmendDraft,
   type AmendDraft,
   CAPABILITIES,
+  codexRefusalText,
   codexSpecRefusal,
   withAutonomy,
   offeredSpec,
@@ -457,7 +458,7 @@ export function specError(spec: AutoSpec, surface: EnqueueSurface = "mcp"): stri
   }
   // The leader would hold such a record readable and place it nowhere (`agent_unsupported`): say why before a write.
   const unsupported = codexSpecRefusal(spec);
-  if (unsupported !== null) return `a Codex task can't run with ${unsupported} yet`;
+  if (unsupported !== null) return codexRefusalText(unsupported);
   if (tags !== undefined) {
     if (Object.keys(tags).some((key) => !key.startsWith("creator.")))
       return "tags: only creator tags are set at create";
@@ -634,6 +635,18 @@ export function taskTagsGateError(lease: SchedulerLease, label: string, field: s
   return lease.scheduler.availability().kind === "ready"
     ? `${label} refused: the scheduler's leader does not take task tags yet — its daemon needs \`seance update\`; retry without ${field}`
     : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to take task tags — try again once one leads, or retry without ${field}`;
+}
+
+/**
+ * The submit-time half of the `codex` gate (the record's `AGENT_DEP_SENTINEL` is the other): an older leader holds a
+ * Codex record unreadable, so `agent` is written only to a verified leader advertising `CAPABILITIES.codex` — never to
+ * none, which cannot say. `field` names it as the surface does.
+ */
+export function codexGateError(lease: SchedulerLease, label: string, field: string): string | null {
+  if (leaderAdvertises(lease, CAPABILITIES.codex)) return null;
+  return lease.scheduler.availability().kind === "ready"
+    ? `${label} refused: the scheduler's leader does not run Codex tasks yet — its daemon needs \`seance update\`; retry without ${field}`
+    : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to run Codex tasks — try again once one leads, or retry without ${field}`;
 }
 
 /** A refused `requires`: the line to show, and what to count in its audit line. */

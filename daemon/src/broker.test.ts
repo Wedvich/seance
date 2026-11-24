@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CONNECT_TIMEOUT_MS, LazyRelay } from "./app-relay.ts";
 import {
   OP_TIMEOUT_MS,
+  AGENT_DEP_SENTINEL,
   CAPABILITIES,
   promptBasis,
   RequestFailure,
@@ -545,6 +546,15 @@ describe("the broker's scheduler actions", () => {
       const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
       expect(await broker.handle(enqueue({ ...spec, client: "cli" }))).toMatchObject({ ok: true, data: { ok: true } });
       expect(fakes[0]?.creates).toEqual([expect.objectContaining({ spec: expect.objectContaining(spec) })]);
+      broker.stop();
+    });
+
+    test("takes the sentinel a client sends ahead beside agent, and stores no copy of it in deps", async () => {
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
+      const sent = { ...spec, deps: [AGENT_DEP_SENTINEL] };
+      expect(await broker.handle(enqueue(sent))).toMatchObject({ ok: true, data: { ok: true } });
+      expect(fakes[0]?.creates[0]?.spec).toMatchObject(spec);
+      expect(fakes[0]?.creates[0]?.spec.deps ?? []).toEqual([]);
       broker.stop();
     });
 

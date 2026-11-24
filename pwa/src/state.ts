@@ -1,6 +1,9 @@
 import {
+  AGENT_NAMES,
+  CODEX_MODELS,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  type AgentLoginKind,
   EFFORTS,
   isEffort,
   nextClockTime,
@@ -57,6 +60,60 @@ export const MODEL_LABELS: Record<Model, string> = {
   opus: "Opus",
   sonnet: "Sonnet",
   haiku: "Haiku",
+};
+
+/** What runs a task the form writes: Claude Code, the default a record leaves out, or an agent a login names. */
+export type FormAgent = "claude" | AgentLoginKind;
+
+export type CodexModel = (typeof CODEX_MODELS)[number];
+
+/**
+ * A model with the agent that runs it, as the model sheet offers them: picking one sets both, so the agent is always
+ * chosen, never read off a model's name (docs/codex.md, "The task").
+ */
+export type ModelPick =
+  | { readonly agent: "claude"; readonly model: Model }
+  | { readonly agent: "codex"; readonly model: CodexModel };
+
+/** The model sheet's groups, one per agent, in order: Claude's first, the default. */
+export const MODEL_GROUPS: readonly { readonly agent: FormAgent; readonly picks: readonly ModelPick[] }[] = [
+  { agent: "claude", picks: MODELS.map((model) => ({ agent: "claude", model })) },
+  { agent: "codex", picks: CODEX_MODELS.map((model) => ({ agent: "codex", model })) },
+];
+
+export const AGENT_LABELS: Record<FormAgent, string> = { claude: "Claude", ...AGENT_NAMES };
+
+/** `gpt-6.2-sol` → `GPT-6.2 Sol`: the wire's id, cased for a tile. */
+function codexModelLabel(model: CodexModel): string {
+  return model
+    .split("-")
+    .map((word, i) => (i === 0 ? word.toUpperCase() : `${word.charAt(0).toUpperCase()}${word.slice(1)}`))
+    .join(" ")
+    .replace(/^GPT /u, "GPT-");
+}
+
+export function modelLabel(pick: ModelPick): string {
+  return pick.agent === "claude" ? MODEL_LABELS[pick.model] : codexModelLabel(pick.model);
+}
+
+/**
+ * The pick a form's `agent` and `model` make, or null when they disagree (a saved form edited by hand, a model since
+ * dropped from its agent's list): the agent decides which list the model is looked up in, never the reverse.
+ */
+export function modelPickOf(agent: unknown, model: unknown): ModelPick | null {
+  if (agent === undefined || agent === "claude") return isModel(model) ? { agent: "claude", model } : null;
+  if (agent !== "codex") return null;
+  const codex = CODEX_MODELS.find((m) => m === model);
+  return codex === undefined ? null : { agent, model: codex };
+}
+
+/**
+ * Efforts offered per agent. Both are `OFFERED_EFFORTS` today: the picker offers no `max` to anyone, and a Codex task
+ * refuses it (`codexSpecRefusal`), so `max` must never be added to Codex's list while that refusal stands.
+ */
+export const OFFERED_EFFORTS_BY_AGENT: Record<FormAgent, readonly OfferedEffort[]> = {
+  claude: OFFERED_EFFORTS,
+  codex: OFFERED_EFFORTS,
 };
 
 /** Short enough for a tile and the Queue card's chip. */
@@ -259,7 +316,9 @@ export interface PersistedForm {
   readonly worktree: boolean;
   /** The worktree choice last made per repo, by origin; read through `worktreeFor`. Newest last, at most `WORKTREE_REPOS_MAX`. */
   readonly worktreeByRepo: Readonly<Record<string, boolean>>;
-  readonly model: Model;
+  /** Written beside `model`, only through a `ModelPick` (`Store.setModel`), so the two always agree. */
+  readonly agent: FormAgent;
+  readonly model: Model | CodexModel;
   readonly effort: Effort;
   /** Per task: the tasks this one waits on. Cleared once a task is queued. */
   readonly after: readonly TaskDep[];
@@ -538,6 +597,7 @@ export const DEFAULT_FORM: PersistedForm = {
   prompt: "",
   worktree: true,
   worktreeByRepo: {},
+  agent: "claude",
   model: DEFAULT_MODEL,
   effort: DEFAULT_EFFORT,
   after: [],

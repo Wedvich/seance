@@ -5,7 +5,6 @@ import {
   type ErrorResponse,
   type Machine,
   type SchedulerAvailability,
-  type TaskSpec,
 } from "@seance/shared";
 import {
   BROKER_VERSION,
@@ -17,6 +16,8 @@ import {
   type BrokerErrorCode,
   type BrokerOp,
   type BrokerRequest,
+  type BrokerRequestOut,
+  type EnqueueSpecOut,
 } from "./broker-protocol.ts";
 import { exchange, LocalConnectionLost, LocalTimedOut, LocalUnavailable, RESTART_GRACE_MS } from "./local-client.ts";
 import { socketPath } from "./paths.ts";
@@ -86,7 +87,7 @@ export interface BrokerCallOpts {
  * `resendable`: the frame does nothing new when sent twice, so a daemon restart under it is waited out rather than reported.
  */
 async function call(
-  frame: BrokerRequest,
+  frame: BrokerRequestOut,
   deadlineMs: number,
   opts: BrokerCallOpts,
   resendable: boolean,
@@ -177,7 +178,7 @@ export async function brokerFleetState(
 
 /** What a scheduler frame carries beyond its envelope: the op and only the fields that op takes. */
 export type SchedulerCall =
-  | { readonly schedulerOp: "enqueue"; readonly taskId: string; readonly spec: TaskSpec }
+  | { readonly schedulerOp: "enqueue"; readonly taskId: string; readonly spec: EnqueueSpecOut }
   | { readonly schedulerOp: "cancel" | "run-now" | "pass"; readonly taskId: string }
   | { readonly schedulerOp: "amend"; readonly amend: AmendDraft }
   | { readonly schedulerOp: "queue" | "accounts" };
@@ -192,7 +193,7 @@ const RESENDABLE_SCHEDULER_OPS: ReadonlySet<SchedulerCall["schedulerOp"]> = new 
  * restart: a lost `cancel` or `run-now` may follow a request already sent.
  */
 export function brokerSchedulerCall(request: SchedulerCall, opts: BrokerCallOpts = {}): Promise<unknown> {
-  const frame: BrokerRequest = {
+  const frame: BrokerRequestOut = {
     v: BROKER_VERSION,
     kind: "broker",
     id: crypto.randomUUID(),
