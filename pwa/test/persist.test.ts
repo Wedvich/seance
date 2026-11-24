@@ -59,7 +59,7 @@ describe("form persistence", () => {
       worktree: false,
       worktreeByRepo: { "github.com/acme/app": false, "github.com/acme/ops": true },
       model: "fable",
-      effort: "max",
+      effort: "xhigh",
       after: [{ task: TASK, after: "done" }],
       until: "reported",
       requires: ["atlas", "gpu-2"],
@@ -87,6 +87,11 @@ describe("form persistence", () => {
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
     store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
     expect(readForm()).toMatchObject({ after: [], until: "merged", prompt: "old" });
+  });
+
+  test("a saved max effort, which the picker no longer offers, reads as the default", () => {
+    store.set("seance:form", JSON.stringify({ effort: "max" }));
+    expect(readForm().effort).toBe(DEFAULT_FORM.effort);
   });
 
   test("worktreeByRepo keeps boolean entries only, the newest at most WORKTREE_REPOS_MAX, and none when malformed", () => {

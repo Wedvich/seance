@@ -14,7 +14,7 @@ import type { AfterSheetView } from "../queue-view.ts";
 import {
   AUTONOMY_HINTS,
   AUTONOMY_LABELS,
-  EFFORTS,
+  OFFERED_EFFORTS,
   EFFORT_LABELS,
   MODELS,
   MODEL_LABELS,
@@ -661,7 +661,7 @@ function ActiveSheet(props: {
 
   return (
     <Sheet title={SHEET_TITLES.effort} closing={closing} onExited={onExited} onClose={close}>
-      {EFFORTS.map((effort) => (
+      {OFFERED_EFFORTS.map((effort) => (
         <SheetItem
           key={effort}
           label={EFFORT_LABELS[effort]}

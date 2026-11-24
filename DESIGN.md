@@ -10780,7 +10780,9 @@ effort as first-class tiles, defaults opus/medium), spawn verdict (daemon
 relays tmux window name or the captured error), and per-machine counts of running
 claude sessions (header total + footer line, enough to avoid spawning duplicates —
 a full session list was cut: sessions live in the Claude app).
-Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accepts.
+Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: `OFFERED_EFFORTS`, low to `xhigh` ("Extra"). `max` stays on the
+wire for MCP and the CLI but the picker dropped it (owner, 2026-11-24: never used), and a saved form holding it reads
+as the default.
 
 - **Preact, not React, and without `preact/compat`.** The whole app is two screens,
   four sheets and a verdict; React's runtime cost 70 kB gzip against Preact's 16 kB,
