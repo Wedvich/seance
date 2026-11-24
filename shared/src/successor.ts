@@ -27,13 +27,20 @@ export type PassOffer = { readonly ok: true } | { readonly ok: false; readonly r
  * pass` share, as `continueOffer` is for Continue, so they cannot drift. The leader checks the
  * same things again with what it alone knows (the old exclave's account, the PR's head).
  * `leaderSuccessor` is whether the verified leader advertises `CAPABILITIES.successor`: an older
- * one answers an unknown op `invalid_request`, never a timeout.
+ * one answers an unknown op `invalid_request`, never a timeout. A Codex task also needs `leaderCodexPass` (the
+ * verified leader advertises `CAPABILITIES.codexPass`) and its machine advertising it: an older leader refuses it
+ * `successor_unsupported`, and an older daemon could not close or ask its session over its connection.
  *
  * Only a `running` task: a task waiting on a person is never moved from under them (the person can
  * answer or cancel first), and `lost` has no live session to push from. A finished task and a reserved
  * one get their own words, as the leader answers them (`finished`, `dispatching`).
  */
-export function passOffer(task: Task, machines: readonly Machine[], leaderSuccessor: boolean): PassOffer {
+export function passOffer(
+  task: Task,
+  machines: readonly Machine[],
+  leaderSuccessor: boolean,
+  leaderCodexPass = false,
+): PassOffer {
   if (task.successor !== undefined) return { ok: false, reason: "it has already been passed to a successor" };
   if (statesIn("finished").includes(task.state)) return { ok: false, reason: "it has already finished" };
   if (task.state === "reserved") {
@@ -46,17 +53,26 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
   if (task.spec.mode === "here") {
     return { ok: false, reason: "a task run in place has no branch of its own to pass on" };
   }
-  if (task.spec.agent !== undefined) return { ok: false, reason: "a Codex task can't be passed to a successor yet" };
+  const codex = task.spec.agent !== undefined;
   const { assignment } = task;
   if (assignment === undefined) return { ok: false, reason: "the task was never placed on a machine" };
   if (!leaderSuccessor) {
     return { ok: false, reason: "the scheduler's leader can't pass tasks to a successor yet (needs seance update)" };
+  }
+  if (codex && !leaderCodexPass) {
+    return {
+      ok: false,
+      reason: "the scheduler's leader can't pass a Codex task to a successor yet (needs seance update)",
+    };
   }
   const machine = machines.find((m) => m.deviceId === assignment.deviceId);
   if (machine === undefined) return { ok: false, reason: "the machine it runs on is no longer listed" };
   if (!machine.connected) return { ok: false, reason: "the machine it runs on is not connected" };
   if (machine.capabilities?.includes(CAPABILITIES.successor) !== true) {
     return { ok: false, reason: "the machine it runs on can't push for a successor yet (needs seance update)" };
+  }
+  if (codex && machine.capabilities?.includes(CAPABILITIES.codexPass) !== true) {
+    return { ok: false, reason: "the machine it runs on can't pass a Codex task yet (needs seance update)" };
   }
   return { ok: true };
 }
@@ -107,7 +123,7 @@ export function successorSpec(
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(creator === undefined ? {} : { tags: creator }),
-    // Never another agent: a successor runs what its predecessor ran (V1 places a Codex one nowhere, `codexSpecRefusal`).
+    // Never another agent: a successor runs what its predecessor ran, and routing places a Codex one only where `codexPass` is.
     ...(spec.agent === undefined ? {} : { agent: spec.agent }),
     succeeds: {
       task: task.id,

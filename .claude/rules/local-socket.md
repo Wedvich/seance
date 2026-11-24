@@ -159,9 +159,12 @@ the `codex app-server` of a pane it launched (or, on a restart, of a pane of our
   Giving it any act a bound frame lacks, or taking a pane, task or thread from a notification, is a
   threat-model change.
 - The daemon sends a server only constant methods with daemon-held params (the thread it started, a turn id
-  its server named) and never answers a server request: an approval is never granted by the daemon.
-- A Codex pane's own local `session-event` frames take `done` and `handoff` only; `pass` is `unsupported`
-  and a state is dropped, so nothing else running in the pane speaks for it. `sessionOf`'s session for a
+  its server named, the constant `DRAIN_PROMPT` as the drain's turn) and never answers a server request: an approval
+  is never granted by the daemon. The drain's and the custodian's acts reach a Codex pane only this way, never keys
+  (drain.md, custodian.md).
+- A Codex pane's own local `session-event` frames take `done`, `handoff` and `pass` (items 4 and 5 above, as a Claude
+  pane's; the pass's close waits for the turn end its server reports) only; a state is dropped, so nothing else
+  running in the pane speaks for it. `sessionOf`'s session for a
   Codex pane is the innermost `codex` (`CODEX_PANES.process`), the pane's server.
 
 ## `keep-open`: a session's hold on the custodian

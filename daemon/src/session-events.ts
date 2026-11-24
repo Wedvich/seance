@@ -683,13 +683,13 @@ export class EndedTasks {
   /**
    * Whether the drain ask may type into this task's pane: a worktree launch this ledger holds (`passSite`),
    * not yet reported done (a pass would be refused `not_running`) and not being closed here (`closedHere`:
-   * a close's own keys are going in), and a Claude launch: a Codex pane's TUI takes none of the ask's keys as Claude's
-   * does, and its pass is phase 3 (docs/codex.md, "V1 refusals").
+   * a close's own keys are going in). A Codex launch too: its ask goes over the session's connection, never keys
+   * (docs/codex.md, item 11; `drain-ask.ts`).
    */
   askable(taskId: string): boolean {
     if (!("site" in this.passSite(taskId))) return false;
     const note = this.#ledger.notes().find((n) => n.taskId === taskId);
-    return note?.agent === undefined && note?.reported !== true && note?.closedHere !== true;
+    return note?.reported !== true && note?.closedHere !== true;
   }
 
   /** Whether this launch noted a PR (`handoffCheck`'s lookup, a continuation's or successor's inherited one included), for a pass: a branch with no upstream then has to be the PR's. */
@@ -1500,10 +1500,12 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       }
       const { pane } = bound;
       // A Codex pane's state is its own server's (`codex`), never a peer's: the only frames its tools send are
-      // `report_task_done`'s and `hand_off_task`'s, and a pass is phase 3 (docs/codex.md, "V1 refusals"). Anything
-      // else — a `claude -p` one of its tools ran, with hooks of its own — is that process's, never the pane's.
+      // `report_task_done`'s, `hand_off_task`'s and `pass_to_successor`'s (docs/codex.md, item 11). Anything else — a
+      // `claude -p` one of its tools ran, with hooks of its own — is that process's, never the pane's.
       if (pane.agent !== "claude") {
-        if (frame.pass === true) return { ok: false, code: "unsupported" };
+        if (frame.pass === true && frame.record !== undefined) {
+          return markPass(pane, exclaveOf(pane.path, deps.exclaves()), frame.record, caller);
+        }
         if (frame.handoff === true) return markHandoff(pane);
         if (frame.state !== "done") return { ok: true };
         return ingest(

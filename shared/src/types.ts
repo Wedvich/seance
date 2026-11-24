@@ -1319,6 +1319,13 @@ export interface MachineInfo {
  * `sessionLive`: as a daemon, sends `SessionEntry.live` on an app's `sessions` and `MachineStatus.sg` on every status
  * (docs/work.md, "Wire"). Advertised unconditionally, as `sessionTag`: the conversation table both read always runs.
  * A client without it on a machine reads its untasked sessions as state unknown and re-reads them on `sess` changes.
+ * `codexPass`: a Codex task passes to a successor (docs/codex.md, build order item 11; DESIGN.md, Scheduler, "Codex
+ * tasks"). As a leader, passes one (any trigger) only off a machine advertising it, its account the machine's Codex
+ * login's, and places a Codex task carrying `succeeds` only on a machine advertising it; as a daemon, takes a Codex
+ * pane's own pass, asks its sessions to drain and lets the custodian interrupt one, each over the session's connection,
+ * never keys. Advertised beside `drainAsk` (a despawn is wired). An older leader of the Codex build refuses
+ * `succeeds` beside `agent` (`codexSpecRefusal`), so it places such a successor nowhere and passes no Codex task. A
+ * client offers a Codex task's pass only to a verified leader and a task machine advertising it.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1356,6 +1363,7 @@ export const CAPABILITIES = {
   codex: "codex",
   codexContinue: "codexContinue",
   sessionLive: "sessionLive",
+  codexPass: "codexPass",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];

@@ -260,6 +260,11 @@ export interface CustodianVerbDeps {
   readonly canDeliver?: (pane: string, expect: CustodianTarget) => Promise<boolean>;
   /** One `send-keys -t <pane> ...args` (`drain-ask.ts`'s `sendKeys`); true when tmux took it. Only ever `["Escape"]`. */
   readonly keys: (pane: string, args: readonly string[]) => Promise<boolean>;
+  /**
+   * A Codex pane's interrupt: `turn/interrupt` over the daemon's own connection to its server (`codexSessions`), never
+   * a key (docs/codex.md, item 11). True once the server took it. Absent, `interrupt` answers a Codex pane `unsupported`.
+   */
+  readonly codexInterrupt?: (pane: { readonly paneId: string; readonly pid: number }) => Promise<boolean>;
   readonly readRefusals?: () => Promise<unknown>;
   readonly notesPath?: string;
   readonly seat: VerbSeat;
@@ -857,9 +862,10 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       const info = await infoOf(pane);
       if (info === null || info.dead || info.pid === null) return await refuse("gone", null);
       taskId = info.taskId;
-      // Escape is Claude's interrupt, read against Claude's screen: a Codex pane's turn is interrupted only by its
-      // own server, which no custodian verb reaches.
-      if (info.agent !== "claude") return await refuse("unsupported", taskId);
+      // Escape is Claude's interrupt, read against Claude's screen: a Codex pane's turn is interrupted over the
+      // daemon's own connection to its server (`turn/interrupt`), never a key, and only where that is wired.
+      const codex = info.agent === "codex" ? deps.codexInterrupt : undefined;
+      if (info.agent !== "claude" && codex === undefined) return await refuse("unsupported", taskId);
       const key = taskId ?? pane;
       const all = await panesNow();
       if (sharesTask(all, info)) return await refuse("marked", taskId);
@@ -911,13 +917,21 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
         await restoreCounts(key, was);
         return await refuse(last, taskId);
       }
-      if (screen === null || inputBoxDraft(screen) !== "") {
+      // A Codex pane's draft is safe: `turn/interrupt` reaches the turn, never its composer.
+      if (codex === undefined && (screen === null || inputBoxDraft(screen) !== "")) {
         await restoreCounts(key, was);
         return await refuse("waiting", taskId);
       }
       // From here a throw may follow a key that landed: the count stays, at most once being the promise.
       unspent = null;
-      if (!(await deps.keys(pane, ["Escape"]))) {
+      if (codex !== undefined) {
+        if (!(await codex({ paneId: pane, pid: info.pid }))) {
+          // Counted all the same, as a refused key is: the server may have taken it and lost the answer.
+          deps.warn(`custodian: the Codex server did not take the interrupt for ${pane}`);
+          await deps.audit.interrupt(pane, taskId, "internal");
+          return { ok: false, code: "internal" };
+        }
+      } else if (!(await deps.keys(pane, ["Escape"]))) {
         // Counted all the same: at most once is what C27 promises, and a key tmux refused may still have landed.
         deps.warn(`custodian: tmux refused the Escape for ${pane}`);
         await deps.audit.interrupt(pane, taskId, "internal");
@@ -1039,15 +1053,19 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     try {
       const info = await infoOf(pane);
       if (info === null || !info.ours || info.dead || info.pid === null || info.custodian) return false;
-      // Neither a nudge nor an interrupt reaches a Codex pane.
-      if (info.agent !== "claude") return false;
+      // A Codex pane takes no nudge (no inbox mod), and an interrupt only where its connection is wired.
+      const codex = info.agent !== "claude";
+      if (codex && deps.codexInterrupt === undefined) return false;
       // What the verbs would refuse and refund never counts, or a round would be due for good over a pane nothing can
       // act on: two panes under one task id (`marked`), a screen that is not a live prompt, a nudge nobody can receive.
       if (sharesTask(await panesNow(), info)) return false;
       const held = await deps.flags.counts(info.taskId ?? pane, info.pid);
       const target = info.taskId === null ? null : { pid: info.pid, taskId: info.taskId };
       const couldNudge =
-        target !== null && deps.tasks.launchedAt(target.taskId) !== undefined && held.nudges < deps.settings.maxNudges;
+        !codex &&
+        target !== null &&
+        deps.tasks.launchedAt(target.taskId) !== undefined &&
+        held.nudges < deps.settings.maxNudges;
       const couldInterrupt = stillMs >= interruptAfterMs && !held.interrupted;
       if (!couldNudge && !couldInterrupt) return false;
       if ((await classify(info)) !== "live") return false;

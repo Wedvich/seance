@@ -1,4 +1,4 @@
-import { DRAIN_INTERRUPT_MS, type NeedsInputReason, type SessionState } from "@seance/shared";
+import { DRAIN_INTERRUPT_MS, type AgentKind, type NeedsInputReason, type SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
 import { KEY_GAP_MS } from "./agents/claude.ts";
 import { INPUT_BOX_RULE } from "./pane-activity.ts";
@@ -19,6 +19,11 @@ import { capturePane, tmux } from "./tmux.ts";
  * Enter goes in only after every re-check, the screen's own input box among them. Never a second Ctrl+C, which
  * exits Claude Code; never an Escape in the draft clear (two quick Escapes open its Rewind menu). One audit line
  * per act (`origin=drain`), never the text.
+ *
+ * A Codex pane is asked by the same rules over the daemon's own connection to its server instead of keys
+ * (docs/codex.md, item 11): `turn/interrupt` where Claude's is Escape, and `DRAIN_PROMPT` as a new turn (`turn/start`)
+ * where Claude's is the typing, sent only at a turn-ended idle and never while `needs-input`. Nothing is typed into its
+ * composer: pasting there and pressing Enter wedges it (openai/codex#28167).
  */
 
 /**
@@ -211,6 +216,16 @@ export interface DrainAskDeps {
   /** Whether the pane's input box shows exactly `DRAIN_PROMPT`, and no dialog or menu is on screen. */
   readonly inputShows: (pane: string) => Promise<boolean>;
   readonly audit: (taskId: string, outcome: DrainAskOutcome) => Promise<void>;
+  /**
+   * A Codex pane's ask, over the daemon's own connection to its server (`codexSessions`), never keys: pasting into
+   * Codex's composer and pressing Enter wedges it (openai/codex#28167). `interrupt` is `turn/interrupt` where Claude's
+   * is Escape; `prompt` is `DRAIN_PROMPT` as a new turn where Claude's is the typing. Each true once the server took
+   * it. Absent, a Codex pane is not asked (the leader's outside pass covers it).
+   */
+  readonly codex?: {
+    readonly interrupt: (pane: { readonly paneId: string; readonly pid: number }) => Promise<boolean>;
+    readonly prompt: (pane: { readonly paneId: string; readonly pid: number }) => Promise<boolean>;
+  };
   readonly sleep?: (ms: number) => Promise<void>;
   /** Runs `fn` after `ms`; returns the cancel. */
   readonly after?: (ms: number, fn: () => void) => () => void;
@@ -255,6 +270,9 @@ interface PaneFrame {
 interface Entry {
   readonly taskId: string;
   readonly cl: number;
+  /** The pane's agent and pid at enumeration: a Codex pane is asked over its connection, under that pid only. */
+  readonly agent: AgentKind;
+  readonly pid: number;
   phase: "waiting" | "interrupted";
   /** A typing sequence is in flight. */
   busy: boolean;
@@ -334,9 +352,12 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     entry.phase = "interrupted";
     let sent = false;
     try {
-      sent = await deps.keys(pane, ["Escape"]);
+      sent =
+        entry.agent === "codex"
+          ? ((await deps.codex?.interrupt({ paneId: pane, pid: entry.pid })) ?? false)
+          : await deps.keys(pane, ["Escape"]);
     } catch (err) {
-      log.warn(`drain ask: could not send Escape to pane ${pane} (task ${entry.taskId}) (${String(err)})`);
+      log.warn(`drain ask: could not interrupt pane ${pane} (task ${entry.taskId}) (${String(err)})`);
     }
     if (sent) {
       if (current(pane, entry)) armSkip(pane, entry);
@@ -344,7 +365,7 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       return;
     }
     if (!current(pane, entry)) return;
-    log.warn(`drain ask: could not send Escape to pane ${pane} (task ${entry.taskId}) — dropped it`);
+    log.warn(`drain ask: could not interrupt pane ${pane} (task ${entry.taskId}) — dropped it`);
     drop(pane, entry);
     await record(entry.taskId, "skipped");
   };
@@ -387,6 +408,10 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       return;
     }
     if (last.get(pane)?.seq !== seq0) return;
+    if (entry.agent === "codex") {
+      await promptCodex(pane, entry, live.pid);
+      return;
+    }
     // Draft clear: Ctrl+C alone, never a second one, never an Escape. No abort between it and the text: an
     // abort here would leave "Ctrl-C again to exit" armed for the next attempt's Ctrl+C.
     if (!(await deps.keys(pane, ["C-c"]))) {
@@ -434,6 +459,27 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     }
     drop(pane, entry);
     await record(entry.taskId, "typed");
+  };
+
+  /**
+   * A Codex pane's ask: no draft to clear and no screen to read, since nothing goes through its composer. The same
+   * re-checks as Claude's before Enter, synchronous up to the one request, under the pid enumerated. Never retried: the
+   * server may have taken a turn whose answer was lost.
+   */
+  const promptCodex = async (pane: string, entry: Entry, pid: number): Promise<void> => {
+    if (pid !== entry.pid) {
+      drop(pane, entry);
+      return;
+    }
+    let sent = false;
+    try {
+      sent = (await deps.codex?.prompt({ paneId: pane, pid })) ?? false;
+    } catch (err) {
+      log.warn(`drain ask: could not start a turn in pane ${pane} (task ${entry.taskId}) (${String(err)})`);
+    }
+    if (!sent) log.warn(`drain ask: pane ${pane} (task ${entry.taskId}) took no drain turn — dropped it`);
+    drop(pane, entry);
+    await record(entry.taskId, sent ? "typed" : "skipped");
   };
 
   const type = async (pane: string, entry: Entry): Promise<void> => {
@@ -501,12 +547,16 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       const taskId = pane.taskId;
       if (pane.dead || taskId === null || !PANE_ID.test(pane.id)) continue;
       if (!deps.askable(taskId) || deps.marked(pane.id) || entries.has(pane.id)) continue;
+      // A Codex pane only over its connection; a daemon with none to ask through leaves it to the outside pass.
+      if (pane.agent === "codex" && deps.codex === undefined) continue;
       const key = `${pane.id}\0${taskId}`;
       if (asked.has(key)) continue;
       asked.add(key);
       const entry: Entry = {
         taskId,
         cl,
+        agent: pane.agent,
+        pid: pane.pid,
         phase: "waiting",
         busy: false,
         again: false,

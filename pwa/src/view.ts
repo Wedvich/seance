@@ -498,6 +498,11 @@ export function derivePassAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.successor);
 }
 
+/** Whether the verified leader passes a Codex task (`codexPass`): an older one refuses it `successor_unsupported`. */
+export function deriveCodexPassAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.codexPass);
+}
+
 /**
  * Whether a close may be sent to `machine`: it answers `availability`, and the verified leader routes
  * around `cl` (an older one fails the task it sends there). A reopen needs only the machine's `close`.

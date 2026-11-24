@@ -42,7 +42,7 @@ The drain trigger's pass rules are scheduler.md's "Successors and passes".
 - The drain's session ask (`daemon/src/drain-ask.ts`) sends a pane only constant keys — `DRAIN_PROMPT` by
   `send-keys -l`, then Enter, and Escape and Ctrl+C, the Ctrl+C once and never a second, no Escape in the
   draft clear, never a field of any frame.
-- Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`; never a Codex launch),
+- Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`),
   once per pane and task per `cl` per process (a repeated close at the same `cl` asks and Escapes nothing
   already asked), only while this machine is draining at the `cl` the ask began under (checked before an
   Escape goes, not after).
@@ -50,5 +50,9 @@ The drain trigger's pass rules are scheduler.md's "Successors and passes".
   `needs-input` (the drain can deny a permission, never grant one), re-checking the pane, its task, `cl`,
   its last frame and that its input box shows exactly the prompt before Enter, audited `origin=drain`
   with the task id and outcome, never the text.
+- A Codex pane gets no key: every rule above holds over the daemon's connection to its server, "typed" read as "sent
+  over the connection" — `turn/interrupt` where Claude's is Escape, and `DRAIN_PROMPT` as a `turn/start`'s only input
+  where Claude's is the typing, only under the pid the ask enumerated, only while the server reports no turn running,
+  never retried. A daemon with no `codexSessions` wired asks no Codex pane.
 - A `session-pass` carries `drain` only while its machine is closed, and the leader writes
   `trigger: "drain"` for it only while that machine's status carries `cl`.

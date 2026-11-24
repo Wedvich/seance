@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isAgentSessionId, isRecord } from "@seance/shared";
 import { CODEX_PANES, CODEX_RUN_PREFIX } from "../agents/panes.ts";
+import { DRAIN_PROMPT } from "../drain-ask.ts";
 import { sessionKey, type ClaudeProcess } from "../claude-process.ts";
 import { log } from "../log.ts";
 import { ancestorBelow, processNames, processStart } from "../peer.ts";
@@ -32,6 +33,12 @@ import { codexSignals, stateOfStatus, turnIdOf, type CodexSignal } from "./event
  * A lost connection is no session's end: the pane is. The daemon re-dials a live pane's server a few times, and a pane
  * gone or dead is harvest's, as a Claude pane's is.
  */
+
+/** A pane as an act names it: its id and the pid it was read under, so a pane id tmux reused is never acted on. */
+export interface CodexPaneRef {
+  readonly paneId: string;
+  readonly pid: number | null;
+}
 
 /** Where a session's states and its login's readings go: the session-event step and the account. */
 export interface CodexSink {
@@ -72,6 +79,18 @@ export interface CodexSessions {
     pane: { readonly paneId: string; readonly pid: number | null },
     graceMs: number,
   ) => Promise<void>;
+  /**
+   * The drain's and the custodian's interrupt (docs/codex.md, item 11): `turn/interrupt` of the session's running turn,
+   * never a key (pasting into Codex's composer wedges it: openai/codex#28167). True once the server took it; false for
+   * a pane no session here tracks, one whose pid moved, one with no turn running or no connection. Its end arrives as
+   * the session's turn-ended idle, as a turn's own end does.
+   */
+  readonly interruptTurn: (pane: CodexPaneRef) => Promise<boolean>;
+  /**
+   * The drain's ask: `DRAIN_PROMPT`, the one constant, as a new turn's only input (`turn/start`), never keys. Only for a
+   * session here with no turn running; true once the server took it.
+   */
+  readonly drainTurn: (pane: CodexPaneRef) => Promise<boolean>;
   readonly configure: (config: CodexSessionsConfig) => void;
   /** Re-dials every live Codex pane's server this process does not hold: a daemon restart's resync. */
   readonly reconnectAll: () => Promise<void>;
@@ -277,6 +296,12 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
     reading: false,
   });
 
+  /** The session held for the pane, only while it runs under the pid the caller read: never a reused pane id's. */
+  const heldAt = (pane: CodexPaneRef): Session | null => {
+    const session = sessions.get(pane.paneId);
+    return session === undefined || stopped || session.pane.pid !== pane.pid ? null : session;
+  };
+
   const drop = (session: Session): void => {
     if (session.readTimer !== null) clearTimeout(session.readTimer);
     session.connection?.close();
@@ -333,6 +358,24 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
         }),
       ]);
       clearTimeout(timer);
+    },
+    interruptTurn: async (pane): Promise<boolean> => {
+      const session = heldAt(pane);
+      if (session === null || session.connection === null || session.turn === null) return false;
+      const answer = await session.connection.request("turn/interrupt", {
+        threadId: session.thread,
+        turnId: session.turn,
+      });
+      return answer.kind === "result";
+    },
+    drainTurn: async (pane): Promise<boolean> => {
+      const session = heldAt(pane);
+      if (session === null || session.connection === null || session.turn !== null) return false;
+      const answer = await session.connection.request("turn/start", {
+        threadId: session.thread,
+        input: [{ type: "text", text: DRAIN_PROMPT, text_elements: [] }],
+      });
+      return answer.kind === "result";
     },
     // A config reload stops one daemon instance and starts the next in this process: the registry runs again.
     configure: (next): void => {

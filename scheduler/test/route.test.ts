@@ -1795,6 +1795,19 @@ describe("a Codex task", () => {
     expect(codes(only(decide([m], { tasks: claude })))).toEqual(["quota_over_line"]);
   });
 
+  test("a Codex successor only on a machine that passes one (codexPass), and its predecessor's account is the login's", () => {
+    const at = { deviceId: "a", exclave: "main", clone: "app" };
+    const successor = (account: string): Task =>
+      codexTask({ succeeds: { task: "old", account, at, trigger: "quota" } });
+    // A daemon of the Codex build before item 11 would run it, then refuse its pass and the drain's ask.
+    expect(codes(only(decide([codexMachine()], { task: successor("org:x") })))).toEqual(["agent_unsupported"]);
+    const passes = codexMachine({ capabilities: [...CODEX_CAPS, CAPABILITIES.codexPass] });
+    expect(only(decide([passes], { task: successor("org:x") })).rejected).toEqual([]);
+    // The account that ran out is the Codex login's, never the exclave's Claude one.
+    expect(codes(only(decide([passes], { task: successor(CODEX) })))).toEqual(["predecessor_account"]);
+    expect(only(decide([passes], { task: successor("org:a") })).rejected).toEqual([]);
+  });
+
   test("an account pin matches the Codex login, never the exclave's", () => {
     expect(only(decide([codexMachine()], { task: codexTask({ pin: { account: CODEX } }) })).rejected).toEqual([]);
     expect(codes(only(decide([codexMachine()], { task: codexTask({ pin: { account: "org:a" } }) })))).toEqual([

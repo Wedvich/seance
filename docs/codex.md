@@ -1,10 +1,14 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and item 10 built, the rest design.** Item 10 (2026-11-24),
-continuing a Codex task (`thread/resume` of the thread its launch ledger noted, the agent kept, the gate
-`CAPABILITIES.codexContinue`), is in DESIGN.md: Daemon, "Continuing a Codex session" (in "Continuing a session");
-Scheduler, "Codex tasks"; Wire protocol's compatibility list; and the threat model's "A Codex launch's thread id" (this
-doc's threat-model item 10, now whole). Item 8 (2026-11-24),
+**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8), item 10 and item 11 built, the rest design.** Item 11
+(2026-11-24), a Codex task's pass to a successor (every trigger), the drain's ask and the custodian's `interrupt` over
+the session's connection, is in DESIGN.md: Scheduler, "Codex tasks" ("Passing one"); Daemon, "The drain's session ask"
+("A Codex pane"); "Codex session events" (the pane's own frames); the custodian's `interrupt`; Wire protocol's
+compatibility list (`CAPABILITIES.codexPass`); and the threat model's "A Codex task's pass, drain ask and interrupt".
+Item 10 (2026-11-24), continuing a Codex task (`thread/resume` of the thread its launch ledger noted, the agent kept,
+the gate `CAPABILITIES.codexContinue`), is in DESIGN.md: Daemon, "Continuing a Codex session" (in "Continuing a
+session"); Scheduler, "Codex tasks"; Wire protocol's compatibility list; and the threat model's "A Codex launch's thread
+id" (this doc's threat-model item 10, now whole). Item 8 (2026-11-24),
 the clients (the PWA's picker grouped by agent, effort per agent, the agent badge; MCP's and the CLI's `agent`; the
 gates and the broker leg's sentinel), is in DESIGN.md: Scheduler, "Codex tasks", "Clients"; Wire protocol's
 compatibility list; and the threat model's "The task field `agent`". Item 7 (2026-11-24), the Codex
@@ -326,7 +330,7 @@ the machine's Codex login instead of the exclave's Claude login (`accountOf(mach
   something nobody asked for. 0.171.0 lists `max` on most models: lifting the refusal is a later choice, per model). The record always says `agent` explicitly; no reader infers it from a model name.
 - **Refused beside `agent: "codex"` in V1:** effort `max`, `steer`/`plan` (no plan mode reaches the app-server's
   `turn/start` in 0.170, and only a tightening may stand in), any level but `auto` in phase 2 (D6), `attachments`,
-  and `succeeds` (phase 3; `continues` until item 10). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
+  and `attachments` (`continues` until item 10; `succeeds` until item 11, gated on `CAPABILITIES.codexPass`). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
   the broker and the CLI; the PWA's form). A record that carries one anyway stays readable and the leader places it
   nowhere (`agent_unsupported` on every candidate), so a later build that supports it can run it. `until`, deps,
   batches, tags and `pin`/`avoid` are agent-neutral and pass.
@@ -444,7 +448,7 @@ sequenceDiagram
 ### Tools
 
 `seance mcp` is registered in the home's `config.toml`, so it runs as a child of the pane's server and binds by peer
-pid with no change: `report_task_done`, `hand_off_task`, `pass_to_successor` (phase 3) and `send_message` out. The
+pid with no change: `report_task_done`, `hand_off_task`, `pass_to_successor` (item 11) and `send_message` out. The
 binding's session rule (`sessionOf`: the innermost process on the peer's chain called `claude`) learns the pane's
 agent: for a Codex pane, the innermost `codex`, which is the pane's server. Watches need an inbox listener, so a Codex
 session's `watch_github` is refused `nolistener` until messages land.
@@ -457,10 +461,10 @@ session's `watch_github` is refused `nolistener` until messages land.
 - **Reap** is unchanged (the worktree is where it looks). The home's `sessions/` grows like a Claude config dir's
   `projects/`; pruning it is later.
 - **The custodian** sees a Codex pane as `ours`, reads its state from the events above, and may `close` and `capture`
-  it. `nudge` (an inbox) and `interrupt` (an Escape key) answer `unsupported` for a Codex pane until phase 3 gives them
-  `turn/steer` and `turn/interrupt`.
-- **A closed machine** lets its Codex tasks finish in place: the drain ask types keys into a Claude pane, and the outside
-  pass makes a successor, both phase 3 for Codex (`EndedTasks.askable` is false for a Codex launch).
+  it. `nudge` (an inbox) answers `unsupported` for a Codex pane until item 12 gives it `turn/steer`; `interrupt` sends
+  `turn/interrupt` over the connection (item 11).
+- **A closed machine** asks its Codex sessions to move as it asks Claude's, over the connection (item 11): `turn/interrupt`
+  at the deadline and `DRAIN_PROMPT` as a turn at a turn-ended idle; the outside pass makes a successor for the rest.
 - **A dying server** is one closed connection and one ended session. The daemon parses every message strictly, bounds
   its size, and never lets a socket error escape as an exception: the owner's "shed it and keep running", per pane.
 
@@ -625,7 +629,14 @@ nothing.
     the same time (another worktree's) is taken for the test's own; its first test then fails before its despawn, and
     the rejoin test dials the pane it left (seen 2026-11-24, never with the file alone). Read the run dir from the
     server's argv in the stub's `.calls`, and close panes in an `afterEach`.
-11. Pass to a successor, the quota trigger, the drain ask and the custodian's `interrupt` over the connection (after 7).
+11. **Built 2026-11-24** (DESIGN.md, Scheduler, "Codex tasks", "Passing one"; Daemon, "The drain's session ask", "A
+    Codex pane"). Pass to a successor, the quota trigger, the drain ask and the custodian's `interrupt` over the
+    connection (after 7). _Corrected at build:_ one capability, `codexPass`, gates both halves (a daemon advertises it
+    beside `drainAsk`; a leader's pass of a Codex task needs it on itself and the task's machine), and routing places a
+    Codex successor only on a machine advertising it, since a daemon of the Codex build before it would run the
+    session and then refuse its pass and the ask; the pass bills the machine's Codex login (`accountOf`), as routing
+    does. `pass_to_successor` from a Codex pane under a leader without it is refused before the push (a queue read
+    names the pane's agent). The custodian's `nudge` stays `unsupported` until item 12.
 12. Messages into a Codex session (O4) (after 7).
 
 **Phase 4** (after 3 and 9 to 12): the leader's `auto` choosing the agent as well as the account, a policy the owner

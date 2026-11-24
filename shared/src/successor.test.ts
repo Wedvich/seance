@@ -104,11 +104,23 @@ describe("passOffer", () => {
     const { assignment: _assignment, ...unplaced } = running();
     expect(offer(unplaced)).toMatchObject({ ok: false });
     expect(offer(running({ successor: "t-new" }))).toMatchObject({ ok: false });
-    // Phase 3: a successor of a Codex task would need Codex's own preamble and resume.
-    expect(offer(running({}, { agent: "codex", autonomy: "auto" }))).toEqual({
+  });
+
+  test("a Codex task only under a leader and on a machine that pass one (codexPass), each refusal naming the update", () => {
+    const codex = running({}, { agent: "codex", autonomy: "auto" });
+    const both = machine({ capabilities: [CAPABILITIES.successor, CAPABILITIES.codexPass] });
+    expect(passOffer(codex, [both], true, true)).toEqual({ ok: true });
+    // The default is the safe one: a caller that has not read the leader's capability offers no Codex pass.
+    expect(passOffer(codex, [both], true)).toEqual({
       ok: false,
-      reason: "a Codex task can't be passed to a successor yet",
+      reason: "the scheduler's leader can't pass a Codex task to a successor yet (needs seance update)",
     });
+    expect(passOffer(codex, [machine()], true, true)).toEqual({
+      ok: false,
+      reason: "the machine it runs on can't pass a Codex task yet (needs seance update)",
+    });
+    // A Claude task reads neither.
+    expect(passOffer(running(), [machine()], true, false)).toEqual({ ok: true });
   });
 
   test("a finished task is worded as finished, and a reserved one as still starting", () => {

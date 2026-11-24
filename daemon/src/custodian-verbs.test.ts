@@ -1603,6 +1603,44 @@ describe("interrupt", () => {
     expect(marked.state.keys).toEqual([]);
   });
 
+  test("a Codex pane is interrupted over its server's connection, never a key, and only where that is wired", async () => {
+    const sent: string[] = [];
+    let takes = true;
+    const r = rig({
+      activity: () => hung(),
+      codexInterrupt: (pane) => {
+        sent.push(`${pane.paneId} ${pane.pid}`);
+        return Promise.resolve(takes);
+      },
+    });
+    // Its composer is never read: a draft there is safe, since `turn/interrupt` reaches only the turn.
+    r.state.panes = [info({ taskId: "t-1", agent: "codex", command: "codex" })];
+    r.state.screen = boxScreen("❯ half a thought");
+    expect(await r.verbs.handle(interrupt(), process.pid)).toMatchObject({ ok: true, taskId: "t-1" });
+    expect(sent).toEqual(["%1 4242"]);
+    expect(r.state.keys).toEqual([]);
+    expect(r.lines).toEqual(["interrupt %1 t-1 sent"]);
+    expect(await r.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "limit" });
+    expect(sent).toHaveLength(1);
+
+    // One the server did not take is internal and counted all the same, as a refused key is.
+    takes = false;
+    const lost = rig({
+      activity: () => hung(),
+      codexInterrupt: () => Promise.resolve(takes),
+    });
+    lost.state.panes = [info({ taskId: "t-1", agent: "codex", command: "codex" })];
+    expect(await lost.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "internal" });
+    expect(await lost.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "limit" });
+
+    // Unwired: unsupported, and the round's reach does not count it.
+    const bare = rig({ activity: () => hung() });
+    bare.state.panes = [info({ taskId: "t-1", agent: "codex", command: "codex" })];
+    expect(await bare.verbs.handle(interrupt(), process.pid)).toEqual({ ok: false, code: "unsupported" });
+    expect(await bare.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
+    expect(bare.state.keys).toEqual([]);
+  });
+
   test("a key tmux refused is internal and still counted: at most once is the promise", async () => {
     const r = rig({ activity: () => hung() });
     r.state.keysOk = false;
@@ -1650,6 +1688,15 @@ describe("reach", () => {
       r.state.panes = panes;
       expect(await r.verbs.reach("%1", INTERRUPT_AFTER)).toBe(false);
     }
+  });
+});
+
+describe("reach for a Codex pane", () => {
+  test("only an interrupt reaches it, never a nudge: it runs no inbox mod", async () => {
+    const r = rig({ codexInterrupt: () => Promise.resolve(true) });
+    r.state.panes = [info({ taskId: "t-1", agent: "codex", command: "codex" })];
+    expect(await r.verbs.reach("%1", 15 * MIN)).toBe(false);
+    expect(await r.verbs.reach("%1", INTERRUPT_AFTER)).toBe(true);
   });
 });
 

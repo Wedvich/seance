@@ -110,8 +110,10 @@ act, no text in logs, a new act is a threat-model change) hold throughout.
   prompt. The pane is read again after its count is written and handed to the delivery with the pid and
   task counted under (`gone` for any other). Its text is at most `MESSAGE_PUSH_MAX` bytes, never logged
   or audited; at most `maxNudges` per session and one per round.
-- `nudge` and `interrupt` answer `unsupported` for a Codex pane (no inbox mod; its Escape is the TUI's)
-  until phase 3 sends `turn/steer` and `turn/interrupt`; `close` reads no Codex composer for a draft.
+- `nudge` answers `unsupported` for a Codex pane (no inbox mod). `interrupt` reaches one only as
+  `turn/interrupt` over the daemon's connection to its server (`CodexSessions.interruptTurn`, under the pid the verb
+  read), never a key, with Claude's verdict, counts and audit but no box-draft check (nothing touches the composer),
+  and `unsupported` where that is not wired; `close` reads no Codex composer for a draft.
 - `interrupt` sends only the constant key Escape (`["Escape"]`, never a frame field), once per session,
   only to an `ours`, unmarked, `live` pane whose last state is `busy` (never `needs-input`), whose input
   box holds no draft and whose screen, as read by a sampling pass taken after the count is written, has

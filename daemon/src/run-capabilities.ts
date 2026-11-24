@@ -79,6 +79,7 @@ import {
 import { despawnRound } from "./despawn.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
+import { codexSessions } from "./codex/sessions.ts";
 import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
 import { pushForTask } from "./handlers.ts";
 import { createPaneActivity, createPaneRetention } from "./pane-activity.ts";
@@ -334,6 +335,8 @@ const sessionEvents: DaemonCapability = (ctx) => {
           keys: sendKeys,
           inputShows: drainInputShows,
           audit: drainAskAudit(daemonSink),
+          // A Codex pane's ask goes over the daemon's own connection to its server, never keys (docs/codex.md, item 11).
+          codex: { interrupt: codexSessions.interruptTurn, prompt: codexSessions.drainTurn },
         });
   // Beside session events because that capability owns pane binding, the peer warnings above and the `ended` frame
   // that clears a pane's held messages: a second capability would need a late-bound hook into it.
@@ -794,6 +797,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
             Promise.resolve({ ok: false, code: "unsupported" }),
           canDeliver: (pane, expect) => messagesOf.get(ctx)?.canDeliver(pane, expect) ?? Promise.resolve(false),
           keys: sendKeys,
+          codexInterrupt: codexSessions.interruptTurn,
           settings,
           flags,
           sendEvent,
