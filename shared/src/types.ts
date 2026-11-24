@@ -3461,7 +3461,11 @@ export interface PrAlertStamp {
 export const PR_STATES = ["open", "draft", "merged", "closed"] as const;
 export type PrState = (typeof PR_STATES)[number];
 
-export const PR_CHECKS = ["pending", "passing", "failing"] as const;
+/**
+ * `unrun`: the rollup failed only on check runs cancelled before they ran a step (a job no runner took before its
+ * timeout), every other check done. Only `checks` carries it, never `required`.
+ */
+export const PR_CHECKS = ["pending", "passing", "failing", "unrun"] as const;
 export type PrChecks = (typeof PR_CHECKS)[number];
 
 /** GitHub's `mergeStateStatus`, lowercased. An enum value outside this list is left out of a reading. */

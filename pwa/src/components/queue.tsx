@@ -962,6 +962,12 @@ function PrChecksIcon(props: { checks: NonNullable<NonNullable<QueueRow["pr"]>["
       )}
       {checks === "passing" && <path d="M8 12.5l2.8 2.8L16 9.5" />}
       {checks === "failing" && <path d="M9 9l6 6M15 9l-6 6" />}
+      {checks === "unrun" && (
+        <>
+          <path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6" />
+          <circle cx="12" cy="17" r="0.4" fill="currentColor" />
+        </>
+      )}
     </StrokeIcon>
   );
 }

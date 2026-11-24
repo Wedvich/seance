@@ -5160,7 +5160,7 @@ for the lot with its own `gh`.
   baseRefName commits(last: 1){ … statusCheckRollup { state } } } }`, so a poll of fifty PRs
   costs about one rate-limit point. The result becomes `Task.pr = { state, checks?, stacked?, at }`:
   `open`, `draft`, `merged` or `closed`; the head commit's rollup as `pending`, `passing` or
-  `failing`; `stacked` on a merge whose base is not the default branch; `at` the leader's
+  `failing`, or `unrun` (below); `stacked` on a merge whose base is not the default branch; `at` the leader's
   clock at the read. Two tasks on one PR share an alias.
 - **A separate blocked-state read** (2026-11-12). An `awaiting-merge` task's PR can be stuck
   while it reads `open`: a required check failed, a conflict, the branch behind its base, or
@@ -5214,6 +5214,22 @@ for the lot with its own `gh`.
     characters, `prAlert`, `continuedBy` and eight candidates, stays within `STORE_MAX_CT_LENGTH` (`parse.test.ts`).
     The older "every bound at once" fixture is not that record (an awaiting-merge task holds no
     failure, reservation or needs-input fields, which `advance` clears), and is left as it was.
+- **A failing rollup is asked about again** (2026-11-23). GitHub's rollup fails when a job
+  never got a runner: a macOS job left queued past its `timeout-minutes` ends `CANCELLED` with no
+  step run, and the chip read `failing` over CI that never ran. An open or draft PR whose rollup reads
+  `FAILURE` takes a second batched call, aliased `f<i>` after `p<i>`, in runs of `BLOCKED_CHUNK`:
+  the head's `statusCheckRollup{ state contexts(first: 50){ … } }` with `steps(first: 1){
+  totalCount }` on each `CheckRun` (`rejudgedFailure`). Over the newest run of each name, a
+  `CANCELLED` run with no step is no failure: with another check still running the reading is
+  `pending`, with every other check done it is `unrun` (the chip's `?`), and with only superseded
+  runs failed it is `passing`. Any failing context keeps `failing`, and so does anything the read
+  cannot show: a failed or limited run, a null alias, no longer `FAILURE` (a new head between the
+  calls), no contexts, or more than 50. It runs beside the stacked-merge call, inside the chunk,
+  so it can delay that chunk's writes by its own latency; it only ever runs for failing PRs, which
+  are few. `unrun` is the `checks` field's alone, never `required`'s: a required job that never ran
+  still blocks the merge, so `prBlocked` still says `checks` and the alert still goes. An older
+  reader's `parsePrStatus` refuses an unknown `checks`, and a task drops a reading it cannot parse
+  (never fatal), so its chip shows no reading, a `?`, until it updates.
 - **A stacked merge is asked about again.** A merged PR whose base is not the default branch
   takes a second batched call, only for those, aliased `c<i>` after the first call's `p<i>`:
   `repository{ defaultBranchRef{ compare(headRef: $h){ status } } }` with the PR's `mergeCommit`

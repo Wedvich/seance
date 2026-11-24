@@ -248,6 +248,18 @@ function blockedVariables(wide: readonly Wide[]): string[] {
   ]);
 }
 
+/** A failing rollup's second look (`f<i>` for `p<i>`): each context's outcome, and whether a CheckRun ran a step. */
+function rejudgeQueryText(failed: readonly Wide[]): string {
+  const vars = failed.map(({ index: i }) => `$o${i}:String!,$r${i}:String!,$n${i}:Int!`).join(",");
+  const reads = failed
+    .map(
+      ({ index: i }) =>
+        `f${i}: repository(owner:$o${i},name:$r${i}){ pullRequest(number:$n${i}){ commits(last:1){ nodes{ commit{ statusCheckRollup{ state contexts(first:50){ totalCount nodes{ __typename ... on CheckRun{ databaseId name status conclusion steps(first:1){ totalCount } } ... on StatusContext{ context state } } } } } } } } }`,
+    )
+    .join(" ");
+  return `query(${vars}){ ${reads} ${RATE_LIMIT_SELECTION} }`;
+}
+
 /** A watched run's read: `w<i>` is alias `i`, its URL a `URI!` variable, never in the query text. */
 function runQueryText(count: number): string {
   const indices = Array.from({ length: count }, (_, i) => i);
@@ -345,6 +357,45 @@ function conclusionOf(conclusion: unknown): PrChecks {
     default:
       return "pending";
   }
+}
+
+/** A CheckRun cancelled before it ran a step: on GitHub Actions, a job no runner took before its timeout. */
+function neverRan(node: Record<string, unknown>): boolean {
+  if (node["__typename"] !== "CheckRun" || node["status"] !== "COMPLETED" || node["conclusion"] !== "CANCELLED") {
+    return false;
+  }
+  const steps = node["steps"];
+  return isRecord(steps) && steps["totalCount"] === 0;
+}
+
+/**
+ * A `FAILURE` rollup judged again over the newest run of each name: `unrun` when only runs that never ran failed and
+ * nothing is pending, `pending` when they failed and something still runs, `passing` when only superseded runs
+ * failed. `failing` when a context failed, and whenever the read cannot show otherwise: no `FAILURE` rollup any more
+ * (a new head between the two queries), no contexts, or more than the 50 read.
+ */
+function rejudgedFailure(rollup: unknown): PrChecks {
+  if (!isRecord(rollup) || rollup["state"] !== "FAILURE") return "failing";
+  const contexts = rollup["contexts"];
+  const nodes = isRecord(contexts) ? contexts["nodes"] : undefined;
+  if (!isRecord(contexts) || !Array.isArray(nodes)) return "failing";
+  const total = contexts["totalCount"];
+  if (typeof total !== "number" || total > nodes.length) return "failing";
+  const latest = latestRuns(nodes, nameKey);
+  if (latest.length === 0) return "failing";
+  let pending = false;
+  let unrun = false;
+  for (const node of latest) {
+    if (neverRan(node)) {
+      unrun = true;
+      continue;
+    }
+    const { checks } = contextOf(node);
+    if (checks === "failing") return "failing";
+    if (checks === "pending") pending = true;
+  }
+  if (pending) return "pending";
+  return unrun ? "unrun" : "passing";
 }
 
 /**
@@ -682,7 +733,32 @@ async function readBlocked(
 }
 
 /**
- * One `gh` run over `prs`, and a second over its stacked merges (`landedOnDefault`) when there are any.
+ * The alias indices of `failed` whose `FAILURE` rollup reads otherwise on a second look (`rejudgedFailure`), in runs
+ * of `BLOCKED_CHUNK`, since it selects contexts as the blocked read does. Never a failure of the poll: a run that
+ * fails, or is limited, leaves its PRs `failing`, as their rollup said.
+ */
+async function rejudgeFailures(deps: PollDeps, failed: readonly Wide[]): Promise<ReadonlyMap<number, PrChecks>> {
+  const checks = new Map<number, PrChecks>();
+  for (let from = 0; from < failed.length; from += BLOCKED_CHUNK) {
+    const run = failed.slice(from, from + BLOCKED_CHUNK);
+    // oxlint-disable-next-line no-await-in-loop -- runs go one after another, never overlapping
+    const answer = await ask(deps, rejudgeQueryText(run), blockedVariables(run));
+    if (answer.kind === "limited") break;
+    if (answer.kind !== "ok") continue;
+    for (const { index } of run) {
+      const repository = answer.data[`f${index}`];
+      const pullRequest = isRecord(repository) ? repository["pullRequest"] : null;
+      const commit = isRecord(pullRequest) ? commitOf(pullRequest) : undefined;
+      const judged = rejudgedFailure(commit === undefined ? undefined : commit["statusCheckRollup"]);
+      if (judged !== "failing") checks.set(index, judged);
+    }
+  }
+  return checks;
+}
+
+/**
+ * One `gh` run over `prs`, and a second over its stacked merges (`landedOnDefault`) when there are any, beside a
+ * third over its open or draft PRs whose rollup failed (`rejudgeFailures`).
  * The blocked-state read (`readBlocked`) is the caller's, after every chunk's merge reading is written:
  * its latency must not hold a merge back. `wide` names the open PRs of `wideIndices` that await it.
  */
@@ -731,16 +807,28 @@ async function readChunk(
     const forWatch = (read.state === "open" || read.state === "draft") && watchedIndices.has(i);
     if (forTask || forWatch) wide.push({ index: i, pr });
   });
-  const landed = await landedOnDefault(deps, landings);
+  const failed = reads.flatMap((read, i): Wide[] => {
+    const pr = prs[i];
+    if (pr === undefined || read.kind !== "status" || read.checks !== "failing") return [];
+    return read.state === "open" || read.state === "draft" ? [{ index: i, pr }] : [];
+  });
+  const [landed, rejudged] = await Promise.all([landedOnDefault(deps, landings), rejudgeFailures(deps, failed)]);
   return {
     kind: "ok",
-    reads: reads.map((read, i) => {
-      if (read.kind !== "status" || !landed.has(i)) return read;
-      const { stacked: _stacked, ...rest } = read;
-      return rest;
-    }),
+    reads: reads.map((read, i) => settled(read, rejudged.get(i), landed.has(i))),
     wide,
     taskWide,
+  };
+}
+
+/** `read` with the second looks' answers: its checks as judged again, and no `stacked` once landed on the default. */
+function settled(read: Read, checks: PrChecks | undefined, landed: boolean): Read {
+  if (read.kind !== "status") return read;
+  const { stacked, ...rest } = read;
+  return {
+    ...rest,
+    ...(checks === undefined ? {} : { checks }),
+    ...(stacked === undefined || landed ? {} : { stacked }),
   };
 }
 
