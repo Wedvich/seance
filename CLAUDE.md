@@ -40,6 +40,8 @@ a **Status** line (built, spec, draft); trust it over memory.
 - **docs/custodian.md** — the custodian; built, keeps 4b's open drill questions and an index of C1–C49.
   Read before touching despawn, reap's merged check, a pane's tracked state, or anything that reads a
   live session's screen.
+- **docs/custodian-replies.md** — draft, parked behind presence's `self.doing`: sessions answering a custodian nudge. Read before
+  touching `custodianRequest`, `deliverAsCustodian` or what a round reads about a session.
 - **docs/agents.md** — analysis: agents other than Claude Code (Codex, `agy`). Read before adding a
   second agent or making the launch path agent-neutral.
 - **docs/codex.md** — Codex as a first-class account; every question decided by the owner. Built so far: item 1
