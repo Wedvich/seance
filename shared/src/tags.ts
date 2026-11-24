@@ -318,7 +318,29 @@ export function joinTags(
   return out;
 }
 
+/**
+ * `SessionEntry.tags` off the wire, split into its conversation and process layers and joined under `task` (a task
+ * record's entries, `taskTagEntries`), so its `owner.label` wins.
+ */
+export function joinSessionTags(
+  raw: unknown,
+  task?: Readonly<Record<string, TagEntry>> | null,
+): Readonly<Record<string, JoinedTag>> {
+  const tags = parseTags(raw, { scope: "session" }) ?? {};
+  const at = (scope: SessionTagScope): Record<string, SessionTag> =>
+    Object.fromEntries(Object.entries(tags).filter(([, tag]) => tag.scope === scope));
+  return joinTags(task, at("conversation"), at("process"));
+}
+
 export type DisplayNameSource = "owner" | "task" | "self" | "window";
+
+/** Said beside a `displayName` the owner did not choose: the session's own, or the window's. */
+export const DISPLAY_NAME_MARKS: Readonly<Record<DisplayNameSource, string | null>> = {
+  owner: null,
+  task: null,
+  self: "(self-named)",
+  window: "(window)",
+};
 
 /**
  * A session's name (T2): `owner.label` > the task's title > `self.name` > the window name. Only the owner's own
