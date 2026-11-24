@@ -82,11 +82,14 @@ export class Paced {
   #again = false;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #stopped = false;
+  readonly #now: () => number;
 
-  constructor(gapMs: number, retryMs: number, read: () => Promise<boolean>) {
+  /** `now` is injectable so a test can hold the gap's clock rather than race a real one. */
+  constructor(gapMs: number, retryMs: number, read: () => Promise<boolean>, now: () => number = () => Date.now()) {
     this.#gapMs = gapMs;
     this.#retryMs = retryMs;
     this.#read = read;
+    this.#now = now;
   }
 
   kick(): void {
@@ -96,13 +99,13 @@ export class Paced {
       return;
     }
     if (this.#timer !== null) return;
-    const wait = this.#last + this.#gapMs - Date.now();
+    const wait = this.#last + this.#gapMs - this.#now();
     if (wait > 0) {
       this.#arm(wait);
       return;
     }
     this.#running = true;
-    this.#last = Date.now();
+    this.#last = this.#now();
     void this.#read().then((ok) => {
       this.#running = false;
       if (!ok) this.#arm(this.#retryMs);

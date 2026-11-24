@@ -16,21 +16,35 @@ import { createRefusalTally } from "./refusal-tally.ts";
  */
 describe("Paced", () => {
   test("runs at most once per gap, coalesces kicks that land meanwhile, and retries a failed read", async () => {
+    // The gap's clock is held by the test: timed on a real one, a stall between the pacer's
+    // reading and the test's own made a correctly paced gap look short (30 ms of 60 on CI).
+    let now = 1_000;
     const starts: number[] = [];
     const outcomes = [true, false, true];
-    const pacer = new Paced(60, 40, () => {
-      starts.push(Date.now());
-      return Promise.resolve(outcomes.shift() ?? true);
-    });
+    const pacer = new Paced(
+      60,
+      40,
+      () => {
+        starts.push(now);
+        return Promise.resolve(outcomes.shift() ?? true);
+      },
+      () => now,
+    );
     pacer.kick();
     pacer.kick();
     pacer.kick();
     await pollUntil(() => starts.length === 1, "the first read");
-    // A kick inside the gap waits it out rather than reading now.
+    // A kick inside the gap waits it out rather than reading now. A negative assertion: real
+    // time passes several armed waits, but the held clock never leaves the gap.
+    now += 59;
     pacer.kick();
+    await Bun.sleep(150);
+    expect(starts).toEqual([1_000]);
+    now += 1;
     await pollUntil(() => starts.length === 2, "the second read, after the gap");
-    expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBeGreaterThanOrEqual(55);
-    // The second reported failure: the pacer tries again on its own, no kick.
+    expect(starts).toEqual([1_000, 1_060]);
+    // The second reported failure: the pacer tries again on its own, no kick, once the gap allows.
+    now += 60;
     await pollUntil(() => starts.length === 3, "the retry");
     pacer.stop();
     pacer.kick();
