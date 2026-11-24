@@ -24,7 +24,7 @@ import {
 import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
 import type { Timed } from "../timed.ts";
 import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
-import { StrokeIcon } from "./icons.tsx";
+import { AgentLogo, StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuGroup, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
@@ -487,8 +487,8 @@ function AccountCardView(props: {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
+            <AgentLogo kind={account.agent.kind} name={account.agent.name} size={15} className="fleet-agent-logo" />
             <h2 className="fleet-name">{account.title}</h2>
-            {account.agent !== null && <span className="fleet-badge fleet-badge-agent">{account.agent}</span>}
             {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
           <p className="fleet-meta">{account.detail}</p>

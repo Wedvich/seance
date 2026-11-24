@@ -11184,10 +11184,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `pwa/src/machines-view.ts`). `deriveAccounts` groups a login's account (`Machine.logins`, signed in and
   identified) beside the exclaves', so it gets the same card: its 5-hour and weekly windows from `lq` through
   `newestQuotaByAccount`, history, rename through the `account:` record and the "Open for work" switch through the
-  account hold (Closing an account), none of which reads the agent. What differs:
-  - **An agent badge** (`AGENT_NAMES`, "Codex") beside the title, neutral in colour; a Claude card has none, Claude
-    being the default everywhere. _Decided: no Claude badge, because_ a fleet with no login reads as it did.
-  - **Titled by its email**, not by exclave ids it has none of, and with no twin tag (the badge says its kind);
+  account hold (Closing an account), none of which reads the agent. Every account card, a Claude one too, leads its
+  title with its agent's logo (`AgentLogo`, `pwa/src/components/icons.tsx`: lobe-icons' one-colour marks, MIT, copied
+  in as the stroke icons are), muted, named for a screen reader and on hover. _Decided: a logo on every card, not a
+  text badge on the login's alone, because_ a small muted mark is no noise where a pill on every card would be, and a
+  list whose every card leads alike reads faster than one marked only by exception (owner, 2026-11-24). What differs:
+  - **Titled by its email**, not by exclave ids it has none of, and with no twin tag (the logo says its kind);
     repeated titles gain the workspace (else the plan), then the machines, then the account id. The meta line is
     `[<label> ·] <workspace> · <plan> plan · on <machines>`, the label leading only under an alias; the rename sheet
     reads `<label> · Codex` and empties back to the email (`AccountCard.unnamed`, `members`).

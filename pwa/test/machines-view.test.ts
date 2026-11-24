@@ -871,7 +871,7 @@ describe("an agent login", () => {
     machine({ logins: [entry], ...overrides });
   const ready: SchedulerAvailability = { kind: "ready", deviceId: "dev-1", term: 1 };
 
-  test("its account is a card like a Claude one: badged, titled by its email, its windows from lq, its machines", () => {
+  test("its account is a card like a Claude one: its agent's mark, titled by its email, its windows from lq, its machines", () => {
     const a = withLogin({
       deviceId: "a",
       name: "a",
@@ -888,7 +888,7 @@ describe("an agent login", () => {
       title: "me@example.com",
       unnamed: "me@example.com",
       members: "Codex",
-      agent: "Codex",
+      agent: { kind: "codex", name: "Codex" },
       detail: "PengeFix · team plan · on a, b",
       historyFrom: "b",
       credits: null,
@@ -898,13 +898,18 @@ describe("an agent login", () => {
       ["7d", 31],
     ]);
     expect(plain(codex?.observed ?? [])).toBe("cache · 1m ago on b");
-    // The Claude card beside it is unchanged and unbadged.
-    expect(accounts.find((account) => account.accountId === ACCOUNT)).toMatchObject({ title: "default", agent: null });
+    // The Claude card beside it is unchanged bar its own mark.
+    expect(accounts.find((account) => account.accountId === ACCOUNT)).toMatchObject({
+      title: "default",
+      agent: { kind: "claude", name: "Claude" },
+    });
   });
 
   test("no reading yet says the machine has not read the login; a signed-out or unidentified login has no card", () => {
     expect(
-      plain(deriveMachines([withLogin()], NOW, NO_LEADER).accounts.find((a) => a.agent !== null)?.observed ?? []),
+      plain(
+        deriveMachines([withLogin()], NOW, NO_LEADER).accounts.find((a) => a.agent.kind === "codex")?.observed ?? [],
+      ),
     ).toBe("No quota seen yet. It shows once its machine has read the login.");
     for (const entry of [login({ accountId: null, authOk: false }), login({ accountId: null })]) {
       expect(deriveMachines([withLogin({}, entry)], NOW, NO_LEADER).accounts.map((a) => a.accountId)).toEqual([
@@ -917,7 +922,7 @@ describe("an agent login", () => {
     const creditsOf = (c: number | undefined) => {
       const lq = [{ x: 0, h: 100, s: "cache" as const, at: S - 60, ...(c === undefined ? {} : { c }) }];
       const m = withLogin({ status: { at: S, scan: 1, lq } }, login({ credits: true }));
-      const card = deriveMachines([m], NOW, NO_LEADER).accounts.find((a) => a.agent !== null);
+      const card = deriveMachines([m], NOW, NO_LEADER).accounts.find((a) => a.agent.kind === "codex");
       // A full window spills a Claude account into a Credits bar; a login's credits are the line alone.
       expect(card?.bars.map((bar) => bar.label)).toEqual(["5h"]);
       return card?.credits;
@@ -949,10 +954,10 @@ describe("an agent login", () => {
       NOW,
       NO_LEADER,
     );
-    expect(accounts.map((account) => [account.title, account.agent])).toEqual([
-      ["default", null],
-      ["me@example.com (PengeFix)", "Codex"],
-      ["me@example.com (plus)", "Codex"],
+    expect(accounts.map((account) => [account.title, account.agent.kind])).toEqual([
+      ["default", "claude"],
+      ["me@example.com (PengeFix)", "codex"],
+      ["me@example.com (plus)", "codex"],
     ]);
     // The plain name, every client's label, tells them apart by kind, then by workspace; the Claude one keeps its email.
     expect(accounts.map((account) => account.plainName)).toEqual([

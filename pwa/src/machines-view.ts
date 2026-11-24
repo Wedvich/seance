@@ -522,8 +522,8 @@ export interface AccountCard {
    * (one login per agent per machine, so `detail`'s machines say the rest).
    */
   readonly members: string;
-  /** The agent badge: null for Claude, the default everywhere; else the login's agent ("Codex"). */
-  readonly agent: string | null;
+  /** Whose account it is, shown as the agent's logo before the title, on every card so the list reads alike. */
+  readonly agent: AgentMark;
   /** What it reads as without its alias: email, else short id, with any twin tag. */
   readonly plainName: string;
   /** Named, what the title no longer says leads it; an agent login's workspace and plan follow its name. */
@@ -645,6 +645,19 @@ function accountLabel(
 }
 
 /** The agent's own sign-in verb: a login is signed in on its machine's shell, never from the PWA. */
+/** An agent's logo key and its name, the name being the logo's text for a screen reader and a hover. */
+export interface AgentMark {
+  readonly kind: AgentKind;
+  readonly name: string;
+}
+
+/** Claude, which owns the exclaves, beside every agent that signs in as a login. */
+export type AgentKind = "claude" | AgentLoginKind;
+
+function agentMark(agent: AgentLoginKind | null): AgentMark {
+  return agent === null ? { kind: "claude", name: "Claude" } : { kind: agent, name: AGENT_NAMES[agent] };
+}
+
 const LOGIN_VERBS: Readonly<Record<AgentLoginKind, string>> = { codex: "seance codex login" };
 
 function loginNote(machine: Machine, login: AgentLogin, index: number, now: number): LoginNote | null {
@@ -1024,7 +1037,7 @@ function deriveAccounts(
       title: titleOf(group.accountId),
       unnamed: unnamedOf(group),
       members,
-      agent: group.agent === null ? null : AGENT_NAMES[group.agent],
+      agent: agentMark(group.agent),
       plainName,
       detail:
         group.agent === null
