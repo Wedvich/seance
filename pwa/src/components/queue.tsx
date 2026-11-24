@@ -116,7 +116,7 @@ function LabelDialog(props: {
         />
         {notice === null ? (
           <p className="rename-hint">
-            <span>Shown beside the title, and by get_queue to sessions. Leave it empty to remove it.</span>
+            <span>Shown in place of the title, and by get_queue to sessions. Leave it empty to remove it.</span>
             <span className="rename-count">
               {Array.from(draft).length}/{max}
             </span>
@@ -693,7 +693,7 @@ function QueueCard(props: {
         <div className="fleet-card-title">
           <h3 className="fleet-name">
             {row.session === null ? (
-              row.title
+              row.name
             ) : (
               <a
                 className="queue-session"
@@ -702,7 +702,7 @@ function QueueCard(props: {
                 rel="noopener noreferrer"
                 title="Open the session on claude.ai"
               >
-                {row.title}
+                {row.name}
               </a>
             )}
           </h3>
@@ -717,8 +717,8 @@ function QueueCard(props: {
         </div>
         {hasMenu && (
           <>
-            <MoreTrigger menu={handle} label={`More actions for ${row.title}`} />
-            <Menu menu={handle} label={`Actions for ${row.title}`}>
+            <MoreTrigger menu={handle} label={`More actions for ${row.name}`} />
+            <Menu menu={handle} label={`Actions for ${row.name}`}>
               {row.canFollowUp && (
                 <MenuItem label="Follow up" icon={<FollowUpIcon />} onClick={() => props.onFollowUp(row.id)} />
               )}
@@ -754,29 +754,23 @@ function QueueCard(props: {
           </>
         )}
       </div>
-      {(row.label !== null || row.ref !== null) && (
+      {row.ref !== null && (
         <p className="fleet-card-body queue-tags">
-          {row.label !== null && (
-            <span className="fleet-badge queue-label" title="Label">
-              {row.label}
+          {row.ref.url === null ? (
+            <span className="fleet-badge queue-ref" title="What it is for">
+              {row.ref.text}
             </span>
+          ) : (
+            <a
+              className="fleet-badge queue-ref"
+              href={row.ref.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="What it is for"
+            >
+              {row.ref.text}
+            </a>
           )}
-          {row.ref !== null &&
-            (row.ref.url === null ? (
-              <span className="fleet-badge queue-ref" title="What it is for">
-                {row.ref.text}
-              </span>
-            ) : (
-              <a
-                className="fleet-badge queue-ref"
-                href={row.ref.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title="What it is for"
-              >
-                {row.ref.text}
-              </a>
-            ))}
         </p>
       )}
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}

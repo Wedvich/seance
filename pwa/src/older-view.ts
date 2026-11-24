@@ -197,9 +197,11 @@ function archivedRow(
   const why =
     failure === undefined ? null : taskFailureText(failure.code, failure.exit, task.spec.until, failure.oomKill);
   const autonomy = autonomyOf(task.spec);
+  const title = taskTitle(task);
   return {
     id: task.id,
-    title: taskTitle(task),
+    title,
+    name: title,
     headline: [`${outcomePhrase(task)}${machine === null ? "" : ` on ${machine}`}`],
     body: timed`${why === null ? "" : `${sentence(why)} `}Created ${{ text: formatSeen(task.createdAt, now), at: task.createdAt }}.`,
     dot: task.state === "failed" ? "err" : null,

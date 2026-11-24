@@ -9175,7 +9175,7 @@ or alerts on one.
 - **Readers.** MCP's `get_queue` carries only the allowlisted keys (`AGENT_VISIBLE_TAG_KEYS`: `creator.ref` and
   `owner.label`, never `creator.ref-url` or an opaque `creator.*` key) as `tags` in place of the `linear` field it had.
   The archivist keeps `creator.ref` and `creator.ref-url` and
-  drops every other tag. The PWA shows the label beside the title and the ref linked to its https URL, and the verdict
+  drops every other tag. The PWA shows the label in place of the title (T2's precedence; the Label dialog still shows the title) and the ref linked to its https URL, and the verdict
   lists every key. A push, a log line or an audit line never carries a tag; an audit line names `fields=ownerTags`.
 
 ### Amending a waiting task — built 2026-11-12
@@ -11520,7 +11520,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`source:id`) and its https URL, written as the creator's tags, and is hidden against a leader that does not advertise
   `taskTags` unless a ref is already typed (shown off, with the leader's refusal as the problem). On a queue row the
   card's menu opens the **Label task** dialog (`owner.label`, blank clears it) for any task, finished included, while
-  the verified leader takes tags; the label shows beside the task's title, never in place of it, and the ref links to
+  the verified leader takes tags; the label shows in place of the task's title (the owner reversed "beside, never in place of" on 2026-11-24, to match T2), and the ref links to
   its URL only when that is https. An archived card shows the ref and no label, and offers no labelling. Deps and `until` belong to one
   task and reset after each enqueue. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the

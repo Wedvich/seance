@@ -3234,7 +3234,6 @@
   gap: 6px;
 }
 
-.queue-label,
 .queue-ref {
   font-family: var(--sans);
   overflow-wrap: anywhere;

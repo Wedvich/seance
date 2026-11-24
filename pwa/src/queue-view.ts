@@ -117,7 +117,10 @@ function withoutPeriod(line: Timed): Timed {
 
 export interface QueueRow {
   readonly id: string;
+  /** The task's own title: the Label dialog shows it, so a label never hides it for good. */
   readonly title: string;
+  /** The card's heading: `owner.label` when set (T2: the owner's label outranks the task's title), else `title`. */
+  readonly name: string;
   readonly headline: Timed;
   readonly body: Timed | null;
   readonly dot: QueueDot | null;
@@ -147,7 +150,7 @@ export interface QueueRow {
    * takes task tags. Never an archived row: its record left the leader's store.
    */
   readonly canLabel: boolean;
-  /** Its `owner.label`, shown beside the title (never in place of it); null when unset. */
+  /** Its `owner.label`, shown in place of the title (`name`); null when unset. */
   readonly label: string | null;
   /** Its `creator.ref`, linked to `creator.ref-url` when that is an https: URL; null without one. */
   readonly ref: { readonly text: string; readonly url: string | null } | null;
@@ -610,6 +613,7 @@ function rowOf(
   return {
     id: task.id,
     title: taskTitle(task),
+    name: tags.label ?? taskTitle(task),
     headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now, now + skew)),
     body: bodyOf(
       task,
