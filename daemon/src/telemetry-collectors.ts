@@ -295,7 +295,9 @@ function sessionsCollector(sources: CollectorSources): Collect {
         samples.push({ metric: METRIC_NAMES.sess, labels: { exclave: exclave.id }, ts: tick.at, value: count });
       }
     });
-    return { fields: { sess }, samples };
+    // `sg` from the same read, so a failed read drops both for the tick. No metric: it counts nothing.
+    const sg = sources.sessionGen?.(sessions);
+    return { fields: { sess, ...(sg === undefined ? {} : { sg }) }, samples };
   };
 }
 

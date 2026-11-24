@@ -83,6 +83,7 @@ import { log } from "./log.ts";
 import type { Messages } from "./messages.ts";
 import type { Watches } from "./watches.ts";
 import type { Conversations, SessionTagsSource } from "./conversations.ts";
+import { appSessionView } from "./session-view.ts";
 import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 import type { AvailabilityOutcome, CloseMode } from "./state.ts";
@@ -1037,7 +1038,8 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
   const sessions = await ctx.backend.sessions(ctx.getRepos());
   await ctx.tasks?.harvestExits?.();
   const at = Date.now();
-  // Never on a scheduler-sealed reply: the leader has no use for them, and they would reach no one else through it.
+  // Tags and `live` never on a scheduler-sealed reply: the leader has no use for them, and they would reach no one
+  // else through it.
   if (!scheduler) return { sessions: await withTags(ctx.conversations, sessions), at };
   if (ctx.tasks === undefined) return { sessions, at };
   const { ended, ledgerSince, interrupted } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
@@ -1056,12 +1058,9 @@ async function withTags(
   sessions: readonly SessionEntry[],
 ): Promise<readonly SessionEntry[]> {
   if (source === undefined) return sessions;
-  // Tags are display: a failed sweep shows what the table already held, never fails the reply.
+  // Tags and live state are display: a failed sweep shows what the table already held, never fails the reply.
   await source.sweep().catch(() => {});
-  return sessions.map((entry) => {
-    const tags = entry.id === undefined ? undefined : source.tagsFor(entry.id);
-    return tags === undefined ? entry : { ...entry, tags };
-  });
+  return appSessionView(source, sessions);
 }
 
 const PROGRESS_KEY_BYTES = Buffer.byteLength(',"progress":[]', "utf8");

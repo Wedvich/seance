@@ -625,5 +625,5 @@ export function createConversations(deps: ConversationsDeps): Conversations {
   };
 }
 
-/** What an app's `sessions` reply reads: the table swept, then each pane's tags. */
-export type SessionTagsSource = Pick<Conversations, "sweep" | "tagsFor">;
+/** What an app's `sessions` reply reads: the table swept, then each pane's tags and live state (`session-view.ts`). */
+export type SessionTagsSource = Pick<Conversations, "sweep" | "tagsFor" | "process">;

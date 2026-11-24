@@ -38,7 +38,7 @@ export type PaddedStatus = MachineStatus & { readonly _: string };
  * health, capped together by `STATUS_MAX_AUTH_EXPIRED`), `tf`/`tu` (trait probes, capped together by
  * `STATUS_MAX_TRAIT_PAIRS`), `lx`/`lu`/`lb` (agent logins' health, capped together by
  * `STATUS_MAX_LOGINS`), `drn` (the launch gate), `cl` (closed to new work: trimmed, it
- * would read as open), `dr` (a trimmed one would stop a drain the owner started), `cu` (the custodian seat's view, display-only) and `gh` are never trimmed and always fit; `sess` goes only past any real exclave count.
+ * would read as open), `dr` (a trimmed one would stop a drain the owner started), `cu` (the custodian seat's view, display-only), `gh` and `sg` (the session generation) are never trimmed and always fit; `sess` goes only past any real exclave count.
  * Any trim sets `tr` to the count of `quota` entries dropped — 0 when only
  * detail or `lq` entries went — so a reader can tell an exclave (or a login)
  * left out from one with no quota observed; `tr` is absent when nothing was trimmed.

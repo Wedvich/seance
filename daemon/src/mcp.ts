@@ -533,9 +533,12 @@ function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
   return textResult(JSON.stringify(reply.sessions.map(agentVisibleSession), null, 2));
 }
 
-/** A session as another agent's context may see it: its tags cut to the allowlist (DESIGN.md, "Tags and session identity"). */
+/**
+ * A session as another agent's context may see it: its tags cut to the allowlist (DESIGN.md, "Tags and session
+ * identity"), and never its `live` state (docs/work.md WS6: what one session may learn of another's is presence's).
+ */
 function agentVisibleSession(entry: SessionEntry): SessionEntry {
-  const { tags, ...rest } = entry;
+  const { tags, live: _live, ...rest } = entry;
   const visible = agentVisibleTags(tags);
   return visible === undefined ? rest : { ...rest, tags: visible };
 }

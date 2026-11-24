@@ -482,6 +482,28 @@ describe("mcp tools", () => {
     expect(fake.requests[0]?.deviceId).toBe("device-1");
     lazy.stop();
   });
+
+  test("get_sessions never passes a session's live state, and cuts its tags to the allowlist (WS6)", async () => {
+    const entry = { id: "%3", window: "fix-bug", repo: "seance", path: "/repos/seance" };
+    const sessions = [
+      {
+        ...entry,
+        tags: {
+          "agent.kind": { value: "claude", at: 1, scope: "conversation" },
+          "self.doing": { value: "secret plans", at: 1, scope: "process" },
+        },
+        live: { state: "needs-input", since: 2_000, reason: "question" },
+      },
+    ];
+    const fake = fakeRelay([machine()], (op) => (op === "sessions" ? { sessions, at: 3_000 } : {}));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
+    expect(JSON.parse(toolText(result))).toEqual([
+      { ...entry, tags: { "agent.kind": { value: "claude", at: 1, scope: "conversation" } } },
+    ]);
+    lazy.stop();
+  });
 });
 
 describe("isLocalRef", () => {

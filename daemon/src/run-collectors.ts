@@ -30,6 +30,8 @@ export interface CollectorDeps {
   readonly config: Config;
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
+  /** The session generation (`session-view.ts`): the status's `sg`. */
+  readonly sessionGen?: (sessions: readonly SessionEntry[]) => number;
   readonly now: () => number;
   readonly httpFetch: Fetch;
   readonly probe?: HostProbe;
@@ -101,6 +103,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
       log.warn(`telemetry: ${name} failed, its fields are left out of the status: ${String(err)}`);
     },
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
+    ...(collectors.sessionGen === undefined ? {} : { sessionGen: collectors.sessionGen }),
     ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
     ...(collectors.closed === undefined ? {} : { closed: collectors.closed }),
     ...(collectors.drainAt === undefined ? {} : { drainAt: collectors.drainAt }),

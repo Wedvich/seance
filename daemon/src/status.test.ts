@@ -268,6 +268,31 @@ describe("fitStatus", () => {
     expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
   });
 
+  test("the session generation is never trimmed, and at its widest beside every other kept field still fits", () => {
+    const sg = Number.MAX_SAFE_INTEGER;
+    const crowded = fitStatus({ ...status(3), sg, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.sg).toBe(sg);
+    const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
+    const big = Number.MAX_SAFE_INTEGER;
+    const worst = fitStatus({
+      ...status(12),
+      ae,
+      lx: [0],
+      lu: [1],
+      lb: [2, 3],
+      cu: { s: "running", e: 1_763_000_000, n: [999, 999, 999], rc: `session_${"A".repeat(64)}` },
+      gh: { u: big, c: [big, big, big], g: [big, big, big] },
+      drn: true,
+      cl: 1_763_000_000_000,
+      dr: 1_763_000_300_000,
+      sess: [9],
+      sg,
+    });
+    expect(worst.sg).toBe(sg);
+    expect(statusBytes(worst)).toBeLessThanOrEqual(STATUS_PAYLOAD_BUDGET);
+  });
+
   test("the budget beside one login: five exclaves whole with Codex's entry, four with one of every field", () => {
     // Codex reports no per-model window on its one bucket and no credit amounts (`c` alone): docs/codex.md, "Quota".
     const codex = { x: 0, h: 100, d: 100, hr: T + 3600, dr: T + 86_400, c: 100, s: "cache" as const, at: T };
