@@ -2290,7 +2290,7 @@ describe("store", () => {
     try {
       await waitForApp(online(deviceId), "machine online");
       expect(scanTime()).toBe(info.scannedAt);
-      await store.rescan(deviceId);
+      await store.rescan();
       expect(store.getState().rescan).toEqual(RESCAN_IDLE);
       expect(scanTime()).toBe(scannedAt);
     } finally {
@@ -2532,7 +2532,8 @@ describe("store", () => {
     }
   });
 
-  test("a rescan failure survives another sheet and is cleared once its own closes", async () => {
+  // One fresh machine: the suite's relay registry is capped (32), shared by every test here.
+  test("a rescan failure survives another sheet and is cleared once the Repo sheet closes", async () => {
     const deviceId = await newDeviceId();
     // No rescan handler: the request can only time out.
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Mute"), {
@@ -2541,17 +2542,18 @@ describe("store", () => {
     const { store, waitForApp, stop } = startStore({ machine: deviceId }, { timeouts: { rescan: 300 } });
     try {
       await waitForApp(online(deviceId), "machine online");
-      store.openSheet("machine");
-      void store.rescan(deviceId);
-      expect(store.getState().rescan).toEqual({ kind: "scanning", deviceId });
-      // Backing out into another sheet mid-scan: the failure lands with no Machine
+      store.openSheet("repo");
+      void store.rescan();
+      const asked = store.getState().rescan;
+      expect(asked.kind === "scanning" && asked.deviceIds.includes(deviceId)).toBe(true);
+      // Backing out into another sheet mid-scan: the failure lands with no Repo
       // sheet to show it, so it has to still be there on the next open.
       store.onPopState();
       store.openSheet("model");
       await waitForApp((state) => state.rescan.kind === "failed", "rescan failure surfaced");
       store.onPopState();
-      store.openSheet("machine");
-      expect(store.getState().rescan).toEqual({ kind: "failed", deviceId });
+      store.openSheet("repo");
+      expect(store.getState().rescan).toEqual({ kind: "failed", deviceIds: [deviceId] });
       store.onPopState();
       expect(store.getState().rescan).toEqual(RESCAN_IDLE);
     } finally {

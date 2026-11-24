@@ -180,7 +180,7 @@ function closeTop(state: AppState): Partial<AppState> | null {
   if (sheet !== null) {
     // Cleared on the way out, not on the next open: a failure that landed while
     // another layer was up would otherwise be reset before it was ever shown.
-    const rescan = sheet === "machine" && state.rescan.kind === "failed" ? RESCAN_IDLE : state.rescan;
+    const rescan = sheet === "repo" && state.rescan.kind === "failed" ? RESCAN_IDLE : state.rescan;
     return { sheet: null, rescan };
   }
   // Opened over the Queue screen, so it closes first.
@@ -1328,17 +1328,31 @@ export class Store {
     this.#patch({ verdict });
   }
 
-  /** One machine's `rescan`, from its row on the Machine sheet; only that row shows it scanning or failed. */
-  async rescan(deviceId: string): Promise<void> {
+  /**
+   * The Repo sheet's `rescan`, asked of every connected machine at once; an offline one can't
+   * answer. Each machine leaves `scanning` as its own reply lands, so a slow one doesn't hold
+   * the others' rows.
+   */
+  async rescan(): Promise<void> {
     if (this.#state.rescan.kind === "scanning") return;
-    this.#patch({ rescan: { kind: "scanning", deviceId } });
-    try {
-      await this.#rescan(deviceId);
-      this.#patch({ rescan: RESCAN_IDLE });
-    } catch {
-      // The previous list stays in place — the truth we had — with the failure said inline.
-      this.#patch({ rescan: { kind: "failed", deviceId } });
-    }
+    const asked = this.#state.relay.machines.filter((m) => m.connected).map((m) => m.deviceId);
+    if (asked.length === 0) return;
+    let pending = asked;
+    const failed: string[] = [];
+    this.#patch({ rescan: { kind: "scanning", deviceIds: pending } });
+    await Promise.all(
+      asked.map(async (deviceId) => {
+        try {
+          await this.#rescan(deviceId);
+        } catch {
+          // Its previous list stays in place — the truth we had — with the failure said inline.
+          failed.push(deviceId);
+        }
+        pending = pending.filter((id) => id !== deviceId);
+        if (pending.length > 0) this.#patch({ rescan: { kind: "scanning", deviceIds: pending } });
+      }),
+    );
+    this.#patch({ rescan: failed.length === 0 ? RESCAN_IDLE : { kind: "failed", deviceIds: failed } });
   }
 
   /**

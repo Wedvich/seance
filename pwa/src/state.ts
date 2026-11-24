@@ -176,12 +176,13 @@ export function resolveNotBeforeChoice(choice: NotBeforeChoice, now: number): nu
 }
 
 /**
- * The Machine sheet's rescan action: inline scanning/failure state on the row it
- * was asked for, so only that row shows it.
+ * The Repo sheet's rescan, asked of every connected machine at once. `deviceIds` are the
+ * machines still scanning, or, once all have answered, the ones that failed: their rows on
+ * the Machine sheet say so, and the Repo sheet names them.
  */
 export type RescanState =
   | { readonly kind: "idle" }
-  | { readonly kind: "scanning" | "failed"; readonly deviceId: string };
+  | { readonly kind: "scanning" | "failed"; readonly deviceIds: readonly string[] };
 
 /** One shared object, so `#patch`'s identity check sees an idle rescan as unchanged. */
 export const RESCAN_IDLE: RescanState = { kind: "idle" };

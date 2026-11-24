@@ -121,13 +121,16 @@ export interface MachineChoice {
   readonly sub: string;
   readonly disabled: boolean;
   readonly selected: boolean;
-  /** Rescan is offered on connected rows only: an offline machine can't answer it. */
-  readonly canRescan: boolean;
-  /** One rescan runs at a time, so every row's action is off while any is scanning. */
-  readonly rescanDisabled: boolean;
-  /** Set only on the row of the machine being rescanned, or whose rescan failed. */
-  readonly rescan: "scanning" | "failed" | null;
   readonly dot: Dot;
+}
+
+/** The Repo sheet's rescan button, beside its filter: asks every connected machine at once. */
+export interface RepoRescan {
+  /** Off while a rescan runs, and with no machine connected to answer one. */
+  readonly disabled: boolean;
+  readonly scanning: boolean;
+  /** Names the machines whose rescan failed; null when none did. */
+  readonly failure: string | null;
 }
 
 /** One row of the Account sheet: an account some exclave reports signed in. */
@@ -244,6 +247,7 @@ export interface ViewModel {
   /** The Auto tile's and row's dot, both pickers'. */
   readonly autoDot: Dot;
   readonly machineChoices: readonly MachineChoice[];
+  readonly repoRescan: RepoRescan;
   readonly accountChoices: readonly AccountChoice[];
   /** The preview asks a leader to route the form, which drops a pin: it is shown with both pickers on auto only. */
   readonly previewShown: boolean;
@@ -937,7 +941,7 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         disabled = true;
         sub = `${accountNameIn(known, form.account, aliasOf(state.accounts.aliases, form.account))} isn't signed in here`;
       }
-      const here = rescan.kind !== "idle" && rescan.deviceId === machine.deviceId ? rescan.kind : null;
+      const here = rescan.kind !== "idle" && rescan.deviceIds.includes(machine.deviceId) ? rescan.kind : null;
       // Selectable: a pin on it waits until it reopens, which the form's status says.
       if (!disabled && closedAt(machine) !== null) sub = `closed to scheduled work · ${sub}`;
       if (here === "scanning") sub = "scanning…";
@@ -947,12 +951,23 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         sub,
         disabled,
         selected: machine.deviceId === form.machine,
-        canRescan: machine.connected,
-        rescanDisabled: rescan.kind === "scanning",
-        rescan: here,
         dot: presenceDot(relay, machineDot(machine)),
       };
     });
+}
+
+function deriveRepoRescan(state: AppState): RepoRescan {
+  const { relay, rescan } = state;
+  const scanning = rescan.kind === "scanning";
+  const failed =
+    rescan.kind === "failed"
+      ? relay.machines.filter((m) => rescan.deviceIds.includes(m.deviceId)).map((m) => m.name)
+      : [];
+  return {
+    disabled: scanning || !relay.machines.some((m) => m.connected),
+    scanning,
+    failure: failed.length === 0 ? null : `Couldn't rescan ${failed.join(", ")} — showing the last known list.`,
+  };
 }
 
 function deriveAccountChoices(state: AppState): readonly AccountChoice[] {
@@ -1309,6 +1324,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     autoAvailability: availability,
     autoDot,
     machineChoices: deriveMachineChoices(state, now),
+    repoRescan: deriveRepoRescan(state),
     accountChoices: deriveAccountChoices(state),
     previewShown: previewAsked(form, state.notBefore),
     queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),

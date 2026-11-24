@@ -83,7 +83,7 @@ export interface SpawnActions {
   readonly pickAccount: (accountId: string | null) => void;
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
-  readonly rescan: (deviceId: string) => void;
+  readonly rescan: () => void;
   readonly setModel: (pick: ModelPick) => void;
   readonly setEffort: (effort: Effort) => void;
   readonly setAutonomy: (autonomy: AutonomyLevel) => void;
@@ -539,7 +539,7 @@ function ActiveSheet(props: {
           disabled={!auto.available}
           onClick={() => actions.pickMachine(null)}
         />
-        {view.machineChoices.map(({ machine, sub, disabled, selected, canRescan, rescanDisabled, dot }) => (
+        {view.machineChoices.map(({ machine, sub, disabled, selected, dot }) => (
           <SheetItem
             key={machine.deviceId}
             label={machine.name}
@@ -551,9 +551,6 @@ function ActiveSheet(props: {
             // it holds a socket for, so on a connected row it would do nothing.
             onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
             removeLabel={`Forget ${machine.name}`}
-            onAction={canRescan ? () => actions.rescan(machine.deviceId) : null}
-            actionLabel={`Rescan ${machine.name}`}
-            actionDisabled={rescanDisabled}
             onClick={() => actions.pickMachine(machine.deviceId)}
           />
         ))}
@@ -781,6 +778,26 @@ function NotBeforeSheet(props: {
   );
 }
 
+/** Circular arrow, the stroke weight of the filter's magnifier beside it. */
+function RescanIcon(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v5h-5" />
+    </svg>
+  );
+}
+
 /** The filter text is component state; every open remounts the sheet (keyed by SpawnScreen), so it starts empty. */
 function RepoSheet(props: {
   actions: SpawnActions;
@@ -792,13 +809,26 @@ function RepoSheet(props: {
   const { actions, view, worktree, closing, onExited } = props;
   const [query, setQuery] = useState("");
   const rows = view.repos.filter((repo) => matchesFilter(query, [repo.label, repo.origin]));
+  const { repoRescan } = view;
+  const rescan = (
+    <button
+      type="button"
+      className={repoRescan.scanning ? "sheet-search-action sheet-search-action-busy" : "sheet-search-action"}
+      onClick={actions.rescan}
+      disabled={repoRescan.disabled}
+      aria-label={repoRescan.scanning ? "Rescanning all machines" : "Rescan all machines"}
+      title="Rescan all machines"
+    >
+      <RescanIcon />
+    </button>
+  );
   return (
     <Sheet
       title={SHEET_TITLES.repo}
       closing={closing}
       onExited={onExited}
       onClose={actions.dismissLayer}
-      search={{ label: "Filter repos", query, onQuery: setQuery }}
+      search={{ label: "Filter repos", query, onQuery: setQuery, action: rescan }}
       footer={
         <SheetSetting title="Fresh worktree" hint={view.worktreeHint} on={worktree} onToggle={actions.toggleWorktree} />
       }
@@ -814,6 +844,11 @@ function RepoSheet(props: {
           onClick={() => actions.selectRepo(repo.origin)}
         />
       ))}
+      {repoRescan.failure !== null && (
+        <p className="sheet-note" role="status">
+          {repoRescan.failure}
+        </p>
+      )}
       {view.repos.length === 0 ? (
         <p className="sheet-note">No clone with an origin is in scope of the pinned machine and account.</p>
       ) : (
