@@ -831,6 +831,12 @@ export async function writeAgentSessionFile(
 
 const CODEX_STUB = join(import.meta.dir, "codex-stub.ts");
 
+/** One request a `--listen` stub server took (`codex-stub.ts`). */
+export interface CodexRpc {
+  readonly method: string;
+  readonly params: unknown;
+}
+
 /** What one call of the Codex stub saw (`codex-stub.ts`). */
 export interface CodexCall {
   readonly argv: readonly string[];
@@ -845,6 +851,8 @@ export interface CodexStub {
   /** Replaces the scenario every later call reads (`codex-stub.ts`'s `Scenario`). */
   readonly scenario: (scenario: Record<string, unknown>) => Promise<void>;
   readonly calls: () => Promise<readonly CodexCall[]>;
+  /** The requests a `--listen` server took, in order. */
+  readonly rpc: () => Promise<readonly CodexRpc[]>;
   /** Forgets the calls so far. */
   readonly reset: () => Promise<void>;
 }
@@ -854,6 +862,15 @@ export async function makeCodexStub(dir: string): Promise<CodexStub> {
   await mkdir(dir, { recursive: true });
   const scenarioPath = join(dir, "codex.json");
   const callsPath = `${scenarioPath}.calls`;
+  const rpcPath = `${scenarioPath}.rpc`;
+  const lines = async (path: string): Promise<readonly string[]> =>
+    (
+      await Bun.file(path)
+        .text()
+        .catch(() => "")
+    )
+      .split("\n")
+      .filter((line) => line !== "");
   await writeFile(scenarioPath, "{}");
   const path = await scriptStub(dir, "codex", `exec "${process.execPath}" "${CODEX_STUB}" "${scenarioPath}" "$@"`);
   // The warm-up stops at the stub's own flag; this first real call pays bun's start before any timed probe.
@@ -862,15 +879,11 @@ export async function makeCodexStub(dir: string): Promise<CodexStub> {
   return {
     path,
     scenario: (scenario) => writeFile(scenarioPath, JSON.stringify(scenario)),
-    calls: async () => {
-      const text = await Bun.file(callsPath)
-        .text()
-        .catch(() => "");
-      return text
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line): CodexCall => JSON.parse(line));
+    calls: async () => (await lines(callsPath)).map((line): CodexCall => JSON.parse(line)),
+    rpc: async () => (await lines(rpcPath)).map((line): CodexRpc => JSON.parse(line)),
+    reset: async () => {
+      await rm(callsPath, { force: true });
+      await rm(rpcPath, { force: true });
     },
-    reset: () => rm(callsPath, { force: true }),
   };
 }

@@ -1,5 +1,6 @@
 import type { SessionBackend } from "./backend.ts";
 import type { Check } from "./check.ts";
+import { codexHome } from "./codex/home.ts";
 import type { Config } from "./config.ts";
 import { despawnSession } from "./despawn.ts";
 import { listClaudeSessions, listStuckWindows } from "./sessions.ts";
@@ -32,7 +33,12 @@ export function createBackend(
       spawnSession(
         request,
         repos,
-        { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag },
+        {
+          ...opts,
+          tmuxSession: config.tmuxSession,
+          machineTag: config.machineTag,
+          ...(config.codex === undefined ? {} : { codex: { config: config.codex, home: codexHome() } }),
+        },
         continuation,
         attachments,
       ),

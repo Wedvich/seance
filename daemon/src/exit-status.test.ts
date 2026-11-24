@@ -22,6 +22,7 @@ const idle = {
 
 function pane(paneId: string, fields: Partial<PaneInfo> = {}): PaneInfo {
   return {
+    agent: "claude",
     paneId,
     windowId: `@${paneId.slice(1)}`,
     windowName: "task",

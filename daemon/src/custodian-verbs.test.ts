@@ -29,6 +29,7 @@ const CLOSE_AFTER = CUSTODIAN_DEFAULTS.closeAfterMinutes * MIN;
 const ROUND = "%90";
 
 const info = (over: Partial<PaneInfo> = {}): PaneInfo => ({
+  agent: "claude",
   paneId: "%1",
   windowId: "@1",
   windowName: "work",

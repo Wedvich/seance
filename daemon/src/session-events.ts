@@ -475,6 +475,7 @@ export class EndedTasks {
               repo: site.repo,
               path: site.worktree,
               ...(site.session === undefined ? {} : { session: site.session }),
+              ...(site.agent === undefined ? {} : { agent: site.agent }),
               ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
               ...(site.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
             },
@@ -865,6 +866,10 @@ export class EndedTasks {
     // No `--continue` fallback: it is what misses a worktree spawn's conversation.
     if (note.session === undefined) {
       return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
+    }
+    // A Codex thread is no Claude session `--resume` could take: continuing one is item 8 (docs/codex.md).
+    if (note.agent !== undefined) {
+      return { refused: "a Codex task's session can't be continued yet" };
     }
     // The PR this session had, for the continuation to inherit: its own report, else what it inherited. Every
     // ending that leaves the task awaiting-merge keeps it (a crash, a vanished window, a despawn: `ended()` in

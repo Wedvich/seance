@@ -1,4 +1,7 @@
+import type { AgentKind } from "@seance/shared";
 import { claudeDriver } from "./agents/claude.ts";
+import { closeCodex } from "./agents/codex.ts";
+import type { AgentDriver } from "./agents/driver.ts";
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { noteClosing } from "./closing-panes.ts";
 import { exec } from "./exec.ts";
@@ -7,6 +10,9 @@ import { isRegistered, paneInfo, type PaneInfo } from "./sessions.ts";
 import { tmux } from "./tmux.ts";
 
 const DEFAULT_GRACE_MS = 5_000;
+
+/** Each agent's close, by the pane's own start mark (`PaneInfo.agent`), never a field of the request. */
+const CLOSES: Readonly<Record<AgentKind, AgentDriver["close"]>> = { claude: claudeDriver.close, codex: closeCodex };
 /** How long a killed pane's processes get to exit on their own, and again after SIGTERM. */
 const DEFAULT_REAP_WAIT_MS = 2_000;
 
@@ -77,11 +83,12 @@ async function close(
   leaveDead: boolean,
 ): Promise<DespawnResult> {
   const window = pane.windowName;
-  if (!force && (await claudeDriver.close(pane, { graceMs: graceMs ?? DEFAULT_GRACE_MS, leaveDead }))) {
-    return { window, outcome: "exited" };
+  const agent = pane.agent === "claude" ? {} : { agent: pane.agent };
+  if (!force && (await CLOSES[pane.agent](pane, { graceMs: graceMs ?? DEFAULT_GRACE_MS, leaveDead }))) {
+    return { window, outcome: "exited", ...agent };
   }
   await killPane(pane.paneId, reapWaitMs ?? DEFAULT_REAP_WAIT_MS);
-  return { window, outcome: "killed" };
+  return { window, outcome: "killed", ...agent };
 }
 
 /**

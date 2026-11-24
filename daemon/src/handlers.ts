@@ -255,8 +255,9 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
   // Only ever `true`: it is the drain-capable leader's word that it routes a `machine_closed` again.
   if (obj["routesClosed"] !== undefined && obj["routesClosed"] !== true) return false;
-  // No driver here launches another agent yet (docs/codex.md, build order item 6): one named is refused, never started
-  // as Claude. A leader sends it only to a daemon advertising `CAPABILITIES.codex`, which this build does not.
+  // The Codex driver exists (`agents/codex.ts`) but no wire spawn reaches it before the session's events and close do
+  // (docs/codex.md, build order item 7): one named is refused, never started as Claude. A leader sends it only to a
+  // daemon advertising `CAPABILITIES.codex`, which this build does not.
   if (obj["agent"] !== undefined) return false;
   // The rules a well-formed continuation can still break (the scheduler's client, a task id, not itself)
   // are `continuationRefusal`'s: a malformed request answers `internal_error`, a transport code that
@@ -631,6 +632,7 @@ async function handleSpawn(
               repo: entry.path,
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
+              ...(outcome.agent === undefined ? {} : { agent: outcome.agent }),
               ...(continuedPr === undefined ? {} : { continuedPr }),
               ...(stackedOn === undefined ? {} : { stackedOn }),
             },

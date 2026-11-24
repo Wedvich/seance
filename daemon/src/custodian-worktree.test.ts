@@ -77,6 +77,7 @@ function rig(
 
 const quiet = { turnEndedAt: TURN_END, touchedAt: TURN_END };
 const pane = (path: string): PaneInfo => ({
+  agent: "claude",
   paneId: "%1",
   windowId: "@1",
   windowName: "w",

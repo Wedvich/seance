@@ -6,6 +6,7 @@ import { basename, dirname } from "node:path";
 import {
   amendedFields,
   DEFAULT_EFFORT,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_MODEL,
   quote,
   type AmendRequest,
@@ -192,6 +193,9 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const clientNote = request.client === undefined ? "" : `client=${quote(request.client)} `;
       // Only when on, so every ordinary spawn's line stays byte-identical.
       const planNote = request.plan === true ? "plan=true " : "";
+      // Only when not Claude, as `plan`; a constant word of `AGENT_LOGIN_KINDS`, never wire text.
+      const agentNote = request.agent === undefined ? "" : `agent=${request.agent} `;
+      const model = request.model ?? (request.agent === "codex" ? DEFAULT_CODEX_MODEL : DEFAULT_MODEL);
       const autonomyNote = request.autonomy === undefined ? "" : `autonomy=${request.autonomy} `;
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
       const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
@@ -207,8 +211,8 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
           ? ""
           : `attachments=${files.length} attachmentBytes=${files.reduce((sum, file) => sum + file.size, 0)} `;
       await emit(
-        `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
-          `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
+        `${clientNote}${agentNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
+          `model=${quote(model)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
           autonomyNote +
           taskNote +
@@ -256,7 +260,8 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
       await emit(`${clientNote}target=${quote(request.id)}${forceNote}`);
     },
     ok: async (result: DespawnResult): Promise<void> => {
-      await emit(`ok window=${quote(result.window)} outcome=${result.outcome}`);
+      const agentNote = result.agent === undefined ? "" : ` agent=${result.agent}`;
+      await emit(`ok window=${quote(result.window)} outcome=${result.outcome}${agentNote}`);
     },
     failed: async (code: string): Promise<void> => {
       await emit(`failed code=${code}`);

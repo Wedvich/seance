@@ -16,10 +16,12 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@seance/scheduler": "workspace:*",
     "@seance/shared": "workspace:*",
+    "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
-    "@types/bun": "^1.4.2"
+    "@types/bun": "^1.4.2",
+    "@types/ws": "^8.18.1"
   }
 }

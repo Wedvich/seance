@@ -1,8 +1,19 @@
 import { constants } from "node:os";
 import { EXIT_STATUS_MAX, isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
-import { runsAgentCommand } from "./agents/panes.ts";
+import type { AgentKind } from "@seance/shared";
+import { agentOf, runsAgentCommand } from "./agents/panes.ts";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
-import { capturePane, CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
+import {
+  AGENT,
+  capturePane,
+  CUSTODIAN_FIELD,
+  FIELD_SEP,
+  listAllPanes,
+  OURS,
+  PANE_TITLED,
+  TASK_FIELD,
+  tmux,
+} from "./tmux.ts";
 
 /**
  * The one registration predicate, shared by the session list and the spawn
@@ -130,6 +141,8 @@ export interface PaneInfo {
   readonly windowName: string;
   /** Started by séance — the `OURS` start-command match. */
   readonly ours: boolean;
+  /** The agent whose mark its start command carries (`AGENT`); `claude` for any pane without another's. */
+  readonly agent: AgentKind;
   readonly dead: boolean;
   /** When the pane died, epoch ms; null while alive, or on a tmux without `pane_dead_time`. */
   readonly deadAt: number | null;
@@ -188,6 +201,7 @@ const PANE_INFO_FORMAT = [
   TASK_FIELD,
   "#{pane_pid}",
   CUSTODIAN_FIELD,
+  AGENT,
   "#{pane_current_path}",
 ].join(FIELD_SEP);
 
@@ -210,6 +224,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       task,
       pid,
       custodian,
+      agent,
       ...rest
     ] = line.split(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || command === undefined || dead === undefined) continue;
@@ -220,7 +235,8 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       windowName === undefined ||
       task === undefined ||
       pid === undefined ||
-      custodian === undefined
+      custodian === undefined ||
+      agent === undefined
     )
       continue;
     if (rest.length === 0) continue;
@@ -233,6 +249,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       windowId,
       windowName,
       ours: ours === "1",
+      agent: ours === "1" ? agentOf(agent) : "claude",
       dead: dead === "1",
       deadAt: dead === "1" && deadSeconds > 0 ? deadSeconds * 1000 : null,
       deadStatus: dead === "1" ? exitStatus(deadStatus, deadSignal) : null,

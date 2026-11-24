@@ -1,6 +1,9 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 item 4 and item 5 built, the rest design.** Item 4 (2026-11-24), the task
+**Status: phase 1 (items 1, 2, 3), phase 2 items 4 and 6 and item 5 built, the rest design.** Item 6 (2026-11-24),
+the Codex launch, is in DESIGN.md: Daemon, "Codex sessions"; and the threat model's "A Codex pane's server socket",
+"What the daemon sends a Codex server, and keeps" and "A Codex launch's thread id" (this doc's threat-model items 4, 5
+and 10, and 12's spawn and despawn lines). Item 4 (2026-11-24), the task
 field `agent` and its routing, is in DESIGN.md: Scheduler, "Codex tasks"; Wire protocol's compatibility list; and the
 threat model's "The task field `agent`" (this doc's threat-model item 9). Item 1 (2026-11-23), the daemon's side of the account — the
 `codex` config block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login |
@@ -336,7 +339,7 @@ sequenceDiagram
   D->>D: ledger notes thread id
   D->>S: turn/start {threadId, input: seed, effort}
   D->>P: writes <run>/thread
-  P->>S: exec codex resume <thread> --remote unix://<run>/s.sock
+  P->>S: codex resume --remote unix://<run>/s.sock -- <thread>
   D-->>L: spawn reply (window, pane)
   S-->>D: thread/status/changed, turn/completed, account/rateLimits/updated …
 ```
@@ -350,12 +353,19 @@ sequenceDiagram
 3. **The run dir** is `/tmp/seance-cx-<mkdtemp>` (0700, checked with `lstat`; under `/tmp`, never `tmpdir()`, as the
    custodian's is), holding `run.sh`, `thread` and the `--listen` path `s.sock`. Codex makes that path a symlink to a
    socket in its own `/tmp/codex-daemon-<uid>/` (a 0700 directory, a 0600 socket, removed when the server exits; S3), so
-   the daemon dials only once `lstat` shows the link and its target's directory owned by its uid at 0700.
+   the daemon dials only once `lstat` shows the link and its target's directory owned by its uid at 0700. _Decided at
+   build:_ a socket bound directly at the path, owned by the daemon's uid, is accepted too, because the run dir is
+   already the daemon's own 0700 directory; a release that stops linking costs nothing.
 4. **The pane runs `exec /bin/sh '<run>/run.sh'`** (the custodian's pattern: the owner's tmux `default-shell` parses no
    quoting of it), wrapped in `caffeinate -is` on macOS. The script is constant text with daemon paths through `shq()`:
-   start the server in the background, wait (bounded) for `thread`, then `exec` the TUI on that thread. The server is
-   the shell's child, so after the `exec` it is the TUI's: the pane pid is the TUI, and every hook, tool command and MCP
-   server is a descendant of it. The window carries `SEANCE_AUTONOMY` and the machine tag like any session.
+   start the server in the background, wait (bounded) for `thread`, then run the TUI on that thread. _Corrected at
+   build:_ this said `exec` the TUI, but an `exec`ed TUI's exit leaves the server orphaned to init, listening with no
+   pane. Nor can the TUI be a foreground child: it outlives a hangup, and the shell defers its trap until a foreground
+   child exits, so a window closed by hand left both running (seen live). The shell starts the TUI in the background on
+   the pane's terminal and `wait`s on it; a hangup interrupts the `wait`, and the `EXIT` trap ends the TUI and the
+   server and removes the run dir, passing the TUI's status on for harvest. The pane pid is the shell (under `caffeinate` on macOS), and every hook, tool command and
+   MCP server is a descendant of it. The script also unsets `OPENAI_API_KEY` and `CODEX_API_KEY`, so the session bills
+   the home's login. The window carries `SEANCE_AUTONOMY` and the machine tag like any session.
 5. **The daemon dials the socket** with a WebSocket client (Bun's own cannot dial a unix socket; the `ws` package can, as
    `ws+unix:`; S3), checks the server's `initialize` answer, and calls `thread/start` with `cwd` its own worktree path,
    `model` from the parsed spec, and approval, sandbox and reviewer from `config.json` (D5). The returned thread id is
@@ -559,8 +569,8 @@ nothing.
    places a Codex task yet: no daemon launches one. _Corrected at build:_ the version floor (`CODEX_MIN_VERSION`,
    `parseCodexVersion`, `versionAtLeast`) moved from `daemon/src/codex/probe.ts` to `shared/src/codex.ts`, because the
    scheduler may not import the daemon and `login_outdated` needs it; a login with no `version` reads outdated. A
-   daemon refuses a spawn carrying `agent` as malformed until item 6, so even a wrongly advertised `codex` never starts
-   Claude. Codex 0.171.0 lists `max` effort on most models (below), so "Codex has no `max`" is out of date; the
+   daemon refuses a spawn carrying `agent` as malformed until item 7 (item 6 built the driver behind that refusal), so
+   even a wrongly advertised `codex` never starts Claude. Codex 0.171.0 lists `max` effort on most models (below), so "Codex has no `max`" is out of date; the
    refusal stands for V1, since the floor's 0.170.0 and some models lack it.
 5. **Built 2026-11-23: the driver seam, no behaviour change** (at once, beside 1): Claude's argv, pane recognition,
    graceful close, trust and resume move behind an `AgentDriver` interface (`daemon/src/agents/claude.ts`), the command
@@ -568,8 +578,11 @@ nothing.
    Codex's driver is `panes` (its run-dir mark), `launch` (run dir, script, connection), `started` (`thread/start`,
    the seed's turn; answers the thread id) and `close` (`turn/interrupt`); the spawn path makes its worktree, as for a
    stack, and `driverFor` (`spawn.ts`) picks it by the task's `agent`.
-6. **The Codex launch** (after 1, 4 and 5): the run dir and script, the connection, `thread/start`, the ledger's thread
-   id, the seed, the TUI's late join, pane recognition. Not advertised: a wire spawn of `agent: "codex"` is refused.
+6. **Built 2026-11-24** (DESIGN.md, Daemon, "Codex sessions"). **The Codex launch** (after 1, 4 and 5): the run dir
+   and script, the connection, `thread/start`, the ledger's thread id, the seed, the TUI's late join, pane
+   recognition. Not advertised: a wire spawn of `agent: "codex"` is refused. _Corrected at build:_ the ledger notes
+   `agent` beside the thread id (`TaskNote.agent`) and a continuation refuses such a note, so item 10's continue is
+   the only thing that may resume a thread; `close` kills the pane until item 7's `turn/interrupt`.
 7. **The Codex session** (after 6): notifications into the pipeline, the graceful close, reconnect at start, the tools'
    binding, the custodian's view; then the daemon advertises `codex` while a login is configured.
 8. **Clients** (after 4): the PWA's model picker grouped by agent (picking a GPT model sets `agent`), effort per agent,
@@ -617,10 +630,10 @@ Still to run, each before the phase named; each checks a fact the design already
 - ~~`DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version~~: built from `model/list` on
   `codex app-server` 0.171.0 (2026-11-24), every model it lists with no `upgrade` in its order, the default its
   `isDefault` one (DESIGN.md, Scheduler, "Codex tasks").
-- The daemon's WebSocket client over a unix socket: `ws` as a daemon dependency, or a minimal one over
-  `Bun.connect({ unix })`.
-- Recognising a Codex pane: its `AgentPanes.startMark` (`agents/panes.ts`, read by `sessions.ts` through `OURS`), a
-  glob for the run dir `/tmp/seance-cx-*` in its start command, beside the window's `@seance-task`.
+- ~~The daemon's WebSocket client over a unix socket~~: built on `ws` as a daemon dependency (DESIGN.md, Daemon,
+  "Codex sessions"), already in the lockfile through raycast, and verified dialling `ws+unix:` under Bun.
+- ~~Recognising a Codex pane~~: built, `CODEX_PANES.startMark` a glob for `/tmp/seance-cx-` in the start command,
+  folded into `OURS` and the `AGENT` format that sets `PaneInfo.agent`.
 - ~~The key a login's `SettingsRecord.authAlerts` entry uses ("Login health")~~: built, `login.codex` (DESIGN.md,
   Scheduler, "Auth alerts").
 

@@ -154,3 +154,19 @@ export async function fetchBase(repo: RepoEntry, branch: string, terminal?: Term
   }
   return { ok: true, sha };
 }
+
+/**
+ * The commit `origin/<default>` names on disk, read exactly as `fetchBase` reads a base: what a Codex worktree starts
+ * at, since Codex has no `--worktree` of Claude's to branch it (DESIGN.md, Daemon, "Codex sessions"). Read after
+ * `freshenBase`, which never fails a spawn, so an offline origin starts from the last fetched tip, as Claude's does.
+ */
+export async function defaultBaseTip(repo: RepoEntry): Promise<BaseTip> {
+  const branch = await readDefaultBranch(repo.path).catch(() => null);
+  if (branch === null) return { ok: false, message: `${repo.name} has no default branch on disk to start from` };
+  const tip = await hardenedGit(repo.path, ["show-ref", "--verify", "-s", `refs/remotes/origin/${branch}`], 5_000);
+  const sha = tip.stdout.trim();
+  if (tip.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/u.test(sha)) {
+    return { ok: false, message: `origin/${branch} is not on disk to start from` };
+  }
+  return { ok: true, sha };
+}
