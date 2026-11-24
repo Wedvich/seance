@@ -2334,12 +2334,14 @@ describe("store", () => {
     }
   });
 
-  // One daemon for both owner acts: the file's relay caps its registry, so a test does not get a machine of its own.
-  test("the custodian controls and a session rename send their op only to a machine advertising it, and show a refusal as fixed text", async () => {
+  // One daemon for the owner's acts: the file's relay caps its registry, so a test does not get a machine of its own.
+  test("the custodian controls and a session rename send their op only to a machine advertising it, a session close despawns, and each shows a refusal as fixed text", async () => {
     const seated = await newDeviceId();
     const plain = await newDeviceId();
     const asked: unknown[] = [];
     const tagged: unknown[] = [];
+    const despawned: unknown[] = [];
+    let despawnCode: string | null = null;
     let reads = 0;
     let refuse = false;
     let tagCode = "tasked";
@@ -2357,6 +2359,11 @@ describe("store", () => {
           tagged.push(payload);
           if (refuse) return { ok: false, code: tagCode, message: "daemon text, never shown" };
           return { ok: true, value: "release notes" };
+        },
+        despawn: (payload) => {
+          despawned.push(payload);
+          if (despawnCode !== null) return { ok: false, code: despawnCode, message: "daemon text, never shown" };
+          return { ok: true, window: "w", outcome: "exited", sessions: [] };
         },
         custodian: (payload) => {
           asked.push(payload);
@@ -2408,6 +2415,21 @@ describe("store", () => {
         "This machine can't rename sessions right now",
       );
       expect(tagged).toHaveLength(4);
+
+      // A close is the graceful despawn of that pane, and reads the machine's sessions again whatever the answer.
+      const beforeClose = reads;
+      await store.closeSession(seated, "%3");
+      expect(despawned).toEqual([{ id: "%3", client: "pwa" }]);
+      expect(reads).toBe(beforeClose + 1);
+      expect(store.getState().queueNotice).toBeNull();
+      despawnCode = "session_not_found";
+      await store.closeSession(seated, "%3");
+      expect(store.getState().queueNotice).toBe("That session had already ended");
+      expect(reads).toBe(beforeClose + 2);
+      // Never sent to a machine that is not connected.
+      await store.closeSession(plain, "%3");
+      expect(despawned).toHaveLength(2);
+      expect(store.getState().queueNotice).toBe("That session's machine isn't connected");
     } finally {
       stop();
       daemon.close();
