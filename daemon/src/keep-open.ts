@@ -82,6 +82,8 @@ export function createKeepOpen(deps: KeepOpenDeps): KeepOpen {
   /** Keyed by session: one hold per `claude` process. */
   const holds = new Map<SessionKey, Hold>();
   let stopped = false;
+  /** `start`'s reload: a frame waits for it, or its save would overwrite the file before the reload read it. */
+  let loaded: Promise<void> = Promise.resolve();
 
   const writeFile = async (snapshot: object): Promise<void> => {
     await mkdir(dirname(deps.path), { recursive: true, mode: 0o700 });
@@ -118,7 +120,7 @@ export function createKeepOpen(deps: KeepOpenDeps): KeepOpen {
   const handle: KeepOpen["handle"] = async (raw, peer) => {
     const frame = parseKeepOpenFrame(raw);
     if (frame === null) {
-      await deps.audit({ op: "hold", outcome: "invalid" });
+      await deps.audit({ op: isRecord(raw) && raw["keep"] === false ? "release" : "hold", outcome: "invalid" });
       return { ok: false, code: "invalid" };
     }
     const op = frame.keep ? "hold" : "release";
@@ -128,6 +130,7 @@ export function createKeepOpen(deps: KeepOpenDeps): KeepOpen {
     };
     if (stopped) return await refuse("stopping");
     if (peer === null || !hostNamesPeers()) return await refuse("unbound");
+    await loaded;
     const bound = await bindPeer(peer, await deps.panes(), hostNamesPeers);
     if (bound === null) return await refuse("unbound");
     if (bound.session === null) return await refuse("nosession");
@@ -135,6 +138,8 @@ export function createKeepOpen(deps: KeepOpenDeps): KeepOpen {
     // The stop could land during the binding's awaits: nothing is written after it.
     if (stopped) return await refuse("stopping");
     const swept = await sweep();
+    // The sweep's audit lines await too: a hold taken after the stop would be answered held and never saved.
+    if (stopped) return await refuse("stopping");
     if (!frame.keep) {
       const had = holds.delete(session);
       if (had || swept) await save();
@@ -156,7 +161,8 @@ export function createKeepOpen(deps: KeepOpenDeps): KeepOpen {
     return false;
   };
 
-  const start: KeepOpen["start"] = async () => {
+  const load = async (): Promise<void> => {
+    if (stopped) return;
     await (writeChains.get(deps.path) ?? Promise.resolve());
     let text: string;
     try {
@@ -176,9 +182,18 @@ export function createKeepOpen(deps: KeepOpenDeps): KeepOpen {
       warn(`keep-open: ${deps.path} is unreadable; no session is held`);
       return;
     }
-    // A frame handled while the file was read is newer than the file's view of that session.
-    for (const hold of saved) if (!holds.has(hold.session)) holds.set(hold.session, hold);
+    // A stopped table ends nothing, and its restart reads the file as it stands.
+    if (stopped) return;
+    for (const hold of saved) {
+      if (!holds.has(hold.session) && holds.size < KEEP_OPEN_MACHINE_MAX) holds.set(hold.session, hold);
+    }
     if ((await sweep()) || holds.size !== saved.length) await save();
+  };
+
+  const start: KeepOpen["start"] = () => {
+    const run = load();
+    loaded = run.catch(() => {});
+    return run;
   };
 
   const stop: KeepOpen["stop"] = () => {

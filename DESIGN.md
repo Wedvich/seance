@@ -13253,7 +13253,10 @@ say so. MCP's `keep_session_open` (`keep`, default true; false releases) is that
   (`too_many` for a new session's, never a repeat's). `keep-open.json` under `stateDir()` (0600, atomic rename, one
   write chain per path per process, nothing written once stopped; shutdown awaits it beside the watch table's) holds
   pane ids, process identity and a time; at start an entry is reloaded only while its process runs with the saved start
-  time, so a self-update keeps the holds and a reboot drops them.
+  time, so a self-update keeps the holds and a reboot drops them. A frame waits for that reload before it binds (the
+  socket serves frames while `start` still reads the file, and a frame's save or release would otherwise be undone by
+  it), the reload stops at 64 holds, and a stop during the frame's sweep refuses it `stopping` rather than answer a
+  hold it will never save.
 - **What it holds.** The custodian's `close` (`closeVerdict`: `held_open`, after `foreign` and `marked`) and the seat's
   due check (`seatHolds`, `pane-holds.ts`), and nothing else: the owner's despawn, the drain's ask, a hand-off, a pass
   and reap never read it, and the round's `nudge` and `interrupt` still reach a held session, since a long-lived session

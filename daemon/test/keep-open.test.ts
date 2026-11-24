@@ -149,6 +149,8 @@ describe("a session's hold", () => {
     expect(await r.table.handle({ ...hold, pane: pane.id }, shell.pid)).toEqual({ ok: false, code: "invalid" });
     expect(await r.table.handle({ ...hold, keep: "yes" }, pane.pid)).toEqual({ ok: false, code: "invalid" });
     expect(await r.table.handle({ ...hold, v: 2 }, pane.pid)).toEqual({ ok: false, code: "invalid" });
+    expect(await r.table.handle({ ...release, v: 2 }, pane.pid)).toEqual({ ok: false, code: "invalid" });
+    expect(r.audit.at(-1)).toBe("audit keep-open origin=keep-open op=release outcome=invalid");
     expect(r.table.holds(pane.id)).toBe(false);
 
     const blind = rig({ hostNamesPeers: () => false });
@@ -188,6 +190,29 @@ describe("a session's hold", () => {
     expect(second.table.holds(gone.id)).toBe(false);
     const saved: unknown = JSON.parse(await readFile(first.path, "utf8"));
     expect(saved).toEqual({ v: 1, holds: [expect.objectContaining({ pane: pane.id })] });
+  });
+
+  test("a release sent while the restart reloads the file stays released", async () => {
+    const first = rig();
+    const pane = await claudePane("reload");
+    expect(await first.table.handle(hold, pane.pid)).toEqual({ ok: true, held: true });
+    await first.table.stop();
+    // A FIFO holds `start`'s read open until the test writes the file into it; the save after renames over it.
+    const content = await readFile(first.path, "utf8");
+    await rm(first.path);
+    expect(await Bun.spawn(["mkfifo", first.path]).exited).toBe(0);
+
+    const second = rig({ path: first.path });
+    const starting = second.table.start();
+    const releasing = second.table.handle(release, pane.pid);
+    // Only how sure a regression is to be caught: the table waits for its reload, so the outcome holds either way.
+    await Promise.race([releasing, Bun.sleep(1_000)]);
+    await writeFile(first.path, content);
+    expect(await releasing).toEqual({ ok: true, held: false });
+    await starting;
+    expect(second.table.holds(pane.id)).toBe(false);
+    const saved: unknown = JSON.parse(await readFile(first.path, "utf8"));
+    expect(saved).toEqual({ v: 1, holds: [] });
   });
 
   test("an unreadable file holds nothing and is said, never a failed start", async () => {
