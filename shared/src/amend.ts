@@ -1,3 +1,4 @@
+import { codexAmendRefusal } from "./codex.ts";
 import { utf8Length } from "./successor.ts";
 import { ownerTagsOf, withOwnerTags, writeTags } from "./tags.ts";
 import {
@@ -41,15 +42,18 @@ export function amendedPromptFits(prompt: string, spec: Pick<TaskSpec, "attachme
   return prompt.length <= units && utf8Length(prompt) <= SUCCESSOR_PROMPT_BYTES;
 }
 
-export type AmendRefusal = "prompt_too_long" | "append_only" | "tags_full";
+export type AmendRefusal = "prompt_too_long" | "append_only" | "tags_full" | "agent_unsupported";
 
 /**
  * `spec` with `amend` applied, or why not. A successor's prompt is the leader's (its preamble resets
  * the branch), so it takes `append` only. Every other field is kept as it is, sentinel-bearing ones
  * included: the leader's write seals the spec through the one task sealer. `ownerTags` merge into the task's
- * `owner.*` keys alone (`""` clears one), refused `tags_full` past `TASK_TAG_BUDGET.owner`.
+ * `owner.*` keys alone (`""` clears one), refused `tags_full` past `TASK_TAG_BUDGET.owner`. An effort a create of the
+ * task's agent would be refused (`codexAmendRefusal`: `max` on a Codex task) is `agent_unsupported`, the leader's own
+ * check behind every client's, so no amend leaves a task routing places nowhere.
  */
 export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | AmendRefusal {
+  if (codexAmendRefusal(spec, amend) !== null) return "agent_unsupported";
   let prompt = spec.prompt;
   if (amend.prompt !== undefined) {
     if (amend.prompt.mode === "replace" && spec.succeeds !== undefined) return "append_only";

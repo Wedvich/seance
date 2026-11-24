@@ -236,6 +236,20 @@ describe("amend refuses", () => {
     });
   });
 
+  test("effort max on a Codex task is agent_unsupported and writes nothing; another effort lands", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const task = await enqueue(store, scheduler, spec({ agent: "codex", autonomy: "auto", effort: "high" }));
+    const before = await stored(store, task.id);
+    expect(await scheduler.amend({ taskId: task.id, effort: "max" })).toEqual({ ok: false, code: "agent_unsupported" });
+    expect(await scheduler.amend(await against(task, { mode: "append", text: "more" }, { effort: "max" }))).toEqual({
+      ok: false,
+      code: "agent_unsupported",
+    });
+    expect(await stored(store, task.id)).toEqual(before);
+    expect(await scheduler.amend({ taskId: task.id, effort: "xhigh" })).toMatchObject({ ok: true });
+    expect((await stored(store, task.id))?.body.spec).toMatchObject({ agent: "codex", effort: "xhigh" });
+  });
+
   test("a prompt past the cap is prompt_too_long: the create's, the smaller one beside attachments, and the store's", async () => {
     const { store, scheduler } = setup(new MemoryQueueStore(), offline());
     const plain = await enqueue(store, scheduler, spec());

@@ -112,6 +112,15 @@ describe("amendSpec", () => {
     expect(amendSpec(successor, { taskId: "t", title: "t" })).toEqual(spec({ succeeds, title: "t" }));
   });
 
+  test("effort max on a Codex task is agent_unsupported, whatever else the amendment names; a Claude one takes it", () => {
+    const codex = spec({ agent: "codex", autonomy: "auto", effort: "high" });
+    expect(amendSpec(codex, { taskId: "t", effort: "max" })).toBe("agent_unsupported");
+    expect(amendSpec(codex, { taskId: "t", title: "t", effort: "max" })).toBe("agent_unsupported");
+    expect(amendSpec(codex, { taskId: "t", effort: "xhigh" })).toEqual({ ...codex, effort: "xhigh" });
+    expect(amendSpec(codex, { taskId: "t", effort: null })).toEqual(spec({ agent: "codex", autonomy: "auto" }));
+    expect(amendSpec(spec(), { taskId: "t", effort: "max" })).toEqual(spec({ effort: "max" }));
+  });
+
   test("an amended prompt past its bound is prompt_too_long, the joining blank line counted", () => {
     const max = TASK_REQUEST_LIMITS.prompt;
     const full = spec({ prompt: "x".repeat(max - 3) });

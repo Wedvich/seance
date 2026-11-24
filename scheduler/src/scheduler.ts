@@ -192,7 +192,8 @@ export type RunNowResult =
  * `amend`: the task as amended (or as it stands, when the amendment changed nothing), or why not.
  * `placed`: it left the waiting states; `dispatching`: it is `reserved`, or its spawn is still out.
  * `prompt_changed`: its prompt is not the one `basis` names. `prompt_too_long` and `append_only`:
- * `amendSpec`'s, or the store refused the record as too large. `conflict`: it kept moving under the write.
+ * `amendSpec`'s, or the store refused the record as too large; `agent_unsupported`: `amendSpec`'s, an effort the
+ * task's agent refuses. `conflict`: it kept moving under the write.
  */
 export type AmendResult =
   | { readonly ok: true; readonly task: Task }
