@@ -1780,3 +1780,218 @@ describe("a task's tags on its row", () => {
     }
   });
 });
+
+describe("sessions on the queue screen", () => {
+  const conversation = "1a2b3c4d-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+  const REMOTE = "session_01TuECqfR7Twko9QJm98sWAw";
+  const at = { deviceId: "dev-a", exclave: "main", clone: "app", window: "w" };
+  const entry = (id: string, fields: Partial<SessionEntry> = {}): SessionEntry => ({
+    id,
+    window: `win-${id}`,
+    repo: "app",
+    path: "/x",
+    ...fields,
+  });
+  const live = (kind: "busy" | "idle" | "needs-input", ago: number, extra: object = {}) => ({
+    state: kind,
+    since: NOW - ago,
+    ...extra,
+  });
+  const read = (entries: readonly SessionEntry[], deviceId = "dev-a"): AppState["sessions"] => ({
+    [deviceId]: { at: NOW, sessions: entries },
+  });
+  const viewOf = (
+    tasks: readonly Task[] | null,
+    sessions: AppState["sessions"],
+    machines: readonly Machine[] = [machine()],
+    idle: readonly IdleTaskRef[] = [],
+  ) => deriveQueue(state(tasks === null ? null : ok(tasks, [], 0, idle), { sessions }, { machines }), NOW);
+  const placement = (view: ReturnType<typeof deriveQueue>) =>
+    view.sections.map((s) => [s.title, [...s.rows.map((r) => r.id), ...s.sessions.map((r) => r.id)]]);
+
+  test("a tasked session folds into its task's row, adding Close and its tags, and makes no row of its own", () => {
+    const view = viewOf(
+      [task("t", { state: "running", assignment: at })],
+      read([entry("%1", { taskId: "t", tags: { "self.doing": { value: "on it", at: NOW, scope: "process" } } })]),
+    );
+    expect(placement(view)).toEqual([["Running", ["t"]]]);
+    const row = view.sections[0]?.rows[0];
+    expect(row?.close).toEqual({ deviceId: "dev-a", pane: "%1" });
+    expect(row?.sessionTags.map((g) => [g.namespace, g.tags.map((t) => t.value)])).toEqual([["self", ["on it"]]]);
+    // No session read: no Close, no tags.
+    const bare = viewOf([task("t", { state: "running", assignment: at })], {}).sections[0]?.rows[0];
+    expect([bare?.close, bare?.sessionTags]).toEqual([null, []]);
+  });
+
+  test("an untasked session is a row named as the machine card names it, with where it runs, its mark and its state", () => {
+    const view = viewOf(
+      [],
+      read([
+        entry("%2", {
+          tags: {
+            "owner.label": { value: "Triage", at: NOW, scope: "conversation" },
+            "agent.remote": { value: REMOTE, at: NOW, scope: "process" },
+          },
+          live: live("needs-input", 3 * 60_000, { reason: "permission" }),
+        }),
+        entry("%3", { repo: null, live: live("idle", 12 * 60_000) }),
+      ]),
+    );
+    const rows = view.sections.flatMap((s) => s.sessions);
+    expect(
+      rows.map((r) => [r.id, r.name, r.nameMark, r.kind, r.where, lineText(r.state), r.session, r.tasked]),
+    ).toEqual([
+      [
+        "session:dev-a:%2",
+        "Triage",
+        null,
+        "Not a task",
+        "Mac · app",
+        "Waiting on you: permission since 3m ago",
+        `https://claude.ai/code/${REMOTE}`,
+        false,
+      ],
+      ["session:dev-a:%3", "win-%3", "(window)", "Not a task", "Mac", "Idle since 12m ago", null, false],
+    ]);
+    expect(view.empty).toBeNull();
+  });
+
+  test("a session row is placed by live: needs-input, busy, idle, none (Running, unknown), and Asleep off a sleeping machine", () => {
+    const view = viewOf(
+      [],
+      {
+        ...read([
+          entry("%1", { live: live("needs-input", 1000) }),
+          entry("%2", { live: live("busy", 1000) }),
+          entry("%3", { live: live("idle", 1000) }),
+          entry("%4"),
+        ]),
+        ...read([entry("%9", { live: live("busy", 1000) })], "dev-b"),
+      },
+      [machine(), machine({ deviceId: "dev-b", name: "Box", connected: false })],
+    );
+    expect(placement(view)).toEqual([
+      ["Needs you", ["session:dev-a:%1"]],
+      ["Running", ["session:dev-a:%2", "session:dev-a:%4"]],
+      ["Idle", ["session:dev-a:%3"]],
+      ["Asleep", ["session:dev-b:%9"]],
+    ]);
+    const unknown = view.sections[1]?.sessions[1];
+    expect(lineText(unknown?.state ?? [])).toBe("State unknown");
+  });
+
+  test("a running task is placed by its session's live when read, else by the leader's idle list", () => {
+    const tasks = ["busy", "idle", "asks", "fallback", "nolive"].map((id) =>
+      task(id, { state: "running", assignment: at }),
+    );
+    const sessions = read([
+      // Live wins over the leader's idle list, both ways.
+      entry("%1", { taskId: "busy", live: live("busy", 1000) }),
+      entry("%2", { taskId: "idle", live: live("idle", 5 * 60_000) }),
+      entry("%3", { taskId: "asks", live: live("needs-input", 2 * 60_000, { reason: "question" }) }),
+      entry("%5", { taskId: "nolive" }),
+    ]);
+    const released = [
+      { taskId: "busy", since: NOW - 60_000 },
+      { taskId: "fallback", since: NOW - 60_000 },
+    ];
+    const view = viewOf(tasks, sessions, [machine()], released);
+    expect(placement(view)).toEqual([
+      ["Needs you", ["asks"]],
+      ["Running", ["busy", "nolive"]],
+      ["Idle", ["idle", "fallback"]],
+    ]);
+    const asks = view.sections[0]?.rows[0];
+    expect(lineText(asks?.body ?? [])).toBe("Waiting on you: a question since 2m ago");
+    // An asleep machine keeps its last read, but its live no longer places a task.
+    const asleep = viewOf(tasks.slice(0, 1), read([entry("%1", { taskId: "busy", live: live("idle", 1000) })]), [
+      machine({ connected: false }),
+    ]);
+    expect(placement(asleep)).toEqual([["Asleep", ["busy"]]]);
+  });
+
+  test("a session whose task the list leaves out stays a session row, marked so, and waits for a list to say so", () => {
+    const sessions = read([entry("%1", { taskId: "gone", live: live("busy", 1000) })]);
+    const view = viewOf([], sessions);
+    const [row] = view.sections.flatMap((s) => s.sessions);
+    expect([row?.kind, row?.tasked, row?.rename]).toEqual(["Task not listed", true, null]);
+    expect(view.summary).toBe("0 running · 0 waiting · 1 session");
+    // Before a list is read, every tasked session would read as unlisted.
+    expect(viewOf(null, sessions).sections).toEqual([]);
+  });
+
+  test("a second session of a listed task is a row of its own, and the first stays the task's", () => {
+    const view = viewOf(
+      [task("t", { state: "running", assignment: at })],
+      read([entry("%1", { taskId: "t" }), entry("%2", { taskId: "t" })]),
+    );
+    const rows = view.sections.flatMap((s) => s.sessions);
+    expect(rows.map((r) => [r.id, r.kind, r.close?.pane])).toEqual([
+      ["session:dev-a:%2", "Another session of a task", "%2"],
+    ]);
+    expect(view.sections[0]?.rows[0]?.close?.pane).toBe("%1");
+  });
+
+  test("the cap figure follows the leader's idle list, while sections follow live", () => {
+    const tasks = ["a", "b"].map((id) => task(id, { state: "running", assignment: at }));
+    const sessions = read([
+      // Its turn ended, but the leader still holds its slot: it sits in Idle and still counts against the cap.
+      entry("%1", { taskId: "a", live: live("idle", 1000) }),
+      // The leader released it, though its session reads busy: Running, and no slot.
+      entry("%2", { taskId: "b", live: live("busy", 1000) }),
+    ]);
+    const view = deriveQueue(state(ok(tasks, [], 0, [{ taskId: "b", since: NOW - 60_000 }], 3), { sessions }), NOW);
+    expect(placement(view)).toEqual([
+      ["Running", ["b"]],
+      ["Idle", ["a"]],
+    ]);
+    expect(view.summary).toBe("1/3 running · 1 idle · 0 waiting");
+  });
+
+  test("a failed queue read stays said beside an untasked session", () => {
+    const view = deriveQueue(
+      state({ kind: "failed", message: "Couldn't read the queue" }, { sessions: read([entry("%1")]) }),
+      NOW,
+    );
+    expect(view.empty).toBe("Couldn't read the queue");
+    expect(view.sections.flatMap((s) => s.sessions)).toHaveLength(1);
+  });
+
+  test("the summary counts untasked sessions apart, and the fleet cap counts tasks only", () => {
+    const view = deriveQueue(
+      state(ok([task("t", { state: "running", assignment: at })], [], 0, [], 3), {
+        sessions: read([entry("%1", { live: live("busy", 1000) }), entry("%2", { live: live("idle", 1000) })]),
+      }),
+      NOW,
+    );
+    expect(view.summary).toBe("1/3 running · 0 waiting · 2 sessions");
+    expect(viewOf([], read([entry("%1")])).summary).toBe("0 running · 0 waiting · 1 session");
+  });
+
+  test("a session row offers Rename only with sessionTag over an open relay, and Close only on a connected machine", () => {
+    const verified: SessionEntry["tags"] = {
+      "agent.session": { value: conversation, at: NOW, scope: "conversation", verified: true },
+    };
+    const rowWith = (machines: readonly Machine[], relay: Partial<RelayState> = {}) =>
+      deriveQueue(
+        state(ok([]), { sessions: read([entry("%1", { tags: verified })]) }, { machines, ...relay }),
+        NOW,
+      ).sections.flatMap((s) => s.sessions)[0];
+    const tagging = machine({ capabilities: [CAPABILITIES.sessionTag] });
+    expect(rowWith([tagging])?.rename).toEqual({ pane: "%1", session: conversation, label: "" });
+    expect(rowWith([tagging])?.close).toEqual({ deviceId: "dev-a", pane: "%1" });
+    expect(rowWith([machine()])?.rename).toBeNull();
+    const closed = rowWith([tagging], { status: "connecting" });
+    expect([closed?.rename, closed?.close]).toEqual([null, null]);
+    const asleep = rowWith([machine({ capabilities: [CAPABILITIES.sessionTag], connected: false })]);
+    expect([asleep?.rename, asleep?.close]).toEqual([null, null]);
+  });
+
+  test("Close always asks twice, and the row's menu closing disarms it", () => {
+    const first = armTap({ id: "session:dev-a:%1" }, "close", null);
+    expect(first.fire).toBe(false);
+    expect(armTap({ id: "session:dev-a:%1" }, "close", first.armed)).toEqual({ fire: true, armed: null });
+    expect(disarmRow("session:dev-a:%1", first.armed)).toBeNull();
+    expect(disarmRow("other", first.armed)).toBe(first.armed);
+  });
+});

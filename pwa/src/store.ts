@@ -10,6 +10,9 @@ import type {
   AvailabilityResponse,
   CustodianRequest,
   CustodianResponse,
+  DespawnRequest,
+  DespawnResponse,
+  Machine,
   RescanResponse,
   SessionsResponse,
   SessionTagErrorCode,
@@ -296,8 +299,26 @@ export function custodianRefusalText(reply: CustodianResponse | null, name: stri
 
 /** How long a close or reopen's asked state is held for the machine's status to catch up (the relay's floor is ~10 s). */
 const AVAILABILITY_HOLD_MS = 20_000;
-/** Spacing of the closed machines' session re-reads a queue nudge may cause. */
-const CLOSED_SESSIONS_NUDGE_MS = 10_000;
+/**
+ * Spacing of the session re-reads a signal rather than a person asks for: the closed machines' on a queue nudge, and
+ * each machine's on its status's `sg` (or `sess`) while the Queue screen shows (docs/work.md, "Reads").
+ */
+const SESSIONS_READ_SPACING_MS = 10_000;
+
+/**
+ * What a change of means a machine's sessions moved: `sg` where the Queue screen shows and the machine sends one
+ * (compared for inequality only: it is seeded with boot time), else its per-exclave session counts. `sg` is absent
+ * for a tick whose own session read failed: that tick keeps the `sg` key last seen, so a daemon whose listing fails
+ * now and then does not alternate keys and read each time.
+ */
+function sessionsKey(machine: Machine, queueShown: boolean, seen?: string): string {
+  if (queueShown && machine.capabilities?.includes(CAPABILITIES.sessionLive) === true) {
+    const sg = machine.status?.sg;
+    if (sg !== undefined) return `sg:${sg}`;
+    if (seen?.startsWith("sg:") === true) return seen;
+  }
+  return `sess:${JSON.stringify(machine.status?.sess ?? null)}`;
+}
 
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
@@ -324,8 +345,17 @@ export class Store {
    * kept coming on that socket.
    */
   #wokenAt = new Map<string, number>();
-  /** deviceId -> its status's session counts as last seen while closed, so a change re-reads its sessions (`#readMovedSessions`). */
-  #closedSess = new Map<string, string>();
+  /**
+   * deviceId -> its `sessionsKey` as last seen while watched (closed under a drain leader, or any while the Queue
+   * screen shows), so a change re-reads its sessions (`#readMovedSessions`).
+   */
+  #sessKey = new Map<string, string>();
+  /** Whether the last `#readMovedSessions` saw the screen shown: its closing re-keys without reading. */
+  #sessShown = false;
+  /** deviceId -> when the Queue screen last read its sessions: its re-reads are spaced per machine. */
+  #sessReadAt = new Map<string, number>();
+  /** deviceId -> the one trailing read for changes dropped inside its spacing, so the last is never lost. */
+  #sessTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** When a queue nudge last re-read the closed machines' sessions: a box parked closed for days must not cost a read per nudge. */
   #nudgeReadAt = 0;
   /** The one trailing read for nudges dropped inside the spacing, so the last of a burst is never lost. */
@@ -466,6 +496,7 @@ export class Store {
         const relay = this.#client.getState();
         if (relay.status !== "open") return;
         this.#queue.onShown(relay);
+        if (this.#queueShown()) this.#readQueueSessions();
         this.#accounts.onShown();
         this.#archive.sync();
         this.#older.sync();
@@ -474,7 +505,7 @@ export class Store {
     document.addEventListener("visibilitychange", onVisibility);
     const unsubscribeQueue = this.#client.onQueueChanged((change) => {
       this.#queue.onQueueChanged(change);
-      const wait = CLOSED_SESSIONS_NUDGE_MS - (Date.now() - this.#nudgeReadAt);
+      const wait = SESSIONS_READ_SPACING_MS - (Date.now() - this.#nudgeReadAt);
       if (wait <= 0) {
         this.#readOnNudge();
         return;
@@ -497,6 +528,7 @@ export class Store {
       document.removeEventListener("visibilitychange", onVisibility);
       this.#disarmUndo();
       this.#clearNudgeTimer();
+      this.#clearSessTimers();
       this.#queue.dispose();
       this.#accounts.dispose();
       this.#archive.dispose();
@@ -543,7 +575,10 @@ export class Store {
       // woken again and the session lists stay at whatever the very first
       // connect saw.
       this.#wokenAt = new Map();
-      this.#closedSess = new Map();
+      this.#sessKey = new Map();
+      this.#sessShown = false;
+      this.#sessReadAt = new Map();
+      this.#clearSessTimers();
       this.#nudgeReadAt = 0;
       this.#clearNudgeTimer();
       this.#queue.onDrop();
@@ -584,6 +619,13 @@ export class Store {
   #pruneGone(machines: readonly { readonly deviceId: string }[]): Partial<AppState> {
     const live = new Set(machines.map((machine) => machine.deviceId));
     for (const deviceId of [...this.#wokenAt.keys()]) if (!live.has(deviceId)) this.#wokenAt.delete(deviceId);
+    for (const deviceId of [...this.#sessKey.keys()]) if (!live.has(deviceId)) this.#sessKey.delete(deviceId);
+    for (const deviceId of [...this.#sessReadAt.keys()]) if (!live.has(deviceId)) this.#sessReadAt.delete(deviceId);
+    for (const [deviceId, timer] of [...this.#sessTimers]) {
+      if (live.has(deviceId)) continue;
+      clearTimeout(timer);
+      this.#sessTimers.delete(deviceId);
+    }
 
     const { form, sessions } = this.#state;
     const kept = Object.fromEntries(Object.entries(sessions).filter(([id]) => live.has(id)));
@@ -597,7 +639,7 @@ export class Store {
   /**
    * A closed machine's sessions are what its drain row counts, and they change without its register
    * (a pass closes a pane): re-read them when the queue changes and when its status's per-exclave
-   * session counts do, never on a poll; a queue nudge at most once per `CLOSED_SESSIONS_NUDGE_MS`
+   * session counts do, never on a poll; a queue nudge at most once per `SESSIONS_READ_SPACING_MS`
    * (one dropped inside it is read when the spacing ends; a status change carries on from there). Only under a `drainPass` leader, and not for a machine
    * `woken` already read this call.
    */
@@ -624,23 +666,92 @@ export class Store {
     this.#nudgeTimer = null;
   }
 
-  /** On a relay change: the closed machines whose reported session counts moved since last seen. */
+  /** A hidden document shows nothing: its socket may stay live, and no read is made for a screen nobody sees. */
+  #queueShown(): boolean {
+    return (this.#state.queue || this.#state.wide) && document.visibilityState === "visible";
+  }
+
+  /**
+   * On a relay change: the watched machines whose `sessionsKey` moved since last seen. A closed machine under a drain
+   * leader is read at once while the Queue screen is hidden (its drain row counts the sessions); while the screen
+   * shows, every connected machine is watched and read through the per-machine spacing. An asleep machine is not
+   * read and keeps its last read.
+   */
   #readMovedSessions(woken: readonly { readonly deviceId: string }[]): void {
     const { relay } = this.#state;
-    if (!deriveDrainAvailability(relay)) return;
+    const drains = deriveDrainAvailability(relay);
+    const shown = this.#queueShown();
+    const flippedHidden = this.#sessShown && !shown;
+    this.#sessShown = shown;
     const justRead = new Set(woken.map((machine) => machine.deviceId));
     const due: string[] = [];
     for (const machine of relay.machines) {
-      if (!machine.connected || closedAt(machine) === null) {
-        this.#closedSess.delete(machine.deviceId);
+      const { deviceId } = machine;
+      if (!machine.connected || !(shown || (drains && closedAt(machine) !== null))) {
+        this.#sessKey.delete(deviceId);
         continue;
       }
-      const key = JSON.stringify(machine.status?.sess ?? null);
-      const seen = this.#closedSess.get(machine.deviceId);
-      this.#closedSess.set(machine.deviceId, key);
-      if (seen !== key && !justRead.has(machine.deviceId)) due.push(machine.deviceId);
+      const seen = this.#sessKey.get(deviceId);
+      const key = sessionsKey(machine, shown, seen);
+      this.#sessKey.set(deviceId, key);
+      // The screen just closed: the key's kind changed with it, not the sessions.
+      if (flippedHidden && seen?.startsWith("sg:") === true && key.startsWith("sess:")) continue;
+      if (justRead.has(deviceId)) {
+        if (shown) this.#sessReadAt.set(deviceId, Date.now());
+        continue;
+      }
+      if (seen === key) continue;
+      if (shown) this.#readSpaced(deviceId);
+      else due.push(deviceId);
     }
     if (due.length > 0) void this.#fetchSessions(due);
+  }
+
+  /** At most once per `SESSIONS_READ_SPACING_MS` per machine; one dropped inside it is read when the spacing ends. */
+  #readSpaced(deviceId: string): void {
+    const wait = SESSIONS_READ_SPACING_MS - (Date.now() - (this.#sessReadAt.get(deviceId) ?? 0));
+    if (wait <= 0) {
+      this.#sessReadAt.set(deviceId, Date.now());
+      void this.#fetchSessions([deviceId]);
+      return;
+    }
+    if (this.#sessTimers.has(deviceId)) return;
+    this.#sessTimers.set(
+      deviceId,
+      setTimeout(() => {
+        this.#sessTimers.delete(deviceId);
+        const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+        // Asleep or gone since: it keeps its last read, and its wake reads it again.
+        if (this.#state.relay.status !== "open" || machine?.connected !== true || !this.#queueShown()) return;
+        this.#sessReadAt.set(deviceId, Date.now());
+        void this.#fetchSessions([deviceId]);
+      }, wait),
+    );
+  }
+
+  #clearSessTimers(): void {
+    for (const timer of this.#sessTimers.values()) clearTimeout(timer);
+    this.#sessTimers = new Map();
+  }
+
+  /**
+   * The Queue screen opening (or the wide layout showing it) reads every connected machine's sessions at once, and
+   * notes each one's key, so the status that follows does not read it a second time.
+   */
+  #readQueueSessions(): void {
+    const { relay } = this.#state;
+    if (relay.status !== "open") return;
+    const due = relay.machines.filter((machine) => machine.connected);
+    const now = Date.now();
+    this.#sessShown = true;
+    for (const machine of due) {
+      this.#sessKey.set(machine.deviceId, sessionsKey(machine, true));
+      this.#sessReadAt.set(machine.deviceId, now);
+      const timer = this.#sessTimers.get(machine.deviceId);
+      if (timer !== undefined) clearTimeout(timer);
+      this.#sessTimers.delete(machine.deviceId);
+    }
+    if (due.length > 0) void this.#fetchSessions(due.map((machine) => machine.deviceId));
   }
 
   /** The close sheet and the Machines screen read a machine's sessions and the queue afresh. */
@@ -925,7 +1036,9 @@ export class Store {
     // Likewise: only the Queue screen draws it, and the narrow layout may not be showing that.
     this.closeOlderSheet();
     this.#patch({ wide });
-    if (wide) void this.refreshQueue();
+    if (!wide) return;
+    void this.refreshQueue();
+    this.#readQueueSessions();
   }
 
   /** The phone's Machines screen, from the header menu or a link (`#openScreen`). */
@@ -945,10 +1058,12 @@ export class Store {
     // Already a column beside the form: a layer there would be an invisible back stop.
     if (this.#state.wide) {
       void this.refreshQueue();
+      this.#readQueueSessions();
       return;
     }
     this.#openScreen("queue");
     void this.refreshQueue();
+    this.#readQueueSessions();
   }
 
   /** Marks a task for the Queue screen to bring into view (a notification's link); `clearFocus` ends it. */
@@ -1441,6 +1556,36 @@ export class Store {
     // The row is stale: its session ended, moved on or now runs a task. Read again so the card stops offering the rename.
     if (parsed !== null && SESSION_GONE_CODES.has(parsed.code)) await this.#fetchSessions([deviceId]);
     return sessionTagRefusalText(parsed, machine.name);
+  }
+
+  /**
+   * Closes a session from its Queue row (docs/work.md, "Untasked row"): the graceful `despawn` the daemon takes for any
+   * registered pane, the owner's existing act. The machine's sessions are read again either way; a refusal is the
+   * queue's notice, as fixed text.
+   */
+  async closeSession(deviceId: string, pane: string): Promise<void> {
+    const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+    if (machine === undefined || !machine.connected) {
+      this.#patch({ queueNotice: "That session's machine isn't connected" });
+      return;
+    }
+    let reply: DespawnResponse | null;
+    try {
+      const request: DespawnRequest = { id: pane, client: "pwa" satisfies SpawnClient };
+      const answered = await this.#client.request<DespawnResponse>(deviceId, "despawn", request);
+      reply = "ok" in answered && typeof answered.ok === "boolean" ? answered : null;
+    } catch {
+      reply = null;
+    }
+    await this.#fetchSessions([deviceId]);
+    if (reply?.ok === true) return;
+    const text =
+      reply?.code === "session_not_found"
+        ? "That session had already ended"
+        : reply?.code === "invalid_target"
+          ? "That session can't be closed from here"
+          : `Couldn't close the session on ${machine.name}`;
+    this.#patch({ queueNotice: text });
   }
 
   /**

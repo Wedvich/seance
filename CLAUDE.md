@@ -59,7 +59,7 @@ a **Status** line (built, spec, draft); trust it over memory.
 - **docs/tags.md** — tags and session identity; built, keeps open questions and spike evidence. Read
   DESIGN.md's "Tags and session identity" before adding a field that labels a session or task, or
   touching session identity or adapter addressing.
-- **docs/work.md** — spec, step 1 (daemon) built: the Queue screen renamed Work, listing every live session beside the tasks by
+- **docs/work.md** — spec, steps 1 (daemon) and 2 (the PWA's list) built: the Queue screen renamed Work, listing every live session beside the tasks by
   its live state (`SessionEntry.live`, `MachineStatus.sg`); WS1–WS7. Read before touching the session list,
   `sessions`' reply or the Queue screen's sections.
 

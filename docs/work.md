@@ -1,8 +1,9 @@
 # The Work screen: sessions beside tasks
 
 **Status: spec; Order step 1 (daemon: `SessionEntry.live`, `MachineStatus.sg`, `CAPABILITIES.sessionLive`) built
-2026-11-24, recorded in DESIGN.md ("Tags and session identity", "Live state and the session generation"); steps 2–3
-(PWA) not built.** The owner's brief (2026-11-23): the session list, today the task queue, also lists
+2026-11-24, recorded in DESIGN.md ("Tags and session identity", "Live state and the session generation"); step 2
+(the PWA's list: `deriveQueue`'s join, the reads in `Store`, Close as `Store.closeSession`) built 2026-11-24, its
+choices under "PWA" below; step 3 (WS7, the rename to Work) not built.** The owner's brief (2026-11-23): the session list, today the task queue, also lists
 sessions that are not tasks. This is the place #567 left open when it took the session list off the Machines card
 "until its place is decided" (DESIGN.md, "Tags and session identity", "The PWA's per-namespace view"); `sessionRows`,
 the `SessionRow` model and `Store.renameSession` were kept for it.
@@ -87,8 +88,9 @@ as Running with "state unknown" (no `sg`: re-read on `sess` changes, as today).
   it is open, beside the queue read. An asleep or offline machine keeps its last read, shown under Asleep as its tasks are.
   `Store`'s per-machine `sessions` state is already the drain row's; the Work screen shares it.
 - **Join** (`queue-view.ts`, `deriveQueue`). A session whose `taskId` the queue lists folds into that task's row, which
-  gains the pane (Close) and the session's tags. A session whose `taskId` the capped queue does not list stays a task row
-  with what the session shows. A session with no `taskId` is an untasked row.
+  gains the pane (Close) and the session's tags. A session whose `taskId` the capped queue does not list has no record
+  to build a task row from: it is a session row marked "Task not listed" (see Built, below). A session with no `taskId`
+  is an untasked row.
 - **Untasked row.** Name by `displayName` (owner label, else the window name), the machine and repo, a "Not a task" mark,
   the state line ("waiting on you: permission", "idle 12m"). Actions: Rename (`CAPABILITIES.sessionTag`, as #556),
   Close (the graceful despawn; `despawnSession` already takes any registered pane), Open on claude.ai (`agent.remote`),
@@ -97,6 +99,24 @@ as Running with "state unknown" (no `sg`: re-read on `sess` changes, as today).
   or no `live` to Running, `idle` to Idle, an asleep machine's to Asleep. A task row without `live` keeps today's rule
   (the leader's idle list). The summary line counts untasked rows apart from tasks ("3/6 running · 2 sessions"), since the fleet cap counts
   tasks only.
+- **Built (step 2), the choices the brief left open.**
+  - A session whose task the list leaves out is a row of the untasked model marked "Task not listed" (no record to
+    build a task row from), with Close, Open and Tags only, counted in the summary's "sessions" figure, never against
+    the cap, and shown only once a list was read (before one, every tasked session would read as unlisted). A second
+    session carrying a listed task's id (the first joins the row, the assignment's machine first) is such a row too,
+    marked "Another session of a task", so every live session stays closable.
+  - The summary's "N/max running" follows the leader's slot accounting (running tasks its idle list does not hold,
+    plus reserved), while the sections follow `live`: a task whose turn ended is in Idle at once but holds its slot
+    until the leader releases it. A failed or unavailable queue's reason stays shown beside session rows.
+  - Close is on a tasked row too, after Cancel, asking twice like it: the owner's despawn of any registered pane, a
+    direct request to the machine, so it stays enabled while the leader is away (stopping a runaway session). The task
+    ends with its session, not as a cancel; the item's text says so.
+  - Session reads happen only while the document is visible; the key of a machine whose tick carried no `sg` is the one
+    last seen, and closing the screen re-keys without reading.
+  - In a section, task rows come first, then session rows by `live.since`, oldest first, no `live` last.
+  - The reads are keyed per machine on `sg` while the screen shows and the machine advertises `sessionLive`, else on
+    the `sess` counts (the drain's key); a read while the screen is hidden keeps the drain's unspaced behaviour.
+  - `live.since` is aged on this device's clock, as a tag's age is: a `sessions` reply carries no skew.
 - **Rename.** Header menu, screen title, `Screen` stays `"queue"` internally and in history state (a rename is not worth
   a migration of deep links or persisted state); only the words change.
 

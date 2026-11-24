@@ -121,6 +121,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           onContinue={(id) => void store.continueTask(id)}
           onPass={(id) => void store.passTask(id)}
           onFollowUp={(id) => store.followUp(id)}
+          onCloseSession={(target) => store.closeSession(target.deviceId, target.pane)}
+          onRenameSession={(deviceId, pane, session, text) => store.renameSession(deviceId, pane, session, text)}
           labelling={state.labelling}
           onOpenLabel={(id) => store.openLabel(id)}
           onCloseLabel={() => store.closeLabel()}

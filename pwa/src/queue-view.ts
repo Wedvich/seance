@@ -24,8 +24,13 @@ import {
   type Task,
   FLEET_LIMIT_MAX,
   BACKGROUND_KINDS,
+  CAPABILITIES,
+  parseSessionLive,
   type BackgroundKind,
   type IdleTaskRef,
+  type NeedsInputReason,
+  type SessionEntry,
+  type SessionLive,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
@@ -40,7 +45,13 @@ import {
   type StartNowItem,
 } from "./decision-view.ts";
 import { settlingInput } from "./input-debounce.ts";
-import { accountDisplayName, formatUntil } from "./machines-view.ts";
+import {
+  accountDisplayName,
+  formatUntil,
+  sessionRows,
+  type SessionRow,
+  type SessionTagGroup,
+} from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTagLines } from "./task-tags.ts";
 import { taskTitle } from "./task-title.ts";
@@ -81,32 +92,38 @@ export function primaryAction(row: Pick<QueueRow, "canContinue">): QueueInlineAc
   return row.canContinue ? "continue" : null;
 }
 
-export type ArmOp = "cancel" | "mark-done" | "pass";
+export type ArmOp = "cancel" | "mark-done" | "pass" | "close";
 
 /** Names the act and the row, so one item's tap can't arm another's. */
 export function armKey(op: ArmOp, rowId: string): string {
   return `${op}:${rowId}`;
 }
 
+/** A session row has no task, so neither flag: only its Close arms. */
+export type ArmRow = Pick<QueueRow, "id"> & Partial<Pick<QueueRow, "cancelEndsSession" | "markDoneEndsSession">>;
+
 /**
  * An act that ends a session asks twice: a first tap only arms (`fire` false, and the menu stays
  * open to relabel), a second within the arm window fires. `armed` is what the screen holds next.
  */
 export function armTap(
-  row: Pick<QueueRow, "id" | "cancelEndsSession" | "markDoneEndsSession">,
+  row: ArmRow,
   op: ArmOp,
   armed: string | null,
 ): { readonly fire: boolean; readonly armed: string | null } {
   const key = armKey(op, row.id);
-  // A pass always ends the session it passes on, and is only offered while one is live.
-  const endsSession = op === "pass" || (op === "cancel" ? row.cancelEndsSession : row.markDoneEndsSession);
+  // A pass or a close always ends the session it names, and is only offered while one is live.
+  const endsSession =
+    op === "pass" ||
+    op === "close" ||
+    (op === "cancel" ? row.cancelEndsSession === true : row.markDoneEndsSession === true);
   if (endsSession && armed !== key) return { fire: false, armed: key };
   return { fire: true, armed: null };
 }
 
 /** A row's menu closing, by any means, disarms that row's acts; Clear's arm and other rows' stay. */
 export function disarmRow(rowId: string, armed: string | null): string | null {
-  const own = [armKey("cancel", rowId), armKey("mark-done", rowId), armKey("pass", rowId)];
+  const own = (["cancel", "mark-done", "pass", "close"] as const).map((op) => armKey(op, rowId));
   return armed !== null && own.includes(armed) ? null : armed;
 }
 
@@ -218,6 +235,44 @@ export interface QueueRow {
    * model-written from pane text, shown as text and never used to act, sort or section. Null when it has none.
    */
   readonly flag: { readonly label: string; readonly note: string | null } | null;
+  /** Its live session's pane, for Close (docs/work.md, "Join"); null while no read lists it, or its machine is away. */
+  readonly close: CloseTarget | null;
+  /** Its live session's joined tags, folded under the card; empty while no read lists the session. */
+  readonly sessionTags: readonly SessionTagGroup[];
+}
+
+/** The graceful despawn's target: `SessionEntry.id` on its machine, the only target the daemon takes. */
+export interface CloseTarget {
+  readonly deviceId: string;
+  readonly pane: string;
+}
+
+/**
+ * A live session the queue's list carries no row for (docs/work.md, WS1): one running no task, or one whose task the
+ * capped list leaves out. It has no record to act on, so it offers only what acts on the session itself.
+ */
+export interface SessionQueueRow {
+  /** `session:<deviceId>:<pane>`: never a task id, so no task act or reveal can name it. */
+  readonly id: string;
+  readonly deviceId: string;
+  /** `displayName` through `sessionRows`. */
+  readonly name: string;
+  /** `SessionRow.mark`: said beside a name the owner did not choose. */
+  readonly nameMark: string | null;
+  /** Carries a task the capped list leaves out: marked so, and counted with the tasks in the summary. */
+  readonly tasked: boolean;
+  /** "Not a task", or "Task not listed". */
+  readonly kind: string;
+  /** Its machine, then its repo where known. */
+  readonly where: string;
+  /** What its `live` says, or that there is none. */
+  readonly state: Timed;
+  readonly close: CloseTarget | null;
+  /** `SessionRow.rename`: only an untasked session, on a machine that takes `session-tag`. */
+  readonly rename: SessionRow["rename"];
+  /** Its `agent.remote` page on claude.ai; null without one. */
+  readonly session: string | null;
+  readonly tags: readonly SessionTagGroup[];
 }
 
 /** What each flag reason says on the card: fixed per reason, the note beside it is the custodian's own words. */
@@ -231,6 +286,8 @@ export const FLAG_LABELS: Record<FlagReason, string> = {
 export interface QueueSection {
   readonly title: string;
   readonly rows: readonly QueueRow[];
+  /** The sessions it places beside its tasks, after them; only Needs you, Running, Idle and Asleep hold any. */
+  readonly sessions: readonly SessionQueueRow[];
 }
 
 export interface HoldRow {
@@ -259,7 +316,10 @@ export function parseLimitDraft(draft: string): number | null | undefined {
 }
 
 export interface QueueScreenView {
-  /** The header's meta line, "2 running · 1 waiting", or "2/8 running" under a limit; null until a list has been read. */
+  /**
+   * The header's meta line, "2 running · 1 waiting · 3 sessions", or "2/8 running" under a limit; null until a list has
+   * been read. Sessions running no task are counted apart, since the fleet cap counts tasks only.
+   */
   readonly summary: string | null;
   /**
    * The fleet limit to change; null while no verified leader that keeps one has answered `queue`,
@@ -480,17 +540,72 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
  * `remoteSession` and `agent.remote`). Both passed `isRemoteSessionId` at parse (`session_` and base62 only), so they can name no other path,
  * query or origin.
  */
-function sessionOf(task: Task, sessions: AppState["sessions"]): string | null {
-  const remote = liveRemote(task, sessions) ?? task.remoteSession;
+function sessionOf(task: Task, read: ReadSession | undefined): string | null {
+  return remoteLink(read === undefined ? undefined : liveRemote(read.entry), task.remoteSession);
+}
+
+function remoteLink(...remotes: readonly (string | undefined)[]): string | null {
+  const remote = remotes.find((id) => id !== undefined);
   return remote === undefined ? null : `https://claude.ai/code/${remote}`;
 }
 
-function liveRemote(task: Task, sessions: AppState["sessions"]): string | undefined {
-  const deviceId = task.assignment?.deviceId;
-  const read = deviceId === undefined ? undefined : sessions[deviceId];
-  if (read === undefined || read === "unknown") return undefined;
-  const entry = read.sessions.find((session) => session.taskId === task.id);
-  return parseTags(entry?.tags, { scope: "session" })?.["agent.remote"]?.value;
+function liveRemote(entry: SessionEntry): string | undefined {
+  return parseTags(entry.tags, { scope: "session" })?.["agent.remote"]?.value;
+}
+
+/** One session from its machine's last `sessions` read, its `live` read through `parseSessionLive`. */
+interface ReadSession {
+  readonly machine: Machine;
+  readonly entry: SessionEntry;
+  readonly live: SessionLive | null;
+}
+
+/** Every machine's last read, the registry's order. An asleep machine keeps its last read; an unanswered one has none. */
+function readSessions(state: AppState): readonly ReadSession[] {
+  return state.relay.machines.flatMap((machine) => {
+    const read = state.sessions[machine.deviceId];
+    // Stored as the reply carried it: a daemon a version ahead is inside the PSK boundary, but a render must not throw.
+    if (read === undefined || read === "unknown" || !Array.isArray(read.sessions)) return [];
+    return read.sessions.map((entry) => ({ machine, entry, live: parseSessionLive(entry.live) }));
+  });
+}
+
+/** A listed task's session: the one on its assignment's machine, else any read that carries its id. */
+function joinByTask(reads: readonly ReadSession[], tasks: ReadonlyMap<string, Task>): Map<string, ReadSession> {
+  const joined = new Map<string, ReadSession>();
+  for (const read of reads) {
+    const { taskId } = read.entry;
+    const task = taskId === undefined ? undefined : tasks.get(taskId);
+    if (taskId === undefined || task === undefined) continue;
+    const held = joined.get(taskId);
+    const assigned = task.assignment?.deviceId;
+    if (held === undefined || (read.machine.deviceId === assigned && held.machine.deviceId !== assigned)) {
+      joined.set(taskId, read);
+    }
+  }
+  return joined;
+}
+
+function closeOf(read: ReadSession, relayOpen: boolean): CloseTarget | null {
+  const pane = read.entry.id;
+  return relayOpen && read.machine.connected && pane !== undefined ? { deviceId: read.machine.deviceId, pane } : null;
+}
+
+const REASON_WORDS: Record<NeedsInputReason, string> = {
+  question: "a question",
+  permission: "permission",
+  elicitation: "an MCP server",
+};
+
+/** A session's state line: "Waiting on you: permission since 3m ago", "Idle since 12m ago". Exported for tests. */
+export function sessionStateLine(live: SessionLive | null, now: number): Timed {
+  if (live === null) return ["State unknown"];
+  // The daemon's clock, aged on this device's, as a tag's age is: a `sessions` reply carries no skew.
+  const since = seen(live.since, now);
+  if (live.state === "needs-input") {
+    return timed`Waiting on you${live.reason === undefined ? "" : `: ${REASON_WORDS[live.reason]}`} since ${since}`;
+  }
+  return live.state === "idle" ? timed`Idle since ${since}` : timed`Working since ${since}`;
 }
 
 function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
@@ -605,10 +720,13 @@ function rowOf(
   skew: number,
   titles: ReadonlyMap<string, string>,
   tasks: readonly Task[],
-  idle: ReadonlyMap<string, IdleTaskRef>,
+  ctx: PickContext,
+  read: ReadSession | undefined,
 ): QueueRow {
   const phase = TASK_PHASES[task.state];
-  const idleRef = idle.get(task.id);
+  const live = ctx.live.get(task.id);
+  // The leader's idle line says its slot is free: kept beside a live idle, dropped where `live` says it is not idle.
+  const idleRef = live === undefined || live.state === "idle" ? ctx.idle.get(task.id) : undefined;
   const actionable = phase !== "dispatching" && phase !== "finished";
   const canFollowUp = phase !== "finished";
   const context = {
@@ -622,21 +740,23 @@ function rowOf(
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = startNowFor(task, deriveRunNowPastPause(state.relay), now + skew);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
-  const session = sessionOf(task, state.sessions);
+  const session = sessionOf(task, read);
   const autonomy = autonomyOf(task.spec);
   const tags = taskTagLines(task);
+  const body = bodyOf(
+    task,
+    state.relay.machines,
+    now,
+    skew,
+    idleRef === undefined ? undefined : { ...idleRef, since: idleRef.since - skew },
+  );
   return {
     id: task.id,
     title: taskTitle(task),
     name: tags.label ?? taskTitle(task),
     headline: withoutPeriod(taskHeadline(task, state.relay.machines, state.accounts.aliases, now, now + skew)),
-    body: bodyOf(
-      task,
-      state.relay.machines,
-      now,
-      skew,
-      idleRef === undefined ? undefined : { ...idleRef, since: idleRef.since - skew },
-    ),
+    // Placed in Needs you or Idle by `live` alone: the card says why it sits there.
+    body: body ?? (live === undefined || live.state === "busy" ? null : sessionStateLine(live, now)),
     dot: dotOf(task),
     age: seen(task.createdAt, now),
     canCancel: actionable,
@@ -668,6 +788,8 @@ function rowOf(
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
     agent: task.spec.agent === undefined ? null : AGENT_NAMES[task.spec.agent],
     flag: task.flag === undefined ? null : { label: FLAG_LABELS[task.flag.reason], note: task.flag.note ?? null },
+    close: read === undefined ? null : closeOf(read, state.relay.status === "open"),
+    sessionTags: read === undefined ? [] : (sessionRows([read.entry], tasks, false, now)[0]?.tags ?? []),
   };
 }
 
@@ -678,16 +800,24 @@ function asRunning(task: Task, leaderNow: number): Task {
   return { ...rest, state: "running" };
 }
 
-/** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
-type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, IdleTaskRef>) => number | null;
+interface PickContext {
+  readonly machines: readonly Machine[];
+  /** The running tasks the leader released for sitting idle at their prompt, by id. */
+  readonly idle: ReadonlyMap<string, IdleTaskRef>;
+  /** A running task's session's `live`, where its awake machine's read carried one (WS4): it places the task. */
+  readonly live: ReadonlyMap<string, SessionLive>;
+}
+
+type SectionPick = (task: Task, ctx: PickContext) => number | null;
 
 /**
- * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
- * lost task whose machine is back or gone, since one asleep is in Asleep.
+ * Escalated (past the leader's patience) first, then the rest of needs-input (a running task whose session says it
+ * waits on you among them), then lost — a lost task whose machine is back or gone, since one asleep is in Asleep.
  */
-const needsYou: SectionPick = (t, machines) => {
+const needsYou: SectionPick = (t, { machines, live }) => {
   if (machineAsleep(t, machines)) return null;
   if (t.state === "lost") return 2;
+  if (t.state === "running") return live.get(t.id)?.state === "needs-input" ? 1 : null;
   if (t.state !== "needs-input") return null;
   return t.escalated === true ? 0 : 1;
 };
@@ -696,26 +826,40 @@ const needsYou: SectionPick = (t, machines) => {
  * Nothing on a sleeping machine can be acted on from the phone, so it leaves Needs you and
  * Running for a section of its own (DESIGN.md, "Asleep machines on the Queue screen").
  */
-const asleep: SectionPick = (t, machines) => {
+const asleep: SectionPick = (t, { machines }) => {
   if (!machineAsleep(t, machines)) return null;
   if (t.state === "needs-input") return 0;
   return t.state === "lost" ? 2 : 1;
 };
 
+/** A running task's place by its session's `live` where read (WS4: idle the moment its turn ends), else the leader's idle list. */
+function runningPlace(t: Task, { idle, live }: PickContext): "busy" | "idle" | "needs-input" {
+  return live.get(t.id)?.state ?? (idle.has(t.id) ? "idle" : "busy");
+}
+
 /** The one section the screen renders collapsed until tapped. */
 export const ASLEEP_SECTION = "Asleep";
 
+const NEEDS_YOU_SECTION = "Needs you";
+const RUNNING_SECTION = "Running";
 const IDLE_SECTION = "Idle";
 
 const SECTIONS: readonly { readonly title: string; readonly pick: SectionPick; readonly oldestFirst?: true }[] = [
-  { title: "Needs you", pick: needsYou },
+  { title: NEEDS_YOU_SECTION, pick: needsYou },
   {
-    title: "Running",
-    pick: (t, machines, idle) =>
-      (t.state === "reserved" || t.state === "running") && !idle.has(t.id) && !machineAsleep(t, machines) ? 0 : null,
+    title: RUNNING_SECTION,
+    pick: (t, ctx) =>
+      (t.state === "reserved" || (t.state === "running" && runningPlace(t, ctx) === "busy")) &&
+      !machineAsleep(t, ctx.machines)
+        ? 0
+        : null,
   },
   // Done its turn and waiting on a reply nobody owes it, so it holds no slot (DESIGN.md, "Routing caps").
-  { title: IDLE_SECTION, pick: (t, machines, idle) => (idle.has(t.id) && !machineAsleep(t, machines) ? 0 : null) },
+  {
+    title: IDLE_SECTION,
+    pick: (t, ctx) =>
+      t.state === "running" && runningPlace(t, ctx) === "idle" && !machineAsleep(t, ctx.machines) ? 0 : null,
+  },
   {
     title: "Waiting",
     pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null),
@@ -726,6 +870,41 @@ const SECTIONS: readonly { readonly title: string; readonly pick: SectionPick; r
   { title: "Awaiting merge", pick: (t) => (t.state === "awaiting-merge" ? 0 : null) },
   { title: "Finished", pick: (t) => (TASK_PHASES[t.state] === "finished" ? 0 : null) },
 ];
+
+/** A session row's section by its `live` (WS2): no `live` is never idle, so Running, marked unknown. */
+function sessionSection(read: ReadSession): string {
+  if (!read.machine.connected) return ASLEEP_SECTION;
+  if (read.live?.state === "needs-input") return NEEDS_YOU_SECTION;
+  return read.live?.state === "idle" ? IDLE_SECTION : RUNNING_SECTION;
+}
+
+function sessionRowOf(
+  read: ReadSession,
+  tasks: readonly Task[],
+  relayOpen: boolean,
+  now: number,
+  listed: boolean,
+): SessionQueueRow {
+  const { machine, entry } = read;
+  const renameable = relayOpen && machine.connected && machine.capabilities?.includes(CAPABILITIES.sessionTag) === true;
+  // One entry in, one row out: the per-namespace view's model, kept for this surface.
+  const [row] = sessionRows([entry], tasks, renameable, now);
+  const tasked = entry.taskId !== undefined;
+  return {
+    id: `session:${machine.deviceId}:${entry.id ?? entry.window}`,
+    deviceId: machine.deviceId,
+    name: row?.name ?? entry.window,
+    nameMark: row?.mark ?? null,
+    tasked,
+    kind: !tasked ? "Not a task" : listed ? "Another session of a task" : "Task not listed",
+    where: entry.repo === null ? machine.name : `${machine.name} · ${entry.repo}`,
+    state: sessionStateLine(read.live, now),
+    close: closeOf(read, relayOpen),
+    rename: row?.rename ?? null,
+    session: remoteLink(liveRemote(entry)),
+    tags: row?.tags ?? [],
+  };
+}
 
 function unreadableLine(count: number): string | null {
   if (count === 0) return null;
@@ -738,19 +917,46 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const ok = view?.kind === "ok" ? view : null;
   const skew = ok?.skew ?? 0;
   const tasks = (ok?.tasks ?? []).map((task) => asRunning(task, now + skew));
+  const byId = new Map(tasks.map((task) => [task.id, task]));
   const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
   const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r]));
 
+  const reads = readSessions(state);
+  const joined = joinByTask(reads, byId);
+  const live = new Map<string, SessionLive>();
+  for (const [taskId, read] of joined) {
+    if (running.has(taskId) && read.machine.connected && read.live !== null) live.set(taskId, read.live);
+  }
+  const ctx: PickContext = { machines: state.relay.machines, idle, live };
+
+  const relayOpen = state.relay.status === "open";
+  // A tasked session waits for a list: before one, every such session would read as a task the list leaves out.
+  // One session joins a task: a second carrying the same listed id is a row of its own, so it can still be closed.
+  const unjoined = reads
+    .filter((read) => read.entry.taskId === undefined || (ok !== null && joined.get(read.entry.taskId) !== read))
+    // Longest in its state first; no `live` last.
+    .toSorted((a, b) => (a.live?.since ?? Infinity) - (b.live?.since ?? Infinity));
+  const placed = new Map<string, SessionQueueRow[]>();
+  for (const read of unjoined) {
+    const title = sessionSection(read);
+    const listed = read.entry.taskId !== undefined && byId.has(read.entry.taskId);
+    placed.set(title, [...(placed.get(title) ?? []), sessionRowOf(read, tasks, relayOpen, now, listed)]);
+  }
+
   const sections = SECTIONS.map(({ title, pick, oldestFirst }) => {
     const members = tasks
-      .map((task) => ({ task, rank: pick(task, state.relay.machines, idle) }))
+      .map((task) => ({ task, rank: pick(task, ctx) }))
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank || (oldestFirst ? a.task.createdAt - b.task.createdAt : 0));
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks, idle)) };
-  }).filter((section) => section.rows.length > 0);
+    return {
+      title,
+      rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks, ctx, joined.get(task.id))),
+      sessions: placed.get(title) ?? [],
+    };
+  }).filter((section) => section.rows.length + section.sessions.length > 0);
 
   // Once for every hold: a held account no machine reports still counts as a twin.
   const heldIds = (ok?.holds ?? []).flatMap((hold) => (hold.account === undefined ? [] : [hold.account]));
@@ -758,24 +964,33 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, known, now));
 
   // A list already read stays up while the leader is away: the status line says it may be stale.
+  // Why the task list is missing stays up beside session rows: they say nothing of whether the queue was read.
   let empty: string | null = null;
   if (tasks.length === 0) {
     if (!available) empty = text;
     else if (view === null || view.kind === "loading") empty = "Loading…";
     else if (view.kind === "failed") empty = view.message;
-    else empty = "Nothing in the queue.";
+    else if (unjoined.length === 0) empty = "Nothing in the queue.";
   }
 
+  // The fleet cap follows the leader's slot accounting, not `live` (WS4): a task it lists idle holds no slot, and one it
+  // does not holds one even while its session reads idle. Session rows never count against it.
+  const slots = tasks.filter(
+    (t) =>
+      (t.state === "reserved" || (t.state === "running" && !idle.has(t.id))) && !machineAsleep(t, state.relay.machines),
+  ).length;
   const count = (title: string): number => sections.find((s) => s.title === title)?.rows.length ?? 0;
+  const untasked = unjoined.length;
 
   return {
     summary:
       ok === null
         ? null
         : [
-            `${count("Running")}${ok.globalMax === undefined ? "" : `/${ok.globalMax}`} running`,
+            `${slots}${ok.globalMax === undefined ? "" : `/${ok.globalMax}`} running`,
             ...(count(IDLE_SECTION) === 0 ? [] : [`${count(IDLE_SECTION)} idle`]),
             `${count("Waiting")} waiting`,
+            ...(untasked === 0 ? [] : [`${untasked} ${untasked === 1 ? "session" : "sessions"}`]),
           ].join(" · "),
     limit: ok !== null && available && deriveLimitsAvailability(state.relay) ? { fleet: ok.globalMax ?? null } : null,
     limitsUnreadable: ok?.limitsUnreadable === true ? LIMITS_UNREADABLE : null,

@@ -239,6 +239,8 @@ function archivedRow(
     // The reason only: the archive keeps no note. What stays on a finished record is the daemon's kept-worktree flag,
     // which is the point of keeping it (work sits in a worktree), so the card says so.
     flag: task.flag === undefined ? null : { label: FLAG_LABELS[task.flag.reason], note: null },
+    close: null,
+    sessionTags: [],
   };
 }
 
