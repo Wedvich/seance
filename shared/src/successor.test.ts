@@ -123,6 +123,19 @@ describe("passOffer", () => {
     expect(passOffer(running(), [machine()], true, false)).toEqual({ ok: true });
   });
 
+  test("a Codex task at checkpoint, explicit or absent, also needs a leader advertising codexCheckpoint", () => {
+    const both = machine({ capabilities: [CAPABILITIES.successor, CAPABILITIES.codexPass] });
+    // Its successor keeps the level, and an item 11 leader without codexCheckpoint would place it nowhere.
+    for (const task of [running({}, { agent: "codex", autonomy: "checkpoint" }), running({}, { agent: "codex" })]) {
+      expect(passOffer(task, [both], true, true)).toEqual({
+        ok: false,
+        reason: "the scheduler's leader can't run a Codex task at checkpoint yet (needs seance update)",
+      });
+      expect(passOffer(task, [both], true, true, true)).toEqual({ ok: true });
+    }
+    expect(passOffer(running({}, { autonomy: "checkpoint" }), [machine()], true, false, false)).toEqual({ ok: true });
+  });
+
   test("a finished task is worded as finished, and a reserved one as still starting", () => {
     for (const state of ["done", "failed", "cancelled"] as const) {
       expect(offer(running({ state }))).toEqual({ ok: false, reason: "it has already finished" });

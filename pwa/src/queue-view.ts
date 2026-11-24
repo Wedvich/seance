@@ -59,6 +59,7 @@ import { plain, timed, type Moment, type Timed } from "./timed.ts";
 import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveCodexCheckpointAvailability,
   deriveCodexContinueAvailability,
   deriveLimitsAvailability,
   derivePassAvailability,
@@ -734,6 +735,7 @@ function rowOf(
     now: now + skew,
     leaderHandoff: deriveContinueHandoffAvailability(state.relay),
     leaderCodexContinue: deriveCodexContinueAvailability(state.relay),
+    leaderCodexCheckpoint: deriveCodexCheckpointAvailability(state.relay),
   };
   const canContinue =
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
@@ -742,6 +744,7 @@ function rowOf(
     state.relay.machines,
     derivePassAvailability(state.relay),
     deriveCodexPassAvailability(state.relay),
+    deriveCodexCheckpointAvailability(state.relay),
   ).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = startNowFor(task, deriveRunNowPastPause(state.relay), now + skew);

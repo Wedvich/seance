@@ -888,6 +888,8 @@ export async function makeCodexStub(dir: string): Promise<CodexStub> {
     reset: async () => {
       await rm(callsPath, { force: true });
       await rm(rpcPath, { force: true });
+      await rm(`${scenarioPath}.slot`, { force: true });
+      await rm(`${scenarioPath}.clients`, { force: true });
     },
   };
 }

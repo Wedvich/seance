@@ -20,6 +20,7 @@ import {
   AGENT_LOGIN_KINDS,
   AUTONOMY_LEVELS,
   CODEX_MODELS,
+  codexNeedsCheckpointLeader,
   DEFAULT_CODEX_MODEL,
   type AgentLoginKind,
   autonomyOf,
@@ -432,6 +433,7 @@ function describeMachine(
             ...(login.accountId === null ? {} : describeName(names, login.accountId)),
             auth: loginHealth(machine, index, now),
             ...(login.version === undefined ? {} : { version: login.version }),
+            ...(login.paired === true ? { paired: true } : {}),
           })),
         }),
     // Named so the model knows which target costs nothing to reach; get_sessions
@@ -857,7 +859,7 @@ const AGENT_FIELD = z
   .enum(AGENT_LOGIN_KINDS)
   .optional()
   .describe(
-    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}) and autonomy auto. A model name never chooses the agent. A Codex task takes no effort max, steer, checkpoint or attachments for now, and is refused unless the scheduler's leader runs Codex tasks`,
+    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}). A model name never chooses the agent. A Codex task takes no effort max, steer or attachments for now, and is refused unless the scheduler's leader runs Codex tasks (at checkpoint, unless it runs them there: then retry with autonomy auto)`,
   );
 
 const UNTIL_FIELD = z
@@ -1075,7 +1077,9 @@ function describeTask(
     ...(spec.succeeds === undefined ? {} : { succeeds: spec.succeeds.task }),
     ...(task.successor === undefined ? {} : { passedTo: task.successor }),
     // The same offer the app's menu follows; `pass_task` still re-checks the leader.
-    ...(passOffer(task, machines, leaderSuccessor, leaderCodexPass).ok ? { passable: true } : {}),
+    ...(passOffer(task, machines, leaderSuccessor, leaderCodexPass, offer.leaderCodexCheckpoint).ok
+      ? { passable: true }
+      : {}),
     // Never `prBlocked` on the task: an `until: "reported"` task does not wait on its merge.
     ...(blocked === null ? {} : { prBlocked: blocked }),
   };
@@ -1170,7 +1174,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). `logins` are the machine's agent logins beside its exclaves (today one Codex sign-in to ChatGPT, which no task runs on yet): each one's `agent`, the `accountId` (`codex:<account>:<user>`) and `email` once identified, `account` and `alias` named as an exclave's are, `version` (its `codex --version`), and `auth`: `ok`, `expired` (its login needs `seance codex login` on that machine), `blocked` (signed in, but its included usage is refused), `unknown` (not read yet, or the machine is asleep), `signed_out`, or `unidentified` (signed in with no account id). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `draining` false for a soft close, whose drain has not been started (nothing is moved: `running` tasks still working there, `idle` ones idle at their prompt, which never finish on their own and are what a drain is for (the leader counts one idle 10 minutes after its turn ended), and `waitingOnYou` ones waiting on a person), true once it has (`moving` tasks still being passed to other machines, `waitingOnYou` of them waiting on a person); then `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). `logins` are the machine's agent logins beside its exclaves (today one Codex sign-in to ChatGPT, which no task runs on yet): each one's `agent`, the `accountId` (`codex:<account>:<user>`) and `email` once identified, `account` and `alias` named as an exclave's are, `version` (its `codex --version`), `paired` (true when its Codex home is paired with the owner's phone, so one Codex session there at a time can be driven from the ChatGPT app), and `auth`: `ok`, `expired` (its login needs `seance codex login` on that machine), `blocked` (signed in, but its included usage is refused), `unknown` (not read yet, or the machine is asleep), `signed_out`, or `unidentified` (signed in with no account id). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `draining` false for a soft close, whose drain has not been started (nothing is moved: `running` tasks still working there, `idle` ones idle at their prompt, which never finish on their own and are what a drain is for (the leader counts one idle 10 minutes after its turn ended), and `waitingOnYou` ones waiting on a person), true once it has (`moving` tasks still being passed to other machines, `waitingOnYou` of them waiting on a person); then `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1266,6 +1270,11 @@ export function buildMcpServer(
           now: reply.at,
           leaderHandoff: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.continueHandoff),
           leaderCodexContinue: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.codexContinue),
+          leaderCodexCheckpoint: advertises(
+            lease.machines,
+            lease.scheduler.availability(),
+            CAPABILITIES.codexCheckpoint,
+          ),
         };
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
         const traits = fleetTraits(lease.machines);
@@ -1568,7 +1577,7 @@ export function buildMcpServer(
         // A create asked for the ref, so a leader that cannot take it refuses; the caller retries without it.
         const tagsGate = spec.tags === undefined ? null : taskTagsGateError(leg, "spawn", "ref");
         if (tagsGate !== null) return errorResult(tagsGate);
-        const codexGate = spec.agent === undefined ? null : codexGateError(leg, "spawn", "agent");
+        const codexGate = spec.agent === undefined ? null : codexGateError(leg, "spawn", "agent", spec);
         if (codexGate !== null) return errorResult(codexGate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
         if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
@@ -1746,9 +1755,9 @@ export function buildMcpServer(
           if (gate !== null) return errorResult(gate);
         }
         // Before any create, as the others: a batch is never half-written for want of a leader that runs Codex.
-        const codex = planned.findIndex(({ spec }) => spec.agent !== undefined);
-        if (codex !== -1) {
-          const gate = codexGateError(leg, `queue_batch task ${codex + 1}`, "agent");
+        for (const [i, { spec }] of planned.entries()) {
+          if (spec.agent === undefined) continue;
+          const gate = codexGateError(leg, `queue_batch task ${i + 1}`, "agent", spec);
           if (gate !== null) return errorResult(gate);
         }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
@@ -1993,6 +2002,16 @@ export function buildMcpServer(
         ) {
           return errorResult(
             `${PASS_SELF_TOOL} refused: the scheduler's leader cannot pass a Codex task yet — its daemon needs \`seance update\`. Nothing was pushed.`,
+          );
+        }
+        // A successor keeps its task's level, and a leader without `codexCheckpoint` places a Codex one there nowhere.
+        if (
+          own !== null &&
+          own.some((t) => TASK_PHASES[t.state] !== "finished" && codexNeedsCheckpointLeader(t.spec)) &&
+          !advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.codexCheckpoint)
+        ) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: the scheduler's leader cannot run a Codex task at checkpoint yet — its daemon needs \`seance update\`. Nothing was pushed.`,
           );
         }
         // Before the push: a task the scheduler already counts as finished (a merge settles `until: "merged"` while the

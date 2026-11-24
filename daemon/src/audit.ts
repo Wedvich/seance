@@ -1075,7 +1075,7 @@ export function adapterOwnerAudit(sink: AuditSink): AdapterOwnerAudit {
   };
 }
 
-export const CODEX_OWNER_OPS = ["login", "logout", "status"] as const;
+export const CODEX_OWNER_OPS = ["login", "logout", "status", "pair", "unpair"] as const;
 export type CodexOwnerOp = (typeof CODEX_OWNER_OPS)[number];
 
 /**
@@ -1092,13 +1092,17 @@ export const CODEX_OWNER_OUTCOMES = [
   "signed_out",
   "expired",
   "unknown",
+  // `pair` and `unpair`: a code that lapsed unclaimed, a Ctrl-C, nothing to unpair.
+  "lapsed",
+  "cancelled",
+  "not_paired",
 ] as const;
 export type CodexOwnerOutcome = (typeof CODEX_OWNER_OUTCOMES)[number];
 
 /**
- * The owner's `seance codex login | logout | status` (`codex/codex-cli.ts`), under the `cli` origin like every command typed
- * at this machine: the verb and its outcome only, never the device code, an email, an account id or anything Codex
- * printed.
+ * The owner's `seance codex login | logout | status | pair | unpair` (`codex/codex-cli.ts`), under the `cli` origin like
+ * every command typed at this machine: the verb and its outcome only, never the device code, the pairing code, an
+ * email, an account, environment or client id, or anything Codex printed.
  */
 export function codexOwnerAudit(sink: AuditSink): (op: CodexOwnerOp, outcome: CodexOwnerOutcome) => Promise<void> {
   const origin: SpawnOrigin = "cli";

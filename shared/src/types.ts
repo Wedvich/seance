@@ -1036,7 +1036,7 @@ export interface AgentLogin {
   readonly authOk: boolean;
   /** The account can spend credits past its included usage (docs/codex.md, "Credits and spill"). */
   readonly credits?: true;
-  /** The home is paired with a phone (phase 3); display only, never a routing input. Never set yet. */
+  /** The home is paired with a phone (`remote.json`, DESIGN.md, Daemon, "Codex remote control"); display only, never a routing input. */
   readonly paired?: true;
   /** `codex --version`'s number; absent when no `codex` answered. */
   readonly version?: string;
@@ -1326,6 +1326,10 @@ export interface MachineInfo {
  * never keys. Advertised beside `drainAsk` (a despawn is wired). An older leader of the Codex build refuses
  * `succeeds` beside `agent` (`codexSpecRefusal`), so it places such a successor nowhere and passes no Codex task. A
  * client offers a Codex task's pass only to a verified leader and a task machine advertising it.
+ * `codexCheckpoint`: as a leader, places a Codex task at autonomy `checkpoint` (docs/codex.md, D6 lifted at build order
+ * item 9; DESIGN.md, Scheduler, "Codex tasks"). An older leader holds such a record readable and places it nowhere
+ * (`agent_unsupported`), so a client writes a Codex task at `checkpoint` only to a verified leader advertising it.
+ * Leader half only: a daemon of any Codex build runs the level, and pairing never decides whether a task starts.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1364,6 +1368,7 @@ export const CAPABILITIES = {
   codexContinue: "codexContinue",
   sessionLive: "sessionLive",
   codexPass: "codexPass",
+  codexCheckpoint: "codexCheckpoint",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];

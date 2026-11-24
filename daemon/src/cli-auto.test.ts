@@ -646,12 +646,27 @@ describe("spawnAuto's placement flags", () => {
       expect(fake.creates).toEqual([]);
     });
 
-    test("a V1 refusal is named before the relay is dialled: Codex runs at auto only", async () => {
-      const fake = leading([CAPABILITIES.codex]);
-      const { ok, text } = await run(fake, { agent: "codex" });
+    test("a V1 refusal is named before the relay is dialled: Codex never runs at steer", async () => {
+      const fake = leading([CAPABILITIES.codex, CAPABILITIES.codexCheckpoint]);
+      const { ok, text } = await run(fake, { agent: "codex", autonomy: "steer" });
       expect(ok).toBe(false);
-      expect(text).toContain("a Codex task runs only at autonomy auto for now, not checkpoint");
+      expect(text).toContain("a Codex task runs only at autonomy auto or checkpoint for now, not steer");
       expect(fake.started).toBe(0);
+    });
+
+    test("checkpoint, the default level, is written only to a leader advertising codexCheckpoint", async () => {
+      const older = leading([CAPABILITIES.codex]);
+      const refused = await run(older, { agent: "codex" });
+      expect(refused.ok).toBe(false);
+      expect(refused.text).toContain("runs Codex tasks only at autonomy auto");
+      expect(refused.text).toContain("retry with autonomy auto");
+      expect(older.creates).toEqual([]);
+      // `auto` still goes to that leader.
+      expect((await run(older, { agent: "codex", autonomy: "auto" })).ok).toBe(true);
+
+      const fake = leading([CAPABILITIES.codex, CAPABILITIES.codexCheckpoint]);
+      expect((await run(fake, { agent: "codex" })).ok).toBe(true);
+      expect(fake.creates[0]?.spec.agent).toBe("codex");
     });
   });
 

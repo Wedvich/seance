@@ -613,10 +613,10 @@ export function deriveCodexProblem(
 ): { readonly text: string; readonly label: string } | null {
   if (state.form.agent === "claude") return null;
   const name = AGENT_LABELS[state.form.agent];
-  if (state.autonomy !== "auto") {
+  if (state.autonomy === "steer") {
     return {
-      text: `${name} runs only at ${AUTONOMY_LABELS.auto} autonomy for now. Pick ${AUTONOMY_LABELS.auto}, or a Claude model`,
-      label: `${name} needs ${AUTONOMY_LABELS.auto}`,
+      text: `${name} can't run at ${AUTONOMY_LABELS.steer} autonomy yet. Pick ${AUTONOMY_LABELS.checkpoint} or ${AUTONOMY_LABELS.auto}, or a Claude model`,
+      label: `${name} can't ${AUTONOMY_LABELS.steer}`,
     };
   }
   if (state.attachments.length > 0) {
@@ -625,11 +625,20 @@ export function deriveCodexProblem(
       label: "Can't attach files",
     };
   }
-  if (!canHold(state.relay) && !deriveCodexAvailability(state.relay)) {
-    return { text: CODEX_UNAVAILABLE, label: `Can't run ${name}` };
+  if (canHold(state.relay)) return null;
+  if (!deriveCodexAvailability(state.relay)) return { text: CODEX_UNAVAILABLE, label: `Can't run ${name}` };
+  if (state.autonomy === "checkpoint" && !deriveCodexCheckpointAvailability(state.relay)) {
+    return { text: CODEX_CHECKPOINT_UNAVAILABLE, label: `${name} needs ${AUTONOMY_LABELS.auto}` };
   }
   return null;
 }
+
+/** A Codex task at `checkpoint` goes only to a verified leader advertising `codexCheckpoint`: an item 8 one places it nowhere. */
+export function deriveCodexCheckpointAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.codexCheckpoint);
+}
+
+export const CODEX_CHECKPOINT_UNAVAILABLE = `The scheduler's leader runs Codex only at ${AUTONOMY_LABELS.auto} autonomy. Pick ${AUTONOMY_LABELS.auto}, or update seanced on its machine`;
 
 export const TASK_TAGS_UNAVAILABLE = "The scheduler's leader doesn't take task tags yet. Update seanced on its machine";
 

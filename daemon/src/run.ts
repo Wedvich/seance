@@ -364,6 +364,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // Late-bound: the client and the status loop are built below, and the account starts only after both.
     onInfoChange: () => void client.reRegister(),
     onStatusChange: () => status.refresh(),
+    onPairedChange: () => codexSessions.remoteChanged(),
   });
   const traitProbes = hasProbe(config.traits)
     ? createTraitProbes({
@@ -442,6 +443,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // Unconditional: session events always run, and a host whose frames cannot bind verifies no conversation,
         // which is all the PWA offers a rename for.
         CAPABILITIES.sessionTag,
+        // Unconditional, a leader's half only: any daemon may lead, and this build places a Codex task at `checkpoint`
+        // (docs/codex.md, build order item 9). Whether a machine runs Codex at all is `codex` below.
+        CAPABILITIES.codexCheckpoint,
         // A Codex session's states, close and tools are this build's (docs/codex.md, build order item 7): offered
         // while the login could run one, so the scheduler routes none to a machine signed out or below the floor.
         ...(codexAccount !== null && codexRunnable(codexAccount.login()) ? [CAPABILITIES.codex] : []),
@@ -991,6 +995,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         launchSession: (taskId) => endedTasks.launchSession(taskId),
         // Messages into a session reach it as turns (DESIGN.md, "Session messages", "A Codex session").
         ...(capabilities.messages === undefined ? {} : { inbox: capabilities.messages.attachCodex }),
+        paired: codexAccount.paired,
       });
       void codexSessions.reconnectAll().catch((err: unknown) => log.warn(`codex: reconnect failed (${String(err)})`));
     }

@@ -12,6 +12,7 @@ import {
 } from "./probe.ts";
 import { log } from "../log.ts";
 import { inRefreshLane } from "../refresh-lane.ts";
+import { readRemote, remotePath } from "./remote.ts";
 import { CHECK_INTERVAL_MS, DEBOUNCE_MS, STALE_AFTER_MS } from "../usage-refresh.ts";
 
 /**
@@ -53,6 +54,10 @@ export interface CodexAccountDeps extends CodexAccountOpts {
   readonly onInfoChange: () => void;
   /** The status's view changed (health, a new reading): send a status now. */
   readonly onStatusChange: () => void;
+  /** `remote.json`, the owner's pairing note (`remote.ts`). */
+  readonly remotePath: string;
+  /** The home's pairing changed: the remote-control slot is offered or taken back. */
+  readonly onPairedChange?: () => void;
 }
 
 export interface CodexAccount {
@@ -61,6 +66,8 @@ export interface CodexAccount {
   /** The register blob's entry. */
   readonly login: () => AgentLogin;
   readonly view: () => LoginView;
+  /** Whether `remote.json` says the home is paired, as last read: display (`AgentLogin.paired`) and the slot's offer. */
+  readonly paired: () => boolean;
   /**
    * A running session's own `account/rateLimits/read` answer (`codex/sessions.ts`), over its pane's server on this
    * home: taken as a probe's reading while the login reads `ok` and the answer names the same account, and the next
@@ -113,6 +120,8 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
   let attemptedAt: number | null = null;
   let signature: string | null = null;
   let failure: ProbeFailure | null = null;
+  let paired = false;
+  let pairing: Promise<void> | null = null;
 
   let running: number | null = null;
   let probing: Promise<void> | null = null;
@@ -127,6 +136,7 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     ...(identity.workspace === undefined ? {} : { workspace: identity.workspace }),
     authOk,
     ...(credits ? { credits: true } : {}),
+    ...(paired ? { paired: true } : {}),
     ...(version === null ? {} : { version }),
   });
   const view = (): LoginView => ({ health, quota, blocked });
@@ -204,7 +214,25 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     return now() - attemptedAt >= staleAfterMs;
   };
 
+  /** A file read, never a probe: outside the refresh lane, at each tick. */
+  const readPaired = (): void => {
+    if (stopped || pairing !== null) return;
+    pairing = (async (): Promise<void> => {
+      try {
+        const found = (await readRemote(deps.remotePath)) !== null;
+        if (stopped || found === paired) return;
+        paired = found;
+        log.info(`codex login: ${paired ? "paired with a phone" : "not paired"}`);
+        deps.onInfoChange();
+        deps.onPairedChange?.();
+      } finally {
+        pairing = null;
+      }
+    })();
+  };
+
   const check = (): void => {
+    readPaired();
     if (stopped || probing !== null) return;
     probing = (async (): Promise<void> => {
       try {
@@ -237,6 +265,7 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     home: deps.home,
     login,
     view,
+    paired: () => paired,
     observe,
     start: (): void => {
       if (stopped || timer !== null) return;
@@ -263,7 +292,7 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     },
     idle: async (): Promise<void> => {
       // oxlint-disable-next-line no-await-in-loop -- a probe begun while waiting is waited for too
-      for (let pending = probing; pending !== null; pending = probing) await pending;
+      for (let pending = probing ?? pairing; pending !== null; pending = probing ?? pairing) await pending;
     },
   };
 }
@@ -287,7 +316,7 @@ export async function startCodex(
   config: { readonly codex?: unknown },
   opts: (CodexAccountOpts & { readonly stateDir?: string }) | undefined,
   userHome: string,
-  callbacks: Pick<CodexAccountDeps, "onInfoChange" | "onStatusChange">,
+  callbacks: Pick<CodexAccountDeps, "onInfoChange" | "onStatusChange" | "onPairedChange">,
 ): Promise<CodexAccount | null> {
   if (config.codex === undefined || opts === undefined) return null;
   const { stateDir: stateDirectory, ...accountOpts } = opts;
@@ -297,5 +326,11 @@ export async function startCodex(
   });
   if (prepared === null) return null;
   if (!prepared.mcp) log.warn("codex login: bun is not on PATH — config.toml written without the seance MCP server");
-  return createCodexAccount({ ...accountOpts, ...callbacks, home: prepared.home, userHome });
+  return createCodexAccount({
+    ...accountOpts,
+    ...callbacks,
+    home: prepared.home,
+    userHome,
+    remotePath: remotePath(stateDirectory),
+  });
 }

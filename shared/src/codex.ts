@@ -31,33 +31,39 @@ export function versionAtLeast(version: string, floor: string = CODEX_MIN_VERSIO
 }
 
 /**
- * What V1 refuses beside `agent: "codex"` (docs/codex.md, "The task"), named for a client's refusal: effort `max`, any
- * autonomy but `auto` (D6; `steer` is plan mode) and `attachments`. `continues` passes (item 10), its gate
+ * What V1 refuses beside `agent: "codex"` (docs/codex.md, "The task"), named for a client's refusal: effort `max`,
+ * autonomy `steer` (plan mode, which the app-server's `turn/start` does not reach) and `attachments`. `checkpoint` runs
+ * since build order item 9 lifted D6; a client still writes it only to a leader advertising
+ * `CAPABILITIES.codexCheckpoint` (`codexNeedsCheckpointLeader`). `continues` passes (item 10), its gate
  * `CAPABILITIES.codexContinue`; `succeeds` passes (item 11), its gate `CAPABILITIES.codexPass`; each the leader's and
- * the target's, never this one. Null
- * for a Claude task or a Codex one V1 runs. `specError` refuses on it before a write; routing rejects every candidate
- * of a record that carries one anyway (`agent_unsupported`), so it stays readable and is placed nowhere until a build
- * that supports it.
+ * the target's, never this one. Null for a Claude task or a Codex one V1 runs. `specError` refuses on it before a
+ * write; routing rejects every candidate of a record that carries one anyway (`agent_unsupported`), so it stays
+ * readable and is placed nowhere until a build that supports it.
  */
 export function codexSpecRefusal(
   spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments">,
 ): string | null {
   if (spec.agent === undefined) return null;
   if (spec.effort === "max") return "effort max";
-  // `plan: true` alone reads `steer`, and an absent level `checkpoint`: a Codex task says `auto` explicitly.
+  // `plan: true` alone reads `steer`; an absent level reads `checkpoint`, which runs.
   const level = autonomyOf(spec);
-  if (level !== "auto") return `autonomy ${level}`;
+  if (level === "steer") return `autonomy ${level}`;
   if (spec.attachments !== undefined) return "attachments";
   return null;
 }
 
 /**
- * `codexSpecRefusal`'s clause as the line a client refuses with: the autonomy case says what to send instead, since
- * every client defaults to `checkpoint` and a Codex task must say `auto` explicitly (D6).
+ * Whether a Codex spec is placed only by a leader advertising `CAPABILITIES.codexCheckpoint`: an item 8 leader places
+ * a Codex task at any level but `auto` nowhere. Every client defaults to `checkpoint`, so an absent level counts.
  */
+export function codexNeedsCheckpointLeader(spec: Pick<TaskSpec, "agent" | "plan" | "autonomy">): boolean {
+  return spec.agent !== undefined && autonomyOf(spec) === "checkpoint";
+}
+
+/** `codexSpecRefusal`'s clause as the line a client refuses with: the autonomy case says what to send instead. */
 export function codexRefusalText(refusal: string): string {
   return refusal.startsWith("autonomy ")
-    ? `a Codex task runs only at autonomy auto for now, not ${refusal.slice("autonomy ".length)}`
+    ? `a Codex task runs only at autonomy auto or checkpoint for now, not ${refusal.slice("autonomy ".length)}`
     : `a Codex task can't run with ${refusal} yet`;
 }
 

@@ -247,6 +247,7 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
   /** Each pane's inbox as `Messages.attachCodex` is handed it (messages.test.ts covers what messaging does with it). */
   const inboxes = new Map<string, SessionInbox>();
   const inboxSessions = new Map<string, SessionKey | null>();
+  let paired = false;
   const configure = async (): Promise<void> => {
     codexSessions.configure({
       sink: {
@@ -261,6 +262,7 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
         inboxes.set(pane.id, inbox);
         inboxSessions.set(pane.id, session);
       },
+      paired: () => paired,
     });
   };
   const states = (pane: string): readonly CodexState[] => heard.filter((h) => h.pane === pane).map((h) => h.state);
@@ -532,5 +534,75 @@ describe("a Codex continuation (docs/codex.md item 10)", () => {
     expect(err.code).toBe("not_continuable");
     expect(await windowNames()).toEqual(before);
     expect(await stub.calls()).toEqual([]);
+  });
+});
+
+describe("the remote-control slot on live sessions (codex/remote.ts, docs/codex.md item 9)", () => {
+  const configure = async (): Promise<void> => {
+    codexSessions.configure({
+      sink: { state: async () => undefined, rateLimits: () => undefined },
+      home: await realpath(codexHome),
+      launchSession: () => undefined,
+      paired: () => paired,
+    });
+  };
+  let paired = true;
+  const remoteCalls = async (): Promise<readonly { readonly method: string; readonly params: unknown }[]> =>
+    (await stub.rpc()).filter((call) => call.method.startsWith("remoteControl/"));
+
+  beforeEach(async () => {
+    paired = true;
+    await configure();
+  });
+
+  afterEach(() => {
+    codexSessions.stop();
+  });
+
+  test("a checkpoint session takes it from an auto one, ephemerally, and it passes on when that session ends", async () => {
+    await stub.scenario({ turn: "hold" });
+    const auto = await paneOf(await spawnSession(codex("Codex Auto", { autonomy: "auto" }), repos, opts));
+    await pollUntil(() => codexSessions.remoteHolder() === auto, "the auto session to hold the slot", 10_000);
+    expect(await remoteCalls()).toEqual([{ method: "remoteControl/enable", params: { ephemeral: true } }]);
+
+    const checkpoint = await paneOf(await spawnSession(codex("Codex Checkpoint"), repos, opts));
+    await pollUntil(() => codexSessions.remoteHolder() === checkpoint, "the checkpoint session to take it", 10_000);
+    expect((await remoteCalls()).map((call) => call.method)).toEqual([
+      "remoteControl/enable",
+      "remoteControl/disable",
+      "remoteControl/enable",
+    ]);
+
+    await despawnSession(checkpoint, { force: true });
+    await pollUntil(() => codexSessions.remoteHolder() === auto, "the slot back on the auto session", 10_000);
+    await despawnSession(auto, { force: true });
+    await pollUntil(() => codexSessions.remoteHolder() === null, "the slot empty", 10_000);
+  });
+
+  test("unpaired, no server is asked; pairing later offers it, and a restart's re-join keeps it without a call", async () => {
+    paired = false;
+    await stub.scenario({ turn: "hold" });
+    const pane = await paneOf(await spawnSession(codex("Codex Unpaired", { autonomy: "auto" }), repos, opts));
+    await pollUntil(() => codexSessions.holds(pane), "the session to be held", 10_000);
+    await codexSessions.remoteSettled();
+    expect(await remoteCalls()).toEqual([]);
+
+    paired = true;
+    codexSessions.remoteChanged();
+    await pollUntil(() => codexSessions.remoteHolder() === pane, "the slot offered on pairing", 10_000);
+
+    codexSessions.stop();
+    await stub.reset();
+    await configure();
+    await codexSessions.reconnectAll();
+    await codexSessions.remoteSettled();
+    expect(codexSessions.remoteHolder()).toBe(pane);
+    expect((await remoteCalls()).map((call) => call.method)).toEqual(["remoteControl/status/read"]);
+
+    paired = false;
+    codexSessions.remoteChanged();
+    await pollUntil(() => codexSessions.remoteHolder() === null, "the slot taken back on unpairing", 10_000);
+    expect((await remoteCalls()).at(-1)).toEqual({ method: "remoteControl/disable", params: { ephemeral: true } });
+    await despawnSession(pane, { force: true });
   });
 });

@@ -827,8 +827,8 @@ seance spawn --in 2h seance -p "run the slow suite"
 #   not placed before 2 hours from now (--at 21:30 or --at 2026-11-18T21:30, local time unless it ends in Z or an offset, instead; one of the two; Start now skips the wait)
 seance spawn --autonomy steer seance -p "plan the queue rewrite"
 #   starts in plan mode and waits for approval; auto decides reversible choices itself
-seance spawn --agent codex --autonomy auto seance -p "bump the lint config"
-#   runs on a machine's Codex login, at its default model; Codex runs only at auto for now, and needs a leader that runs Codex
+seance spawn --agent codex seance -p "bump the lint config"
+#   runs on a machine's Codex login, at its default model; Codex runs at checkpoint (the default) or auto, never steer, and needs a leader that runs Codex
 seance spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seance spawn --now seance --here   # run in the checkout as it stands, no worktree
@@ -932,7 +932,7 @@ waits for approval, `auto` decides reversible choices itself and records them fo
 (DESIGN.md, "Autonomy level"); `queue_batch` takes one for the whole batch, and a continuation
 keeps its task's (a `steer` task's continues at `checkpoint`). `agent: "codex"` (on `spawn_session` and
 each `queue_batch` member) runs the task on a machine's Codex login instead of Claude Code; a model
-name never picks the agent. For now it needs `autonomy: "auto"` and no `max` effort, and a scheduler leader on a build that runs Codex tasks. `continue_task` resumes a Codex task's own thread, as Codex, on a leader and machine whose build continues Codex tasks. There is no separate `plan` input:
+name never picks the agent. For now it takes no `steer` and no `max` effort, and needs a scheduler leader on a build that runs Codex tasks (at `checkpoint`, one on a build that runs them there). `continue_task` resumes a Codex task's own thread, as Codex, on a leader and machine whose build continues Codex tasks. There is no separate `plan` input:
 every tool refuses a key it does not know, naming it, rather than ignoring it. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.

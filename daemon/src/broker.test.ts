@@ -575,9 +575,29 @@ describe("the broker's scheduler actions", () => {
       }
     });
 
+    test("at checkpoint, explicit or the default, only to a leader advertising codexCheckpoint", async () => {
+      const older = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
+      for (const fields of [{ autonomy: "checkpoint" }, { autonomy: undefined }]) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
+        expect(failed(await older.broker.handle(enqueue({ ...spec, ...fields })))).toMatchObject({
+          code: "invalid_request",
+        });
+      }
+      expect(older.fakes[0]?.creates ?? []).toEqual([]);
+      older.broker.stop();
+
+      const capabilities = [CAPABILITIES.codex, CAPABILITIES.codexCheckpoint];
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities });
+      const checkpoint = { agent: "codex", autonomy: "checkpoint" };
+      expect(await broker.handle(enqueue(checkpoint))).toMatchObject({ ok: true, data: { ok: true } });
+      expect(fakes[0]?.creates[0]?.spec).toMatchObject(checkpoint);
+      broker.stop();
+    });
+
     test("is refused beside a field V1 does not run, even to a leader that takes codex", async () => {
-      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
-      for (const fields of [{ effort: "max" }, { autonomy: "checkpoint" }, { autonomy: undefined }]) {
+      const capabilities = [CAPABILITIES.codex, CAPABILITIES.codexCheckpoint];
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities });
+      for (const fields of [{ effort: "max" }, { autonomy: "steer" }, { autonomy: undefined, plan: true }]) {
         // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
         expect(failed(await broker.handle(enqueue({ ...spec, ...fields })))).toMatchObject({
           code: "invalid_request",

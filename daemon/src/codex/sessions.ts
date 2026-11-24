@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { isAgentSessionId, isRecord } from "@seance/shared";
+import { isAgentSessionId, isAutonomyLevel, isRecord, type AutonomyLevel } from "@seance/shared";
 import { CODEX_PANES, CODEX_RUN_PREFIX } from "../agents/panes.ts";
 import { DRAIN_PROMPT } from "../drain-ask.ts";
 import { sessionKey, type ClaudeProcess, type SessionKey } from "../claude-process.ts";
@@ -19,6 +19,7 @@ import {
 } from "./client.ts";
 import { createCodexDelivery, type CodexDelivery } from "./delivery.ts";
 import { codexSignals, stateOfStatus, turnIdOf, type CodexSignal } from "./events.ts";
+import { createRemoteSlot, remoteEnabled, remoteStatusCall, type RemoteSlot } from "./remote.ts";
 
 /**
  * The daemon's live Codex sessions (DESIGN.md, Daemon, "Codex session events"; docs/codex.md, build order item 7): per
@@ -34,6 +35,9 @@ import { codexSignals, stateOfStatus, turnIdOf, type CodexSignal } from "./event
  *
  * A lost connection is no session's end: the pane is. The daemon re-dials a live pane's server a few times, and a pane
  * gone or dead is harvest's, as a Claude pane's is.
+ *
+ * The registry also keeps the machine's one remote-control slot (`remote.ts`, DESIGN.md, Daemon, "Codex remote
+ * control"): every held session is a member, from its attach or re-join until it leaves the registry.
  */
 
 /** A pane as an act names it: its id and the pid it was read under, so a pane id tmux reused is never acted on. */
@@ -59,6 +63,8 @@ export interface CodexSessionsConfig {
    * the connection goes. Absent where this host runs no messaging: nothing reaches a Codex session then.
    */
   readonly inbox?: (pane: BoundPane, session: SessionKey | null, inbox: SessionInbox) => void;
+  /** Whether the home is paired (`remote.json`): the slot is offered only then. */
+  readonly paired: () => boolean;
 }
 
 export interface CodexSessionsOptions {
@@ -74,7 +80,10 @@ export interface CodexSessions {
    * For the launch: a listener to dial with, buffering what arrives before the thread is known, and the attach that
    * binds the session once `thread` is written. A launch that fails before attaching leaves nothing held.
    */
-  readonly track: (runDir: string) => {
+  readonly track: (
+    runDir: string,
+    level: AutonomyLevel,
+  ) => {
     readonly listener: (notification: CodexNotification) => void;
     readonly attach: (thread: string, connection: CodexConnection, window: string) => Promise<void>;
   };
@@ -103,6 +112,12 @@ export interface CodexSessions {
   readonly reconnectAll: () => Promise<void>;
   /** Whether the pane's session is held here (a test's and the reconnect's read). */
   readonly holds: (paneId: string) => boolean;
+  /** The home's pairing changed (`remote.json`): the slot is offered, or taken back. */
+  readonly remoteChanged: () => void;
+  /** The pane whose server holds the remote-control slot, if any (a test's read). */
+  readonly remoteHolder: () => string | null;
+  /** Resolves once the slot has no step queued: for tests. */
+  readonly remoteSettled: () => Promise<void>;
   /** Closes every connection; the servers run on in their panes, for the next daemon process to re-join. */
   readonly stop: () => void;
 }
@@ -121,11 +136,14 @@ const EARLY_METHODS: ReadonlySet<string> = new Set([
 const THREAD_FILE = "thread";
 /** `run.sh` writes the server's pid here: the session's process, which `seance mcp` from it binds to (`sessionOf`). */
 const SERVER_FILE = "server";
+/** The launch writes the task's autonomy level here, for a reconnect's slot ranking (`agents/codex.ts`). */
+export const LEVEL_FILE = "autonomy";
 const RUN_DIR_PATTERN = /\/tmp\/seance-cx-[A-Za-z0-9]{1,32}\/run\.sh/u;
 
 interface Session {
   readonly thread: string;
   readonly runDir: string;
+  readonly level: AutonomyLevel | null;
   readonly pane: BoundPane;
   process: ClaudeProcess | null;
   connection: CodexConnection | null;
@@ -148,6 +166,19 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
   const sessions = new Map<string, Session>();
   let config: CodexSessionsConfig | null = null;
   let stopped = false;
+  let slot: RemoteSlot | null = null;
+
+  const newSlot = (next: CodexSessionsConfig): RemoteSlot =>
+    createRemoteSlot({
+      paired: next.paired,
+      control: (runDir, method) => remoteStatusCall(runDir, next.home, method),
+    });
+
+  /** A session leaves the registry: the slot passes on if it held it. */
+  const release = (session: Session): void => {
+    if (sessions.get(session.pane.id) === session) sessions.delete(session.pane.id);
+    slot?.leave(session.pane.id);
+  };
 
   const endTurn = (session: Session): void => {
     session.turn = null;
@@ -232,14 +263,14 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
       if (stopped || sessions.get(session.pane.id) !== session) return;
       // oxlint-disable-next-line no-await-in-loop -- as above
       if (!(await livePane(session))) {
-        sessions.delete(session.pane.id);
+        release(session);
         return;
       }
       // oxlint-disable-next-line no-await-in-loop -- as above
       if (await rejoin(session)) return;
     }
     if (sessions.get(session.pane.id) === session) {
-      sessions.delete(session.pane.id);
+      release(session);
       log.warn("codex: lost a session's server connection — its state is no longer read until the daemon restarts");
     }
   };
@@ -321,10 +352,11 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
     return start === null ? null : { pid, start, key: sessionKey(pid, start) };
   };
 
-  const fresh = (thread: string, runDir: string, pane: BoundPane): Session => {
+  const fresh = (thread: string, runDir: string, pane: BoundPane, level: AutonomyLevel | null): Session => {
     const session: Session = {
       thread,
       runDir,
+      level,
       pane,
       process: null,
       connection: null,
@@ -364,7 +396,7 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
   };
 
   return {
-    track: (runDir) => {
+    track: (runDir, level) => {
       const early: CodexNotification[] = [];
       let session: Session | null = null;
       return {
@@ -382,13 +414,17 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
           const pane = (await opts.panes()).find((p) => p.id === paneId && !p.dead);
           if (pane === undefined || stopped) return;
           const held = sessions.get(pane.id);
-          if (held !== undefined) drop(held);
-          const attached = fresh(thread, runDir, pane);
+          if (held !== undefined) {
+            drop(held);
+            release(held);
+          }
+          const attached = fresh(thread, runDir, pane, level);
           attached.process = await serverOf(runDir, pane);
           sessions.set(pane.id, attached);
           session = attached;
           hold(attached, connection);
           for (const notification of early.splice(0)) hear(attached, notification);
+          slot?.join({ paneId: pane.id, runDir, level });
         },
       };
     },
@@ -436,6 +472,8 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
     configure: (next): void => {
       stopped = false;
       config = next;
+      slot?.stop();
+      slot = newSlot(next);
     },
     reconnectAll: async (): Promise<void> => {
       const home = config?.home;
@@ -454,20 +492,41 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
             // A tasked pane's thread is the one its launch noted: the run dir's file alone could be any thread.
             if (pane.taskId !== null && config?.launchSession(pane.taskId) !== thread) return;
             if (stopped || sessions.has(pane.id)) return;
-            const session = fresh(thread, runDir, pane);
+            const level = await levelOf(runDir);
+            const session = fresh(thread, runDir, pane, level);
             session.process = await serverOf(runDir, pane);
             sessions.set(pane.id, session);
-            if (!(await rejoin(session)) && sessions.get(pane.id) === session) sessions.delete(pane.id);
+            if (!(await rejoin(session))) {
+              if (sessions.get(pane.id) === session) sessions.delete(pane.id);
+              return;
+            }
+            // A server the previous daemon process gave the slot keeps it: its remote control outlived that process.
+            const status = await remoteStatusCall(runDir, home, "remoteControl/status/read");
+            if (stopped || sessions.get(pane.id) !== session) return;
+            slot?.join({ paneId: pane.id, runDir, level }, status !== null && remoteEnabled(status));
           }),
       );
     },
     holds: (paneId) => sessions.has(paneId),
+    remoteChanged: (): void => slot?.reconcile(),
+    remoteHolder: () => slot?.holder() ?? null,
+    remoteSettled: async (): Promise<void> => {
+      await slot?.settled();
+    },
     stop: (): void => {
       stopped = true;
       for (const session of sessions.values()) drop(session);
       sessions.clear();
+      // The servers keep remote control as they keep running: the next daemon process re-joins the holder.
+      slot?.stop();
     },
   };
+}
+
+/** The level the launch wrote to the run dir, else null (an item 7 launch wrote none). */
+async function levelOf(runDir: string): Promise<AutonomyLevel | null> {
+  const text = (await readFile(join(runDir, LEVEL_FILE), "utf8").catch(() => "")).trim();
+  return isAutonomyLevel(text) ? text : null;
 }
 
 /** Each pane's start command, by pane id: where a Codex pane's run dir is named. */

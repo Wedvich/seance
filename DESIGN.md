@@ -881,7 +881,8 @@ nothing checked it. The last is the gap they leave.
   writes one audit line, `audit codex origin=cli op=<verb> outcome=<…>`, from a closed set of outcomes
   (`CODEX_OWNER_OUTCOMES`): never the device code, an email, an account id or anything Codex printed. `login` hands
   the terminal to Codex's own `login --device-auth` in the home, so Séance never sees the code or a token. The probe
-  writes no audit line: it is not a spawn, as the `/usage` refresh is not.
+  writes no audit line: it is not a spawn, as the `/usage` refresh is not. `pair` and `unpair` (item 9) are the same
+  kind of act: "Codex remote control", below.
 - **The fleet reads an agent login as it reads an exclave, through the same rules** (Daemon, "Codex login", "Fleet
   readers"; docs/codex.md item 2). `lq`, `lx`, `lu` and `lb` are held to the register blob's `logins` by
   `sanitizeStatus`, which drops those four fields alone over an index outside it, a repeat or a bad percent, never the
@@ -932,7 +933,8 @@ nothing checked it. The last is the gap they leave.
   its own requests (a result, or an error's code: never its message), each frame bounded at 16 MiB; it reads a
   notification only through `codexSignals` ("A Codex session's events", below) and reads no server request, so it
   never answers an approval. Nothing the server sent reaches a log, an audit
-  line or a frame.
+  line or a frame. Since item 9 the daemon also sends the remote-control calls of "Codex remote control" (below), over
+  a connection of their own.
 - **A Codex launch's thread id** (docs/codex.md threat-model item 10). The launch ledger notes as a Codex task's
   `session` only the thread id this daemon's own `thread/start` answered, beside `agent: "codex"`
   (`TaskNote.agent`), never a claimed one. A continuation (item 10, 2026-11-24; Daemon, "Continuing a Codex
@@ -979,6 +981,24 @@ nothing checked it. The last is the gap they leave.
   (a resumed thread keeps it). A message's wrapper gives it only its kind's authority, as for Claude. Watch notes and
   the custodian's `nudge` reach a Codex pane this way, so watches no longer answer it `nolistener` while its
   connection is held.
+- **Codex remote control** (item 9, 2026-11-24; Daemon, "Codex remote control"; docs/codex.md threat-model items 11
+  and 12). Pairing is the owner's shell act: `seance codex pair | unpair` are in the one `COMMANDS` table (so a
+  custodian round's fence denies them), never a frame, a local-socket op, a broker action, an app op or MCP, and each
+  writes one `audit codex origin=cli op=pair|unpair outcome=<…>` line from `CODEX_OWNER_OUTCOMES`, never the pairing
+  code, an environment or client id. The verb prints only the manual pairing code, held to `^[A-Za-z0-9-]{4,32}$`, and
+  its expiry: nothing else Codex answered reaches the terminal, a log or an audit line. A paired phone drives the
+  session holding the slot through OpenAI's remote control, as the Claude app drives a Claude session through
+  Anthropic's: whoever holds the owner's ChatGPT account can type into that one session, under the sandbox and
+  reviewer `config.json` set (D5), never more. `remote.json` holds ids only (the enrollment's secret stays in the home,
+  which the daemon never reads), 0600, read as a plain file through `lstat` and a strict parser, and decides only
+  whether the slot is offered and `AgentLogin.paired` (display); it never decides whether a task starts (O3). What
+  the daemon sends: `remoteControl/enable` and `remoteControl/disable` with `{ephemeral: true}` alone and
+  `remoteControl/status/read` with `{}`, each over a one-shot connection it opens with `experimentalApi` to the
+  server of a pane it launched (after `socketState` and the home's realpath, as every dial); the verbs add
+  `pairing/start` (`manualCode: true`), `pairing/status` (the code the server gave), `client/list` (the environment
+  id the server gave) and `client/revoke` (ids the server listed), to a `--listen` server of their own in a 0700
+  `/tmp/seance-cxp-` run dir, killed by group however the verb ends. No frame field reaches a param, and a session's
+  own connection never opts into the experimental API.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -2576,6 +2596,11 @@ an old peer's frames parse as before. Mixed versions:
   unreadable (`AGENT_DEP_SENTINEL`). An older daemon answers a Codex pane's `pass` `unsupported` and asks it nothing.
   Clients offer a Codex task's pass only to a verified leader and a task machine advertising it (`passOffer`), and
   `pass_to_successor` refuses before any push from a Codex pane when the leader does not.
+- `CAPABILITIES.codexCheckpoint` (2026-11-24, docs/codex.md item 9; Scheduler, "Codex tasks"), the leader half only:
+  an item 8 leader holds a Codex record at `checkpoint` (or at no level, which reads it) readable and places it nowhere
+  (`agent_unsupported`), so every client (the PWA, MCP, the CLI, the broker) writes such a task only to a verified
+  leader advertising it, and otherwise refuses before a write, naming `auto` as the retry. A continuation keeps its task's level, so `continueOffer` offers one of a Codex `checkpoint` task only under such a leader too (an item 10 leader continues Codex but would hold it). A successor keeps it as well, so `passOffer` and `pass_to_successor` pass such a task only under one too (an item 11 leader passes Codex but would hold the successor). A daemon of any Codex build
+  runs the level (Codex's `checkpoint` preamble shipped with item 6); only this build's daemon hands one the phone.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -3954,8 +3979,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     spill gated on `AgentLogin.credits` and spent credits on the reading's `c`, as Claude's on extra usage. Every
     Codex plan is estimated at `unknownSeat` (capacity 1) until observed deltas say otherwise. A Claude task's
     candidates never read `logins`: its decision is unchanged by a machine's login and capability (under test).
-  - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max`, any autonomy but an explicit `auto` (so
-    `steer`, `plan`, and an absent level, which reads `checkpoint`) and `attachments`. `continues` was refused until
+  - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max`, `steer` (and `plan`, which reads it) and
+    `attachments`. `checkpoint`, explicit or absent, runs since item 9 (2026-11-24, D6 lifted):
+    `codexNeedsCheckpointLeader` says a spec needs a leader advertising `CAPABILITIES.codexCheckpoint`, and every
+    client gates on it as on `codex`; the route needs nothing more of the machine. `continues` was refused until
     item 10 (2026-11-24): `continueFilter` now routes a Codex continuation only to a machine advertising
     `CAPABILITIES.codexContinue` (`continue_unsupported` otherwise; Daemon, "Continuing a Codex session"). `succeeds`
     was refused until item 11 (below). `specError` refuses them before a write for MCP, the broker and the CLI; a
@@ -3985,13 +4012,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
       model together, so picking a GPT model sets `form.agent: "codex"`. A Codex row is named by its family alone (Sol, not
       GPT-6.2 Sol), since the list holds one version per family. The saved form keeps both and falls back to
       the default when they disagree. Effort is offered per agent (`OFFERED_EFFORTS_BY_AGENT`, no `max` for either).
-      `deriveCodexProblem` blocks the button and names why: an autonomy other than Auto (the form never switches it on
-      its own), attached files, or no verified leader advertising `codex`. A held Codex task is checked against the
-      leader when sent and fails there, never sent without `agent`. The model tile tags the agent; the Queue row and
+      `deriveCodexProblem` blocks the button and names why: Steer (the form never switches the level on its own),
+      attached files, no verified leader advertising `codex`, or Checkpoint to one not advertising `codexCheckpoint`
+      (`CODEX_CHECKPOINT_UNAVAILABLE`, which names Auto). A held Codex task is checked against both when sent and
+      fails there, never sent without `agent`. The model tile tags the agent; the Queue row and
       the queued verdict show an agent badge for a non-Claude task (`AGENT_NAMES`); absent reads as Claude, as autonomy
       omits checkpoint.
     - _MCP:_ `spawn_session` and each `queue_batch` member take `agent` (`"codex"`; omitted is Claude), refused by
-      `specError` and then by `codexGateError` before any create (a batch before its first); `get_queue` shows a
+      `specError` and then by `codexGateError` (which also asks `codexCheckpoint` of a `checkpoint` spec, for every
+      Codex member of a batch) before any create (a batch before its first); `get_queue` shows a
       non-Claude agent.
     - _CLI:_ `seance spawn --agent <claude|codex>`, queued only: `--now` spawns Claude directly and refuses it. The
       CLI has no `--model` or `--effort`, so a Codex task runs `DEFAULT_CODEX_MODEL`.
@@ -7764,6 +7793,55 @@ of this section built.
   - **Audit.** The spawn request line carries `agent=codex` after any `client=`, with Codex's default model when none
     was named; the despawn `ok` line ends ` agent=codex`. A Claude spawn's and despawn's lines are byte-identical to
     before.
+- **Codex remote control** (`daemon/src/codex/remote.ts`, `pair.ts`, `codex-cli.ts`; built 2026-11-24, docs/codex.md
+  "Remote control (phase 3)" and build order item 9): the owner's phone (Codex in the ChatGPT app) reaches one Codex
+  session per machine through OpenAI's remote control, as the Claude app reaches a Claude session. The threat model's
+  "Codex remote control" holds it.
+  - **What Codex does** (the item 9 spike, S5's rest, 0.170.0 on the Mac). `remoteControl/*` is experimental: a
+    connection whose `initialize` did not send `capabilities.experimentalApi` gets `-32600`. A `--listen` server starts
+    `disabled`; `enable` persists in the home (the next server starts connected) unless `ephemeral: true`, which lasts
+    the server's life. Every `--listen` server on a home shares one environment and its pairing, which outlives
+    servers (the phone stayed listed across a kill and restart, no new code); a stdio server enrolls an environment of
+    its own with no clients, so a pairing over one reaches no session. One server per home holds the backend's
+    connection: a second enabled one reads `errored` and connects within about 5 s of the holder disabling or exiting.
+    `pairing/start` needs remote control on (an `errored` server serves); `client/list` answers with it off, given the
+    environment id. A manual code (`XXXX-XXXX`) lapses 600 s after issue.
+  - **`seance codex pair`.** After the login verbs' checks (block, home, binary at the floor) it starts a
+    `codex app-server --listen` of its own on the home, in a 0700 `/tmp/seance-cxp-` run dir (never the panes'
+    `/tmp/seance-cx-` mark, so no pane listing or reconnect sees it), dialled only after `socketState` and accepted only
+    when `initialize` answers the home's realpath. It enables remote control ephemerally, reads the environment id
+    (`status/read` until one is named, 30 s), asks `pairing/start` with `manualCode: true`, prints the code and its
+    expiry, and polls `pairing/status` every 2 s until it is claimed, it lapses, or Ctrl-C. Then it lists the
+    environment's clients (at most 16, four pages) and writes `stateDir()/codex/remote.json`
+    (`{v: 1, environmentId, clients, at}`, 0600, `writeDurable`). However it ends, it disables remote control and kills
+    its server's group (TERM, KILL after 5 s), so a session's server takes the backend's connection at once.
+    _Decided:_ a server of the verb's own rather than a session's, because pairing must work with no session running
+    and must not hold a session's server's slot; `--listen` rather than stdio for the environment above.
+  - **`seance codex unpair`** revokes every client the environment lists, not only the ones noted (a phone paired
+    outside Séance reaches the sessions too), then removes `remote.json`: `ok`, or `not_paired` when there was neither
+    a client nor a note. A revoke that fails leaves the note, `failed`. Outcomes join `CODEX_OWNER_OUTCOMES`:
+    `lapsed`, `cancelled`, `not_paired`.
+  - **`AgentLogin.paired`.** The account reads `remote.json` at each minute tick (a file read, outside the refresh
+    lane, never a probe; anything but a plain file that parses strictly reads unpaired). A change re-registers and
+    tells `codexSessions` (`remoteChanged`). Display only: MCP `list_machines` shows it; the PWA's login row does not,
+    since the owner decided that row carries nothing kind-specific (item 3). Never a routing input (O3).
+  - **The slot** (`createRemoteSlot`, inside `codexSessions`). A session joins at attach with its task's level (the
+    run dir's `autonomy` file, written 0600 `wx` at launch from `autonomyOf`, read back by a restart's rejoin; one that
+    cannot be read ranks as `auto`) and leaves when it ends (its pane dead, its reconnects spent, an attach replacing
+    it). While `paired`, the daemon enables remote control (ephemerally, over a one-shot connection of its own with
+    `experimentalApi`) on one member's server: a `checkpoint` session's before any other, else the oldest. A
+    `checkpoint` session takes the slot from a holder at another level (disable, then enable), never from another
+    `checkpoint` one; when the holder leaves, the daemon disables its server (best effort: a live pane's server whose
+    connection was lost would otherwise keep it) and offers the next. `errored` counts as held: Codex connects it once
+    the other server lets go. A server whose `enable` fails is skipped while it lives (one fixed warn). Unpaired, the
+    holder is disabled and no server is asked. Every step runs on one chain, so the daemon never has two servers
+    enabled at once. `stop` touches no server; the next process's rejoin reads `status/read`, keeps an enabled server
+    as holder without a call and disables a second. _Decided:_ `checkpoint` first, because that is where a person
+    answers; ephemeral, because a persisted enable would bring every later server on the home up competing for the
+    connection, and a server the daemon did not enable must start disabled.
+  - **No link.** S7 found no URL that opens a Codex thread in the ChatGPT app (`codex://threads/<id>`, found in the
+    binary, and chatgpt.com's `/codex/threads/<id>` and `/codex/tasks/<id>`, tried on Android), so `agent.remote`
+    stays Claude's and the PWA links nothing for a Codex task.
 - **GitHub rate limits** (`daemon/src/github-rate.ts`, `gh.ts`; added 2026-11-17): this machine's own `gh`'s GitHub
   API budget, in the status's `gh`. Every Claude session on every machine signs in as one GitHub user, so all of them
   share one 5,000-an-hour REST budget and one 5,000-point GraphQL one. On 2026-11-17 sessions' own `gh` polling spent

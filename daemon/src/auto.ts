@@ -4,6 +4,7 @@ import {
   parseAmendDraft,
   type AmendDraft,
   CAPABILITIES,
+  codexNeedsCheckpointLeader,
   codexRefusalText,
   codexSpecRefusal,
   withAutonomy,
@@ -583,6 +584,7 @@ export async function continueAuto(
     now: reply.at,
     leaderHandoff: leaderAdvertises(lease, CAPABILITIES.continueHandoff),
     leaderCodexContinue: leaderAdvertises(lease, CAPABILITIES.codexContinue),
+    leaderCodexCheckpoint: leaderAdvertises(lease, CAPABILITIES.codexCheckpoint),
   });
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
   // Tags are dropped, not refused, under a leader without `taskTags`: nobody asked for them on a continue.
@@ -641,13 +643,26 @@ export function taskTagsGateError(lease: SchedulerLease, label: string, field: s
 /**
  * The submit-time half of the `codex` gate (the record's `AGENT_DEP_SENTINEL` is the other): an older leader holds a
  * Codex record unreadable, so `agent` is written only to a verified leader advertising `CAPABILITIES.codex` — never to
- * none, which cannot say. `field` names it as the surface does.
+ * none, which cannot say. A Codex task at `checkpoint` (`codexNeedsCheckpointLeader`, the default level) also needs
+ * `CAPABILITIES.codexCheckpoint`: an item 8 leader would hold it and place it nowhere. `field` names it as the surface
+ * does.
  */
-export function codexGateError(lease: SchedulerLease, label: string, field: string): string | null {
-  if (leaderAdvertises(lease, CAPABILITIES.codex)) return null;
-  return lease.scheduler.availability().kind === "ready"
-    ? `${label} refused: the scheduler's leader does not run Codex tasks yet — its daemon needs \`seance update\`; retry without ${field}`
-    : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to run Codex tasks — try again once one leads, or retry without ${field}`;
+export function codexGateError(
+  lease: SchedulerLease,
+  label: string,
+  field: string,
+  spec: Pick<AutoSpec, "agent" | "plan" | "autonomy">,
+): string | null {
+  const ready = lease.scheduler.availability().kind === "ready";
+  if (!leaderAdvertises(lease, CAPABILITIES.codex)) {
+    return ready
+      ? `${label} refused: the scheduler's leader does not run Codex tasks yet — its daemon needs \`seance update\`; retry without ${field}`
+      : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to run Codex tasks — try again once one leads, or retry without ${field}`;
+  }
+  if (!codexNeedsCheckpointLeader(spec) || leaderAdvertises(lease, CAPABILITIES.codexCheckpoint)) return null;
+  return ready
+    ? `${label} refused: the scheduler's leader runs Codex tasks only at autonomy auto — its daemon needs \`seance update\`; retry with autonomy auto`
+    : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to run Codex tasks at checkpoint — try again once one leads, or retry with autonomy auto`;
 }
 
 /** A refused `requires`: the line to show, and what to count in its audit line. */
@@ -811,7 +826,13 @@ export async function passAuto(lease: SchedulerLease, taskId: string, surface: E
   if (task.successor !== undefined) {
     return done(`task ${taskId} was already passed to successor ${task.successor}; nothing was sent`);
   }
-  const offer = passOffer(task, lease.machines, true, leaderAdvertises(lease, CAPABILITIES.codexPass));
+  const offer = passOffer(
+    task,
+    lease.machines,
+    true,
+    leaderAdvertises(lease, CAPABILITIES.codexPass),
+    leaderAdvertises(lease, CAPABILITIES.codexCheckpoint),
+  );
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
   const mayHave = `the pass may have landed anyway — ${PASS_CHECK[surface]}, or pass it again: a task already passed answers with its successor`;
   let reply: Awaited<ReturnType<SchedulerLeg["pass"]>>;

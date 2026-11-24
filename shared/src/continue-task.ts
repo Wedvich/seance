@@ -1,5 +1,6 @@
 import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
+import { codexNeedsCheckpointLeader } from "./codex.ts";
 import { blockedBrief, taskPrBlock } from "./pr-blocked.ts";
 import { TASK_PHASES } from "./task-phase.ts";
 import { chainTags, withoutTaskTags } from "./tags.ts";
@@ -24,13 +25,18 @@ export type ContinueOffer =
 
 /**
  * What only the caller knows: its best leader-clock now, and whether the verified leader advertises `continueHandoff`
- * and `codexContinue`.
+ * `codexContinue` and `codexCheckpoint`.
  */
 export interface OfferContext {
   readonly now: number;
   readonly leaderHandoff: boolean;
   /** The verified leader advertises `CAPABILITIES.codexContinue`: an older one would hold a Codex continuation forever. */
   readonly leaderCodexContinue: boolean;
+  /**
+   * The verified leader advertises `CAPABILITIES.codexCheckpoint`. A continuation keeps its task's level, and an item
+   * 10 leader continues Codex but places one at `checkpoint` nowhere.
+   */
+  readonly leaderCodexCheckpoint: boolean;
 }
 
 /**
@@ -201,6 +207,12 @@ export function continueOffer(
     return {
       ok: false,
       reason: "the scheduler's leader can't continue a Codex task yet (needs seance update)",
+    };
+  }
+  if (codexNeedsCheckpointLeader(task.spec) && context?.leaderCodexCheckpoint !== true) {
+    return {
+      ok: false,
+      reason: "the scheduler's leader can't run a Codex task at checkpoint yet (needs seance update)",
     };
   }
   if (task.state === "cancelled") {
