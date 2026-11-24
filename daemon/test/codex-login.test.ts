@@ -12,7 +12,7 @@ import {
   type MachineStatus,
 } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
-import { createCodexAccount, type CodexAccount } from "../src/codex/account.ts";
+import { codexRunnable, createCodexAccount, type CodexAccount } from "../src/codex/account.ts";
 import { codexEnv, prepareCodexHome, renderCodexConfig } from "../src/codex/home.ts";
 import { probeCodex } from "../src/codex/probe.ts";
 import { configSkeleton, type Config } from "../src/config.ts";
@@ -252,6 +252,52 @@ describe("the account", () => {
     expect(account?.login()).toMatchObject({ accountId: "codex:acct-1:user-1", authOk: true });
     account?.stop();
   });
+
+  test("a running session's own reading refreshes the quota for the same account only, never a health", async () => {
+    const home = await freshHome();
+    await stub.scenario(SIGNED_IN);
+    const counts = await start(home);
+    const moved = {
+      ...RATE_LIMITS,
+      ordinaryUsageAllowed: false,
+      rateLimits: { ...RATE_LIMITS.rateLimits, primary: { ...RATE_LIMITS.rateLimits.primary, usedPercent: 57 } },
+    };
+    // Another account's reading, or garbage, is dropped whole.
+    account?.observe({ ...moved, accountId: "acct-2" });
+    account?.observe({ ...moved, rateLimits: "nope" });
+    account?.observe(null);
+    expect(account?.view().quota?.h).toBe(3);
+    account?.observe(moved);
+    expect(account?.view()).toMatchObject({ health: "ok", blocked: true, quota: { h: 57, d: 41 } });
+    expect(counts.status).toBe(2);
+    // Fresh again: the reading counts as the probe's, so none runs.
+    await Bun.sleep(200);
+    expect((await stub.calls()).length).toBe(2);
+    account?.stop();
+  });
+
+  test("a signed-out login takes no session's reading", async () => {
+    const home = await freshHome();
+    await stub.scenario(SIGNED_OUT);
+    await start(home);
+    account?.observe(RATE_LIMITS);
+    expect(account?.view()).toEqual({ health: "signed_out", quota: null, blocked: false });
+    account?.stop();
+  });
+});
+
+describe("codexRunnable: when this machine advertises CAPABILITIES.codex", () => {
+  const login = { agent: "codex", accountId: "codex:a:u", authOk: true, version: "0.170.0" } as const;
+  test("signed in, identified and at the floor", () => {
+    expect(codexRunnable(login)).toBe(true);
+    expect(codexRunnable({ ...login, version: "0.171.2" })).toBe(true);
+  });
+  test("signed out, unidentified, below the floor or of no known version", () => {
+    expect(codexRunnable({ ...login, authOk: false })).toBe(false);
+    expect(codexRunnable({ ...login, accountId: null })).toBe(false);
+    expect(codexRunnable({ ...login, version: "0.166.0" })).toBe(false);
+    expect(codexRunnable({ agent: "codex", accountId: "codex:a:u", authOk: true })).toBe(false);
+  });
 });
 
 describe("the daemon", () => {
@@ -344,6 +390,8 @@ describe("the daemon", () => {
           version: "0.170.0",
         },
       ]);
+      // Signed in, identified and at the floor: the scheduler may route it a Codex task.
+      expect(info.capabilities).toContain("codex");
       let status = await next.status();
       const deadline = Date.now() + 10_000;
       while (status.lq === undefined || status.scan !== info.scannedAt) {
@@ -367,7 +415,9 @@ describe("the daemon", () => {
     ]) {
       // oxlint-disable-next-line no-await-in-loop -- one daemon at a time
       await withDaemon(opts, async (next) => {
-        expect((await next.info()).logins).toEqual([]);
+        const info = await next.info();
+        expect(info.logins).toEqual([]);
+        expect(info.capabilities).not.toContain("codex");
         const status = await next.status();
         for (const key of ["lq", "lx", "lu", "lb"]) expect(status).not.toHaveProperty(key);
       });

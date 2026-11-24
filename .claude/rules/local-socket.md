@@ -4,6 +4,7 @@ paths:
   - "daemon/src/{session-event*,settings-hooks*,usage-refresh,report-done*,handoff*}.ts"
   - "daemon/src/{launch-ledger*,pane-activity*,conversations,claude-process,agent-session-file*}.ts"
   - "daemon/src/owner-labels*.ts"
+  - "daemon/src/codex/{sessions,events}.ts"
   - "shared/src/tags.ts"
 ---
 
@@ -142,6 +143,23 @@ Nothing kept below is run or sent, and no reply depends on it.
   conversation table beside it (`conversations.ts`, memory only). Its tags reach only an app's `sessions`
   (`SessionEntry.tags`: never a scheduler-sealed one, and MCP's `get_sessions` only
   `AGENT_VISIBLE_TAG_KEYS`), never a log, an audit line or argv.
+
+## A Codex pane's events: its own server, bound by construction
+
+DESIGN.md, "Codex session events". The second source of session events is the daemon's own connection to
+the `codex app-server` of a pane it launched (or, on a restart, of a pane of ours whose start command names a
+0700 run dir of its uid and whose `thread` file names the thread the launch ledger noted for its task).
+
+- A notification enters only through `codexSignals`, and only for the session's own thread: another thread's
+  is dropped. It reaches the pipeline only through `SessionEvents.codex`, which re-reads the pane listing
+  (live, same pid and task, still Codex's) before `ingest`, the step a bound frame reaches after binding.
+  Giving it any act a bound frame lacks, or taking a pane, task or thread from a notification, is a
+  threat-model change.
+- The daemon sends a server only constant methods with daemon-held params (the thread it started, a turn id
+  its server named) and never answers a server request: an approval is never granted by the daemon.
+- A Codex pane's own local `session-event` frames take `done` and `handoff` only; `pass` is `unsupported`
+  and a state is dropped, so nothing else running in the pane speaks for it. `sessionOf`'s session for a
+  Codex pane is the innermost `codex` (`CODEX_PANES.process`), the pane's server.
 
 ## A session's name is the owner's sealed act
 

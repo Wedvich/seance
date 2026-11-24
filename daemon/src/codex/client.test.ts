@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parseMessage, socketState, SOCKET_NAME } from "./client.ts";
+import { parseMessage, parseNotification, socketState, SOCKET_NAME } from "./client.ts";
 
 // Under `/tmp`, never `tmpdir()`: a socket path has ~104 bytes on macOS.
 let base: string;
@@ -93,5 +93,25 @@ describe("parseMessage: responses only", () => {
     expect(parseMessage('{"id":"x","result":1}')).toBeNull();
     expect(parseMessage('{"id":3}')).toBeNull();
     expect(parseMessage("not json")).toBeNull();
+  });
+});
+
+describe("parseNotification: what a session's server says unprompted", () => {
+  test("a bounded method and its params, unparsed", () => {
+    expect(parseNotification('{"method":"turn/started","params":{"threadId":"t"}}')).toEqual({
+      method: "turn/started",
+      params: { threadId: "t" },
+    });
+    expect(parseNotification('{"method":"thread/closed"}')).toEqual({ method: "thread/closed", params: undefined });
+  });
+
+  test("a server request (an approval: it carries an id), a response, a long or empty method and noise are none", () => {
+    expect(parseNotification('{"id":7,"method":"item/commandExecution/requestApproval","params":{}}')).toBeNull();
+    expect(parseNotification('{"id":1,"result":{}}')).toBeNull();
+    expect(parseNotification(JSON.stringify({ method: "x".repeat(129) }))).toBeNull();
+    expect(parseNotification('{"method":""}')).toBeNull();
+    expect(parseNotification('{"method":3}')).toBeNull();
+    expect(parseNotification("[1]")).toBeNull();
+    expect(parseNotification("not json")).toBeNull();
   });
 });

@@ -896,9 +896,10 @@ nothing checked it. The last is the gap they leave.
   `agent` and nulls the spec over the sentinel without it or over an agent it does not know. A client writes `agent`
   only to a verified leader advertising `CAPABILITIES.codex` (the broker refuses it otherwise, before a write), and the
   leader sends it in a spawn only to a machine advertising `codex` (`agent_unsupported` otherwise), since an older
-  daemon would drop it and start Claude. A daemon not advertising `codex` refuses a wire spawn carrying `agent` as
-  malformed (`isSpawnRequest`), never runs it as Claude: item 6 built the driver but keeps that refusal until the
-  session's events and close land (item 7). What V1 refuses beside it (`codexSpecRefusal`) is refused before a write and, in a record
+  daemon would drop it and start Claude. A daemon refuses a wire spawn carrying an `agent` other than
+  `codex` as malformed (`isSpawnRequest`), and advertises `codex` only while its login is configured, signed in,
+  identified and at the floor (`codexRunnable`, item 7); a Codex spawn reaching a machine with no `codex` block is
+  `launch_error`, never run as Claude. What V1 refuses beside it (`codexSpecRefusal`) is refused before a write and, in a record
   that carries it anyway, placed nowhere.
 - **A Codex pane's server socket** (Daemon, "Codex sessions"; docs/codex.md threat-model item 4). The pane's
   `codex app-server --listen` path is `s.sock` in a run dir the daemon made: `/tmp/seance-cx-<mkdtemp>`, `chmod`ed
@@ -912,20 +913,38 @@ nothing checked it. The last is the gap they leave.
   text written 0600 with `wx`, every path in it through `shq()`; the pane's one shell string is
   `exec [caffeinate -is ]/bin/sh '<run>/run.sh'`.
 - **What the daemon sends a Codex server, and keeps** (docs/codex.md threat-model items 5 and 6, the launch's half).
-  Constant method names (`initialize`, the `initialized` notification, `thread/start`, `turn/start`); `cwd` the
+  Constant method names (`initialize`, the `initialized` notification, `thread/start`, `turn/start`; since item 7
+  `turn/interrupt`, `thread/resume`, `thread/turns/list` and `account/rateLimits/read`, whose params are only the
+  thread id this daemon's own `thread/start` answered, a turn id its server named and constants); `cwd` the
   worktree path the spawn path made; `approvalPolicy`, `sandbox` and `approvalsReviewer` from the machine's own
   `config.json` only, never a frame, autonomy level or session; `model` from the parsed spec (else
   `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input, never argv, a file or
   `developerInstructions`. Nothing reaches the pane's argv but daemon paths and the thread id, the id only after
   `isAgentSessionId` passed it and then as a shell variable's value after `--`. The daemon keeps only the answers to
-  its own requests (a result, or an error's code: never its message), each frame bounded at 16 MiB; it ignores every
-  notification and server request, so it never answers an approval. Nothing the server sent reaches a log, an audit
+  its own requests (a result, or an error's code: never its message), each frame bounded at 16 MiB; it reads a
+  notification only through `codexSignals` ("A Codex session's events", below) and reads no server request, so it
+  never answers an approval. Nothing the server sent reaches a log, an audit
   line or a frame.
 - **A Codex launch's thread id** (docs/codex.md threat-model item 10). The launch ledger notes as a Codex task's
   `session` only the thread id this daemon's own `thread/start` answered, beside `agent: "codex"`
   (`TaskNote.agent`), never a claimed one; a continuation refuses a note carrying `agent` until Codex continue lands
   (item 10), so `--resume` is never handed a thread id. Spawn and despawn audit lines carry `agent=codex` for a Codex
   session (Daemon, "Codex sessions"): the spawn's from the request, the despawn's from the pane's own start mark.
+- **A Codex session's events** (item 7, 2026-11-24; Daemon, "Codex session events"; docs/codex.md threat-model items 5
+  and 6, the session's half). A new source of session events, not a new act: the daemon's own connection to the
+  server of a pane it launched (or, after a restart, of a pane of ours whose start command names a 0700 run dir of its
+  uid and whose `thread` file names the thread the launch ledger noted for its task). It is bound by construction,
+  never by a field: the pane, its pid and task are the launch's, the thread is the daemon's own `thread/start`
+  answer, and a notification naming another thread is dropped (S3 saw Codex's own ephemeral thread report on the same
+  connection). A state enters only after a re-read of the pane listing shows that pane live under the same pid and
+  task and still Codex's, at the step a bound local-socket frame reaches after binding, with `agent: {kind: "codex",
+  session: <thread id>}` verified against the launch ledger. It sends a server nothing a notification named, answers
+  no server request (an approval stays the owner's or Codex's reviewer's), and keeps only an enum state, a bounded turn
+  id and the login's rate-limit reading, which the account takes only for its own account id. A Codex pane's own
+  local frames (its `seance mcp`, bound by peer pid to the innermost `codex`, the pane's server) may report `done`
+  and hand off; a `pass` is `unsupported` (phase 3) and a state is dropped, so a `claude -p` a tool started in the
+  pane never speaks for it. Watches answer `nolistener` for a Codex pane, the custodian's `nudge` and `interrupt`
+  `unsupported`, and the drain ask never types into one (`EndedTasks.askable`).
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -1164,7 +1183,7 @@ nothing checked it. The last is the gap they leave.
   `watch` frame, bound by the kernel-reported peer pid to the pane, its pane process and the innermost `claude` process
   on the peer's chain (`bindPeer`: `<pid>:<start time>`), refused `unbound` where the host names no peer or the pid
   came back null, `nosession` for a peer with no `claude` on its chain and `nolistener` for a pane no inbox listener
-  serves; the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
+  serves, which a Codex pane always is (item 7); the frame carries a URL, a head and an id, and nothing that names a pane, task or session. A `remove` is
   honoured only from the bound session that made the watch, and a wrong id, another session's id and an unknown id all
   answer `unknown`. The caps (8 a session, 64 a machine, equal to the leader's per-device cap) are the table's, refused
   at the add and never an eviction. A `watch-event` is looked up in the table by watch id and delivered only to the
@@ -1237,7 +1256,7 @@ nothing checked it. The last is the gap they leave.
   drain's session ask"; `.claude/rules/drain.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
   `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
   Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`: not
-  reported done, not being closed, no hand-off or pass mark), only while this machine is draining at the `cl` the
+  reported done, not being closed, no hand-off or pass mark, not a Codex launch), only while this machine is draining at the `cl` the
   ask began under. The text goes in only after that pane's `idle` carrying `turnEnded` and never while its last
   frame is `needs-input`, so the drain can deny a permission and never grant one; Ctrl+C is sent once, never
   twice (a second exits Claude Code), and no Escape belongs to the draft clear. Enter goes in only after every
@@ -7548,8 +7567,10 @@ of this section built.
     sign-in, a sign-out, Codex's own refresh). Probes run on the `/usage` refresh's lane (`refresh-lane.ts`, moved out
     of `usage-refresh.ts` for both), one at a time across the process and a reload's two daemons, so a small LXC never
     carries a Claude refresh and a Codex probe at once. `stop()` kills a probe in flight by group (TERM, then KILL),
-    and a child spawned after it is refused at spawn. A running session's `account/rateLimits/updated` notifications
-    keep a reading fresh without a probe once Codex sessions run (phase 2).
+    and a child spawned after it is refused at spawn. A running session keeps the reading fresh without a probe (item 7):
+    on its `account/rateLimits/updated` the session reads `account/rateLimits/read` over its own connection, at
+    most once a minute per session with a burst's last kept, and `observe` takes the answer only while the login is
+    `ok` and the reading's account id is the login's own; it counts as the probe's reading, so the clock restarts.
   - **On the wire.** `MachineInfo.logins: AgentLogin[]` (`[]` with no block; one entry, `agent: "codex"`, with one)
     beside `exclaves`, never an entry in it: an older leader would read a Codex entry as a Claude exclave, and
     `quota[].x`, `ax` and `sess` index that list. `parseMachineInfo` reads `logins` leniently (one this build cannot
@@ -7580,9 +7601,10 @@ of this section built.
     version, id, display fields, both windows and the credits state. The daemon notices a sign-in within a minute
     through the signature. On only through `RunOpts.codex`, which `main.ts` always passes, like `githubRate`.
 - **Codex sessions** (`daemon/src/agents/codex.ts`, `daemon/src/codex/client.ts`; built 2026-11-24, docs/codex.md
-  "A pane that hosts its own server" and build order item 6): the Codex driver's launch. No wire spawn reaches it yet:
-  the daemon does not advertise `CAPABILITIES.codex` and `isSpawnRequest` refuses `agent` until the session's events,
-  graceful close and reconnect land (item 7). The threat model's "A Codex pane's server socket", "What the daemon sends
+  "A pane that hosts its own server" and build order item 6): the Codex driver's launch. Since item 7 (2026-11-24)
+  the daemon advertises `CAPABILITIES.codex` while its login is runnable (`codexRunnable`: a `codex` block, signed
+  in, identified, at the floor; read from the register entry, so a change re-registers) and `isSpawnRequest` takes
+  `agent: "codex"`; the session's life is "Codex session events" (below Session events). The threat model's "A Codex pane's server socket", "What the daemon sends
   a Codex server, and keeps" and "A Codex launch's thread id" hold it.
   - **Before any pane.** `driverFor` gives a spawn carrying `agent: "codex"` the driver only on a machine whose
     `config.json` has a `codex` block (`SpawnOptions.codex`: that block and `codexHome()`, set by `createBackend`),
@@ -7596,8 +7618,8 @@ of this section built.
     "AGENTS.md or CLAUDE.md" (`prepareWorktree`'s `AGENT_WORDS`), and the autonomy note is Codex's
     (`CODEX_AUTONOMY_PREAMBLE`: a question ends the turn, since Codex has no `AskUserQuestion`).
   - **The run dir and script.** `/tmp/seance-cx-<mkdtemp>` (the literal `/tmp`, as the custodian's, so the start
-    command and its mark are the same on every host), holding `run.sh` (constant text, 0600, `wx`), `thread` and the
-    `--listen` path `s.sock`. The script exports `CODEX_HOME`, unsets the API-key variables, starts the server in the
+    command and its mark are the same on every host), holding `run.sh` (constant text, 0600, `wx`), `server` (the
+    server's pid, the script's own write), `thread` and the `--listen` path `s.sock`. The script exports `CODEX_HOME`, unsets the API-key variables, starts the server in the
     background with its output discarded, and waits for `thread` (at most 180 s, past the daemon's own wait, and only
     while the server lives); then starts `codex resume --remote unix://<run>/s.sock -- <thread>` and `wait`s on it.
     The TUI is never `exec`ed: its exit would leave the server orphaned to init. Nor is it a foreground child: Codex's
@@ -7614,16 +7636,20 @@ of this section built.
     up to 30 s for `socketState` to read ready (a dead or missing pane reads `claude_died`, the spawn path's word for
     a session that died starting), then sends `initialize` (the answer's `codexHome` must be the home's realpath),
     `initialized`, `thread/start` and the first `turn/start`, and only then writes `thread` (`thread.tmp`, renamed).
-    Any failure throws, and the spawn path kills the window, whose script then ends the server. The connection is held
-    per thread id for the pane's life, so the thread always has a subscriber; item 7 reads its notifications. The
+    Any failure throws, and the spawn path kills the window, whose script then ends the server. The connection is handed to
+    the session registry (`codexSessions.track` before `started` dials, `attach` once `thread` is written) for the
+    pane's life, so the thread always has a subscriber, and its notifications are the pane's states. The
     thread id is the outcome's `session` and `agent: "codex"`, which the launch ledger notes.
   - **Recognition.** `CODEX_PANES.startMark` is a glob for the run dir prefix in `pane_start_command`, and `OURS` and
     the `AGENT` format (`agentFormat`, `agents/panes.ts`) fold it: `PaneInfo.agent` is `codex` only for a pane of
     ours whose start command carries that mark, `claude` otherwise. `CODEX_PANES.command` is null: a hand-started
     `codex` runs on the owner's own home and is no session of Séance's to list, close or bind. A Codex pane
     registers by its title like a Claude pane: the TUI titles its pane with the thread's name (seen live).
-  - **Close.** No graceful close until `turn/interrupt` lands (item 7): `closeCodex` answers false and despawn kills
-    the pane; the thread stays in the home's store. Despawn picks it by the pane's agent, so a machine whose `codex`
+  - **Close** (item 7). `closeCodex` interrupts the running turn (`turn/interrupt` with the thread and the id
+    `turn/started` named, over the session's connection) and awaits its `turn/completed` within the grace, then answers
+    false, so despawn kills the pane (`outcome=killed`): the TUI has no exit the daemon could drive without keys, and
+    the pane's `EXIT` trap ends the server. An idle session, or one this process holds no connection for, is killed
+    at once; the thread stays in the home's store. Despawn picks it by the pane's agent, so a machine whose `codex`
     block has since gone still closes one.
   - **Audit.** The spawn request line carries `agent=codex` after any `client=`, with Codex's default model when none
     was named; the despawn `ok` line ends ` agent=codex`. A Claude spawn's and despawn's lines are byte-identical to
@@ -9771,7 +9797,8 @@ frame, only a mark on a frame it already takes.
   Code.
 - **When.** On the drain's start (a plain or `now` close, or a later drain request on a soft-closed machine; a soft
   close starts nothing) the daemon enumerates its live panes and keeps those `EndedTasks.askable` accepts: a
-  launch of the pane's task is in its ledger, a worktree one (never `here`: it has no branch to push), no `done`
+  launch of the pane's task is in its ledger, a worktree one (never `here`: it has no branch to push), not a Codex launch (`TaskNote.agent`: its TUI takes
+  none of the ask's keys as Claude's does, and its pass is phase 3), no `done`
   report noted, no close under way, and the pane carries no hand-off or pass mark (`SessionEvents.marked`). For
   each: a pane whose last frame is a turn-ended `idle` (an `idle` carrying `turnEnded`; a respawn's plain idle
   never counts) is typed into at once; a pane that is not waits for one. If none comes by `drainAt +
@@ -12880,7 +12907,9 @@ replies and could answer its questions. `session` is the `claude` process itself
 `daemon/src/peer.ts`: peer first, the pane process last) called `claude` (`CLAUDE_PANES.command`, `agents/panes.ts`, read by
 `processNames`: argv[0] and comm on Linux, `pbi_comm` and `pbi_name` from `proc_pidinfo` on macOS, `ps` only where
 libproc will not load), with its **start time** (`processStart`: `/proc/<pid>/stat` field 22, or `pbi_start_tvsec` and
-`pbi_start_tvusec`), as `<pid>:<start>`. Innermost because the peer, `seance inbox` or `seance mcp`, is the child
+`pbi_start_tvusec`), as `<pid>:<start>`. For a Codex pane (`PaneInfo.agent`, item 7) the name is `codex`
+(`CODEX_PANES.process`): the innermost is the pane's server, whose child `seance mcp` is (the home's `config.toml`
+registers it), and the same `<pid>:<start>` its session events carry (Daemon, "Codex session events"). Innermost because the peer, `seance inbox` or `seance mcp`, is the child
 of the `claude` that started it: a shell script named `claude` above it that runs `claude` twice (`claude "$@" || claude
 --continue`, a restart loop; its comm is the script's name) is never the session, the real `claude` under it is, and a
 `claude` a tool started under another is its own session, not the outer one's. A pane that `exec`s `claude` is that
@@ -12984,7 +13013,7 @@ the whole table to the leader, and turns each `watch-event` into one note in tha
   `watch-frame.ts` is in `message-layering.test.ts`'s entry list, and the table itself (which logs a warning) is the
   daemon's.
 - **Add.** In order: `stopping`, the binding (`unbound`, `nosession`), `canListen` (`nolistener`: a pane no inbox
-  listener serves would never read a note), the caps (`too_many`, a replacement not counted), then the leader's
+  listener serves would never read a note; a Codex pane's at once, since it runs no inbox mod), the caps (`too_many`, a replacement not counted), then the leader's
   verdict (`WatchLeader.check`: `none` is `no_leader`, one that does not advertise `CAPABILITIES.watches` is
   `unsupported`). The entry is inserted and saved, the whole set sent, and the add waits at most 3 s for the answer to
   it: a `fleet_full` or `invalid` refusal in that answer removes the entry and is the reply; no answer in the window is
@@ -14616,6 +14645,67 @@ leg covers it) and a real Claude Code session driving the mod end to end. The mo
 own tests drive its hooks through `claude plugin test`, and the daemon suite drives
 the binding with real panes.
 
+### Codex session events (`daemon/src/codex/sessions.ts`, `codex/events.ts`) — built 2026-11-24, docs/codex.md item 7
+
+The second source of session events, beside the mod's frames: a Codex pane's own `codex app-server`, over the
+connection its launch dialled (Daemon, "Codex sessions"). Codex runs no Séance hooks (docs/codex.md, "Hooks: none in
+V1"); its server's notifications say the same. The threat model's "A Codex session's events" holds it.
+
+- **The table** (`codexSignals`). `thread/status/changed` to `active` with no flags is `busy`; with
+  `waitingOnApproval` `needs-input` `permission` (before `waitingOnUserInput`, `question`, when both); to `idle`
+  `idle`. `turn/completed`, whatever the turn's status (`completed`, `interrupted`, `failed`), is `idle` with
+  `turnEnded`, after the status's own `idle` (seen live): a status `idle` alone is no turn's end (one follows a
+  `systemError`). `turn/started` names the turn a close interrupts (an id of at most 128 of `[\w.:-]`, else none).
+  `thread/closed` is `ended`. `account/rateLimits/updated`, whatever thread, is the login's (below). Anything else
+  (deltas, items, a reviewer's rationale) is nothing, and so is a status this build does not know (`notLoaded`,
+  `systemError`).
+- **Bound by construction.** The registry (`codexSessions`, one per daemon process, keyed by pane id) holds per
+  session the pane the launch's window holds (`display-message`, then the pane listing), its pid and task, the thread
+  this daemon's `thread/start` answered and the server process. A notification naming another thread is dropped.
+  `SessionEvents.codex` re-reads the listing and drops a state whose pane is gone, dead, under another pid or task, or
+  no longer Codex's; then it reports the pane's conversation (`agent: {kind: "codex", session: <thread id>}`, which
+  the conversation table verifies against the launch ledger's `TaskNote.session` as it verifies a Claude claim) and
+  enters `ingest`, the step a bound local-socket frame reaches after binding: forwarding, the idle release, the
+  hand-off and pass closes, the needs-input alerts and the conversation table are unchanged downstream. Not reached:
+  the `/usage` poke and the claims' retention, which are a Claude exclave's.
+- **The pane's own frames.** Its `seance mcp` (the tools) binds by peer pid as any session's, to the innermost
+  `codex` (`sessionOf`), and still sends bound `session-event` frames: `done` (`report_task_done`) and `handoff`
+  are taken as a Claude pane's; `pass` answers `unsupported` (phase 3); a state is answered `ok` and dropped, so a
+  `claude -p` one of its tools ran in the pane, with hooks of its own, never speaks for it.
+- **The session's process** is the pane's server: `run.sh` writes its pid to `server`, and `serverOf` takes it only
+  while it is named `codex` and under the pane, with its start time: the `<pid>:<start>` `sessionOf` binds `seance
+  mcp` to, so the conversation table and messaging name the same process. A `codex` that runs as `node` (an npm
+  install) is no process: its states still flow, its conversation is not kept, as `sessionOf`'s own rule costs a
+  `claude` that runs as `node`.
+- **Order.** What arrives before the thread is known (the first turn starts as `turn/start` is answered) is held, at
+  most 32 notifications of the table's methods, and replayed on attach; each session's states then enter one at a time
+  in the server's order.
+- **The login's reading.** `account/rateLimits/updated` makes the session read `account/rateLimits/read` over its
+  own connection, at most once a minute (`rateLimitsEveryMs`), a burst's last read kept on a timer; the answer goes to
+  the account's `observe` (Daemon, "Codex login"), which takes it only for its own account. The notification's own
+  body is not read: the read answers the shape the probe already parses.
+- **No approval is answered.** A server request carries an id: `parseNotification` drops it and `parseMessage` reads
+  responses only, so the connection never sees one to answer.
+- **A lost connection is no session's end; the pane's death is.** On a close the session forgets its turn (a close
+  waiting on it stops waiting) and re-dials at 1 s, 5 s and 30 s while the pane lives under the same pid and task;
+  past those it is dropped with one warning, its states unread until the daemon restarts. A pane gone or dead is
+  harvest's, as a Claude pane's is; `thread/closed` alone is `ended` from the server.
+- **Reconnect at start** (`reconnectAll`, once the account has started). Every live Codex pane of ours not held: the run
+  dir from its start command (`runDirOf`), held to `ownDirectory` (a real 0700 directory of the daemon's uid), the
+  thread from its `thread` file (`isAgentSessionId`) and, for a tasked pane, equal to the thread the launch ledger
+  noted; then the dial through `socketState`, `initialize` answering the home's realpath, and `thread/resume` with
+  `excludeTurns: true`. Its status is entered as a state; while busy or waiting, `thread/turns/list` (`limit: 1`,
+  `itemsView: "notLoaded"`) names the running turn (its status `inProgress`) for a close. **Rejected: `thread/read`**
+  (docs/codex.md's first plan): the item 7 spike saw a connection that only reads a thread hear none of its turns or
+  rate limits; resume subscribes it, and `excludeTurns` keeps its answer small.
+- **Bounded.** Every message is parsed strictly (`parseNotification`: an object whose `method` is a non-empty string
+  of at most 128, no `id`; each field kept through an exact check), each frame at most 16 MiB, and a socket error is a
+  closed connection, never an exception: a dying server is one lost connection and, once its pane dies, one ended
+  session.
+- **Wiring.** `run.ts` configures the registry once the account starts (its sink the session-event step's `codex` and
+  the account's `observe`, the home's realpath, the ledger's `launchSession`), re-joins, and stops it after the
+  account; `stop` closes every connection and leaves the servers running for the next daemon process.
+
 ### The custodian frame kind (`daemon/src/custodian-verbs.ts`) — built 2026-11-14 (custodian 4, 6 and 8), served on the round's own socket since custodian 4b
 
 The custodian frame kind, beside `Plain`, `broker`, `session-event`, `message`, `inbox` and `watch`: the round's nine
@@ -14708,7 +14798,7 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   claude.ai say, turns the pane `busy` and the close is refused `busy`, so its Escape never interrupts that turn.
 - **A draft is never typed over (plan review F5).** The graceful despawn clears the input box with Escape and
   Ctrl+C, and neither the screen hash nor a session event sees typing: an owner composing a reply in a finished
-  session would lose it. Before a `live` pane is despawned, `close` reads the screen with its attributes
+  session would lose it. Before a `live` Claude pane is despawned, `close` reads the screen with its attributes
   (`capture-pane -e`, `capturePane`'s `styled`) and `inputBoxDraft` (`drain-ask.ts`; `inputBoxText` is the plain-capture
   twin the drain ask's `inputBoxShows` keeps) returns the text between the last two full-width rules (`INPUT_BOX_RULE`, the top one labelled for a named session,
   which every séance spawn is: found by the go-live on Thad, 2026-11-14, where every close of a finished task session
@@ -14718,7 +14808,9 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   cursor's inverse first cell when more suggestion text follows. **Any other text, or a box that cannot be found (a
   dialog, a menu), is `waiting`**, as is a paste or image placeholder (`[Pasted text #1 …]`, `[Image #1]`) however it is styled (a wording match, review round 2 F6: its styling is not measured, and a box whose every cell is grey is otherwise a suggestion); a cell whose attribute is not recognised counts as typed (the underline colour `58;…` is skipped with its parameters, as `38`/`48` are, so its numbers are never read as standalone codes), so a Claude Code release
   that restyles the suggestion costs a later round (the session is refused `waiting`), never an owner's draft. The
-  styled capture is read in memory for this check only and is never hashed, logged or audited. The grey values are
+  styled capture is read in memory for this check only and is never hashed, logged or audited. A Codex pane's
+  composer is not read (item 7): its TUI draws it otherwise, unmeasured, and its close types nothing, so an owner's
+  draft there is lost with the pane, as with despawn's kill. The grey values are
   what Claude Code's themes use as far as is known, not measured on a release here: `daemon/test/capture-styled.test.ts`
   proves what tmux emits for the faint attribute and for each grey form listed (`90`, `38;5;8`, `38;5;244`, `38;2;153;153;153`), not what Claude Code draws. The screen is read last, after the worktree's stat reads, so the draft check and the busy re-check are both the final reads before the despawn's keys (review round 2 F8). Not checked for `exit-prompt` panes (no box) or `dead` ones.
 - **The worktree (C31–C34, `custodian-worktree.ts`)** is decided after a successful close, for a task whose launch
@@ -14752,7 +14844,8 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   (a task id is what the record is keyed by). Every call, taken or refused, is one audit line, `custodian
   origin=custodian op=flag pane=<id> task=<id|-> reason=<reason|-> outcome=<ok|unsent|code> by=<round|daemon>`, and the note
   is in none. `unsent` is a flag nothing took, the round's as the daemon's; an untasked pane's is `ok`, it has no record to tell.
-- **`nudge` (C22, C26, custodian 8)** delivers one `request` message to a task session through messaging's local
+- **`nudge` (C22, C26, custodian 8)** answers `unsupported` for a Codex pane, after the foreign check: it runs no inbox
+  mod (phase 3's messages arrive as `turn/steer`). Otherwise it delivers one `request` message to a task session through messaging's local
   delivery (`Messages.deliverAsCustodian`, "Session messages"), so it reaches the session only through the `inbox`
   mod's `$.prompt.submit`, never a key: it cannot answer a dialog, approve a permission or touch a draft (the
   evidence docs/messaging.md recorded against `send-keys` delivery, and why C22 replaced the owner's earlier "raw
@@ -14780,7 +14873,8 @@ read a screen through `tmux capture-pane` and a PR through `gh`, both of which n
   own, so a round in that window can spend a nudge on an exclave without the mod: accepted, `doctor` warns about
   the mod). A placed delivery is `delivered`, and the reply carries the session's `nudges` after it. No rate limit applies beside the
   counts: the custodian is not a task, and the counts bound it tighter than `MESSAGE_RATE` would.
-- **`interrupt` (C27, custodian 8)** sends a single Escape, the constant key `["Escape"]` and never a frame field
+- **`interrupt` (C27, custodian 8)** answers `unsupported` for a Codex pane (Escape is its TUI's own; phase 3 sends
+  `turn/interrupt` over the connection). Otherwise it sends a single Escape, the constant key `["Escape"]` and never a frame field
   (`send-keys -t <pane> Escape`, the drain ask's `sendKeys`), for a session hung inside a command, where a message
   would wait for a turn that never ends: Escape on a busy turn ends it and a turn-ended idle follows (the drain ask's
   verified key). `interruptVerdict`, a pure function of the daemon's facts, allows it only for an `ours` pane that is

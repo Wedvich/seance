@@ -10,6 +10,7 @@ import {
   type MachineInfo,
   type UpdateAvailable,
 } from "@seance/shared";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { tmuxHarvestPanes } from "./exit-status.ts";
@@ -46,7 +47,8 @@ import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { graphqlResetOf, startGithubRate, type GithubRateOpts } from "./github-rate.ts";
-import { startCodex, type CodexAccountOpts } from "./codex/account.ts";
+import { codexRunnable, startCodex, type CodexAccountOpts } from "./codex/account.ts";
+import { codexSessions } from "./codex/sessions.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
@@ -438,6 +440,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // Unconditional: session events always run, and a host whose frames cannot bind verifies no conversation,
         // which is all the PWA offers a rename for.
         CAPABILITIES.sessionTag,
+        // A Codex session's states, close and tools are this build's (docs/codex.md, build order item 7): offered
+        // while the login could run one, so the scheduler routes none to a machine signed out or below the floor.
+        ...(codexAccount !== null && codexRunnable(codexAccount.login()) ? [CAPABILITIES.codex] : []),
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan, logins: info.logins ?? [] };
@@ -957,6 +962,20 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   drainAsk.wire(capabilities.drainAsk, drainingOf(state)?.cl ?? null);
   // After the client and the status loop its changes reach: a probe answers in under a second.
   if (!stopped) codexAccount?.start();
+  // After session events, whose step a Codex session's states reach: the launch's sessions report there from now,
+  // and the ones a previous daemon process left running are re-joined (DESIGN.md, Daemon, "Codex session events").
+  const codexState = capabilities.codexState;
+  if (!stopped && codexAccount !== null && codexState !== undefined) {
+    const codexHomeReal = await realpath(codexAccount.home).catch(() => null);
+    if (codexHomeReal !== null && !stopped) {
+      codexSessions.configure({
+        sink: { state: codexState, rateLimits: codexAccount.observe },
+        home: codexHomeReal,
+        launchSession: (taskId) => endedTasks.launchSession(taskId),
+      });
+      void codexSessions.reconnectAll().catch((err: unknown) => log.warn(`codex: reconnect failed (${String(err)})`));
+    }
+  }
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
@@ -972,6 +991,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       status.stop();
       githubRate?.stop();
       codexAccount?.stop();
+      // The connections only: each session runs on in its pane, for the next daemon process to re-join.
+      codexSessions.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();
       capabilities.stop();

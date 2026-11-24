@@ -8,6 +8,14 @@
  * For a Codex session's launch (`agents/codex.ts`) it is also `app-server --listen unix://PATH`, which, as the real
  * one, listens in a 0700 directory of its own and links PATH to that socket, appending each request it takes to
  * `<scenario>.rpc`; and `resume --remote unix://PATH -- <thread>`, the TUI, which titles its pane and idles.
+ *
+ * With `turn` set, the first turn runs as the real 0.170.0's did in the item 7 spike: `thread/status/changed` to
+ * active, `turn/started`, `account/rateLimits/updated` (to every connection, as the real server's per-thread
+ * subscription would), then by `turn`: `complete` goes idle and `turn/completed`; `approval` waits on an approval,
+ * sending the server request no daemon may answer; `hold` stays busy. `turn/interrupt` ends a running turn
+ * `interrupted`. Each turn also announces a decoy: another thread's approval wait, which no reader may take as its own.
+ * `thread/resume` subscribes its connection and answers the thread's status; `thread/turns/list` the turn. A reply to
+ * a server request is logged as `(response)`.
  */
 import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +42,8 @@ interface Scenario {
   readonly threadId?: string;
   /** `--listen` exits at once, binding nothing. */
   readonly listenExit?: number;
+  /** How the first turn runs on the listening server; absent, it announces nothing. */
+  readonly turn?: "complete" | "hold" | "approval";
 }
 
 const [scenarioPath = "", ...args] = process.argv.slice(2);
@@ -94,30 +104,91 @@ async function listen(url: string): Promise<void> {
     });
   }
   process.on("exit", cleanup);
+  const peers = new Set<{ send: (text: string) => unknown }>();
+  const announce = (method: string, params: unknown): void => {
+    for (const peer of peers) peer.send(JSON.stringify({ method, params }));
+  };
+  let thread = "";
+  let status: { type: string; activeFlags?: string[] } = { type: "idle" };
+  let turnStatus = "completed";
+  const setStatus = (next: typeof status): void => {
+    status = next;
+    announce("thread/status/changed", { threadId: thread, status });
+  };
+  const endTurn = (how: string): void => {
+    turnStatus = how;
+    setStatus({ type: "idle" });
+    announce("turn/completed", { threadId: thread, turn: { id: "turn-1", status: how } });
+  };
+  const runTurn = (): void => {
+    if (scenario.turn === undefined) return;
+    turnStatus = "inProgress";
+    setStatus({ type: "active", activeFlags: [] });
+    announce("turn/started", { threadId: thread, turn: { id: "turn-1", status: "inProgress" } });
+    announce("thread/status/changed", {
+      threadId: "019a0000-0000-7000-8000-000000000000",
+      status: { type: "active", activeFlags: ["waitingOnApproval"] },
+    });
+    announce("account/rateLimits/updated", { rateLimits: { limitId: "codex", primary: { usedPercent: 9 } } });
+    if (scenario.turn === "complete") setTimeout(() => endTurn("completed"), 50);
+    if (scenario.turn === "approval") {
+      setStatus({ type: "active", activeFlags: ["waitingOnApproval"] });
+      for (const peer of peers) {
+        peer.send(
+          JSON.stringify({
+            id: 900,
+            method: "item/commandExecution/requestApproval",
+            params: { threadId: thread, turnId: "turn-1", itemId: "i-1", command: "git commit" },
+          }),
+        );
+      }
+    }
+  };
   Bun.serve({
     unix: socket,
     fetch: (request, server) => (server.upgrade(request) ? undefined : new Response("websocket only", { status: 400 })),
     websocket: {
+      open: (ws) => {
+        // Before any `thread/resume`: the real server sends a thread's status to any client, its turns only to one
+        // subscribed. The stub's simplification is to subscribe the launch's connection from the start.
+        if (peers.size === 0) peers.add(ws);
+      },
+      close: (ws) => {
+        peers.delete(ws);
+      },
       message: (ws, data) => {
         const message = JSON.parse(String(data));
         if (typeof message.id !== "number") return;
         appendFileSync(
           `${scenarioPath}.rpc`,
-          `${JSON.stringify({ method: message.method, params: message.params })}\n`,
+          `${JSON.stringify({ method: message.method ?? "(response)", params: message.params })}\n`,
         );
-        const reply = (body: Readonly<Record<string, unknown>>): void => {
+        if (message.method === undefined) return;
+        const reply = (body: object): void => {
           ws.send(JSON.stringify({ id: message.id, ...body }));
         };
         if (message.method === "initialize") {
           reply({ result: { userAgent: "stub", codexHome: scenario.codexHome ?? process.env["CODEX_HOME"] ?? null } });
         } else if (message.method === "thread/start") {
+          thread = scenario.threadId ?? Bun.randomUUIDv7();
           reply(
             scenario.threadStartError === undefined
-              ? { result: { thread: { id: scenario.threadId ?? Bun.randomUUIDv7() } } }
+              ? { result: { thread: { id: thread } } }
               : { error: { code: scenario.threadStartError, message: "stub refused" } },
           );
         } else if (message.method === "turn/start") {
           reply({ result: { turn: { id: "turn-1", status: "inProgress" } } });
+          runTurn();
+        } else if (message.method === "thread/resume") {
+          peers.add(ws);
+          reply({ result: { thread: { id: message.params?.threadId, status } } });
+        } else if (message.method === "thread/turns/list") {
+          reply({ result: { data: [{ id: "turn-1", status: turnStatus }], nextCursor: null } });
+        } else if (message.method === "turn/interrupt") {
+          reply({ result: {} });
+          if (turnStatus === "inProgress") endTurn("interrupted");
+        } else if (message.method === "account/rateLimits/read") {
+          reply(scenario.rateLimits ?? { result: null });
         } else {
           reply({ error: { code: -32601, message: "unknown" } });
         }

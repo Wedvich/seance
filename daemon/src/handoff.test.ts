@@ -9,6 +9,7 @@ const pane = (taskId: string | null, dead = false): BoundPane => ({
   dead,
   taskId,
   ours: true,
+  agent: "claude",
   path: "/w",
 });
 

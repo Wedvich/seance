@@ -1,4 +1,4 @@
-import { lstat, readlink } from "node:fs/promises";
+import { lstat, readlink, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { isRecord } from "@seance/shared";
 import { WebSocket } from "ws";
@@ -24,7 +24,23 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 export const CODEX_REQUEST_TIMEOUT_MS = 30_000;
 
 /** Constant method names only (threat model, "What the daemon sends a pane's server"): never a frame's text. */
-export type CodexMethod = "initialize" | "thread/start" | "turn/start";
+export type CodexMethod =
+  | "initialize"
+  | "thread/start"
+  | "turn/start"
+  | "thread/resume"
+  | "turn/interrupt"
+  | "account/rateLimits/read"
+  | "thread/turns/list";
+
+/** A notification's method as the server named it: bounded, so nothing past it is held. */
+const METHOD_MAX = 128;
+
+/** A notification from the server: its method and its params, unparsed; the reader holds them to its own parser. */
+export interface CodexNotification {
+  readonly method: string;
+  readonly params: unknown;
+}
 
 /** An answer reduced to what a caller may keep: a result's value, or an error's code. Never an error's message. */
 export type CodexAnswer =
@@ -42,6 +58,40 @@ export interface CodexConnection {
 }
 
 export type SocketState = "ready" | "absent" | "refused";
+
+/** `clientInfo.version`, as the probe's: the daemon has no version of its own but its sha. */
+const CLIENT_VERSION = "1";
+
+/** `path`'s realpath when it is a real directory (no link) this uid owns at 0700, else null. */
+export async function ownDirectory(path: string): Promise<string | null> {
+  const info = await lstat(path).catch(() => null);
+  const uid = process.getuid?.();
+  if (info === null || !info.isDirectory() || (info.mode & 0o777) !== 0o700) return null;
+  if (uid !== undefined && info.uid !== uid) return null;
+  return realpath(path).catch(() => null);
+}
+
+/**
+ * The handshake every daemon connection opens with, the launch's and a reconnect's: `initialize`, its answer's
+ * `codexHome` held to `home` (the home's realpath: a server on another home would run the session on another login,
+ * the owner's own perhaps), then `initialized`. A failure carries the answer (`resultOf` keeps only its code), or `home`.
+ */
+export async function initializeCodex(
+  connection: CodexConnection,
+  home: string,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly answer: CodexAnswer | "home" }> {
+  const init = await connection.request("initialize", {
+    clientInfo: { name: "seance", title: null, version: CLIENT_VERSION },
+    capabilities: null,
+  });
+  if (init.kind !== "result") return { ok: false, answer: init };
+  const answered = isRecord(init.value) ? init.value["codexHome"] : undefined;
+  if (typeof answered !== "string" || (await realpath(answered).catch(() => null)) !== home) {
+    return { ok: false, answer: "home" };
+  }
+  connection.notify("initialized");
+  return { ok: true };
+}
 
 /**
  * Whether `<runDir>/s.sock` may be dialled (threat model, "The pane server's socket"). Codex makes the `--listen` path
@@ -71,7 +121,10 @@ export async function socketState(runDir: string, uid: number | undefined = proc
  * Dials `<runDir>/s.sock`, only once `socketState` says it is ready, and resolves null when the handshake does not
  * complete. Called only for a pane this daemon launched, with a run dir it made.
  */
-export async function connectCodex(runDir: string): Promise<CodexConnection | null> {
+export async function connectCodex(
+  runDir: string,
+  onNotification?: (notification: CodexNotification) => void,
+): Promise<CodexConnection | null> {
   if ((await socketState(runDir)) !== "ready") return null;
   let ws: WebSocket;
   try {
@@ -101,7 +154,19 @@ export async function connectCodex(runDir: string): Promise<CodexConnection | nu
   ws.on("close", settleAll);
   ws.on("message", (data, isBinary) => {
     if (isBinary) return;
-    const message = parseMessage(String(data));
+    const value = parseJson(String(data));
+    if (onNotification !== undefined) {
+      const notification = notificationOf(value);
+      if (notification !== null) {
+        try {
+          onNotification(notification);
+        } catch {
+          // The reader's own failure is never the connection's: shed the one message and keep reading.
+        }
+        return;
+      }
+    }
+    const message = answerOf(value);
     if (message === null) return;
     const answer = pending.get(message.id);
     if (answer === undefined) return;
@@ -162,12 +227,18 @@ export async function connectCodex(runDir: string): Promise<CodexConnection | nu
  * daemon never answers) or anything malformed. An error keeps only its code: its message may quote a backend's body.
  */
 export function parseMessage(text: string): { readonly id: number; readonly answer: CodexAnswer } | null {
-  let message: unknown;
+  return answerOf(parseJson(text));
+}
+
+function parseJson(text: string): unknown {
   try {
-    message = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
-    return null;
+    return undefined;
   }
+}
+
+function answerOf(message: unknown): { readonly id: number; readonly answer: CodexAnswer } | null {
   if (!isRecord(message) || "method" in message) return null;
   const { id } = message;
   if (typeof id !== "number" || !Number.isSafeInteger(id)) return null;
@@ -178,4 +249,19 @@ export function parseMessage(text: string): { readonly id: number; readonly answ
   }
   if (!("result" in message)) return null;
   return { id, answer: { kind: "result", value: message["result"] } };
+}
+
+/**
+ * A notification, else null: a message with a bounded string `method` and no `id`. A server request (an approval,
+ * which carries an id) is none: the daemon never answers one, and never reads it either.
+ */
+export function parseNotification(text: string): CodexNotification | null {
+  return notificationOf(parseJson(text));
+}
+
+function notificationOf(message: unknown): CodexNotification | null {
+  if (!isRecord(message) || "id" in message) return null;
+  const { method } = message;
+  if (typeof method !== "string" || method === "" || method.length > METHOD_MAX) return null;
+  return { method, params: message["params"] };
 }

@@ -47,9 +47,10 @@ a **Status** line (built, spec, draft); trust it over memory.
   (the fleet's readers: quota fold, `knownAccounts`, `loginHealth`, archive series, MCP, the login alert), item 3 (the
   PWA: the account card's agent logo, windows and credits, the Machines card's login row), item 4 (the task field
   `agent` and its routing, `AGENT_DEP_SENTINEL`, V1 refusals, `CODEX_MODELS`, DESIGN.md "Codex tasks"), item 5 (the
-  driver seam: `AgentDriver`, `daemon/src/agents/`, DESIGN.md "Agent drivers") and item 6 (the Codex launch:
-  `agents/codex.ts`, `codex/client.ts`, run dir, thread id in the ledger, not yet on the wire; DESIGN.md "Codex
-  sessions"). Read it, and docs/agents.md, before any Codex work.
+  driver seam: `AgentDriver`, `daemon/src/agents/`, DESIGN.md "Agent drivers"), item 6 (the Codex launch:
+  `agents/codex.ts`, `codex/client.ts`, run dir, thread id in the ledger; DESIGN.md "Codex sessions") and item 7 (the
+  session: its server's notifications as session events, `turn/interrupt` close, reconnect, `CAPABILITIES.codex`;
+  `codex/sessions.ts`, DESIGN.md "Codex session events"). Read it, and docs/agents.md, before any Codex work.
 - **docs/orchestrator.md** — draft, nothing decided: tracker projects as task graphs. Read before amend
   deps, anything that reads a tracker, or a non-task session; build nothing from it.
 - **docs/tags.md** — tags and session identity; built, keeps open questions and spike evidence. Read

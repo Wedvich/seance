@@ -1,4 +1,5 @@
-import { CLAUDE_PANES } from "./agents/panes.ts";
+import type { AgentKind } from "@seance/shared";
+import { CLAUDE_PANES, panesOf } from "./agents/panes.ts";
 import { readAgentSession } from "./agent-session-file.ts";
 import { processNames, processStart } from "./peer.ts";
 
@@ -37,9 +38,20 @@ export interface ClaudeProcess {
  * time read).
  */
 export async function claudeProcessOf(chain: readonly number[]): Promise<ClaudeProcess | null> {
+  return sessionProcessOf(chain, "claude");
+}
+
+/**
+ * `claudeProcessOf` for the pane's own agent (`BoundPane.agent`, from its start mark, never a frame): the innermost
+ * process on the chain its driver's `process` names. For a Codex pane that is the pane's `codex app-server`, the
+ * parent of `seance mcp` and of every tool the session runs (docs/codex.md, "Tools"); the TUI, its sibling, is on no
+ * such chain.
+ */
+export async function sessionProcessOf(chain: readonly number[], agent: AgentKind): Promise<ClaudeProcess | null> {
+  const named = panesOf(agent).process;
   for (const pid of chain) {
     // oxlint-disable-next-line no-await-in-loop -- nearest the peer first, and a handful of hops
-    if (!(await processNames(pid)).some((name) => CLAUDE_PANES.command.test(name))) continue;
+    if (!(await processNames(pid)).some((name) => named.test(name))) continue;
     const start = processStart(pid);
     return start === null ? null : { pid, start, key: sessionKey(pid, start) };
   }

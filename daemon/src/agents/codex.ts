@@ -1,8 +1,17 @@
-import { chmod, lstat, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_CODEX_MODEL, isAgentSessionId, isRecord, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure } from "../backend.ts";
-import { connectCodex, socketState, SOCKET_NAME, type CodexAnswer, type CodexConnection } from "../codex/client.ts";
+import {
+  connectCodex,
+  initializeCodex,
+  ownDirectory,
+  socketState,
+  SOCKET_NAME,
+  type CodexAnswer,
+  type CodexConnection,
+} from "../codex/client.ts";
+import { codexSessions } from "../codex/sessions.ts";
 import { codexBin } from "../codex/home.ts";
 import type { CodexConfig } from "../config.ts";
 import { shq } from "../shq.ts";
@@ -31,26 +40,23 @@ const SOCKET_WAIT_MS = 30_000;
 const POLL_MS = 100;
 /** The script's own bound on `thread`, in its 0.1 s steps: past the daemon's whole `started`, so the daemon decides. */
 const SCRIPT_WAIT_STEPS = 1_800;
-/** `clientInfo.version`, as the probe's: the daemon has no version of its own but its sha. */
-const CLIENT_VERSION = "1";
-
-/**
- * A daemon connection per live Codex session, keyed by thread id: held for the pane's life so the thread always has a
- * subscriber, the TUI's join included, and dropped when the server goes (`closed`). The session's notifications and
- * its graceful close read from here (docs/codex.md, build order item 7).
- */
-const connections = new Map<string, CodexConnection>();
 
 export function codexDriver(opts: CodexDriverOptions): AgentDriver {
   return { panes: CODEX_PANES, launch: (spec) => launchCodex(spec, opts), close: closeCodex };
 }
 
 /**
- * No graceful close until `turn/interrupt` lands (build order item 7): false has the caller kill the pane, whose
- * hangup and escalation take the TUI and its server child with it. The thread stays in the home's store. Needs no
- * config, so despawn closes a Codex pane on a machine whose `codex` block has since gone.
+ * The graceful close (docs/codex.md, "Ending a session"): the running turn interrupted over the daemon's own
+ * connection (`codexSessions.interrupt`) and its end awaited within `graceMs`, then false, so the caller kills the
+ * pane, whose hangup and escalation take the TUI and its server with it. The TUI has no exit a daemon can ask for, and
+ * the thread stays in the home's store either way. Needs no config, so despawn closes a Codex pane on a machine whose
+ * `codex` block has since gone; out of the daemon's process (`seance despawn`) no session is held, and the pane is
+ * killed at once.
  */
-export const closeCodex: AgentDriver["close"] = () => Promise.resolve(false);
+export const closeCodex: AgentDriver["close"] = async (pane, opts) => {
+  await codexSessions.interrupt({ paneId: pane.paneId, pid: pane.pid }, opts.graceMs);
+  return false;
+};
 
 /**
  * What this driver cannot run, from the request alone: thrown by the spawn path before it makes a worktree
@@ -123,15 +129,6 @@ async function makeRunDir(): Promise<string> {
   return runDir;
 }
 
-/** `path`'s realpath when it is a real directory (no link) this uid owns at 0700, else null. */
-async function ownDirectory(path: string): Promise<string | null> {
-  const info = await lstat(path).catch(() => null);
-  const uid = process.getuid?.();
-  if (info === null || !info.isDirectory() || (info.mode & 0o777) !== 0o700) return null;
-  if (uid !== undefined && info.uid !== uid) return null;
-  return realpath(path).catch(() => null);
-}
-
 /**
  * The pane's one shell string, as the custodian's: `exec /bin/sh '<run>/run.sh'`, so the owner's tmux `default-shell`
  * parses no quoting but one path's. It is also the pane's mark (`CODEX_PANES.startMark`).
@@ -168,6 +165,8 @@ export function runScript(o: { readonly runDir: string; readonly home: string; r
     "unset OPENAI_API_KEY CODEX_API_KEY",
     `"$codex" app-server --listen "unix://$run/${SOCKET_NAME}" </dev/null >/dev/null 2>&1 &`,
     "server=$!",
+    // The session's process, which the daemon keys the session's facts on as `seance mcp`'s binding does (`sessionOf`).
+    `echo "$server" > "$run/server"`,
     "tui=",
     `trap 'kill $tui "$server" 2>/dev/null; rm -rf "$run"' EXIT`,
     "trap 'exit 129' HUP",
@@ -210,7 +209,8 @@ interface StartArgs {
  */
 async function startThread(args: StartArgs): Promise<string> {
   await awaitSocket(args.runDir, args.window);
-  const connection = await connectCodex(args.runDir);
+  const tracked = codexSessions.track(args.runDir);
+  const connection = await connectCodex(args.runDir, tracked.listener);
   if (connection === null) throw new SpawnFailure("launch_error", "could not connect to the session's Codex server");
   try {
     const thread = await converse(connection, args);
@@ -218,10 +218,8 @@ async function startThread(args: StartArgs): Promise<string> {
     const staged = join(args.runDir, `${THREAD_FILE}.tmp`);
     await writeFile(staged, `${thread}\n`, { mode: 0o600, flag: "wx" });
     await rename(staged, join(args.runDir, THREAD_FILE));
-    connections.set(thread, connection);
-    void connection.closed.then(() => {
-      if (connections.get(thread) === connection) connections.delete(thread);
-    });
+    // Held for the pane's life, so the thread always has a subscriber, the TUI's join included.
+    await tracked.attach(thread, connection, args.window);
     return thread;
   } catch (err) {
     connection.close();
@@ -260,16 +258,11 @@ async function awaitSocket(runDir: string, window: string): Promise<void> {
  */
 async function converse(connection: CodexConnection, args: StartArgs): Promise<string> {
   const { request } = args.spec;
-  const init = await connection.request("initialize", {
-    clientInfo: { name: "seance", title: null, version: CLIENT_VERSION },
-    capabilities: null,
-  });
-  const answeredHome = field(resultOf(init, "initialize"), "codexHome");
-  // A server on another home would run the session on another login, the owner's own perhaps.
-  if (typeof answeredHome !== "string" || (await realpath(answeredHome).catch(() => null)) !== args.home) {
+  const init = await initializeCodex(connection, args.home);
+  if (!init.ok && init.answer === "home") {
     throw new SpawnFailure("launch_error", "the session's Codex server runs on another home");
   }
-  connection.notify("initialized");
+  if (!init.ok && init.answer !== "home") resultOf(init.answer, "initialize");
   const started = await connection.request("thread/start", {
     cwd: args.spec.cwd,
     model: request.model ?? DEFAULT_CODEX_MODEL,
