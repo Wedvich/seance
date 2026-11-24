@@ -365,7 +365,7 @@ describe("deriveMachines", () => {
     const [card] = deriveMachines([old], NOW, NO_LEADER).cards;
     expect(card?.name).toBe("mac");
     expect(card?.note).toContain("predates exclaves");
-    expect(card?.exclaves).toEqual([]);
+    expect(card?.signIns).toEqual([]);
   });
 
   test("load and disk render from the status alone, indexed sessions land on their exclave", () => {
@@ -376,7 +376,7 @@ describe("deriveMachines", () => {
       ["Memory", "warn"],
       ["Disk", "err"],
     ]);
-    expect(card?.exclaves[0]?.sessions).toBe(2);
+    expect(card?.signIns[0]?.sessions).toBe(2);
     expect(card?.charts).toBe(true);
   });
 
@@ -387,7 +387,7 @@ describe("deriveMachines", () => {
         exclaves: [exclave("default", ACCOUNT), exclave("work", "org-2:acct-bbbbbbbb-2222"), exclave("soon", ACCOUNT)],
         status: { at: S - 10, scan: 1, ...auth },
       });
-    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.exclaves.map((row) => row.auth);
+    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.signIns.map((row) => row.auth);
     const at = (ms: number): number => Math.round((NOW + ms) / 1000);
     const HOUR = 3_600_000;
 
@@ -431,7 +431,7 @@ describe("deriveMachines", () => {
         ],
         status: { at: S - 10, scan: 1, ...status },
       });
-    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.exclaves.map((row) => row.probes);
+    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.signIns.map((row) => row.probes);
 
     test("a failing probe names its traits per exclave, singular or plural; unchecked and healthy say nothing", () => {
       expect(
@@ -496,7 +496,7 @@ describe("deriveMachines", () => {
     );
     expect(plain(cards[0]?.meta ?? [])).toBe("asleep · last seen 17m ago");
     expect(cards[0]?.gauges).toEqual([]);
-    expect(cards[0]?.exclaves[0]?.sessions).toBeNull();
+    expect(cards[0]?.signIns[0]?.sessions).toBeNull();
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([7]);
     expect(plain(accounts[0]?.observed ?? [])).toEndWith("18m ago on mac, asleep");
     // A socket the relay still listed when it slept: lastSeen is the register's, days old; the beat is the sleep.
@@ -555,8 +555,8 @@ describe("deriveMachines", () => {
     });
     const { cards, accounts } = deriveMachines([first, old, named], NOW, NO_LEADER);
     expect(accounts.map((account) => account.detail)).toEqual(["me@example.com · on a, b, c", "acct acct-bbb · on a"]);
-    expect(cards[2]?.exclaves[0]?.account).toBe("me@example.com");
-    expect(cards[0]?.exclaves[0]?.account).toBe("me@example.com");
+    expect(cards[2]?.signIns[0]?.account).toBe("me@example.com");
+    expect(cards[0]?.signIns[0]?.account).toBe("me@example.com");
   });
 
   test("an alias titles the card, its exclaves lead the meta line; the exclave row and display name take it too", () => {
@@ -578,7 +578,7 @@ describe("deriveMachines", () => {
       ["default", "me@example.com"],
       ["work", "acct acct-bbb"],
     ]);
-    expect(cards[0]?.exclaves.map((row) => row.account)).toEqual(["personal", "client"]);
+    expect(cards[0]?.signIns.map((row) => row.account)).toEqual(["personal", "client"]);
     expect(accountDisplayName(knownAccounts([named]), ACCOUNT, aliases)).toBe("personal");
     expect(
       accountDisplayName(knownAccounts([named]), "org-3:unseen-account", { "org-3:unseen-account": "ghost" }),
@@ -640,7 +640,7 @@ describe("deriveMachines", () => {
       "me@example.com (org 1a2b3c4d) · on a",
       "me@example.com (org 9f8e7d6c) · on a",
     ]);
-    expect(cards[0]?.exclaves.map((row) => row.account)).toEqual([
+    expect(cards[0]?.signIns.map((row) => row.account)).toEqual([
       "me@example.com (org 1a2b3c4d)",
       "me@example.com (org 9f8e7d6c)",
     ]);
@@ -668,8 +668,8 @@ describe("deriveMachines", () => {
     });
     const old = machine({ deviceId: "b", name: "b", exclaves: [exclave("default", personal)] });
     const { cards } = deriveMachines([withEmail, old], NOW, NO_LEADER);
-    expect(cards[1]?.exclaves[0]?.account).toBe("me@example.com (org 1a2b3c4d)");
-    expect(cards[0]?.exclaves[0]?.account).toBe(cards[1]?.exclaves[0]?.account);
+    expect(cards[1]?.signIns[0]?.account).toBe("me@example.com (org 1a2b3c4d)");
+    expect(cards[0]?.signIns[0]?.account).toBe(cards[1]?.signIns[0]?.account);
 
     // A short-id twin: one account's emailless row must not collide with another account's short id.
     const bare = machine({
@@ -683,7 +683,7 @@ describe("deriveMachines", () => {
       exclaves: [{ ...exclave("default", "org-x:acct-abcdefgh1"), email: "x@example.com" }],
     });
     const labels = deriveMachines([bare, named], NOW, NO_LEADER).cards.map((card) =>
-      card.exclaves.map((row) => row.account),
+      card.signIns.map((row) => row.account),
     );
     expect(labels).toEqual([["x@example.com", "acct acct-abc"], ["x@example.com"]]);
   });
@@ -871,7 +871,7 @@ describe("an agent login", () => {
     machine({ logins: [entry], ...overrides });
   const ready: SchedulerAvailability = { kind: "ready", deviceId: "dev-1", term: 1 };
 
-  test("its account is a card like a Claude one: its agent's mark, titled by its email, its windows from lq, its machines", () => {
+  test("its account is the Claude card bar its agent: titled by what signs in, its email and machines under it, its windows from lq", () => {
     const a = withLogin({
       deviceId: "a",
       name: "a",
@@ -885,11 +885,10 @@ describe("an agent login", () => {
     const { accounts } = deriveMachines([a, b], NOW, NO_LEADER);
     const codex = accounts.find((account) => account.accountId === CODEX);
     expect(codex).toMatchObject({
-      title: "me@example.com",
-      unnamed: "me@example.com",
+      title: "Codex",
       members: "Codex",
       agent: { kind: "codex", name: "Codex" },
-      detail: "PengeFix · on a, b",
+      detail: "me@example.com · on a, b",
       historyFrom: "b",
     });
     expect(codex?.bars.map((bar) => [bar.label, bar.pct])).toEqual([
@@ -909,7 +908,7 @@ describe("an agent login", () => {
       plain(
         deriveMachines([withLogin()], NOW, NO_LEADER).accounts.find((a) => a.agent.kind === "codex")?.observed ?? [],
       ),
-    ).toBe("No quota seen yet. It shows once its machine has read the login.");
+    ).toBe("No quota seen yet. It shows once its machine has reported.");
     for (const entry of [login({ accountId: null, authOk: false }), login({ accountId: null })]) {
       expect(deriveMachines([withLogin({}, entry)], NOW, NO_LEADER).accounts.map((a) => a.accountId)).toEqual([
         ACCOUNT,
@@ -934,19 +933,18 @@ describe("an agent login", () => {
     expect(barsOf(undefined)?.map(([label]) => label)).toEqual(["5h"]);
   });
 
-  test("an alias titles it and its email leads the meta line; renaming goes back to the email", () => {
+  test("an alias titles it and the agent leads the meta line, as for a Claude account", () => {
     const { accounts, cards } = deriveMachines([withLogin()], NOW, NO_LEADER, { [CODEX]: "chatgpt" });
     expect(accounts.find((a) => a.accountId === CODEX)).toMatchObject({
       title: "chatgpt",
       alias: "chatgpt",
-      unnamed: "me@example.com",
       plainName: "me@example.com",
-      detail: "me@example.com · PengeFix · on mac",
+      detail: "Codex · me@example.com · on mac",
     });
-    expect(cards[0]?.logins[0]?.account).toBe("chatgpt");
+    expect(cards[0]?.signIns.find((row) => row.agent.kind === "codex")?.account).toBe("chatgpt");
   });
 
-  test("its title carries no twin tag beside a Claude account of the same email; two logins of one email differ by workspace", () => {
+  test("titled as a Claude account is: two logins differ by machine; a Claude twin is no twin, two logins of one email are", () => {
     const claude = { ...exclave("default", ACCOUNT), email: "me@example.com" };
     const plus = login({ accountId: "codex:acc-3333:user-2222", workspace: undefined, plan: "plus" });
     const { accounts } = deriveMachines(
@@ -956,14 +954,14 @@ describe("an agent login", () => {
     );
     expect(accounts.map((account) => [account.title, account.agent.kind])).toEqual([
       ["default", "claude"],
-      ["me@example.com (PengeFix)", "codex"],
-      ["me@example.com (Codex)", "codex"],
+      ["Codex on a", "codex"],
+      ["Codex on b", "codex"],
     ]);
-    // The plain name, every client's label, tells them apart by kind, then by workspace; the Claude one keeps its email.
+    // The plain name, every client's label: the logo tells kinds apart, so only the two logins take an org tag.
     expect(accounts.map((account) => account.plainName)).toEqual([
       "me@example.com",
-      "me@example.com (Codex, org acc-1111)",
-      "me@example.com (Codex, org acc-3333)",
+      "me@example.com (org acc-1111)",
+      "me@example.com (org acc-3333)",
     ]);
   });
 
@@ -980,30 +978,43 @@ describe("an agent login", () => {
 
   describe("the Machines card's row", () => {
     const rowOf = (status: Partial<MachineStatus>, entry: AgentLogin = login(), connected = true) =>
-      deriveMachines([withLogin({ connected, status: { at: S - 10, scan: 1, ...status } }, entry)], NOW, NO_LEADER)
-        .cards[0]?.logins;
+      deriveMachines(
+        [withLogin({ connected, status: { at: S - 10, scan: 1, ...status } }, entry)],
+        NOW,
+        NO_LEADER,
+      ).cards[0]?.signIns.find((row) => row.agent.kind === "codex");
 
-    test("one row per login, always drawn: agent, account, and ok or unknown says nothing", () => {
-      expect(rowOf({})).toEqual([{ agent: "Codex", account: "me@example.com", health: null }]);
-      expect(rowOf({ lu: [0] })?.[0]?.health).toBeNull();
-      expect(deriveMachines([machine()], NOW, NO_LEADER).cards[0]?.logins).toEqual([]);
+    test("a login is a sign-in row like an exclave's, after them, told apart by its agent alone", () => {
+      expect(rowOf({})).toEqual({
+        id: "Codex",
+        agent: { kind: "codex", name: "Codex" },
+        account: "me@example.com",
+        sessions: null,
+        auth: null,
+        probes: null,
+      });
+      expect(deriveMachines([withLogin()], NOW, NO_LEADER).cards[0]?.signIns.map((row) => row.agent.kind)).toEqual([
+        "claude",
+        "codex",
+      ]);
+      expect(rowOf({ lu: [0] })?.auth).toBeNull();
     });
 
     test("expired, signed out, unidentified and blocked each say so, with the verb that fixes a sign-in", () => {
-      expect(rowOf({ lx: [0] })?.[0]?.health).toEqual({ text: "expired: run seance codex login", level: "err" });
-      expect(rowOf({}, login({ accountId: null, authOk: false }))?.[0]).toMatchObject({
+      expect(rowOf({ lx: [0] })?.auth).toEqual({ text: "expired: run seance codex login", level: "err" });
+      expect(rowOf({}, login({ accountId: null, authOk: false }))).toMatchObject({
         account: "not signed in",
-        health: { text: "run seance codex login", level: "warn" },
+        auth: { text: "run seance codex login", level: "warn" },
       });
-      expect(rowOf({}, login({ accountId: null }))?.[0]).toMatchObject({
+      expect(rowOf({}, login({ accountId: null }))).toMatchObject({
         account: "signed in",
-        health: { text: "account not identified", level: "warn" },
+        auth: { text: "account not identified", level: "warn" },
       });
-      expect(rowOf({ lb: [0] })?.[0]?.health).toEqual({ text: "included usage blocked", level: "err" });
+      expect(rowOf({ lb: [0] })?.auth).toEqual({ text: "included usage blocked", level: "err" });
     });
 
-    test("an asleep machine draws no login row, as it draws no exclave row", () => {
-      expect(rowOf({ lx: [0] }, login(), false)).toEqual([]);
+    test("an asleep machine's login says nothing, as its exclaves do", () => {
+      expect(rowOf({ lx: [0] }, login(), false)?.auth).toBeNull();
     });
   });
 });

@@ -4848,13 +4848,12 @@ error.
   one, though the registry carries none, so an aliased account's unaliased twin is tagged all the
   same and one account's label reads alike in every client, whether or not it could read the
   aliases (`accountName` in `shared/src/account-record.ts`, the rule every client shares —
-  `seance mcp` and Raycast name accounts through it too). A twin of another kind (one person's Claude login
-  and Codex login under one email; the kind read off the id's prefix, `AGENT_ACCOUNT_PREFIXES`) is told apart
-  by kind instead (Codex item 3, 2026-11-24): the agent login's label gains its agent's name, `(Codex)`, and the
-  Claude one gains nothing, so signing a machine in to Codex never retags a Claude account; twins of one kind
-  still take the org tag, an agent login's after its name and on its id less the prefix (`(Codex, org
-  ws-1aaaa)`). _Corrected at build:_ item 2 had tagged both with their org halves, the Codex one as
-  `org codex:ab`.
+  `seance mcp` and Raycast name accounts through it too). Only a twin of the same kind counts (Codex item 3,
+  2026-11-24; the kind read off the id's prefix, `AGENT_ACCOUNT_PREFIXES`): one person's Claude login and Codex
+  login under one email both read as the email, since every client shows the kind beside the label (the PWA's
+  logo, MCP's `exclaves` and `logins`), so signing a machine in to Codex never retags a Claude account. Two agent
+  logins of one email take the org tag on their ids less the prefix (`org ws-1aaaa`). _Corrected at build:_
+  item 2 had tagged both kinds with their org halves, the Codex one as `org codex:ab`.
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
@@ -11182,29 +11181,30 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   observations, since a sample carries the observation's time, not the tick's.
 - **An agent login is an account like a Claude one** (Codex item 3, 2026-11-24; Daemon, "Codex login";
   `pwa/src/machines-view.ts`). `deriveAccounts` groups a login's account (`Machine.logins`, signed in and
-  identified) beside the exclaves', so it gets the same card: its 5-hour and weekly windows from `lq` through
+  identified) beside the exclaves', so it gets the same card from the same `AccountCard`, built by the same code:
+  titled by what signs in (its agent's name, "Codex", where a Claude account names its exclave ids; repeated titles
+  gain the machines, then the account id), its email and machines under the title, its 5-hour and weekly windows
+  from `lq` through
   `newestQuotaByAccount`, history, rename through the `account:` record and the "Open for work" switch through the
   account hold (Closing an account), none of which reads the agent. Every account card, a Claude one too, leads its
   title with its agent's logo (`AgentLogo`, `pwa/src/components/icons.tsx`: lobe-icons' one-colour marks, MIT, copied
   in as the stroke icons are), muted, named for a screen reader and on hover. _Decided: a logo on every card, not a
   text badge on the login's alone, because_ a small muted mark is no noise where a pill on every card would be, and a
-  list whose every card leads alike reads faster than one marked only by exception (owner, 2026-11-24). What differs:
-  - **Titled by its email**, not by exclave ids it has none of, and with no twin tag (the logo says its kind);
-    repeated titles gain the workspace (else the agent's name), then the machines, then the account id. The meta line
-    is `[<label> ·] <workspace> · on <machines>`, the label leading only under an alias. _Decided: no plan, because_ a
-    Claude card shows none (owner, 2026-11-24); `AgentLogin.plan` stays on the wire, read by no client today. The rename sheet
-    reads `<label> · Codex` and empties back to the email (`AccountCard.unnamed`, `members`).
+  list whose every card leads alike reads faster than one marked only by exception (owner, 2026-11-24).
+  _Decided: one card, kind a field of it (`AccountCard.agent`), because_ the owner wants a Codex card to read exactly
+  as a Claude one bar its logo (2026-11-24): no plan or workspace, which a Claude card has no counterpart of
+  (`AgentLogin.plan` and `workspace` stay on the wire, read by no client today). What the data makes differ:
   - **Credits are Claude's bar, never an amount** (docs/codex.md, "Credits and spill"): shown only while a window is
     full and the newest reading carries `c` (the daemon sends it only beside `AgentLogin.credits`), never green, with
     the state where Claude's dollar note goes: `available` at 0, `member limit` between, `spent` at 100.
     `sameCreditMonth` is not applied, since `c` is no monthly figure. _Decided: the bar, at Claude's rule, because_
     one card reads like the other, and the bar shows only while credits are being spent, where an empty "0%" is
     named `available` rather than read as none left (owner, 2026-11-24; a line, always shown, was built first).
-  - **No reading yet** says the machine has not read the login, since a login's quota comes from the probe, not a
-    session.
-  - **The Machines card's login row**: one per login while connected (none asleep, as for exclave rows), always
-    drawn, since a login is configured on purpose and the card is where a signed-out one shows: the agent, the
-    account's label (`not signed in` without an id, `signed in` unidentified), then `loginHealth` in words —
+  - **No reading yet** is one text for every kind ("It shows once its machine has reported"), since a Claude
+    account's reading comes from a session and a login's from its machine's probe.
+  - **The Machines card's sign-in rows** (`SignInRow`): an exclave and a login are one row type, the login's after
+    the exclaves', its id the agent's name, told apart by `agent` (the logo before the id), drawn only while
+    connected and only when something needs attention. A login's note is `loginHealth` in words —
     `expired: run seance codex login` (err), `run seance codex login` (signed out, warn), `account not identified`
     (warn), `included usage blocked` (err), nothing for ok or unknown. Decided: no outdated-binary note, though the
     login carries its `version`: the owner keeps every machine at or above `CODEX_MIN_VERSION` before Codex goes

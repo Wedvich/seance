@@ -1,7 +1,6 @@
 import {
   AGENT_ACCOUNT_PREFIXES,
   AGENT_LOGIN_KINDS,
-  AGENT_NAMES,
   APP_ID,
   AT_REST_OPS,
   STORE_PREFIXES,
@@ -114,9 +113,9 @@ function bareId(accountId: string): string {
  * alike in every client, whether or not that client could read the aliases
  * (a keyless `seance mcp`, a refused listing).
  *
- * A twin of another kind (one person's Claude login and ChatGPT login under one email) is told apart by kind, not
- * by org: the agent login's label gains its agent's name and the Claude one stays as it was, so signing in to Codex
- * never retags a Claude account. Twins of one kind still take the org tag, an agent login's after its name.
+ * Only a twin of the same kind counts: one person's Claude login and ChatGPT login under one email both read as the
+ * email, since every client already shows the kind beside the label (the PWA's logo, MCP's `exclaves` and `logins`),
+ * and signing in to Codex then never retags a Claude account.
  */
 export function accountName(
   accountId: string,
@@ -127,22 +126,18 @@ export function accountName(
   if (alias !== undefined) return alias;
   const name = fallbackName(accountId, email);
   const key = name.toLowerCase();
-  const twins = known.filter((other) => other.accountId !== accountId && nameKey(other.accountId, other.email) === key);
-  if (twins.length === 0) return name;
   const agent = agentOf(accountId);
-  const kin = twins.filter((other) => agentOf(other.accountId) === agent);
-  const tags = [
-    ...(agent !== null && kin.length < twins.length ? [AGENT_NAMES[agent]] : []),
-    ...(kin.length === 0
-      ? []
-      : [
-          twinTag(
-            bareId(accountId),
-            kin.map((other) => bareId(other.accountId)),
-          ),
-        ]),
-  ];
-  return tags.length === 0 ? name : `${name} (${tags.join(", ")})`;
+  const twins = known.filter(
+    (other) =>
+      other.accountId !== accountId &&
+      agentOf(other.accountId) === agent &&
+      nameKey(other.accountId, other.email) === key,
+  );
+  if (twins.length === 0) return name;
+  return `${name} (${twinTag(
+    bareId(accountId),
+    twins.map((other) => bareId(other.accountId)),
+  )})`;
 }
 
 /** `accountName` for an id alone, its email whatever `known` reports for it. */

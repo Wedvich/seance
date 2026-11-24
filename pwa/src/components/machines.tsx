@@ -260,7 +260,7 @@ function MachineCardView(props: {
   const menu = useMenu();
   // Kept while a chart is open even if its source drops: the item is the chart's only close.
   const offersHistory = card.charts || history !== null;
-  const attention = card.exclaves.filter((row) => row.auth !== null || row.probes !== null);
+  const attention = card.signIns.filter((row) => row.auth !== null || row.probes !== null);
 
   return (
     <section className="fleet-card card">
@@ -376,26 +376,19 @@ function MachineCardView(props: {
         </p>
       )}
 
-      {card.connected && (attention.length > 0 || card.logins.length > 0) && (
+      {card.connected && attention.length > 0 && (
         <ul className="exclaves">
           {attention.map((row) => (
-            <li key={row.id} className="exclave">
-              <span className="exclave-id">{row.id}</span>
+            <li key={`${row.agent.kind}:${row.id}`} className="exclave">
+              <span className="exclave-id">
+                <AgentLogo kind={row.agent.kind} name={row.agent.name} size={12} className="exclave-logo" />
+                {row.id}
+              </span>
               {row.auth !== null && (
                 <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
               )}
               {row.probes !== null && (
                 <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
-              )}
-            </li>
-          ))}
-          {/* One login per agent per machine (D1), so the agent is the row's identity. */}
-          {card.logins.map((row) => (
-            <li key={`login:${row.agent}`} className="exclave">
-              <span className="exclave-id">{row.agent}</span>
-              <span className="exclave-account">{row.account}</span>
-              {row.health !== null && (
-                <span className={`exclave-auth exclave-auth-${row.health.level}`}>{row.health.text}</span>
               )}
             </li>
           ))}
@@ -667,7 +660,7 @@ function RenameDialog(props: {
             <span>
               {blocked
                 ? "Another account's name is still saving. Save is on hold until it lands."
-                : `Shown as the card title. Leave it empty to go back to “${account.unnamed}”.`}
+                : `Shown as the card title. Leave it empty to go back to “${account.members}”.`}
             </span>
             <span className="rename-count">
               {draft.length}/{ACCOUNT_ALIAS_MAX_LENGTH}

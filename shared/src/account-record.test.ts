@@ -155,19 +155,17 @@ describe("account labels", () => {
     expect(accountNameIn(knownAccounts(withLogin), CODEX)).toBe("gpt@example.com");
   });
 
-  test("a Codex twin of a Claude account is told apart by kind, the Claude one untouched; Codex twins by workspace too", () => {
+  test("a Codex twin of a Claude account is no twin, both reading as the email; Codex twins by workspace", () => {
     const known = [
       { accountId: OTHER, email: "you@example.com" },
       { accountId: "codex:ws-1aaaaaaaa:user-1", email: "you@example.com" },
     ];
     expect(accountNameIn(known, OTHER)).toBe("you@example.com");
-    expect(accountNameIn(known, "codex:ws-1aaaaaaaa:user-1")).toBe("you@example.com (Codex)");
+    expect(accountNameIn(known, "codex:ws-1aaaaaaaa:user-1")).toBe("you@example.com");
     const two = [...known, { accountId: "codex:ws-2bbbbbbbb:user-1", email: "you@example.com" }];
     expect(accountNameIn(two, OTHER)).toBe("you@example.com");
-    expect(accountNameIn(two, "codex:ws-1aaaaaaaa:user-1")).toBe("you@example.com (Codex, org ws-1aaaa)");
-    expect(accountNameIn(two, "codex:ws-2bbbbbbbb:user-1")).toBe("you@example.com (Codex, org ws-2bbbb)");
-    // Two Codex accounts and no Claude one: no kind to tell apart, the workspace alone.
-    expect(accountNameIn(two.slice(1), "codex:ws-1aaaaaaaa:user-1")).toBe("you@example.com (org ws-1aaaa)");
+    expect(accountNameIn(two, "codex:ws-1aaaaaaaa:user-1")).toBe("you@example.com (org ws-1aaaa)");
+    expect(accountNameIn(two, "codex:ws-2bbbbbbbb:user-1")).toBe("you@example.com (org ws-2bbbb)");
   });
 
   test("an email two known accounts share gains each one's org; a unique email or an alias reads as itself", () => {
