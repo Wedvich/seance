@@ -889,7 +889,7 @@ describe("an agent login", () => {
       unnamed: "me@example.com",
       members: "Codex",
       agent: { kind: "codex", name: "Codex" },
-      detail: "PengeFix · team plan · on a, b",
+      detail: "PengeFix · on a, b",
       historyFrom: "b",
     });
     expect(codex?.bars.map((bar) => [bar.label, bar.pct])).toEqual([
@@ -941,7 +941,7 @@ describe("an agent login", () => {
       alias: "chatgpt",
       unnamed: "me@example.com",
       plainName: "me@example.com",
-      detail: "me@example.com · PengeFix · team plan · on mac",
+      detail: "me@example.com · PengeFix · on mac",
     });
     expect(cards[0]?.logins[0]?.account).toBe("chatgpt");
   });
@@ -957,7 +957,7 @@ describe("an agent login", () => {
     expect(accounts.map((account) => [account.title, account.agent.kind])).toEqual([
       ["default", "claude"],
       ["me@example.com (PengeFix)", "codex"],
-      ["me@example.com (plus)", "codex"],
+      ["me@example.com (Codex)", "codex"],
     ]);
     // The plain name, every client's label, tells them apart by kind, then by workspace; the Claude one keeps its email.
     expect(accounts.map((account) => account.plainName)).toEqual([

@@ -11190,8 +11190,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   text badge on the login's alone, because_ a small muted mark is no noise where a pill on every card would be, and a
   list whose every card leads alike reads faster than one marked only by exception (owner, 2026-11-24). What differs:
   - **Titled by its email**, not by exclave ids it has none of, and with no twin tag (the logo says its kind);
-    repeated titles gain the workspace (else the plan), then the machines, then the account id. The meta line is
-    `[<label> ·] <workspace> · <plan> plan · on <machines>`, the label leading only under an alias; the rename sheet
+    repeated titles gain the workspace (else the agent's name), then the machines, then the account id. The meta line
+    is `[<label> ·] <workspace> · on <machines>`, the label leading only under an alias. _Decided: no plan, because_ a
+    Claude card shows none (owner, 2026-11-24); `AgentLogin.plan` stays on the wire, read by no client today. The rename sheet
     reads `<label> · Codex` and empties back to the email (`AccountCard.unnamed`, `members`).
   - **Credits are Claude's bar, never an amount** (docs/codex.md, "Credits and spill"): shown only while a window is
     full and the newest reading carries `c` (the daemon sends it only beside `AgentLogin.credits`), never green, with

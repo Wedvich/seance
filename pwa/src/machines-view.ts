@@ -526,7 +526,7 @@ export interface AccountCard {
   readonly agent: AgentMark;
   /** What it reads as without its alias: email, else short id, with any twin tag. */
   readonly plainName: string;
-  /** Named, what the title no longer says leads it; an agent login's workspace and plan follow its name. */
+  /** Named, what the title no longer says leads it; an agent login's workspace follows its name. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
   readonly observed: Timed;
@@ -839,7 +839,6 @@ interface AccountGroup {
   readonly members: Set<string>;
   /** A login's display fields, the first any machine reports (one account has one). */
   workspace: string | undefined;
-  plan: string | undefined;
   readonly machines: Set<string>;
   /** Online hosts that serve `metrics`, in fleet order. */
   readonly charted: string[];
@@ -967,14 +966,12 @@ function deriveAccounts(
       agent,
       members: new Set(),
       workspace: undefined,
-      plan: undefined,
       machines: new Set(),
       charted: [],
     };
     group.members.add(member);
     group.machines.add(machine.name);
     group.workspace ??= login?.workspace;
-    group.plan ??= login?.plan;
     if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
     groups.set(accountId, group);
   };
@@ -995,7 +992,7 @@ function deriveAccounts(
       ? [...group.members].join(" · ")
       : accountName(group.accountId, known.find((account) => account.accountId === group.accountId)?.email);
   // Titles tell the cards, and their ⋯ labels, apart: a repeated one gains the exclave ids (a login: its workspace,
-  // else its plan), then the machines, and finally the account id, which no other account shares.
+  // else its agent), then the machines, and finally the account id, which no other account shares.
   const tiers = (group: AccountGroup): string[] => {
     const alias = aliasOf(aliases, group.accountId);
     const on = [...group.machines].join(", ");
@@ -1006,7 +1003,7 @@ function deriveAccounts(
       return [base, named(exclaves), named(`${exclaves} on ${on}`), `${base} (${group.accountId})`];
     }
     const base = alias ?? unnamedOf(group);
-    const what = group.workspace ?? group.plan ?? AGENT_NAMES[group.agent];
+    const what = group.workspace ?? AGENT_NAMES[group.agent];
     return [base, `${base} (${what})`, `${base} (${what} on ${on})`, `${base} (${group.accountId})`];
   };
   const candidates = new Map([...groups.values()].map((group) => [group.accountId, tiers(group)]));
@@ -1040,7 +1037,6 @@ function deriveAccounts(
           : [
               ...(alias === undefined ? [] : [plainName]),
               ...(group.workspace === undefined ? [] : [group.workspace]),
-              ...(group.plan === undefined ? [] : [`${group.plan} plan`]),
               on,
             ].join(" · "),
       bars: quota === undefined ? [] : quotaBars(quota.observation, now, group.agent !== null),
