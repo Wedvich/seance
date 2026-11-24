@@ -1064,6 +1064,29 @@ export interface SessionEntry {
    * `parseTags(…, { scope: "session" })`. Absent when there are none, and from older daemons.
    */
   readonly tags?: Readonly<Record<string, SessionTag>>;
+  /**
+   * The session's live state (docs/work.md, "Wire"): its newest live `claude` process's last reported state, as the
+   * conversation table keeps it. Sent only to an app, never on a scheduler-sealed `sessions` and never in MCP
+   * `get_sessions` (WS6); display-only, read only through `parseSessionLive`. Absent when the daemon retained no state
+   * for the pane (no frame yet: no hooks, an exclave without the mod), and from daemons without
+   * `CAPABILITIES.sessionLive`.
+   */
+  readonly live?: SessionLive;
+}
+
+export const SESSION_LIVE_STATES = ["busy", "idle", "needs-input"] as const;
+
+export type SessionLiveState = (typeof SESSION_LIVE_STATES)[number];
+
+/** `SessionEntry.live`. */
+export interface SessionLive {
+  readonly state: SessionLiveState;
+  /** When the state began, unix ms on the daemon's clock. */
+  readonly since: number;
+  /** Beside `idle` only: the idle a turn's own end raised. */
+  readonly turnEnded?: true;
+  /** Beside `needs-input` only, as `NEEDS_INPUT_REASONS` holds it. */
+  readonly reason?: NeedsInputReason;
 }
 
 /** Git identity of a daemon's own checkout. `commitTs` is ms, like every other wire timestamp. */
@@ -1293,6 +1316,9 @@ export interface MachineInfo {
  * it, and offers one only for a task whose machine does: an item-4 to item-9 leader refuses `continues` beside
  * `agent` (`agent_unsupported`) and would hold the record forever, and such a daemon refuses the spawn
  * `not_continuable`, so neither ever runs it as Claude. One build does both halves.
+ * `sessionLive`: as a daemon, sends `SessionEntry.live` on an app's `sessions` and `MachineStatus.sg` on every status
+ * (docs/work.md, "Wire"). Advertised unconditionally, as `sessionTag`: the conversation table both read always runs.
+ * A client without it on a machine reads its untasked sessions as state unknown and re-reads them on `sess` changes.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1329,6 +1355,7 @@ export const CAPABILITIES = {
   sessionTag: "sessionTag",
   codex: "codex",
   codexContinue: "codexContinue",
+  sessionLive: "sessionLive",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1533,6 +1560,15 @@ export interface MachineStatus {
    * and range-checks each index against the `logins` of the info it holds. A login in none of them, signed in, is ok.
    */
   readonly lb?: readonly number[];
+  /**
+   * The session generation (docs/work.md, "`MachineStatus.sg`"): a number the daemon changes whenever its answer to an
+   * app's `sessions` would show something new (a pane appears or goes, a task, label, tag or `live` state or reason
+   * changes), so a client re-reads that machine's sessions when it differs from the last it saw. Compare for
+   * inequality only: a restart starts it afresh (seeded from the boot time in unix ms, so above the last process's in practice, but not promised). Display-only,
+   * never trimmed by `fitStatus`, absent from a daemon without `CAPABILITIES.sessionLive` and for a tick whose sessions
+   * read failed. A bad `sg` is dropped alone, never the status.
+   */
+  readonly sg?: number;
 }
 
 /**

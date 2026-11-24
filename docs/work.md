@@ -1,6 +1,8 @@
 # The Work screen: sessions beside tasks
 
-**Status: spec, nothing built.** The owner's brief (2026-11-23): the session list, today the task queue, also lists
+**Status: spec; Order step 1 (daemon: `SessionEntry.live`, `MachineStatus.sg`, `CAPABILITIES.sessionLive`) built
+2026-11-24, recorded in DESIGN.md ("Tags and session identity", "Live state and the session generation"); steps 2–3
+(PWA) not built.** The owner's brief (2026-11-23): the session list, today the task queue, also lists
 sessions that are not tasks. This is the place #567 left open when it took the session list off the Machines card
 "until its place is decided" (DESIGN.md, "Tags and session identity", "The PWA's per-namespace view"); `sessionRows`,
 the `SessionRow` model and `Store.renameSession` were kept for it.
@@ -67,7 +69,7 @@ screen's basis for every untasked row; the DESIGN.md entry is amended with this,
 
 The PWA re-reads a machine's sessions today only when its status's `sess` counts change, and a session going busy to
 idle changes no count. `sg` is a number the daemon bumps on any change a `sessions` reply would show: a pane appears or
-goes, a `live.state` or `reason` changes, a label or task changes. Display-only, never trimmed by `fitStatus`, a bad one
+goes, a `live.state`, `reason` or `since` changes, a label or task changes. Display-only, never trimmed by `fitStatus`, a bad one
 dropped alone. The client re-reads a machine's sessions when its `sg` changes, spaced as the drain row's re-read is
 (at most once per ten seconds per machine, a trailing read so the last change is never lost).
 

@@ -196,8 +196,10 @@ import {
   QUOTA_ALERT_REASONS,
   QUOTA_SOURCES,
   SCHEDULER_OPS,
+  SESSION_LIVE_STATES,
   SESSION_STATES,
   SPAWN_ERROR_CODES,
+  type SessionLive,
   TASK_ID_PATTERN,
   TASK_REQUEST_LIMITS,
   TASK_STATES,
@@ -735,6 +737,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   const cu = value["cu"] === undefined ? null : parseCustodianStatus(value["cu"]);
   // Dropped alone too, for the same reason.
   const gh = value["gh"] === undefined ? null : parseGithubRate(value["gh"]);
+  // And `sg`: a bad one only costs the client its prompt sessions re-read.
+  const sg = isUint(value["sg"]) ? value["sg"] : undefined;
   return {
     at: value["at"],
     scan: value["scan"],
@@ -761,6 +765,25 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(lx === undefined ? {} : { lx }),
     ...(lu === undefined ? {} : { lu }),
     ...(lb === undefined ? {} : { lb }),
+    ...(sg === undefined ? {} : { sg }),
+  };
+}
+
+/**
+ * `SessionEntry.live` off the wire, or null for a value that is not one (a reader drops the field, never the entry,
+ * as `parseTags` does for `tags`). Strict in `state` and `since`; `turnEnded` is kept only as `true` beside `idle` and
+ * `reason` only as a known reason beside `needs-input`, each dropped alone otherwise. Unknown keys are ignored.
+ */
+export function parseSessionLive(value: unknown): SessionLive | null {
+  if (!isRecord(value)) return null;
+  const { state, since, turnEnded, reason } = value;
+  const known = SESSION_LIVE_STATES.find((s) => s === state);
+  if (known === undefined || !isUint(since) || since === 0) return null;
+  return {
+    state: known,
+    since,
+    ...(known === "idle" && turnEnded === true ? { turnEnded } : {}),
+    ...(known === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
   };
 }
 

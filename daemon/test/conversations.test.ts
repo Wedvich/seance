@@ -381,6 +381,59 @@ describe("SessionEntry.tags", () => {
   });
 });
 
+describe("SessionEntry.live", () => {
+  test("rides an app's sessions reply as the table holds it, never a scheduler-sealed one", async () => {
+    const quiet = await claudePane();
+    const { pane: p, pid } = await claudePane();
+    const backend: SessionBackend = {
+      spawn: () => Promise.reject(new Error("not in this suite")),
+      sessions: () =>
+        Promise.resolve([
+          { id: p, window: "w", repo: null, path: base },
+          { id: quiet.pane, window: "q", repo: null, path: base },
+        ]),
+      doctor: () => Promise.resolve([]),
+    };
+    const ctx: HandlerContext = {
+      backend,
+      getRepos: () => [],
+      rescan: () => Promise.resolve([]),
+      auditSink: () => {},
+      tasks: new EndedTasks(),
+      conversations: table,
+    };
+    /** Each entry's `live` as the wire carries it, by pane. */
+    const ask = async (from: string): Promise<ReadonlyMap<unknown, unknown>> => {
+      const request: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "sessions", payload: {} };
+      const payload = (await createHandler(ctx)(request, from))?.payload;
+      const sessions = isRecord(payload) ? payload["sessions"] : undefined;
+      if (!Array.isArray(sessions)) throw new Error("no sessions in the reply");
+      return new Map(sessions.filter(isRecord).map((entry) => [entry["id"], entry["live"]]));
+    };
+    const liveOf = async (): Promise<unknown> => (await ask("app")).get(p);
+
+    await report(pid, { state: "needs-input", reason: "permission" });
+    await pollUntil(() => table.process(p)?.state === "needs-input", "the needs-input retained");
+    const since = table.process(p)?.since;
+    expect(await liveOf()).toEqual({ state: "needs-input", since, reason: "permission" });
+
+    await report(pid, { state: "idle", turnEnded: true });
+    await pollUntil(() => table.process(p)?.state === "idle", "the idle retained");
+    expect(await liveOf()).toEqual({ state: "idle", since: table.process(p)?.since, turnEnded: true });
+
+    await report(pid, { state: "busy" });
+    await pollUntil(() => table.process(p)?.state === "busy", "the busy retained");
+    expect(await liveOf()).toEqual({ state: "busy", since: table.process(p)?.since });
+
+    // A pane whose claude never sent a frame has no state to show: `live` is left out, never guessed.
+    const app = await ask("app");
+    expect(app.has(quiet.pane)).toBe(true);
+    expect(app.get(quiet.pane)).toBeUndefined();
+    const scheduler = await ask(SCHEDULER_ID);
+    expect([...scheduler.values()]).toEqual([undefined, undefined]);
+  });
+});
+
 describe("the owner's label (session-tag)", () => {
   let stores = 0;
   /** A table and ingest over a conversations file of their own. */

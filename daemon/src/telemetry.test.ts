@@ -219,6 +219,37 @@ describe("createTelemetry", () => {
     store.close();
   });
 
+  test("the session generation rides beside sess, from the tick's own read", async () => {
+    const home = await makeHome();
+    const store = MetricsStore.memory();
+    const seen: (readonly SessionEntry[])[] = [];
+    let fail = false;
+    const sessions = [session(join(home, "work", "repo"))];
+    const telemetry = createTelemetry(store, {
+      diskPaths: [],
+      registered: registeredOf(home),
+      sessions: async () => {
+        if (fail) throw new Error("no server running");
+        return sessions;
+      },
+      sessionGen: (read) => {
+        seen.push(read);
+        return 42;
+      },
+      probe: fakeProbe(),
+    });
+    const first = await telemetry.tick(T0);
+    expect(first.sess).toBeDefined();
+    expect(first.sg).toBe(42);
+    expect(seen).toEqual([sessions]);
+    // A failed read says nothing of the sessions, so neither field.
+    fail = true;
+    const second = await telemetry.tick(T0 + 30_000);
+    expect([second.sess, second.sg]).toEqual([undefined, undefined]);
+    expect(seen).toHaveLength(1);
+    store.close();
+  });
+
   test("a rewritten config file is read on the next tick", async () => {
     const home = await makeHome();
     await mkdir(join(home, ".claude-work"), { recursive: true });

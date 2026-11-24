@@ -57,6 +57,7 @@ import {
   parseResumeRequest,
   parseCustodianEvent,
   parseSessionEvent,
+  parseSessionLive,
   parseTaskFlag,
   parseStoreChanged,
   parseStoreReply,
@@ -2696,6 +2697,56 @@ describe("M4 shapes", () => {
       null,
     ]) {
       expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, gh: bad })).toEqual({ at: 1, scan: 2, cpu: 40 });
+    }
+  });
+
+  test("a status carries the session generation as `sg`; a bad one is dropped alone", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, sg: 1_763_000_000 })).toEqual({ at: 1, scan: 2, sg: 1_763_000_000 });
+    expect(parseMachineStatus({ at: 1, scan: 2, sg: 0 })?.sg).toBe(0);
+    for (const sg of [-1, 1.5, "7", null, Number.MAX_SAFE_INTEGER + 1, { n: 1 }]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, cpu: 40, sg })).toEqual({ at: 1, scan: 2, cpu: 40 });
+    }
+  });
+
+  test("parseSessionLive reads each state, keeping turnEnded and reason only beside their own state", () => {
+    expect(parseSessionLive({ state: "busy", since: 5 })).toEqual({ state: "busy", since: 5 });
+    expect(parseSessionLive({ state: "idle", since: 5, turnEnded: true })).toEqual({
+      state: "idle",
+      since: 5,
+      turnEnded: true,
+    });
+    expect(parseSessionLive({ state: "needs-input", since: 5, reason: "question" })).toEqual({
+      state: "needs-input",
+      since: 5,
+      reason: "question",
+    });
+    // Each extra is dropped alone, never the value: a newer writer's addition, or one beside the wrong state.
+    expect(parseSessionLive({ state: "busy", since: 5, turnEnded: true, reason: "question", x: 1 })).toEqual({
+      state: "busy",
+      since: 5,
+    });
+    expect(parseSessionLive({ state: "idle", since: 5, turnEnded: false })).toEqual({ state: "idle", since: 5 });
+    expect(parseSessionLive({ state: "needs-input", since: 5, reason: "telepathy" })).toEqual({
+      state: "needs-input",
+      since: 5,
+    });
+  });
+
+  test("parseSessionLive is null for anything that is not a live state", () => {
+    for (const bad of [
+      null,
+      "busy",
+      [],
+      {},
+      { state: "ended", since: 5 },
+      { state: "done", since: 5 },
+      { state: "busy" },
+      { state: "busy", since: 0 },
+      { state: "busy", since: -1 },
+      { state: "busy", since: 1.5 },
+      { state: "busy", since: "5" },
+    ]) {
+      expect(parseSessionLive(bad)).toBeNull();
     }
   });
 

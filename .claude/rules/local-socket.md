@@ -143,7 +143,9 @@ Nothing kept below is run or sent, and no reply depends on it.
   last state, `reason` and `agent` claims, keyed on the process (`<pid>:<start time>`), with the
   conversation table beside it (`conversations.ts`, memory only). Its tags reach only an app's `sessions`
   (`SessionEntry.tags`: never a scheduler-sealed one, and MCP's `get_sessions` only
-  `AGENT_VISIBLE_TAG_KEYS`), never a log, an audit line or argv.
+  `AGENT_VISIBLE_TAG_KEYS`), never a log, an audit line or argv. Its state reaches only an app's `sessions`
+  (`SessionEntry.live`, through `appSessionView`: never a scheduler-sealed one, never MCP's `get_sessions`) and the
+  status's `sg` as a counter, never a log, an audit line, argv or a web push.
 
 ## A Codex pane's events: its own server, bound by construction
 

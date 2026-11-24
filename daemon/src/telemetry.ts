@@ -80,6 +80,8 @@ export interface TelemetrySources {
   /** Read once at the start of each tick: the stamp and the list `sess` and `quota` index into. */
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
+  /** The session generation after the tick's own sessions read (`sg`, `session-view.ts`); absent reads as no `sg`. */
+  readonly sessionGen?: (sessions: readonly SessionEntry[]) => number | Promise<number>;
   readonly probe?: HostProbe;
   /** The clock a `tick` without an explicit time reads; defaults to `Date.now`. */
   readonly now?: () => number;

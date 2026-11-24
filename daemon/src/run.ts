@@ -52,6 +52,7 @@ import { codexSessions } from "./codex/sessions.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { createLateDrainAsk } from "./drain-ask.ts";
 import { createDrainEmptyWatch, watchedSessions } from "./drain-empty.ts";
+import { appSessionView, createSessionGeneration } from "./session-view.ts";
 import { createLeadFallback } from "./lead-fallback.ts";
 import {
   adaptersSettled,
@@ -446,6 +447,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // Unconditional: its leader half routes a Codex continuation whatever this machine's own login, and `codex`
         // already says whether a Codex task is placed here at all (docs/codex.md, build order item 10).
         CAPABILITIES.codexContinue,
+        // As `sessionTag`: `live` and `sg` read the same table, which always runs.
+        CAPABILITIES.sessionLive,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan, logins: info.logins ?? [] };
@@ -694,6 +697,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     conversations: {
       sweep: () => sessionTags.current?.sweep() ?? Promise.resolve(),
       tagsFor: (pane) => sessionTags.current?.tagsFor(pane),
+      process: (pane) => sessionTags.current?.process(pane) ?? null,
     },
     // Advertised from register on, so before the table starts it is a retryable failure (`internal_error`), not "unsupported".
     sessionTag: (pane, id, value) =>
@@ -720,6 +724,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : {}),
   };
 
+  // The status's `sg`, over the app's view of the status loop's own sessions read (the table late-bound, as above).
+  const sessionGeneration = createSessionGeneration({
+    seed: now(),
+    view: (sessions) => appSessionView(handlerCtx.conversations, sessions),
+    prepare: async () => {
+      await handlerCtx.conversations?.sweep();
+    },
+  });
   // The seat starts with the capabilities, after the loop it reports to: read late, like `drainAsk`.
   // Created before the client, whose every register samples at once; reads it late.
   const status = startStatusLoop(
@@ -737,6 +749,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           },
         },
       ),
+      sessionGen: sessionGeneration.observe,
       now,
       httpFetch,
       draining: () => endedTasks.draining,
