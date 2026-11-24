@@ -30,9 +30,14 @@ describe("specError", () => {
     expect(specError({ ...BASE, agent: "codex", plan: true })).toBe(
       "a Codex task runs only at autonomy auto for now, not steer",
     );
+    // A continuation passes (item 10): its gate is the leader's and the target's `codexContinue`, not V1's.
     expect(
-      specError({ ...codex, continues: { task: ID, at: { deviceId: "d", exclave: "main", clone: "app" } } }),
-    ).toContain("continuing a session");
+      specError({
+        ...codex,
+        mode: "continue",
+        continues: { task: ID, at: { deviceId: "d", exclave: "main", clone: "app" } },
+      }),
+    ).toBeNull();
     // The same fields on a Claude task are untouched.
     expect(specError({ ...BASE, effort: "max", plan: true })).toBeNull();
   });

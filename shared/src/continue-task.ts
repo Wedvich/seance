@@ -22,10 +22,15 @@ export type ContinueOffer =
   | { readonly ok: true; readonly at: Target; readonly resumes?: string; readonly brief?: string }
   | { readonly ok: false; readonly reason: string };
 
-/** What only the caller knows: its best leader-clock now, and whether the verified leader advertises `continueHandoff`. */
+/**
+ * What only the caller knows: its best leader-clock now, and whether the verified leader advertises `continueHandoff`
+ * and `codexContinue`.
+ */
 export interface OfferContext {
   readonly now: number;
   readonly leaderHandoff: boolean;
+  /** The verified leader advertises `CAPABILITIES.codexContinue`: an older one would hold a Codex continuation forever. */
+  readonly leaderCodexContinue: boolean;
 }
 
 /**
@@ -192,7 +197,12 @@ export function continueOffer(
   tasks: readonly Task[],
   context?: OfferContext,
 ): ContinueOffer {
-  if (task.spec.agent !== undefined) return { ok: false, reason: "a Codex task's session can't be continued yet" };
+  if (task.spec.agent !== undefined && context?.leaderCodexContinue !== true) {
+    return {
+      ok: false,
+      reason: "the scheduler's leader can't continue a Codex task yet (needs seance update)",
+    };
+  }
   if (task.state === "cancelled") {
     if (task.assignment === undefined) {
       return { ok: false, reason: "a task cancelled before it started has no session to continue" };
@@ -259,6 +269,10 @@ function placement(
   const caps = machine.capabilities;
   if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession)) {
     return { ok: false, reason: "the machine it ran on can't continue a session yet (needs seance update)" };
+  }
+  // An older daemon refuses the spawn `not_continuable`, and the leader would wait for it (`continue_unsupported`).
+  if (task.spec.agent !== undefined && !caps.includes(CAPABILITIES.codexContinue)) {
+    return { ok: false, reason: "the machine it ran on can't continue a Codex session yet (needs seance update)" };
   }
   return {
     ok: true,
@@ -354,7 +368,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.requires === undefined ? {} : { requires: spec.requires }),
     ...(creator === undefined ? {} : { tags: creator }),
-    // Never another agent: a Codex continuation is refused before a write (`codexSpecRefusal`), never run as Claude.
+    // Never another agent: the daemon refuses a continuation whose agent is not the one its ledger noted.
     ...(spec.agent === undefined ? {} : { agent: spec.agent }),
     continues: { task: continues, at },
   };

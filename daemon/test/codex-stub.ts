@@ -14,8 +14,10 @@
  * subscription would), then by `turn`: `complete` goes idle and `turn/completed`; `approval` waits on an approval,
  * sending the server request no daemon may answer; `hold` stays busy. `turn/interrupt` ends a running turn
  * `interrupted`. Each turn also announces a decoy: another thread's approval wait, which no reader may take as its own.
- * `thread/resume` subscribes its connection and answers the thread's status; `thread/turns/list` the turn. A reply to
- * a server request is logged as `(response)`.
+ * `thread/resume` subscribes its connection and answers the thread's status; on a server that has started no thread it
+ * loads the one named, as the real server loads a thread from the home's store for a continuation (`resumeError`
+ * answers an error instead, a store that lost it). `thread/turns/list` answers the turn. A reply to a server request
+ * is logged as `(response)`.
  */
 import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +42,8 @@ interface Scenario {
   readonly threadStartError?: number;
   /** `thread/start` answers this thread id instead of a fresh UUIDv7. */
   readonly threadId?: string;
+  /** `thread/resume` answers this error code. */
+  readonly resumeError?: number;
   /** `--listen` exits at once, binding nothing. */
   readonly listenExit?: number;
   /** How the first turn runs on the listening server; absent, it announces nothing. */
@@ -180,6 +184,11 @@ async function listen(url: string): Promise<void> {
           reply({ result: { turn: { id: "turn-1", status: "inProgress" } } });
           runTurn();
         } else if (message.method === "thread/resume") {
+          if (scenario.resumeError !== undefined) {
+            reply({ error: { code: scenario.resumeError, message: "stub refused" } });
+            return;
+          }
+          if (thread === "") thread = String(message.params?.threadId);
           peers.add(ws);
           reply({ result: { thread: { id: message.params?.threadId, status } } });
         } else if (message.method === "thread/turns/list") {

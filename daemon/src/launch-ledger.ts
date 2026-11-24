@@ -103,8 +103,9 @@ export interface TaskNote {
    */
   readonly session?: string;
   /**
-   * The launch's agent when not Claude (`LaunchSite.agent`): a continuation refuses it, since a Codex thread is no
-   * Claude session to resume. Sticky like `session`; internal, never in `TaskProgress`.
+   * The launch's agent when not Claude (`LaunchSite.agent`): which driver a continuation resumes `session` with, and
+   * the agent the continuing spawn must name (`continuationSite`). Sticky like `session`; internal, never in
+   * `TaskProgress`.
    */
   readonly agent?: AgentLoginKind;
   readonly branch?: string;

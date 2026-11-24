@@ -1,6 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type {
+  AgentLoginKind,
   DespawnRequest,
   DespawnResponse,
   ErrorResponse,
@@ -28,6 +29,7 @@ import type {
   WatchEventResponse,
 } from "@seance/shared";
 import {
+  AGENT_NAMES,
   isMetricsRequest,
   isRecord,
   isAutonomyLevel,
@@ -192,6 +194,8 @@ export interface TaskLaunches {
         readonly continuedPr?: string;
         readonly branch?: string;
         readonly stackedOn?: string;
+        /** The agent that ran it, absent for Claude: the continuation must name the same. */
+        readonly agent?: AgentLoginKind;
       }
     | { readonly refused: string };
   /**
@@ -486,6 +490,13 @@ async function continuationSite(
   if (entry.path !== site.repo) {
     return notContinuable(`it ran in another clone of ${request.repo} (${site.repo}), not this one`);
   }
+  // A continuation keeps its task's agent: the ledger says which ran, so a thread id never reaches `claude --resume`
+  // and a Claude session id never reaches `thread/resume`, whatever the spawn's `agent` says.
+  if (request.agent !== site.agent) {
+    return notContinuable(
+      `it ran as ${site.agent === undefined ? "Claude" : AGENT_NAMES[site.agent]}; a continuation keeps its agent`,
+    );
+  }
   const worktrees = join(entry.path, ".claude", "worktrees");
   const real = await canonical(site.path);
   const present = await stat(real).then(
@@ -515,6 +526,7 @@ async function continuationSite(
     ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
     ...(site.branch === undefined ? {} : { branch: site.branch }),
     ...(site.stackedOn === undefined ? {} : { stackedOn: site.stackedOn }),
+    ...(site.agent === undefined ? {} : { agent: site.agent }),
   };
 }
 

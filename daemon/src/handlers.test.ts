@@ -1314,6 +1314,7 @@ describe("a scheduler spawn that continues a failed task", () => {
     readonly branch?: string;
     /** `null`: noted by a daemon predating session ids. */
     readonly session?: string | null;
+    readonly agent?: "codex";
   }
 
   const SESSION = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
@@ -1332,6 +1333,7 @@ describe("a scheduler spawn that continues a failed task", () => {
         ...(where.prUrl === undefined ? {} : { prUrl: where.prUrl }),
         ...(where.handedOff === undefined ? {} : { handedOff: true as const }),
         ...(where.branch === undefined ? {} : { branch: where.branch }),
+        ...(where.agent === undefined ? {} : { agent: where.agent }),
       });
     const calls: { readonly request: SpawnRequest; readonly continuation: Continuation | undefined }[] = [];
     const backend: SessionBackend = {
@@ -1370,6 +1372,40 @@ describe("a scheduler spawn that continues a failed task", () => {
     expect(logged()).toContain(`mode=continue title="" `);
     expect(logged()).toContain(`task="${NEW}" continues="${OLD}" prompt=none`);
     expect(logged()).toContain(`ok window="fix" path="${site}"`);
+  });
+
+  test("a Codex launch continues as Codex: its thread and agent reach the backend from the ledger", async () => {
+    const { calls, handlerCtx } = await rig({ agent: "codex" });
+    const reply = await createHandler(handlerCtx)(continuation({ agent: "codex", autonomy: "auto" }), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: true, path: site });
+    expect(calls).toEqual([
+      {
+        request: expect.objectContaining({ mode: "continue", continues: OLD, agent: "codex" }),
+        continuation: { path: site, session: SESSION, agent: "codex" },
+      },
+    ]);
+  });
+
+  test("a continuation keeps its task's agent: either mismatch is not_continuable, before anything is recorded or run", async () => {
+    for (const [notedAgent, asked] of [
+      ["codex", undefined],
+      [undefined, "codex"],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one rig per case, each checked before the next
+      const { ledger, calls, handlerCtx } = await rig(notedAgent === undefined ? {} : { agent: notedAgent });
+      // oxlint-disable-next-line no-await-in-loop
+      const reply = await createHandler(handlerCtx)(
+        continuation(asked === undefined ? {} : { agent: asked, autonomy: "auto" }),
+        SCHEDULER_ID,
+      );
+      expect(reply?.payload).toMatchObject({
+        ok: false,
+        code: "not_continuable",
+        message: expect.stringContaining("a continuation keeps its agent"),
+      });
+      expect(calls).toEqual([]);
+      expect(ledger.ids()).not.toContain(NEW);
+    }
   });
 
   test("the old note's exit reaches the backend with the path, never from the request", async () => {

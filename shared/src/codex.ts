@@ -32,13 +32,14 @@ export function versionAtLeast(version: string, floor: string = CODEX_MIN_VERSIO
 
 /**
  * What V1 refuses beside `agent: "codex"` (docs/codex.md, "The task"), named for a client's refusal: effort `max`, any
- * autonomy but `auto` (D6; `steer` is plan mode), `attachments`, `continues` and `succeeds`. Null
+ * autonomy but `auto` (D6; `steer` is plan mode), `attachments` and `succeeds`. `continues` passes (item 10): its gate
+ * is `CAPABILITIES.codexContinue`, the leader's and the target's, never this one. Null
  * for a Claude task or a Codex one V1 runs. `specError` refuses on it before a write; routing rejects every candidate
  * of a record that carries one anyway (`agent_unsupported`), so it stays readable and is placed nowhere until a build
  * that supports it.
  */
 export function codexSpecRefusal(
-  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments" | "continues" | "succeeds">,
+  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments" | "succeeds">,
 ): string | null {
   if (spec.agent === undefined) return null;
   if (spec.effort === "max") return "effort max";
@@ -46,7 +47,6 @@ export function codexSpecRefusal(
   const level = autonomyOf(spec);
   if (level !== "auto") return `autonomy ${level}`;
   if (spec.attachments !== undefined) return "attachments";
-  if (spec.continues !== undefined) return "continuing a session";
   if (spec.succeeds !== undefined) return "a successor";
   return null;
 }

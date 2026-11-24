@@ -33,6 +33,7 @@ import {
   deriveAutoAvailability,
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  deriveCodexContinueAvailability,
   deriveLimitsAvailability,
   derivePassAvailability,
   deriveRunNowAvailability,
@@ -934,6 +935,7 @@ export class SchedulerStore {
     const context = {
       now: Date.now() + (view?.kind === "ok" ? view.skew : 0),
       leaderHandoff: deriveContinueHandoffAvailability(this.#state.relay),
+      leaderCodexContinue: deriveCodexContinueAvailability(this.#state.relay),
     };
     const offer = continueOffer(listed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : [], context);
     if (!offer.ok) return sentence(offer.reason);

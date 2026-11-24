@@ -320,3 +320,96 @@ describe("a Codex session's life: its server's notifications (codex/sessions.ts,
     await pollUntil(() => !codexSessions.holds(pane), "the dead pane's session to go", 10_000);
   });
 });
+
+describe("a Codex continuation (docs/codex.md item 10)", () => {
+  let seq = 0;
+  const continuing = (
+    session: string,
+    path: string,
+    over: Partial<SpawnRequest> = {},
+    exit?: number,
+  ): Promise<SpawnOutcome> => {
+    seq += 1;
+    return spawnSession(
+      {
+        repo: "myrepo",
+        mode: "continue",
+        title: `Codex Cont ${seq}`,
+        taskId: `cx-cont-${seq}`,
+        continues: "cx-old",
+        client: "scheduler",
+        agent: "codex",
+        autonomy: "auto",
+        ...over,
+      },
+      repos,
+      opts,
+      { path, session, agent: "codex", ...(exit === undefined ? {} : { exit }) },
+    );
+  };
+
+  /** A Codex launch, then its pane closed: the worktree and the thread its ledger would note. */
+  async function ended(title: string): Promise<{ readonly path: string; readonly thread: string }> {
+    const outcome = await spawnSession(codex(title, { taskId: `cx-first-${seq}-${title.length}` }), repos, opts);
+    await despawnSession(await paneOf(outcome), { force: true });
+    await pollUntil(async () => !(await windowNames()).includes(title), "the first session's window to go");
+    await stub.reset();
+    return { path: await realpath(outcome.path), thread: outcome.session ?? "" };
+  }
+
+  test("resumes the noted thread on a fresh server, under config.json, seeds a turn, and the TUI joins it", async () => {
+    const first = await ended("Codex First");
+    const outcome = await continuing(first.thread, first.path, { prompt: "carry on", model: "gpt-6.2" }, 137);
+
+    expect(outcome.agent).toBe("codex");
+    expect(outcome.registered).toBe(true);
+    expect(outcome.path).toBe(first.path);
+    // The ledger notes the same thread again, so a continuation of this one resumes it too.
+    expect(outcome.session).toBe(first.thread);
+
+    const rpc = await stub.rpc();
+    expect(rpc.map((call) => call.method)).toEqual(["initialize", "thread/resume", "turn/start"]);
+    expect(rpc[1]?.params).toEqual({
+      threadId: first.thread,
+      cwd: first.path,
+      model: "gpt-6.2",
+      ...CONFIG,
+      excludeTurns: true,
+    });
+    const seed = JSON.stringify(rpc[2]?.params);
+    expect(rpc[2]?.params).toMatchObject({ threadId: first.thread });
+    expect(seed).toContain("resumed by séance in the same git worktree");
+    expect(seed).toContain("only codex itself");
+    expect(seed).toContain("From the user: carry on");
+    const tui = (await stub.calls()).map((call) => call.argv).find((argv) => argv[0] === "resume");
+    expect(tui?.at(-1)).toBe(first.thread);
+    await despawnSession(await paneOf(outcome), { force: true });
+  });
+
+  test("a continuation with no note still seeds its turn: the preamble says why it was resumed", async () => {
+    const first = await ended("Codex Noteless");
+    const outcome = await continuing(first.thread, first.path);
+    const seed = JSON.stringify((await stub.rpc())[2]?.params);
+    expect(seed).toContain("cancelled from séance");
+    expect(seed).not.toContain("From the user");
+    await despawnSession(await paneOf(outcome), { force: true });
+  });
+
+  test("a thread the home's store no longer holds is not_continuable, and the window goes", async () => {
+    const first = await ended("Codex Lost");
+    await stub.scenario({ resumeError: -32600 });
+    const err = await refusal(continuing(first.thread, first.path, { title: "Codex Lost Cont" }));
+    expect(err.code).toBe("not_continuable");
+    expect((await stub.rpc()).map((call) => call.method)).toEqual(["initialize", "thread/resume"]);
+    expect(await windowNames()).not.toContain("Codex Lost Cont");
+  });
+
+  test("a noted id that is no thread id is refused before any pane", async () => {
+    const first = await ended("Codex Bad Id");
+    const before = await windowNames();
+    const err = await refusal(continuing("not-a-thread", first.path));
+    expect(err.code).toBe("not_continuable");
+    expect(await windowNames()).toEqual(before);
+    expect(await stub.calls()).toEqual([]);
+  });
+});

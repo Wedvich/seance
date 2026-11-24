@@ -440,7 +440,7 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
  * another is `continue_elsewhere`, and the target must be a daemon that spawns
  * the mode at all, or it would refuse the request as malformed, and one that
  * resumes the session id it noted: an older one runs `--continue`, which misses
- * a worktree spawn's conversation.
+ * a worktree spawn's conversation. A Codex continuation also wants `codexContinue`.
  */
 function continueFilter(task: Task, machine: Machine): Reason[] {
   const at = task.spec.continues?.at;
@@ -448,7 +448,12 @@ function continueFilter(task: Task, machine: Machine): Reason[] {
   const reasons: Reason[] = [];
   if (machine.deviceId !== at.deviceId) reasons.push({ code: "continue_elsewhere" });
   const caps = machine.capabilities;
-  if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession))
+  // A daemon without `codexContinue` refuses a Codex continuation `not_continuable` (never runs it as Claude): it waits.
+  if (
+    caps?.includes(CAPABILITIES.continueTask) !== true ||
+    !caps.includes(CAPABILITIES.continueSession) ||
+    (task.spec.agent !== undefined && !caps.includes(CAPABILITIES.codexContinue))
+  )
     reasons.push({ code: "continue_unsupported" });
   return reasons;
 }

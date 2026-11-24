@@ -901,6 +901,7 @@ describe("daemon ↔ relay integration", () => {
         "messageReply",
         "drainAsk",
         "sessionTag",
+        "codexContinue",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.

@@ -37,9 +37,11 @@ the branch push are github.md; the drain's own ask is drain.md.
 - A continuation (`mode: "continue"`) runs only for a spawn sealed `from` the scheduler with
   `client: "scheduler"` (or the leader's in-process dispatch), in the worktree this machine's own launch
   ledger noted for the continued task id — never a path from a frame — resuming the Claude session id this
-  daemon chose at that launch (`--session-id`) and noted beside it — never an id from a frame — under the
-  clone its `repo` name resolved to, and only while no later launch in that ledger noted the same
-  worktree.
+  daemon chose at that launch (`--session-id`), or for a Codex launch the thread id its own `thread/start`
+  answered (by `thread/resume`), noted beside it — never an id from a frame — as the agent that note names
+  (`not_continuable` when the request's `agent` differs), under the clone its `repo` name resolved to, and
+  only while no later launch in that ledger noted the same worktree. A Codex continuation is routed only to a
+  machine advertising `codexContinue`, and written by a client only to a verified leader advertising it.
 - A gone worktree is re-added only at that noted path, a direct child of the clone's canonical
   `.claude/worktrees`, on the branch that ledger noted and only while `refs/heads/<branch>` exists, under
   reap's lock, added detached at that ref's sha and then switched onto it (never origin's, never

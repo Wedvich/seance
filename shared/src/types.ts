@@ -1286,6 +1286,13 @@ export interface MachineInfo {
  * Codex login at or above the floor. One build does both halves; no daemon advertises it before the Codex launch
  * (docs/codex.md, build order item 7), so until then no Codex task is placed. A client writes `agent` only to a verified
  * leader advertising it.
+ * `codexContinue`: as a leader, routes a Codex task carrying `continues` (`mode: "continue"`) only to a machine
+ * advertising it; as a daemon, continues a Codex launch by `thread/resume` of the thread its own launch ledger noted
+ * (DESIGN.md, Daemon, "Continuing a Codex session"). Advertised by every daemon, whatever its login: `codex` already
+ * says whether a machine runs Codex at all. A client writes a Codex continuation only to a verified leader advertising
+ * it, and offers one only for a task whose machine does: an item-4 to item-9 leader refuses `continues` beside
+ * `agent` (`agent_unsupported`) and would hold the record forever, and such a daemon refuses the spawn
+ * `not_continuable`, so neither ever runs it as Claude. One build does both halves.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1321,6 +1328,7 @@ export const CAPABILITIES = {
   taskTags: "taskTags",
   sessionTag: "sessionTag",
   codex: "codex",
+  codexContinue: "codexContinue",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -3351,7 +3359,10 @@ export type Reason =
    * session pass never has it: the quota filter already rejects a full account.
    */
   | { readonly code: "predecessor_account" }
-  /** The target machine does not advertise both `CAPABILITIES.continueTask` and `continueSession`. */
+  /**
+   * The target machine does not advertise both `CAPABILITIES.continueTask` and `continueSession`, or, for a Codex
+   * continuation, `codexContinue`.
+   */
   | { readonly code: "continue_unsupported" }
   /** The task carries attachments and the machine does not advertise `CAPABILITIES.attachments`. */
   | { readonly code: "attachments_unsupported" }

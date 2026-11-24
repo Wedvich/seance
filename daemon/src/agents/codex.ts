@@ -64,13 +64,13 @@ export const closeCodex: AgentDriver["close"] = async (pane, opts) => {
  * carries one anyway never reaches a worktree or a pane.
  */
 export function codexRequestRefusal(request: SpawnRequest): SpawnFailure | null {
-  if (request.mode === "continue") return new SpawnFailure("not_continuable", "a Codex session can't be continued yet");
   if (request.attachments !== undefined) {
     return new SpawnFailure("launch_error", "a Codex session can't take attachments yet");
   }
   if (request.effort === "max") return new SpawnFailure("launch_error", "a Codex session can't run at effort max");
-  // The TUI can join a thread only once it has had a turn (S2), and the seed is that turn.
-  if (request.prompt === undefined || request.prompt === "") {
+  // The TUI can join a thread only once it has had a turn (S2), and the seed is that turn. A continuation's thread has
+  // had its turns, and its seed is never empty: the preamble says why it was resumed.
+  if (request.mode !== "continue" && (request.prompt === undefined || request.prompt === "")) {
     return new SpawnFailure("launch_error", "a Codex session needs a prompt");
   }
   return null;
@@ -79,7 +79,11 @@ export function codexRequestRefusal(request: SpawnRequest): SpawnFailure | null 
 async function launchCodex(spec: LaunchSpec, opts: CodexDriverOptions): Promise<AgentLaunch> {
   const refused = codexRequestRefusal(spec.request);
   if (refused !== null) throw refused;
-  if (spec.resume !== undefined) throw new SpawnFailure("not_continuable", "a Codex session can't be continued yet");
+  // The ledger's own note, held to the shape `thread/start` answered at launch: it reaches the TUI's argv through
+  // `thread`, as a variable's value after `--`.
+  if (spec.resume !== undefined && !isAgentSessionId(spec.resume)) {
+    throw new SpawnFailure("not_continuable", "its launch record holds no Codex thread id to resume");
+  }
   if (spec.readDirs.length > 0) throw new SpawnFailure("launch_error", "a Codex session can't take attachments yet");
   const seed = spec.seed;
   if (seed === undefined) throw new SpawnFailure("launch_error", "a Codex session needs a prompt");
@@ -254,25 +258,27 @@ async function awaitSocket(runDir: string, window: string): Promise<void> {
 /**
  * The conversation (threat model, "What the daemon sends a pane's server"): constant methods; `cwd` the daemon's own
  * path; approval, sandbox and reviewer from `config.json` alone; model and effort from the parsed spec; the seed as one
- * text input. What it keeps: the answer's home and the thread id, each checked, nothing else.
+ * text input; for a continuation, the thread id its launch ledger noted (`spec.resume`), never a frame's. What it
+ * keeps: the answer's home and the thread id, each checked, nothing else.
  */
 async function converse(connection: CodexConnection, args: StartArgs): Promise<string> {
-  const { request } = args.spec;
+  const { request, resume } = args.spec;
   const init = await initializeCodex(connection, args.home);
   if (!init.ok && init.answer === "home") {
     throw new SpawnFailure("launch_error", "the session's Codex server runs on another home");
   }
   if (!init.ok && init.answer !== "home") resultOf(init.answer, "initialize");
-  const started = await connection.request("thread/start", {
+  // The same settings either way: a resumed thread takes them as overrides, so it runs under this machine's
+  // `config.json` as it stands now, never under whatever it was started with.
+  const settings: ThreadSettings = {
     cwd: args.spec.cwd,
     model: request.model ?? DEFAULT_CODEX_MODEL,
     approvalPolicy: args.config.approvalPolicy,
     sandbox: args.config.sandbox,
     approvalsReviewer: args.config.approvalsReviewer,
-  });
-  const thread = field(field(resultOf(started, "thread/start"), "thread"), "id");
-  if (!isAgentSessionId(thread))
-    throw new SpawnFailure("launch_error", "Codex answered thread/start with no thread id");
+  };
+  const thread =
+    resume === undefined ? await newThread(connection, settings) : await resumedThread(connection, resume, settings);
   const turn = await connection.request("turn/start", {
     threadId: thread,
     input: [{ type: "text", text: args.seed, text_elements: [] }],
@@ -280,6 +286,41 @@ async function converse(connection: CodexConnection, args: StartArgs): Promise<s
     ...(request.effort === undefined ? {} : { effort: request.effort }),
   });
   resultOf(turn, "turn/start");
+  return thread;
+}
+
+interface ThreadSettings {
+  readonly cwd: string;
+  readonly model: string;
+  readonly approvalPolicy: CodexConfig["approvalPolicy"];
+  readonly sandbox: CodexConfig["sandbox"];
+  readonly approvalsReviewer: CodexConfig["approvalsReviewer"];
+}
+
+async function newThread(connection: CodexConnection, settings: ThreadSettings): Promise<string> {
+  const started = await connection.request("thread/start", { ...settings });
+  const thread = field(field(resultOf(started, "thread/start"), "thread"), "id");
+  if (!isAgentSessionId(thread))
+    throw new SpawnFailure("launch_error", "Codex answered thread/start with no thread id");
+  return thread;
+}
+
+/**
+ * `thread/resume` of the noted thread from the home's store, its turns left out (the TUI shows them; the daemon keeps
+ * none). An error answer (a store that lost the thread) is `not_continuable`, which settles the continuation, since no
+ * retry on the same thread gets past it. The answer must name the thread asked for.
+ */
+async function resumedThread(connection: CodexConnection, thread: string, settings: ThreadSettings): Promise<string> {
+  const resumed = await connection.request("thread/resume", { threadId: thread, ...settings, excludeTurns: true });
+  if (resumed.kind === "error") {
+    throw new SpawnFailure(
+      "not_continuable",
+      `Codex could not resume its thread (error ${resumed.code ?? "without a code"}): its session store may have lost it`,
+    );
+  }
+  if (field(field(resultOf(resumed, "thread/resume"), "thread"), "id") !== thread) {
+    throw new SpawnFailure("launch_error", "Codex answered thread/resume for another thread");
+  }
   return thread;
 }
 

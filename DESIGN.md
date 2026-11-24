@@ -817,7 +817,8 @@ nothing checked it. The last is the gap they leave.
   machine's own launch ledger, keyed by the continued task id (bounded by `TASK_ID_PATTERN`),
   never from the frame. The noted path must also be a worktree of the clone the `repo` name
   resolved to: the same clone, canonical with no symlink on the way, under
-  `<clone>/.claude/worktrees/`.
+  `<clone>/.claude/worktrees/`. The conversation it resumes comes from the same note: a Claude session id, or for a
+  Codex launch the thread id its own `thread/start` answered ("A Codex launch's thread id"), never the frame's.
 - Every external process is invoked as an **argv array** (`exec.ts`). The one
   shell string is the tmux inner command, where every wire-supplied value —
   `title`, `model`, `effort`, worktree name — goes through `shq()`. Nothing
@@ -918,7 +919,9 @@ nothing checked it. The last is the gap they leave.
 - **What the daemon sends a Codex server, and keeps** (docs/codex.md threat-model items 5 and 6, the launch's half).
   Constant method names (`initialize`, the `initialized` notification, `thread/start`, `turn/start`; since item 7
   `turn/interrupt`, `thread/resume`, `thread/turns/list` and `account/rateLimits/read`, whose params are only the
-  thread id this daemon's own `thread/start` answered, a turn id its server named and constants); `cwd` the
+  thread id this daemon's own `thread/start` answered, a turn id its server named and constants; since item 10 a
+  continuation's launch sends `thread/resume` in `thread/start`'s place, its `threadId` the one its launch ledger
+  noted and its settings the same as below, with `excludeTurns`); `cwd` the
   worktree path the spawn path made; `approvalPolicy`, `sandbox` and `approvalsReviewer` from the machine's own
   `config.json` only, never a frame, autonomy level or session; `model` from the parsed spec (else
   `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input, never argv, a file or
@@ -930,8 +933,11 @@ nothing checked it. The last is the gap they leave.
   line or a frame.
 - **A Codex launch's thread id** (docs/codex.md threat-model item 10). The launch ledger notes as a Codex task's
   `session` only the thread id this daemon's own `thread/start` answered, beside `agent: "codex"`
-  (`TaskNote.agent`), never a claimed one; a continuation refuses a note carrying `agent` until Codex continue lands
-  (item 10), so `--resume` is never handed a thread id. Spawn and despawn audit lines carry `agent=codex` for a Codex
+  (`TaskNote.agent`), never a claimed one. A continuation (item 10, 2026-11-24; Daemon, "Continuing a Codex
+  session") resumes only that noted id, by `thread/resume` on the new pane's own server, and only when the
+  continuation's `agent` is the note's (`not_continuable` otherwise, both ways), so `--resume` is never handed a
+  thread id and a Codex thread is never resumed as Claude; the id passes `isAgentSessionId` before anything is sent
+  or reaches argv, and the answer must name that same thread. Spawn and despawn audit lines carry `agent=codex` for a Codex
   session (Daemon, "Codex sessions"): the spawn's from the request, the despawn's from the pane's own start mark.
 - **A Codex session's events** (item 7, 2026-11-24; Daemon, "Codex session events"; docs/codex.md threat-model items 5
   and 6, the session's half). A new source of session events, not a new act: the daemon's own connection to the
@@ -2518,6 +2524,13 @@ an old peer's frames parse as before. Mixed versions:
   to a machine advertising it: an older `isSpawnRequest` would ignore the field and start Claude. An older reader of a
   decision drops the four reasons as any unknown code. No daemon advertises `codex` yet; rollout is leaders first, as
   for any field a leader routes.
+- `CAPABILITIES.codexContinue` (2026-11-24, docs/codex.md item 10; Daemon, "Continuing a Codex session"): the gate
+  for a Codex continuation, a task carrying both `agent` and `continues`. An older leader (items 4 to 9) refuses that
+  pair (`agent_unsupported` on every candidate), so it holds such a record and never places it; a new leader routes
+  one only to a machine advertising `codexContinue` (`continue_unsupported` otherwise), since an older daemon refuses
+  the spawn `not_continuable`. Every client (the PWA, MCP, the CLI, the broker) writes one only to a verified leader
+  advertising it and offers one only for a task whose machine does; an unknown string to an older reader, which keeps
+  the machine. Every daemon of this build advertises it. No relay change; rollout is leaders first.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -3897,10 +3910,13 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     Codex plan is estimated at `unknownSeat` (capacity 1) until observed deltas say otherwise. A Claude task's
     candidates never read `logins`: its decision is unchanged by a machine's login and capability (under test).
   - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max`, any autonomy but an explicit `auto` (so
-    `steer`, `plan`, and an absent level, which reads `checkpoint`), `attachments`, `continues` and `succeeds`.
+    `steer`, `plan`, and an absent level, which reads `checkpoint`), `attachments` and `succeeds`. `continues` was
+    refused until item 10 (2026-11-24): `continueFilter` now routes a Codex continuation only to a machine advertising
+    `CAPABILITIES.codexContinue` (`continue_unsupported` otherwise; Daemon, "Continuing a Codex session").
     `specError` refuses them before a write for MCP, the broker and the CLI; a record carrying one anyway stays
     readable and is placed nowhere (`agent_unsupported` on every candidate), so a later build can run it.
-    `passOffer`, `continueOffer` and the leader's own pass refuse a Codex task (phase 3), and `successorSpec` and
+    `passOffer` and the leader's own pass refuse a Codex task (phase 3); `continueOffer` offers one only under a
+    verified leader advertising `codexContinue` and for a machine advertising it; `successorSpec` and
     `continuationSpec` copy `agent`, so a task never silently becomes Claude.
   - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
     `codex app-server` 0.171.0 (2026-11-24): the models it lists with no `upgrade`, only the newest version in each
@@ -7645,9 +7661,9 @@ of this section built.
   a Codex server, and keeps" and "A Codex launch's thread id" hold it.
   - **Before any pane.** `driverFor` gives a spawn carrying `agent: "codex"` the driver only on a machine whose
     `config.json` has a `codex` block (`SpawnOptions.codex`: that block and `codexHome()`, set by `createBackend`),
-    `launch_error` otherwise. The driver refuses what V1 cannot run, before a write: a resume (`not_continuable`),
-    attachments, effort `max`, no prompt (the TUI can join a thread only once it has had a turn, and the seed is that
-    turn), and a home that is not a real 0700 directory of the daemon's uid (`launch_error` each).
+    `launch_error` otherwise. The driver refuses what V1 cannot run, before a write: attachments, effort `max`, no
+    prompt on a launch that is not a continuation (the TUI can join a thread only once it has had a turn, and the seed
+    is that turn; a continuation's seed is always written), and a home that is not a real 0700 directory of the daemon's uid (`launch_error` each).
   - **The worktree** is the spawn path's own, as for a stack: `addStackedWorktree` at `origin/<default>`'s tip after
     the fetch (`defaultBaseTip`, `base-fetch.ts`; `no_default_branch` when it cannot be read), at
     `.claude/worktrees/<slug>` on `worktree-<slug>`, so reap, the custodian, continue and `pushTaskBranch` find it
@@ -8578,7 +8594,9 @@ fields carry over), under the same gates.
   never routed to one either; it waits `continue_unsupported`). A
   `cancelled` task (with an assignment) additionally needs the machine to advertise
   `CAPABILITIES.continueCancelled`: an older daemon has `continueTask` but applies neither the
-  ledger-owner rule nor the seed wording. The same function, given the list the caller read the task from,
+  ledger-owner rule nor the seed wording. A Codex task additionally needs the verified leader and its machine to
+  advertise `CAPABILITIES.codexContinue` ("Continuing a Codex session", below; the broker refuses the enqueue
+  otherwise). The same function, given the list the caller read the task from,
   also refuses a task whose session a continuation took over (`tookOver`): one that is not `queued`,
   `blocked` or `ready`, not `failed` with a code outside {`session_failed`, `session_closed`,
   `lost_expired`, `merge_expired`} (a positive list: a false "did not take over" costs one daemon refusal, a false "took
@@ -8696,6 +8714,29 @@ fields carry over), under the same gates.
   shell has `seance continue` rather than a documented recipe.
 - **Moved out of Rejected:** `claude --resume <id>`. It was rejected because the daemon knew no Claude
   session id; `--session-id` on every task spawn gives it one of its own choosing (2026-10-27).
+- **Continuing a Codex session** (built 2026-11-24, docs/codex.md item 10; `CAPABILITIES.codexContinue`). A Codex
+  task continues as Codex, in its own worktree and thread, under every rule above; only the resume differs.
+  - _The agent is the ledger's._ `continuationSpec` copies `agent`, and `EndedTasks.continuation` hands the
+    handler the note's `agent` beside its path and session. The handler refuses, before the write-ahead, a
+    continuation whose `agent` is not the note's (`not_continuable` "it ran as Codex; a continuation keeps its
+    agent", and the reverse), so a Codex thread never reaches `claude --resume` and a Claude conversation never
+    reaches a Codex server. The leader does no such check: the spec's `agent` is the client's copy, and the ledger is
+    the authority.
+  - _The resume._ The driver launches as for a fresh Codex task (run dir, `run.sh`, the pane's own server), in the
+    continued worktree as the Claude path does, and where a fresh launch sends `thread/start` it sends
+    `thread/resume { threadId: <noted id>, cwd, model, approvalPolicy, sandbox, approvalsReviewer, excludeTurns: true
+    }`: the id only from the note and only once `isAgentSessionId` passed it (`not_continuable` otherwise, before any
+    pane), the settings exactly as `thread/start`'s (the worktree, the spec's model else `DEFAULT_CODEX_MODEL`, the
+    rest from `config.json`), since Codex 0.172.0's `ThreadResumeParams` takes them as overrides and a resumed thread
+    would otherwise keep whatever it was started with. `excludeTurns` because the daemon reads no history from the
+    answer. An error answer (the home's store lost the thread) is `not_continuable`, the window closed and the
+    write-ahead retracted as for any refusal after it; an answer naming another thread is `launch_error`. The seed
+    (the preamble, worded for Codex: "only codex itself was killed") is the first turn, as a fresh launch's prompt,
+    and the TUI joins by `resume --remote … -- <thread>` as ever. The new launch notes the same thread id and
+    `agent: "codex"`, so a continuation of the continuation resumes it again.
+  - _Why `codexContinue` and not `codex`._ `codex` says a machine runs Codex now and goes away with its login; a
+    continuation needs a daemon that can resume, which is a build fact. A separate flag also tells the clients and
+    the leader apart from an item-4-to-9 leader, which refuses the pair and would hold the record forever.
 
 ### Passing to a successor — designed 2026-11-12; the outside, the session's own and the automatic path built 2026-11-12
 
@@ -11697,7 +11738,8 @@ as the default.
   greyed too, its line saying why ("Waiting for the scheduler", "Waiting on the tasks it depends on"): `run-now` takes only
   `ready` and refuses anything earlier `not_waiting`, so offering it there was a tap certain to fail (2026-11-12). A card shown
   `blocked` after its dependencies cleared waits for the next read (a `queue-changed` nudge, or Refresh) to enable it.
-- **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed
+- **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"; a Codex task since
+  2026-11-24, under `deriveCodexContinueAvailability`, Daemon, "Continuing a Codex session"). A failed
   `session_failed` card, or a cancelled one that was placed, carries a single-tap **Continue** when
   `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and
   advertises `continueTask` and `continueSession`, and for a cancelled one `continueCancelled`), the verified leader advertises

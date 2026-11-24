@@ -133,7 +133,7 @@ interface Prepared {
  * A session this daemon closed for its hand-off (`handedOff`, from the old task's ledger note) ended
  * cleanly at the end of its turn, so the first wording says nothing was interrupted.
  *
- * Never asserts that the dead session's background work is gone: only claude itself
+ * Never asserts that the dead session's background work is gone: only the agent itself
  * was stopped, and a surviving child is not something the pane checks can see. The
  * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
  * is a death, anything else (zero, or none noted) a cancel.
@@ -143,7 +143,10 @@ export function continuePreamble(
   exit: number | undefined,
   vanished?: boolean,
   handedOff?: boolean,
+  agent: AgentKind = "claude",
 ): string {
+  // Only the agent's own process was stopped: what else the pane ran, a Codex server's tools among it, may outlive it.
+  const stopped = AGENT_WORDS[agent].process;
   const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
   if (handedOff === true && (exit === undefined || exit === 0)) {
     return (
@@ -165,7 +168,7 @@ export function continuePreamble(
     return (
       prefix +
       `ended unexpectedly (killed, crashed or out of memory) partway through. Its last tool call may not ` +
-      `have finished, and processes it started in the background may still be running (only claude itself ` +
+      `have finished, and processes it started in the background may still be running (only ${stopped} itself ` +
       `was killed): check the worktree's state and running processes before restarting anything, then ` +
       `carry on where it left off.`
     );
@@ -173,7 +176,7 @@ export function continuePreamble(
   return (
     prefix +
     `was stopped before it finished (cancelled from séance). Its last tool call may not have finished, and ` +
-    `processes it started in the background may still be running (only claude itself was stopped): check ` +
+    `processes it started in the background may still be running (only ${stopped} itself was stopped): check ` +
     `the worktree's state and running processes before restarting anything, then carry on where it left off.`
   );
 }
@@ -213,9 +216,11 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string, agent: AgentKind
  * How the seed names the session and the repo's instructions to it: Codex reads AGENTS.md where a directory has one,
  * else CLAUDE.md (docs/codex.md, S9). Constants, never wire text.
  */
-const AGENT_WORDS: Readonly<Record<AgentKind, { readonly who: string; readonly instructions: string }>> = {
-  claude: { who: "Claude", instructions: "CLAUDE.md" },
-  codex: { who: "Codex", instructions: "AGENTS.md or CLAUDE.md" },
+const AGENT_WORDS: Readonly<
+  Record<AgentKind, { readonly who: string; readonly instructions: string; readonly process: string }>
+> = {
+  claude: { who: "Claude", instructions: "CLAUDE.md", process: "claude" },
+  codex: { who: "Codex", instructions: "AGENTS.md or CLAUDE.md", process: "codex" },
 };
 
 /**
@@ -263,10 +268,13 @@ function prepareHere(repo: RepoEntry, agent: AgentKind): Prepared {
   };
 }
 
-/** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`); `session` the id it noted there. */
+/**
+ * `path` is the ledger's worktree, already canonical and checked (`spawnContinued`); `session` the id it noted there,
+ * a thread id for a Codex launch, whose agent the handler held the spawn's to (`continuationSite`).
+ */
 function prepareContinue(continuation: Continuation): Prepared {
-  const { path, session, exit, vanished, handedOff } = continuation;
-  return { cwd: path, resume: session, preamble: continuePreamble(path, exit, vanished, handedOff) };
+  const { path, session, exit, vanished, handedOff, agent } = continuation;
+  return { cwd: path, resume: session, preamble: continuePreamble(path, exit, vanished, handedOff, agent) };
 }
 
 /**

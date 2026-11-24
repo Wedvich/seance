@@ -582,6 +582,7 @@ export async function continueAuto(
   const offer = continueOffer(task, lease.machines, reply.tasks, {
     now: reply.at,
     leaderHandoff: leaderAdvertises(lease, CAPABILITIES.continueHandoff),
+    leaderCodexContinue: leaderAdvertises(lease, CAPABILITIES.codexContinue),
   });
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
   // Tags are dropped, not refused, under a leader without `taskTags`: nobody asked for them on a continue.

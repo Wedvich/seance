@@ -24,7 +24,7 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterTaskEvent } from "@seance/shared";
+import type { AdapterTaskEvent, AgentLoginKind } from "@seance/shared";
 import { claudeProcessOf, nestedClaude, type ClaudeProcess } from "./claude-process.ts";
 import type { AgentClaim, Conversations } from "./conversations.ts";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
@@ -851,8 +851,9 @@ export class EndedTasks {
   }
 
   /**
-   * Where a continued task's session ran, and the Claude session id it chose for the launch
-   * (DESIGN.md, Daemon, "Continuing a session"): `worktree`'s site plus the id; a frame names neither.
+   * Where a continued task's session ran, the session id it chose for the launch (Claude's `--session-id`, or the
+   * thread id its own `thread/start` returned for a Codex launch) and the agent it ran (DESIGN.md, Daemon, "Continuing
+   * a session", "Continuing a Codex session"): `worktree`'s site plus the id and agent; a frame names none of them.
    */
   continuation(taskId: string):
     | {
@@ -865,6 +866,7 @@ export class EndedTasks {
         readonly continuedPr?: string;
         readonly branch?: string;
         readonly stackedOn?: string;
+        readonly agent?: AgentLoginKind;
       }
     | { readonly refused: string } {
     const site = this.worktree(taskId);
@@ -875,10 +877,6 @@ export class EndedTasks {
     // No `--continue` fallback: it is what misses a worktree spawn's conversation.
     if (note.session === undefined) {
       return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
-    }
-    // A Codex thread is no Claude session `--resume` could take: continuing one is item 8 (docs/codex.md).
-    if (note.agent !== undefined) {
-      return { refused: "a Codex task's session can't be continued yet" };
     }
     // The PR this session had, for the continuation to inherit: its own report, else what it inherited. Every
     // ending that leaves the task awaiting-merge keeps it (a crash, a vanished window, a despawn: `ended()` in
@@ -899,6 +897,8 @@ export class EndedTasks {
       ...(note.branch === undefined ? {} : { branch: note.branch }),
       // A continuation of a stacked task runs in the same worktree, on the same base.
       ...(note.stackedOn === undefined ? {} : { stackedOn: note.stackedOn }),
+      // Which driver resumes `session`: a thread id is no Claude session, nor the reverse.
+      ...(note.agent === undefined ? {} : { agent: note.agent }),
     };
   }
 

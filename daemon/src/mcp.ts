@@ -854,7 +854,7 @@ const AGENT_FIELD = z
   .enum(AGENT_LOGIN_KINDS)
   .optional()
   .describe(
-    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}) and autonomy auto. A model name never chooses the agent. A Codex task takes no effort max, steer, checkpoint, attachments or continuation for now, and is refused unless the scheduler's leader runs Codex tasks`,
+    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}) and autonomy auto. A model name never chooses the agent. A Codex task takes no effort max, steer, checkpoint or attachments for now, and is refused unless the scheduler's leader runs Codex tasks`,
   );
 
 const UNTIL_FIELD = z
@@ -1261,6 +1261,7 @@ export function buildMcpServer(
         const offer = {
           now: reply.at,
           leaderHandoff: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.continueHandoff),
+          leaderCodexContinue: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.codexContinue),
         };
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
         const traits = fleetTraits(lease.machines);

@@ -95,8 +95,10 @@ export interface SpawnOutcome {
 /** What a frontend resolved of a continued task's last launch from its own ledger. */
 export interface Continuation {
   readonly path: string;
-  /** The session id that launch's ledger note holds, which the continuation resumes. */
+  /** The session id that launch's ledger note holds, which the continuation resumes: a Codex launch's thread id. */
   readonly session: string;
+  /** The agent that launch ran (`TaskNote.agent`), absent for Claude: the spawn's own `agent` must be the same. */
+  readonly agent?: AgentLoginKind;
   /** The continued task's exit status as its own ledger note recorded; absent when none was noted. Words the seed only. */
   readonly exit?: number;
   /** The earlier window was closed from outside (`TaskProgress.vanished`); worded in the preamble. */

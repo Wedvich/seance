@@ -1,6 +1,10 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3) and phase 2 (items 4 to 8) built, the rest design.** Item 8 (2026-11-24),
+**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and item 10 built, the rest design.** Item 10 (2026-11-24),
+continuing a Codex task (`thread/resume` of the thread its launch ledger noted, the agent kept, the gate
+`CAPABILITIES.codexContinue`), is in DESIGN.md: Daemon, "Continuing a Codex session" (in "Continuing a session");
+Scheduler, "Codex tasks"; Wire protocol's compatibility list; and the threat model's "A Codex launch's thread id" (this
+doc's threat-model item 10, now whole). Item 8 (2026-11-24),
 the clients (the PWA's picker grouped by agent, effort per agent, the agent badge; MCP's and the CLI's `agent`; the
 gates and the broker leg's sentinel), is in DESIGN.md: Scheduler, "Codex tasks", "Clients"; Wire protocol's
 compatibility list; and the threat model's "The task field `agent`". Item 7 (2026-11-24), the Codex
@@ -322,7 +326,7 @@ the machine's Codex login instead of the exclave's Claude login (`accountOf(mach
   something nobody asked for. 0.171.0 lists `max` on most models: lifting the refusal is a later choice, per model). The record always says `agent` explicitly; no reader infers it from a model name.
 - **Refused beside `agent: "codex"` in V1:** effort `max`, `steer`/`plan` (no plan mode reaches the app-server's
   `turn/start` in 0.170, and only a tightening may stand in), any level but `auto` in phase 2 (D6), `attachments`,
-  `continues` and `succeeds` (phase 3). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
+  and `succeeds` (phase 3; `continues` until item 10). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
   the broker and the CLI; the PWA's form). A record that carries one anyway stays readable and the leader places it
   nowhere (`agent_unsupported` on every candidate), so a later build that supports it can run it. `until`, deps,
   batches, tags and `pin`/`avoid` are agent-neutral and pass.
@@ -477,8 +481,8 @@ session's `watch_github` is refused `nolistener` until messages land.
 
 ### Parity (phase 3)
 
-- **Continue** resumes the noted thread (`thread/resume` takes a `threadId` only, and the thread lives in the home's
-  store), under the same rules as `mode: "continue"` today: sealed from the scheduler, the worktree and thread from this
+- **Continue** (built, item 10) resumes the noted thread (`thread/resume` with the launch's settings as overrides;
+  the thread lives in the home's store), under the same rules as `mode: "continue"` today: sealed from the scheduler, the worktree and thread from this
   machine's own ledger, never a frame.
 - **Pass to a successor**, the quota trigger and the drain: the push and the record are agent-neutral; the close is the
   driver's; a successor inherits `agent` and is never placed on another agent.
@@ -611,7 +615,16 @@ nothing.
 
 9. Remote control (after 7 and 8): `seance codex pair | unpair`, `paired`, the slot's hand-over, `agent.remote` if S7
    finds a link; opens `checkpoint`.
-10. Continue (after 7).
+10. **Built 2026-11-24** (DESIGN.md, Daemon, "Continuing a Codex session"). **Continue** (after 7). _Corrected at
+    build:_ `thread/resume` takes more than a `threadId` (0.172.0's `ThreadResumeParams` accepts `cwd`, `model`,
+    approval, sandbox and reviewer as overrides), so a resume sends `thread/start`'s settings from `config.json` and
+    the spec, with `excludeTurns`; the gate is a capability of its own, `codexContinue`, advertised by every daemon of
+    the build (an item-4-to-9 leader refuses the pair and holds it, an older daemon refuses it `not_continuable`); and
+    the agent a continuation runs as is the ledger note's, checked by the daemon, never the spec's alone. _Left:_
+    `codex-spawn.test.ts`'s `runDirs()` diffs the machine's whole `/tmp`, so a Codex launch by another suite running at
+    the same time (another worktree's) is taken for the test's own; its first test then fails before its despawn, and
+    the rejoin test dials the pane it left (seen 2026-11-24, never with the file alone). Read the run dir from the
+    server's argv in the stub's `.calls`, and close panes in an `afterEach`.
 11. Pass to a successor, the quota trigger, the drain ask and the custodian's `interrupt` over the connection (after 7).
 12. Messages into a Codex session (O4) (after 7).
 
