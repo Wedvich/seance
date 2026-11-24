@@ -822,7 +822,8 @@ function QueueCard(props: {
                 <CloseItem
                   rowId={row.id}
                   armed={armed}
-                  disabled={disabled || props.closing}
+                  disabled={row.busy || props.closing}
+                  task
                   onClick={() => props.onClose(row)}
                 />
               )}
@@ -909,12 +910,15 @@ function QueueCard(props: {
 
 /** What a close does, under its item: the despawn's own terms (`DespawnRequest`). */
 const CLOSE_CONFIRM = "Asks Claude to exit and closes its window; a worktree stays.";
+/** On a task's row: the despawn goes straight to its machine, so the task ends with its session, not as a cancel. */
+const CLOSE_TASK_CONFIRM = "Asks Claude to exit and closes its window; the task ends with it, not as a cancel.";
 
 /** Close session: ends a session, so it asks twice like Cancel. */
 function CloseItem(props: {
   rowId: string;
   armed: string | null;
   disabled: boolean;
+  task?: true;
   onClick: () => void;
 }): JSX.Element {
   const armedHere = props.armed === armKey("close", props.rowId);
@@ -922,7 +926,7 @@ function CloseItem(props: {
     <MenuItem
       label={armedHere ? "Tap again to close" : "Close session"}
       icon={<CloseSessionIcon />}
-      sub={CLOSE_CONFIRM}
+      sub={props.task === true ? CLOSE_TASK_CONFIRM : CLOSE_CONFIRM}
       disabled={props.disabled}
       destructive
       keepOpen={!armTap({ id: props.rowId }, "close", props.armed).fire}
