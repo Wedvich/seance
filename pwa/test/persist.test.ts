@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { parseTask } from "@seance/shared";
+import { CODEX_MODELS, parseTask } from "@seance/shared";
 // Type-only, so erased: the module itself loads below, after the localStorage fake.
 import type { HeldTask } from "../src/state.ts";
 import type { PickedFile } from "../src/attachments.ts";
@@ -58,6 +58,7 @@ describe("form persistence", () => {
       prompt: "port the pane",
       worktree: false,
       worktreeByRepo: { "github.com/acme/app": false, "github.com/acme/ops": true },
+      agent: "claude",
       model: "fable",
       effort: "xhigh",
       after: [{ task: TASK, after: "done" }],
@@ -162,6 +163,23 @@ describe("form persistence", () => {
     const form = readForm();
     expect(form.model).toBe(DEFAULT_FORM.model);
     expect(form.effort).toBe(DEFAULT_FORM.effort);
+  });
+
+  test("round-trips a Codex pick: the agent is kept beside its model", () => {
+    const form = { ...DEFAULT_FORM, agent: "codex", model: CODEX_MODELS[0] } as const;
+    writeForm(form);
+    expect(readForm()).toMatchObject({ agent: "codex", model: CODEX_MODELS[0] });
+  });
+
+  // The agent decides which list a model is read from: a model never brings its agent with it, nor keeps another's.
+  test.each([
+    ["a GPT model saved with no agent (an older form)", { agent: undefined, model: CODEX_MODELS[0] }],
+    ["a GPT model under claude", { agent: "claude", model: CODEX_MODELS[0] }],
+    ["a Claude model under codex", { agent: "codex", model: "opus" }],
+    ["an agent this build does not know", { agent: "agy", model: "opus" }],
+  ])("%s reads as the default pick", (_name, fields) => {
+    store.set("seance:form", JSON.stringify({ ...DEFAULT_FORM, ...fields }));
+    expect(readForm()).toMatchObject({ agent: DEFAULT_FORM.agent, model: DEFAULT_FORM.model });
   });
 
   test("ignores wrongly typed fields rather than trusting them", () => {

@@ -1,4 +1,5 @@
 import {
+  AGENT_DEP_SENTINEL,
   CAPABILITIES,
   parseAccountRecord,
   parseQueueReply,
@@ -232,7 +233,18 @@ export function brokerScheduler(
       if (task.spec.requires !== undefined && staleDaemonRequires !== undefined) {
         return Promise.reject(new RequestFailure("refused", staleDaemonRequires, "daemon"));
       }
-      return send({ schedulerOp: "enqueue", taskId: task.id, spec: task.spec }, parseTaskCreated);
+      if (task.spec.agent === undefined) {
+        return send({ schedulerOp: "enqueue", taskId: task.id, spec: task.spec }, parseTaskCreated);
+      }
+      // The sentinel the sealer would append, sent ahead: a daemon older than the field nulls the spec over it
+      // ("malformed task spec") where it would otherwise drop `agent` and queue the task for Claude.
+      const spec = { ...task.spec, deps: [...(task.spec.deps ?? []), AGENT_DEP_SENTINEL] };
+      return send({ schedulerOp: "enqueue", taskId: task.id, spec }, parseTaskCreated).catch((err: unknown) => {
+        if (err instanceof RequestFailure && err.message === MALFORMED_SPEC) {
+          throw new RequestFailure("refused", OLDER_DAEMON_CODEX, "daemon");
+        }
+        throw err;
+      });
     },
     queue: () =>
       send({ schedulerOp: "queue" }, (data) => (data === null ? null : (parseQueueReply(data) ?? undefined))),
@@ -300,6 +312,10 @@ export function brokerFleet(opts: BrokerCallOpts = {}, self: () => Promise<strin
 
 export const OLDER_DAEMON_TRAITS =
   "this machine's daemon is older than this seanced: restart or update it (seance update)";
+export const OLDER_DAEMON_CODEX =
+  "this machine's daemon is older than this seanced and does not carry a Codex task's agent: restart or update it (seance update)";
+/** The broker's refusal of a spec its parser nulls (`parseSchedulerRequest`): what an older one answers for `AGENT_DEP_SENTINEL`. */
+const MALFORMED_SPEC = "malformed task spec";
 export const UNCONFIRMED_DAEMON_TRAITS =
   "this machine is not in the fleet registry yet, so its daemon cannot be confirmed to carry traits: start seanced, or restart it (seance update)";
 

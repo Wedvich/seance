@@ -26,6 +26,7 @@ import {
   startGateError,
   startQueuedAuto,
   taskTagsGateError,
+  codexGateError,
   traitsGateError,
   requiresCheck,
   type AutoEnqueued,
@@ -167,6 +168,7 @@ export async function spawnAuto(
     ...(args.title === undefined ? {} : { title: args.title }),
     ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
     ...(args.autonomy === undefined ? {} : { autonomy: args.autonomy }),
+    ...(args.agent === undefined ? {} : { agent: args.agent }),
     ...(args.requires === undefined ? {} : { requires: args.requires }),
     ...refFields,
     ...(deferred === null ? {} : { notBefore: deferred.at }),
@@ -202,6 +204,8 @@ export async function spawnAuto(
     if (traitsGate !== null) return failed(traitsGate);
     const tagsGate = spec.tags === undefined ? null : taskTagsGateError(leg, "spawn", "--ref");
     if (tagsGate !== null) return failed(tagsGate);
+    const codexGate = spec.agent === undefined ? null : codexGateError(leg, "spawn", "--agent");
+    if (codexGate !== null) return failed(codexGate);
     const placed = await resolvePlacement(leg.machines, leg.scheduler.accounts, placement.input, CLI_PLACEMENT_NAMES);
     if ("error" in placed) return failed(`spawn refused: ${placed.error}`);
     const resolved = resolveOrigin(placed.machines, args.repo, placed.scope);

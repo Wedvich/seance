@@ -203,4 +203,15 @@ describe("a queued verdict's tags", () => {
       describeVerdict({ kind: "unqueued", message: "no answer.", mayHaveLanded: false }, [], {}, NOW, null).tags,
     ).toEqual([]);
   });
+
+  test("a queued Codex task names its agent; a Claude one and every other verdict name none", () => {
+    const codex = verdictOf(
+      task("queued", { spec: { repo: "github.com/acme/app", mode: "worktree", agent: "codex", autonomy: "auto" } }),
+    );
+    expect(codex.agent).toBe("Codex");
+    expect(verdictOf(task("queued")).agent).toBeNull();
+    expect(
+      describeVerdict({ kind: "unqueued", message: "no answer.", mayHaveLanded: false }, [], {}, NOW, null).agent,
+    ).toBeNull();
+  });
 });

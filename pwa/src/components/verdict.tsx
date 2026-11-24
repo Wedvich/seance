@@ -183,6 +183,13 @@ export function VerdictView(props: {
       </div>
       <div className="verdict-tail">
         <SwapText as="p" className="verdict-body" text={content.body} />
+        {content.agent !== null && (
+          <p className="verdict-agent">
+            <span className="fleet-badge" title={`Runs on ${content.agent}`}>
+              {content.agent}
+            </span>
+          </p>
+        )}
         {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
         {content.tags.length > 0 && (
           <dl className="verdict-tags">

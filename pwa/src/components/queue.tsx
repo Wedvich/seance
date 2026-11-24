@@ -708,6 +708,11 @@ function QueueCard(props: {
           </h3>
           <p className="fleet-meta">
             <TimedText line={row.headline} /> · <Time moment={row.age} />
+            {row.agent !== null && (
+              <span className="fleet-badge queue-agent" title={`Runs on ${row.agent}`}>
+                {row.agent}
+              </span>
+            )}
             {row.autonomy !== null && (
               <span className="fleet-badge queue-autonomy" title={`Autonomy: ${row.autonomy}`}>
                 {row.autonomy}

@@ -13,7 +13,7 @@ import {
   HELD_MAX,
   heldOrder,
   isOfferedEffort,
-  isModel,
+  modelPickOf,
   WORKTREE_REPOS_MAX,
   type HeldTask,
   type PersistedForm,
@@ -111,7 +111,8 @@ export function readForm(): PersistedForm {
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
     worktreeByRepo: asWorktreeByRepo(record["worktreeByRepo"]),
-    model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,
+    // One pick or the default one: a model is never kept under an agent whose list lacks it.
+    ...(modelPickOf(record["agent"], record["model"]) ?? { agent: DEFAULT_FORM.agent, model: DEFAULT_FORM.model }),
     // A saved `max` from before the picker dropped it reads as the default: the sheet could not show it selected.
     effort: isOfferedEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
     after: asDeps(record["after"]),

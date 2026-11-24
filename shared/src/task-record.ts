@@ -15,6 +15,7 @@ import {
   type TaskSpec,
   type TaskRecord,
   type TaskRequest,
+  type AgentLoginKind,
 } from "./types.ts";
 import { bindTaskRecord, isRecord } from "./parse.ts";
 import { openAtRest, sealAtRest } from "./crypto.ts";
@@ -38,6 +39,8 @@ export interface TaskRequestForm {
   readonly worktree: boolean;
   readonly model: string;
   readonly effort: string;
+  /** The agent the form picked beside its model; `"claude"`, like absent, writes no field. */
+  readonly agent?: "claude" | AgentLoginKind;
 }
 
 /** The form as a `TaskRequest` for `origin`: the prompt trimmed and left out when blank, or always (a routing preview never reads it). */
@@ -48,6 +51,7 @@ export function taskRequest(form: TaskRequestForm, origin: string, withPrompt: b
     mode: form.worktree ? "worktree" : "here",
     model: form.model,
     effort: form.effort,
+    ...(form.agent === undefined || form.agent === "claude" ? {} : { agent: form.agent }),
     ...(withPrompt && prompt !== "" ? { prompt } : {}),
   };
 }

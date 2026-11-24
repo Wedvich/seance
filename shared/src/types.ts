@@ -99,20 +99,13 @@ export function isEffort(value: unknown): value is Effort {
 }
 
 /**
- * The Codex models the clients offer (DESIGN.md, Scheduler, "Codex tasks"): `model/list` from `codex app-server`
- * 0.171.0 on 2026-11-24, every entry it lists with no `upgrade` (one it names an upgrade for is superseded), in its
- * order. A constant, not each login's own list: one picker does not justify growing every register. The wire keeps
- * `model` a free bounded string, so a model added later needs no wire change.
+ * The Codex models the clients offer (DESIGN.md, Scheduler, "Codex tasks"): from `model/list` on `codex app-server`
+ * 0.171.0 on 2026-11-24, the entries it lists with no `upgrade` (one it names an upgrade for is superseded), and of
+ * those only the newest version in each family (`gpt-6.2-astra`, not `gpt-6-astra`), in its order. A constant, not
+ * each login's own list: one picker does not justify growing every register. The wire keeps `model` a free bounded
+ * string, so an older model named by MCP still runs, and a model added later needs no wire change.
  */
-export const CODEX_MODELS = [
-  "gpt-6.2-sol",
-  "gpt-6.2-astra",
-  "gpt-6.1-terra",
-  "gpt-6.1-sol",
-  "gpt-6-astra",
-  "gpt-6-sol",
-  "gpt-6-luna",
-] as const;
+export const CODEX_MODELS = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-6-luna"] as const;
 
 /** The entry 0.171.0's `model/list` marks `isDefault`: what a Codex task with no `model` runs. */
 export const DEFAULT_CODEX_MODEL = "gpt-6.2-sol";

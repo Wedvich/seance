@@ -1,4 +1,4 @@
-import type { JSX, TargetedKeyboardEvent } from "preact";
+import { Fragment, type JSX, type TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   AUTONOMY_LEVELS,
@@ -12,14 +12,16 @@ import {
 import { describeDecision, startNowItem } from "../decision-view.ts";
 import type { AfterSheetView } from "../queue-view.ts";
 import {
+  AGENT_LABELS,
   AUTONOMY_HINTS,
   AUTONOMY_LABELS,
-  OFFERED_EFFORTS,
+  OFFERED_EFFORTS_BY_AGENT,
   EFFORT_LABELS,
-  MODELS,
-  MODEL_LABELS,
+  MODEL_GROUPS,
+  modelLabel,
   type Effort,
-  type Model,
+  type FormAgent,
+  type ModelPick,
   type NotBeforeChoice,
   type PersistedForm,
   type PreviewState,
@@ -29,6 +31,7 @@ import { matchesFilter, splitMatch } from "../sheet-filter.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
 import { seen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
+import { AgentLogo } from "./icons.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
 import { Sheet, SheetItem, SheetSetting, TileButton, useSheetExit } from "./sheet.tsx";
@@ -81,7 +84,7 @@ export interface SpawnActions {
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
   readonly rescan: (deviceId: string) => void;
-  readonly setModel: (model: Model) => void;
+  readonly setModel: (pick: ModelPick) => void;
   readonly setEffort: (effort: Effort) => void;
   readonly setAutonomy: (autonomy: AutonomyLevel) => void;
   readonly addAfter: (taskId: string, after: DepAfter) => void;
@@ -481,7 +484,8 @@ function ActiveSheet(props: {
   actions: SpawnActions;
   view: ViewModel;
   kind: SheetKind;
-  model: Model;
+  agent: FormAgent;
+  model: string;
   effort: Effort;
   autonomy: AutonomyLevel;
   notBefore: NotBeforeChoice | null;
@@ -497,6 +501,7 @@ function ActiveSheet(props: {
     actions,
     view,
     kind,
+    agent: selectedAgent,
     model: selectedModel,
     effort: selectedEffort,
     autonomy: selectedAutonomy,
@@ -590,13 +595,21 @@ function ActiveSheet(props: {
   if (kind === "model") {
     return (
       <Sheet title={SHEET_TITLES.model} closing={closing} onExited={onExited} onClose={close}>
-        {MODELS.map((model) => (
-          <SheetItem
-            key={model}
-            label={MODEL_LABELS[model]}
-            selected={model === selectedModel}
-            onClick={() => actions.setModel(model)}
-          />
+        {MODEL_GROUPS.map(({ agent, picks }) => (
+          <Fragment key={agent}>
+            <p className="label sheet-group">
+              <AgentLogo kind={agent} name={AGENT_LABELS[agent]} size={12} className="sheet-group-logo" />
+              {AGENT_LABELS[agent]}
+            </p>
+            {picks.map((pick) => (
+              <SheetItem
+                key={pick.model}
+                label={modelLabel(pick)}
+                selected={pick.agent === selectedAgent && pick.model === selectedModel}
+                onClick={() => actions.setModel(pick)}
+              />
+            ))}
+          </Fragment>
         ))}
       </Sheet>
     );
@@ -661,7 +674,7 @@ function ActiveSheet(props: {
 
   return (
     <Sheet title={SHEET_TITLES.effort} closing={closing} onExited={onExited} onClose={close}>
-      {OFFERED_EFFORTS.map((effort) => (
+      {OFFERED_EFFORTS_BY_AGENT[selectedAgent].map((effort) => (
         <SheetItem
           key={effort}
           label={EFFORT_LABELS[effort]}
@@ -1416,6 +1429,7 @@ export function SpawnScreen(props: {
           actions={actions}
           view={view}
           kind={renderedSheet}
+          agent={form.agent}
           model={form.model}
           effort={form.effort}
           autonomy={autonomy}

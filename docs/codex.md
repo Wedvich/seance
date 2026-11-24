@@ -1,6 +1,9 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 items 4 and 6 and item 5 built, the rest design.** Item 6 (2026-11-24),
+**Status: phase 1 (items 1, 2, 3), phase 2 items 4, 6 and 8 and item 5 built, the rest design.** Item 8 (2026-11-24),
+the clients (the PWA's picker grouped by agent, effort per agent, the agent badge; MCP's and the CLI's `agent`; the
+gates and the broker leg's sentinel), is in DESIGN.md: Scheduler, "Codex tasks", "Clients"; Wire protocol's
+compatibility list; and the threat model's "The task field `agent`". Item 6 (2026-11-24),
 the Codex launch, is in DESIGN.md: Daemon, "Codex sessions"; and the threat model's "A Codex pane's server socket",
 "What the daemon sends a Codex server, and keeps" and "A Codex launch's thread id" (this doc's threat-model items 4, 5
 and 10, and 12's spawn and despawn lines). Item 4 (2026-11-24), the task
@@ -585,8 +588,12 @@ nothing.
    the only thing that may resume a thread; `close` kills the pane until item 7's `turn/interrupt`.
 7. **The Codex session** (after 6): notifications into the pipeline, the graceful close, reconnect at start, the tools'
    binding, the custodian's view; then the daemon advertises `codex` while a login is configured.
-8. **Clients** (after 4): the PWA's model picker grouped by agent (picking a GPT model sets `agent`), effort per agent,
-   an agent badge on the Queue; MCP `spawn_session` and `queue_batch` take `agent`; `seance spawn --agent codex`.
+8. **Built 2026-11-24** (DESIGN.md, Scheduler, "Codex tasks", "Clients"). **Clients** (after 4): the PWA's model
+   picker grouped by agent (picking a GPT model sets `agent`), effort per agent, an agent badge on the Queue and the
+   task view; MCP `spawn_session` and `queue_batch` take `agent`; `seance spawn --agent codex`. _Corrected at build:_
+   a brokered enqueue sends `AGENT_DEP_SENTINEL` ahead, since an older broker daemon's parser would drop `agent` and
+   queue Claude; `--now` refuses `--agent codex`. _Left:_ MCP `amend_task` can still set effort `max`
+   on a waiting Codex task, which then places nowhere (`agent_unsupported`) until amended back; refuse it in amend.
 
 **Phase 3: parity.** Checks S5 and S7 first.
 
@@ -628,8 +635,8 @@ Still to run, each before the phase named; each checks a fact the design already
   identity): `lq` loses detail with the exclaves' quota, then goes whole before any Claude entry; `lx`/`lu`/`lb` are
   never trimmed and bounded with `lq` by `STATUS_MAX_LOGINS` (4).
 - ~~`DEFAULT_CODEX_MODEL` and `CODEX_MODELS`, from `model/list` on the shipping version~~: built from `model/list` on
-  `codex app-server` 0.171.0 (2026-11-24), every model it lists with no `upgrade` in its order, the default its
-  `isDefault` one (DESIGN.md, Scheduler, "Codex tasks").
+  `codex app-server` 0.171.0 (2026-11-24), the models it lists with no `upgrade`, only the newest version in each
+  family, in its order, the default its `isDefault` one (DESIGN.md, Scheduler, "Codex tasks").
 - ~~The daemon's WebSocket client over a unix socket~~: built on `ws` as a daemon dependency (DESIGN.md, Daemon,
   "Codex sessions"), already in the lockfile through raycast, and verified dialling `ws+unix:` under Bun.
 - ~~Recognising a Codex pane~~: built, `CODEX_PANES.startMark` a glob for `/tmp/seance-cx-` in the start command,

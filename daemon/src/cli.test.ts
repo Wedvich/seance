@@ -195,6 +195,25 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--requires"])).toThrow("usage:");
   });
 
+  test("--agent codex is kept, claude is the default and reads as absent, and a model name is no agent", () => {
+    expect(parseSpawnArgs(["--agent", "codex", "seance"])).toEqual({ repo: "seance", here: false, agent: "codex" });
+    expect(parseSpawnArgs(["--agent", "claude", "seance"])).toEqual({ repo: "seance", here: false });
+    expect(() => parseSpawnArgs(["--agent", "gpt-6.2-sol", "seance"])).toThrow("--agent takes claude or codex");
+    expect(() => parseSpawnArgs(["--agent", "codex", "--agent", "codex", "seance"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--agent"])).toThrow("usage:");
+  });
+
+  test("--agent codex is refused with --now, which spawns Claude directly", () => {
+    expect(() => parseSpawnArgs(["--now", "--agent", "codex", "seance"])).toThrow(
+      "--agent codex needs the scheduler: --now spawns Claude directly",
+    );
+    expect(parseSpawnArgs(["--now", "--agent", "claude", "seance"])).toEqual({
+      repo: "seance",
+      here: false,
+      now: true,
+    });
+  });
+
   test("--ref and --ref-url take the next word, once each, and a url without a ref is a usage error", () => {
     expect(parseSpawnArgs(["--ref", "linear:ENG-1", "--ref-url", "https://linear.app/x", "seance", "go"])).toEqual({
       repo: "seance",

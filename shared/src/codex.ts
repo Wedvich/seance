@@ -50,3 +50,13 @@ export function codexSpecRefusal(
   if (spec.succeeds !== undefined) return "a successor";
   return null;
 }
+
+/**
+ * `codexSpecRefusal`'s clause as the line a client refuses with: the autonomy case says what to send instead, since
+ * every client defaults to `checkpoint` and a Codex task must say `auto` explicitly (D6).
+ */
+export function codexRefusalText(refusal: string): string {
+  return refusal.startsWith("autonomy ")
+    ? `a Codex task runs only at autonomy auto for now, not ${refusal.slice("autonomy ".length)}`
+    : `a Codex task can't run with ${refusal} yet`;
+}
