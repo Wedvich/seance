@@ -455,9 +455,14 @@ function describeMachine(
                 }),
             waitingOnYou: drain.moving.filter((m) => m.waitingOnYou).length,
             moved: drain.moved.length,
+            // An untasked pane by its window and pane id, as `get_sessions` gives them: never `displayName`, whose
+            // label and `self.name` would put a name in this agent's context (DESIGN.md, "Tags and session identity").
             stuck: drain.stuck.map((s) => ({
               ...(s.taskId === undefined ? {} : { taskId: s.taskId }),
               reason: drainStuckText(s),
+              ...(s.session === undefined
+                ? {}
+                : { window: s.session.window, ...(s.session.id === undefined ? {} : { pane: s.session.id }) }),
             })),
             empty: drain.empty,
           },

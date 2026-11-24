@@ -1,10 +1,14 @@
 import {
   CAPABILITIES,
   creatorTaskTags,
+  DISPLAY_NAME_MARKS,
+  displayName,
+  joinSessionTags,
   refTags,
   resolveNotBefore,
   withAutonomy,
   type AmendDraft,
+  type DrainStuck,
 } from "@seance/shared";
 import { setAccountOpen, setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
@@ -452,9 +456,22 @@ export async function cmdAvailabilityAuto(
     closedAt: outcome.closed.at,
     draining: outcome.closed.draining,
     print: (line) => console.log(line),
+    label: drainStuckLabel,
   }).finally(() => built.fleet.stop());
   (drained.code === 0 ? console.log : console.error)(drained.text);
   process.exit(drained.code);
+}
+
+/**
+ * What a `--wait` line names an item by: a task by its id, an untasked session as the owner's surfaces name it
+ * (`displayName`, docs/work.md WS7; the PWA's drain row does the same). The owner's terminal only, never MCP's
+ * `list_machines` (another agent's context keeps the window). Tag values passed `displayLine`: printable text.
+ */
+export function drainStuckLabel(stuck: DrainStuck): string {
+  if (stuck.session === undefined) return stuck.taskId ?? "-";
+  const name = displayName(joinSessionTags(stuck.session.tags), null, stuck.session.window);
+  const mark = DISPLAY_NAME_MARKS[name.source];
+  return `"${name.text}"${mark === null ? "" : ` ${mark}`}`;
 }
 
 export async function cmdPassAuto(args: PassCliArgs): Promise<void> {
