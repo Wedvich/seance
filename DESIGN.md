@@ -9320,11 +9320,14 @@ wire, beside the tags and from the same table:
   (WS6: what one session may learn of another's state is docs/presence.md's question). A reader parses it with
   `parseSessionLive`, a bad one dropped alone, never the entry.
 - **`MachineStatus.sg`**: the client re-read a machine's sessions only on a `sess` change, and busy to idle changes no
-  count. Each status tick runs `appSessionView` over its own sessions read (the one `sess` and the drain's empty
-  watch use; no read of its own) and hashes what a reader acts on, every field but the clocks (`live.since`, a tag's
-  `at`); a differing hash bumps the generation, at most once per tick. Memory only, seeded at boot with the time in
-  unix seconds, so a restart starts above anything its predecessor reached unless the clock went back: a reader
-  compares for inequality only. A failed read drops `sg` with `sess` for the tick. Latency: a change reaches the next
+  count. Each status tick sweeps the conversation table (as a `sessions` reply does; display-only, a failed sweep
+  shown as the table held it, one tmux read and the unreported panes' `sessions/<pid>.json` per sample), runs
+  `appSessionView` over its own sessions read (the one `sess` and the drain's empty watch use; no read of its own)
+  and hashes the whole view, `live.since` and a tag's `at` included (both restamp only when the value changes, so a
+  state that returns to itself within a beat, idle to busy to idle, still moves it) with tags in key order (an
+  adapter's replay reorders the table's map); a differing hash bumps the generation, at most once per sample.
+  Memory only, seeded at boot with the time in unix milliseconds, so a restart starts above anything its predecessor
+  reached unless the clock went back or it bumped over 1000 a second: a reader compares for inequality only. A failed read drops `sg` with `sess` for the tick. Latency: a change reaches the next
   beat (`STATUS_INTERVAL_MS`, 30 s, or a refresh that comes sooner), then the client's own spacing. _Rejected:_ a
   status refresh on each state change (each status is a push to every app, and the beat is wall-clock aligned for one
   radio wake a phone), per-session state in the status (its size budget and `fitStatus`), a timer poll by clients.

@@ -726,8 +726,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   // The status's `sg`, over the app's view of the status loop's own sessions read (the table late-bound, as above).
   const sessionGeneration = createSessionGeneration({
-    seed: Math.floor(now() / 1000),
+    seed: now(),
     view: (sessions) => appSessionView(handlerCtx.conversations, sessions),
+    prepare: async () => {
+      await handlerCtx.conversations?.sweep();
+    },
   });
   // The seat starts with the capabilities, after the loop it reports to: read late, like `drainAsk`.
   // Created before the client, whose every register samples at once; reads it late.

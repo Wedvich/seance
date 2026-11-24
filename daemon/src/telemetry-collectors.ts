@@ -296,7 +296,7 @@ function sessionsCollector(sources: CollectorSources): Collect {
       }
     });
     // `sg` from the same read, so a failed read drops both for the tick. No metric: it counts nothing.
-    const sg = sources.sessionGen?.(sessions);
+    const sg = await sources.sessionGen?.(sessions);
     return { fields: { sess, ...(sg === undefined ? {} : { sg }) }, samples };
   };
 }

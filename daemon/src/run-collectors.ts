@@ -31,7 +31,7 @@ export interface CollectorDeps {
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
   /** The session generation (`session-view.ts`): the status's `sg`. */
-  readonly sessionGen?: (sessions: readonly SessionEntry[]) => number;
+  readonly sessionGen?: (sessions: readonly SessionEntry[]) => number | Promise<number>;
   readonly now: () => number;
   readonly httpFetch: Fetch;
   readonly probe?: HostProbe;

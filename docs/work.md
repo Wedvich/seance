@@ -69,7 +69,7 @@ screen's basis for every untasked row; the DESIGN.md entry is amended with this,
 
 The PWA re-reads a machine's sessions today only when its status's `sess` counts change, and a session going busy to
 idle changes no count. `sg` is a number the daemon bumps on any change a `sessions` reply would show: a pane appears or
-goes, a `live.state` or `reason` changes, a label or task changes. Display-only, never trimmed by `fitStatus`, a bad one
+goes, a `live.state`, `reason` or `since` changes, a label or task changes. Display-only, never trimmed by `fitStatus`, a bad one
 dropped alone. The client re-reads a machine's sessions when its `sg` changes, spaced as the drain row's re-read is
 (at most once per ten seconds per machine, a trailing read so the last change is never lost).
 

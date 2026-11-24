@@ -1564,7 +1564,7 @@ export interface MachineStatus {
    * The session generation (docs/work.md, "`MachineStatus.sg`"): a number the daemon changes whenever its answer to an
    * app's `sessions` would show something new (a pane appears or goes, a task, label, tag or `live` state or reason
    * changes), so a client re-reads that machine's sessions when it differs from the last it saw. Compare for
-   * inequality only: a restart starts it afresh (above the last process's, by its seed, but not promised). Display-only,
+   * inequality only: a restart starts it afresh (seeded from the boot time in unix ms, so above the last process's in practice, but not promised). Display-only,
    * never trimmed by `fitStatus`, absent from a daemon without `CAPABILITIES.sessionLive` and for a tick whose sessions
    * read failed. A bad `sg` is dropped alone, never the status.
    */
