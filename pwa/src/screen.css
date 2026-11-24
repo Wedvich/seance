@@ -2421,10 +2421,14 @@
 }
 
 /* Which agent an account is: a fact, not a state, so neutral where Leader and Closed are coloured. */
-/* Muted, so the name stays what the eye reads first. */
+/*
+ * The meta line's colour, faded further: a filled mark reads darker than thin mono text in the same colour, and the
+ * palette is locked, so opacity rather than a new token.
+ */
 .fleet-agent-logo {
   flex: none;
   color: var(--fg2);
+  opacity: 0.6;
 }
 
 .fleet-badge-unverified,
