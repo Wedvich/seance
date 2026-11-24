@@ -92,9 +92,13 @@ export interface MetricsCollector {
   readonly stop: () => void;
 }
 
-/** The samples one `status` carries, as the daemon wrote them to its own store plus the observer label. */
+/**
+ * The samples one `status` carries, as the daemon wrote them to its own store plus the observer label. An agent
+ * login's reading (`lq`) is labelled `login` and `account` as the daemon's own is (`loginCollector`), the account by
+ * its store key (A15); an unidentified login's carries no account and is skipped, as the daemon skips it.
+ */
 export async function statusSamples(
-  machine: Pick<Machine, "deviceId" | "exclaves">,
+  machine: Pick<Machine, "deviceId" | "exclaves" | "logins">,
   status: MachineStatus,
   keyOf: (accountId: string) => Promise<string>,
 ): Promise<Sample[]> {
@@ -121,6 +125,14 @@ export async function statusSamples(
     // oxlint-disable-next-line no-await-in-loop -- a handful of exclaves, each key memoized by the caller
     const account = exclave.accountId === null ? null : await keyOf(exclave.accountId);
     samples.push(...quotaSamples(q, { ...observer, exclave: exclave.id, ...(account === null ? {} : { account }) }));
+  }
+  const logins = machine.logins ?? [];
+  for (const q of status.lq ?? []) {
+    const login = logins[q.x];
+    if (login === undefined || login.accountId === null) continue;
+    // oxlint-disable-next-line no-await-in-loop -- one login per agent, each key memoized by the caller
+    const account = await keyOf(login.accountId);
+    samples.push(...quotaSamples(q, { ...observer, login: login.agent, account }));
   }
   if (status.gh !== undefined) samples.push(...githubSamples(status.gh, observer, status.at));
   return samples;

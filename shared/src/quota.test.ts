@@ -6,6 +6,7 @@ import {
   quotaPressure,
   quotaWindows,
   windowAppliesTo,
+  type AgentLogin,
   type ExclaveInfo,
   type FleetQuotaEntry,
   type Machine,
@@ -169,6 +170,45 @@ describe("newestQuotaByAccount", () => {
     const newest = newestQuotaByAccount([
       { deviceId: "asleep", exclaves: [exclave("main", "org:acct")] },
       { deviceId: "old", status: { at: S, scan: 1, quota: [{ x: 0, h: 99, s: "cache", at: S }] } },
+    ]);
+    expect(newest.size).toBe(0);
+  });
+});
+
+// docs/codex.md, "Identity": `lq` indexes `logins`, never `exclaves`, and one ChatGPT account on two machines is one.
+describe("newestQuotaByAccount with agent logins", () => {
+  const codex = (accountId: string | null): AgentLogin => ({ agent: "codex", accountId, authOk: accountId !== null });
+
+  test("a login's reading folds by its account id across machines, beside the exclaves' and never into them", () => {
+    const newer: QuotaObservation = { x: 0, h: 40, d: 12, s: "cache", at: S - 60 };
+    const newest = newestQuotaByAccount([
+      {
+        deviceId: "a",
+        exclaves: [exclave("main", "org:acct")],
+        logins: [codex("codex:ws:user")],
+        status: {
+          at: S,
+          scan: 1,
+          quota: [{ x: 0, h: 5, s: "cache", at: S }],
+          lq: [{ x: 0, h: 10, d: 30, s: "cache", at: S - 600 }],
+        },
+      },
+      { deviceId: "b", exclaves: [], logins: [codex("codex:ws:user")], status: { at: S, scan: 1, lq: [newer] } },
+    ]);
+    expect(newest.get("codex:ws:user")).toEqual({ observation: newer, deviceId: "b" });
+    // `lq`'s index 0 is the login, not exclave 0: the Claude account keeps its own reading.
+    expect(newest.get("org:acct")?.observation.h).toBe(5);
+  });
+
+  test("an unidentified login, an out-of-range index and a machine with no login list contribute nothing", () => {
+    const newest = newestQuotaByAccount([
+      { deviceId: "a", logins: [codex(null)], status: { at: S, scan: 1, lq: [{ x: 0, h: 9, s: "cache", at: S }] } },
+      {
+        deviceId: "b",
+        logins: [codex("codex:ws:user")],
+        status: { at: S, scan: 1, lq: [{ x: 1, h: 9, s: "cache", at: S }] },
+      },
+      { deviceId: "c", status: { at: S, scan: 1, lq: [{ x: 0, h: 9, s: "cache", at: S }] } },
     ]);
     expect(newest.size).toBe(0);
   });

@@ -215,8 +215,10 @@ function authCollector(sources: CollectorSources): Collect {
 
 /**
  * `lq`, `lx`, `lu` and `lb` from each agent login's view, indexed through the registered blob's `logins` — never the
- * exclave list, which `quota` and `ax` index. No metric yet: a login's quota series is the archivist's (docs/codex.md,
- * build order item 2). A login the view lacks, or reads signed out while the blob says signed in (the re-register not
+ * exclave list, which `quota` and `ax` index. Each `lq` reading of a login with an account id is also a quota series
+ * labelled `login` (the agent) and `account` (the raw id, as an exclave's is: the store is this machine's own, and the
+ * archivist files it under the HMAC), never `exclave`; an unidentified login's has no account to chart. A login the
+ * view lacks, or reads signed out while the blob says signed in (the re-register not
  * committed yet), is `lu`, as `authCollector` does; one the blob holds signed out adds nothing (`authOk: false` says
  * it). `lq` keeps a reading through `unknown`, its `at` telling its age, and is never beside `lx`.
  */
@@ -228,6 +230,7 @@ function loginCollector(sources: CollectorSources): Collect {
     const lx: number[] = [];
     const lu: number[] = [];
     const lb: number[] = [];
+    const samples: Sample[] = [];
     (tick.registered.logins ?? []).slice(0, STATUS_MAX_LOGINS).forEach((login, x) => {
       const view = views.get(login.agent);
       if (view === undefined || view.health === "signed_out") {
@@ -237,7 +240,12 @@ function loginCollector(sources: CollectorSources): Collect {
       if (view.health === "expired") lx.push(x);
       else if (view.health === "unknown") lu.push(x);
       else if (view.blocked) lb.push(x);
-      if (view.quota !== null && view.health !== "expired") lq.push({ x, ...view.quota });
+      if (view.quota !== null && view.health !== "expired") {
+        lq.push({ x, ...view.quota });
+        if (login.accountId !== null) {
+          samples.push(...quotaSamples({ x, ...view.quota }, { login: login.agent, account: login.accountId }));
+        }
+      }
     });
     return Promise.resolve({
       fields: {
@@ -246,7 +254,7 @@ function loginCollector(sources: CollectorSources): Collect {
         ...(lu.length === 0 ? {} : { lu }),
         ...(lb.length === 0 ? {} : { lb }),
       },
-      samples: [],
+      samples,
     });
   };
 }

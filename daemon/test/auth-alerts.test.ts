@@ -3,12 +3,17 @@ import {
   AUTH_ALERTS_MAX,
   AUTH_EXPIRING_MS,
   CAPABILITIES,
+  LOGIN_ALERT_KEYS,
+  parsePushAlert,
+  parseSettingsRecord,
   STATUS_STALE_MS,
+  type AgentLogin,
   type AuthAlerted,
   type Machine,
   type MachineStatus,
 } from "@seance/shared";
 import { authAlertStep } from "../src/auth-alerts.ts";
+import { EXCLAVE_NAME } from "../src/exclaves.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -173,5 +178,58 @@ describe("authAlertStep", () => {
     );
     expect(step.alerts).toMatchObject([{ exclave: "default", state: "expired" }]);
     expect(step.next).toEqual([held("a", "work", "expiring", NOW - 5), held("a", "default", "expired", NOW)]);
+  });
+});
+
+// docs/codex.md, "Login health": a Codex login alerts through the same step and record, under a key no exclave id can be.
+describe("authAlertStep for an agent login", () => {
+  const KEY = LOGIN_ALERT_KEYS.codex;
+  const login = (fields: Partial<AgentLogin> = {}): AgentLogin => ({
+    agent: "codex",
+    accountId: "codex:ws:user",
+    authOk: true,
+    ...fields,
+  });
+  const withLogin = (
+    status: Pick<MachineStatus, "lx" | "lu" | "lb"> | null,
+    logins: readonly AgentLogin[] = [login()],
+  ): Machine =>
+    machine("a", null, ["default"], {
+      logins,
+      ...(status === null ? {} : { status: { at: NOW / 1000 - 10, scan: NOW, ...status } }),
+    });
+
+  test("an expired login alerts once under its key and clears on ok, reporting it restored", () => {
+    const first = authAlertStep([withLogin({ lx: [0] })], [], NOW);
+    expect(first.alerts).toEqual([{ v: 1, kind: "auth", at: NOW, deviceId: "a", exclave: KEY, state: "expired" }]);
+    expect(first.next).toEqual([held("a", KEY, "expired", NOW)]);
+    expect(authAlertStep([withLogin({ lx: [0] })], first.next ?? [], NOW + 1).next).toBeNull();
+    // Blocked is a login the backend accepts: the lapse is over.
+    const back = authAlertStep([withLogin({ lb: [0] })], first.next ?? [], NOW + 2);
+    expect(back).toEqual({ alerts: [], next: [], restored: [held("a", KEY, "expired", NOW)] });
+  });
+
+  test("unknown and a stale status say nothing; signed out clears silently", () => {
+    const entry = [held("a", KEY, "expired")];
+    expect(authAlertStep([withLogin({ lu: [0] })], entry, NOW).next).toBeNull();
+    expect(authAlertStep([withLogin({ lx: [0] })], [], NOW + STATUS_STALE_MS + 60_000).alerts).toEqual([]);
+    const out = authAlertStep([withLogin({}, [login({ accountId: null, authOk: false })])], entry, NOW);
+    expect(out).toEqual({ alerts: [], next: [], restored: [] });
+  });
+
+  test("a login gone from the blob drops its entry; a blob with no login list keeps it", () => {
+    expect(authAlertStep([withLogin({}, [])], [held("a", KEY, "expired")], NOW).next).toEqual([]);
+    const unknownList = machine("a", {}, ["default"]);
+    expect(authAlertStep([unknownList], [held("a", KEY, "expired")], NOW).next).toBeNull();
+  });
+
+  test("the key passes the record's and the push's parsers, and an older step drops it as an exclave gone", () => {
+    const record = parseSettingsRecord({ version: 1, authAlerts: [held("a", KEY, "expired")] });
+    expect(record?.authAlerts).toEqual([held("a", KEY, "expired")]);
+    expect(
+      parsePushAlert({ v: 1, kind: "auth", at: NOW, deviceId: "a", exclave: KEY, state: "expired" }),
+    ).not.toBeNull();
+    // An older leader keeps an entry only for an exclave id it sees, and no exclave name (`EXCLAVE_NAME`) is the key.
+    expect(EXCLAVE_NAME.test(KEY)).toBe(false);
   });
 });

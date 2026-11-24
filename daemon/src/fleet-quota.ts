@@ -8,9 +8,11 @@ import {
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   withObservations,
+  type AgentLogin,
   type ExclaveInfo,
   type FleetQuotaEntry,
   type MachineStatus,
+  type QuotaObservation,
   type QuotaReading,
   type StoreRecord,
   type StoreReplyFrame,
@@ -89,22 +91,33 @@ export interface FleetQuotaWriter {
 /**
  * The newest raw reading per account in `status` — what the writer folds in —
  * keyed through the register blob `status` indexes into (`info[x]`); a tie
- * goes to the first exclave. Empty when `status` names another blob than
- * `scan`, since its indices would point into the wrong list.
+ * goes to the first exclave. An agent login's readings (`lq`) join keyed through
+ * the blob's `logins` the same way (docs/codex.md, "Identity"), with no
+ * `QuotaSource` of their own: a new one would make an older daemon's strict
+ * parser read the whole record as unreadable. Empty when `status` names another
+ * blob than `scan`, since its indices would point into the wrong list.
  */
 export function newestReadings(
   status: MachineStatus | null,
   scan: number,
   info: readonly ExclaveInfo[],
+  logins: readonly AgentLogin[] = [],
 ): ReadonlyMap<string, QuotaReading> {
   const readings = new Map<string, QuotaReading>();
   if (status === null || status.scan !== scan) return readings;
-  for (const { x, ...reading } of status.quota ?? []) {
-    const accountId = info[x]?.accountId;
-    if (accountId === null || accountId === undefined) continue;
-    const held = readings.get(accountId);
-    if (held === undefined || reading.at > held.at) readings.set(accountId, reading);
-  }
+  const fold = (
+    observations: readonly QuotaObservation[],
+    ids: readonly { readonly accountId: string | null }[],
+  ): void => {
+    for (const { x, ...reading } of observations) {
+      const accountId = ids[x]?.accountId;
+      if (accountId === null || accountId === undefined) continue;
+      const held = readings.get(accountId);
+      if (held === undefined || reading.at > held.at) readings.set(accountId, reading);
+    }
+  };
+  fold(status.quota ?? [], info);
+  fold(status.lq ?? [], logins);
   return readings;
 }
 

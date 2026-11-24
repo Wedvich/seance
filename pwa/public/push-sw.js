@@ -87,12 +87,17 @@
       // Both ids are routing ids; the state only picks one of two fixed texts.
       if (typeof alert.deviceId !== "string" || !TASK_ID.test(alert.deviceId)) return null;
       if (typeof alert.exclave !== "string" || !TASK_ID.test(alert.exclave)) return null;
+      // `login.codex` is the one agent-login key (`LOGIN_ALERT_KEYS`): a fixed text for a fixed id, never the id shown.
       const body =
-        alert.state === "expired"
-          ? "A Claude login needs /login."
-          : alert.state === "expiring"
-            ? "A Claude login expires within 3 days."
-            : null;
+        alert.exclave === "login.codex"
+          ? alert.state === "expired"
+            ? "A Codex login needs seance codex login."
+            : null
+          : alert.state === "expired"
+            ? "A Claude login needs /login."
+            : alert.state === "expiring"
+              ? "A Claude login expires within 3 days."
+              : null;
       if (body === null) return null;
       return { body, tag: `auth:${alert.deviceId}:${alert.exclave}`, url: MACHINES_URL };
     }

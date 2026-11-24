@@ -598,7 +598,7 @@ Séance's noise is cover for a real intruder.
    the record, so it does not bring push back; recorded under the Settings record's residual, as
    a gap with no repair path yet. The page's service worker holds no PSK: it opens
    nothing it receives, and a notification's text is fixed per kind with only a task id (or a
-   device id, or nothing for the archivist's silence) from the payload, and a blocked PR's per reason from a fixed set of four, so a forged push (a thief leader's, with a subscription it
+   device id, or nothing for the archivist's silence) from the payload, and a blocked PR's per reason from a fixed set of four (an `auth` alert's per state, and for the one agent-login key `login.codex` its own fixed sentence), so a forged push (a thief leader's, with a subscription it
    read) can make the browser show one of a few fixed sentences, a spill's with at worst a known window
    label (`5h` or `7d`) and a number, and nothing else. A click opens a
    same-origin path the worker itself built from an id that passed `isTaskId`
@@ -877,6 +877,16 @@ nothing checked it. The last is the gap they leave.
   (`CODEX_OWNER_OUTCOMES`): never the device code, an email, an account id or anything Codex printed. `login` hands
   the terminal to Codex's own `login --device-auth` in the home, so Séance never sees the code or a token. The probe
   writes no audit line: it is not a spawn, as the `/usage` refresh is not.
+- **The fleet reads an agent login as it reads an exclave, through the same rules** (Daemon, "Codex login", "Fleet
+  readers"; docs/codex.md item 2). `lq`, `lx`, `lu` and `lb` are held to the register blob's `logins` by
+  `sanitizeStatus`, which drops those four fields alone over an index outside it, a repeat or a bad percent, never the
+  status, so a blob whose `logins` this build cannot read costs the machine nothing of its Claude quota. A login's
+  account id is held only as a string to `isAccountId`, like a Claude id: the fleet quota record takes it with no new
+  `QuotaSource`, the account record, its alias and holds with no change, and the archive labels its series only by
+  the `account:` store key (A15), never the raw id. Its login alert rides the exclave's: the same step, record field,
+  cap and `auth` push, under the fixed key `login.codex` (`LOGIN_ALERT_KEYS`), which the service worker turns into one
+  fixed sentence and never shows. MCP `list_machines` shows a login's agent, account id, email, name, version and
+  health, as it shows an exclave's; no task runs on a login yet, so no reader places, pins or holds by one.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -1554,7 +1564,8 @@ The Durable Object persists a machine registry:
   `lx`. `lq` holds each login's quota reading, at most `STATUS_MAX_LOGINS` (4) entries; `lx` lists the logins the
   backend refused (expired), `lu` those unread or unreadable, `lb` those whose included usage the backend blocks
   (`ordinaryUsageAllowed: false`): disjoint, at most `STATUS_MAX_LOGINS` between them, and a reader nulls the status
-  over a repeat or past the cap, as for `ax`. The trim takes quota detail from `lq` with the exclaves' (scoped weeklies,
+  over a repeat or past the cap, as for `ax`. Past the parser, `sanitizeStatus` range-checks them against the blob's
+  `logins` and drops the four fields alone when they disagree (an `lq` reading stamped past clock skew alone). The trim takes quota detail from `lq` with the exclaves' (scoped weeklies,
   then resets), then `lq`'s entries, last first, before any Claude quota entry, since a machine's Claude exclaves are
   what places today's tasks; `tr` still counts Claude quota entries only, so a status carrying `tr` may have dropped
   `lq` whole. `lx`, `lu` and `lb` are never trimmed, as `ax` is not. Measured (`status.test.ts`): five exclaves' quota
@@ -2918,7 +2929,8 @@ per account, since per-account writes would tell the relay when each account is 
   so registration is the whole authority. Every `FLEET_QUOTA_INTERVAL_MS` (5 min) it takes its
   newest raw reading per account from the last untrimmed sample (`newestReadings`: through the
   register blob the sample indexes, only while the sample names that blob, a tie to the first
-  exclave) and, unless none is newer than the record it last saw, reads the record, folds them
+  exclave; an agent login's `lq` through the blob's `logins` the same way, its `s` still `"cache"`, since a new
+  `QuotaSource` would make an older daemon read the whole record as unreadable) and, unless none is newer than the record it last saw, reads the record, folds them
   in (`withObservations`, `shared/src/fleet-quota.ts`) and puts it at the version read — a create
   at `expect: 0` only when the get answered none. Newer is a later `at`, or a stored entry stamped
   past now by more than `QUOTA_CLOCK_SKEW_MS`, which would otherwise hold its account until the
@@ -2963,7 +2975,8 @@ per account, since per-account writes would tell the relay when each account is 
   item 3's, a token holder rewriting junk faster than the window keeps the record unread.
 - **Readers.** Every reader opens it through `openFleetQuotaRecord`, then folds it with the
   statuses in `newestQuotaByAccount` (`shared/src/quota.ts`): a record entry counts like a status
-  observation by its `observer`, newest wins, a tie to the status. The app-client reads it only
+  observation by its `observer`, newest wins, a tie to the status. A status's `lq` folds beside its `quota`, keyed
+  through `Machine.logins`, so one ChatGPT account on two machines is one account (Daemon, "Codex login"). The app-client reads it only
   when built with `fleetQuotaRefreshMs` (`refreshFleetQuota`: on every open, then every interval);
   no record or an unreadable one reads as empty, a read with no answer keeps the last copy. The
   PWA polls, since the relay nudges apps for no `quota:` write; MCP and Raycast never read it.
@@ -3388,7 +3401,13 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     ("A Claude login needs /login.") or `expiring` ("A Claude login expires within 3 days."), held in
     the record's `authAlerts` (`{deviceId, exclave, state, at}`, at most `AUTH_ALERTS_MAX` = 16) so a
     new leader does not repeat it, and cleared when the exclave reads `ok`, which logs the
-    restore. Transitions are escalation only: `expiring` then `expired` alerts twice, the reverse never
+    restore. An agent login (Daemon, "Codex login") alerts in the same step, record and cap through `loginHealth`,
+    only `expired` (`lx`; Codex gives no refresh-token expiry, so no `expiring`), "A Codex login needs seance codex
+    login.", cleared by `ok` or `blocked` (a login the backend accepts), its entry keyed `exclave: "login.codex"`
+    (`LOGIN_ALERT_KEYS`). _Decided: that key, because_ it is a routing id, so an older leader's record parser and the
+    service worker take it, and it holds a `.`, which no exclave id can (`EXCLAVE_NAME` is `[a-z0-9-]`, plus
+    `default`): an older leader drops the entry as an exclave gone from its machine and alerts nothing for the login,
+    and a newer one never mistakes an exclave for a login. Transitions are escalation only: `expiring` then `expired` alerts twice, the reverse never
     (an `expiring` reading over a held `expired` is two clocks disagreeing, not a recovery), and an `ae` time
     already past reads `expired`. `unknown` neither alerts nor clears: an older daemon, an exclave
     unread or unreadable, a stale or disconnected machine all say nothing, so a daemon restart,
@@ -7375,8 +7394,7 @@ of this section built.
     `main.ts` always passes, like `usageRefresh`.
 - **Codex login** (`daemon/src/codex/`: `home.ts`, `probe.ts`, `account.ts`, `codex-cli.ts`; added 2026-11-23, Codex
   phase 1 item 1, docs/codex.md "The account"): the machine's one ChatGPT login for Codex, named, measured and watched.
-  No Codex task runs yet; nothing reads `logins` or `lq` but the parsers (fleet readers, the PWA and MCP are items 2
-  and 3).
+  No Codex task runs yet. The fleet's readers (item 2) are "Fleet readers" below; the PWA is item 3.
   - **Config.** `config.json`'s `codex` block, the machine's own, parsed strictly like `adapters` (`parseCodex`: an
     unknown key or value fails the load): `approvalPolicy` (`untrusted`, `on-request`, `never`; default
     `on-request`), `sandbox` (`read-only`, `workspace-write`; default `workspace-write`; `danger-full-access` refused
@@ -7437,7 +7455,21 @@ of this section built.
     exclaves, so `lq`/`lx`/`lu`/`lb` (Presence & identity) index the list the reader holds, through one collector
     (`loginCollector`). A change of identity, a display field, `authOk`, `credits` or `version` re-registers, as a
     sign-in on a Claude exclave does; a change of health or reading sends a status at once (the launch gate's
-    `refresh`). No metric series yet (item 2, the archivist's).
+    `refresh`). Each `lq` reading of an identified login is also a quota series in the daemon's own store, labelled
+    `login` (the agent) and `account` (the raw id, as an exclave's: the store is the machine's own), never `exclave`.
+  - **Fleet readers** (item 2, 2026-11-24). `Machine.logins` carries the blob's list beside `exclaves`, and
+    `sanitizeStatus` holds `lq`/`lx`/`lu`/`lb` to it (threat model, "The fleet reads an agent login as it reads an
+    exclave"). `loginHealth` (`shared/src/status-reader.ts`) is the one reader rule, as `exclaveAuth` is: from a live
+    fresh status, `expired` for `lx` and `unknown` for `lu` (a login before its first probe, `authOk: false` in the
+    blob, included); then by the blob `signed_out` and `unidentified`; `blocked` for `lb`; else `ok`; with no live
+    fresh status, `unknown` for a signed-in login. No capability check: a daemon that sends `logins` sends the lists.
+    `newestQuotaByAccount` and the fleet quota writer (`newestReadings`) fold `lq` by `logins[x].accountId` beside
+    the exclaves' quota (Scheduler, "Fleet quota record"); `knownAccounts` reads `logins`, so `accountName` names a
+    Codex account by its email; the archivist imports a live `lq` as the daemon stores it, the account by its store
+    key (Archivist, "Metrics"); the leader's login alert is Scheduler, "Auth alerts"; MCP `list_machines` gives each
+    machine `logins: [{agent, accountId?, email?, account?, alias?, auth, version?}]`, `auth` being `loginHealth`.
+    Nothing that places, pins or holds reads a login yet: `resolveAccount` (pins, `set_account_open`) and the
+    candidates still read exclaves only, so a Codex account cannot be pinned or held from MCP before item 4.
   - **The owner's verbs** (`codex-cli.ts`; threat model, "`seance codex`"): `login` and `logout` refuse without a
     block (`no_config`), write the home's config, check the binary and the floor, then run Codex's `login
     --device-auth` or `logout` on the owner's terminal with the home's env; `status` runs one probe of the home the
@@ -11935,7 +11967,8 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     re-seal goes through the same function, so the sentinel survives the leader's own writes. The
     new parser ignores `exclave`. This replaces an "accepted window" between gate and takeover:
     the gate alone checks only the leader of the moment.
-  - `list_machines` lists each machine's exclaves as `{ id, accountId?, email? }` (absent on a
+  - `list_machines` lists each machine's exclaves as `{ id, accountId?, email? }` (and, since Codex item 2, its
+    agent logins as `logins`, Daemon, "Codex login") (absent on a
     machine reporting none; the relay-unreachable local fallback entry omits it, since `auto`
     needs the relay anyway), and `get_queue` shows a task's `pin` — the machine by name where the
     registry (or the decision's candidates) knows it plus its deviceId, the account by label plus
@@ -15597,8 +15630,10 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   - **Series per observer**, unmerged (A33): every series carries `machine`, the observing
     machine's device id (its name would split a series at a rename; a daemon's own series name no
     machine, its store being its own). An `account` label is the `account:<hex>` store key
-    (`accountStoreKey`, A15), never the raw id the daemon labels with; `exclave` and `model` are
-    kept as the daemon writes them.
+    (`accountStoreKey`, A15), never the raw id the daemon labels with; `exclave`, `model` and an agent
+    login's `login` are kept as the daemon writes them. A login's live reading (`lq`) is imported through the
+    same `quotaSamples`, labelled `login` and `account` and never `exclave` (Daemon, "Codex login"); an
+    unidentified one has no account and is skipped, as the daemon skips it.
   - **Live.** Each `Machine.status` the app leg holds (already bound to the blob it indexes) with
     an `at` newer than the last ingested from that machine (and no more than 5 minutes ahead of
     the archivist's clock: a daemon with a wrong clock is not kept, and is not remembered, so

@@ -42,6 +42,16 @@ const OLDER = machine({
   status: { at: nowS, scan: 1, ax: [0] },
 });
 const ASLEEP = machine({ deviceId: "device-4", name: "Sleeper", connected: false });
+const CODEX = machine({
+  deviceId: "device-5",
+  name: "Codex Box",
+  exclaves: [],
+  logins: [
+    { agent: "codex", accountId: "codex:ws:user", email: "gpt@example.com", authOk: true, version: "0.170.0" },
+    { agent: "codex", accountId: null, authOk: false },
+  ],
+  status: { at: nowS, scan: 1, lx: [0], lq: [{ x: 0, h: 10, s: "cache", at: nowS }] },
+});
 
 const target = { deviceId: "device-4", exclave: "default", clone: "/r/seance" };
 const task = (id: string, state: Task["state"], extra: Partial<Task> = {}): Task => ({
@@ -76,7 +86,7 @@ const local: LocalMachine = {
 async function call(name: string): Promise<string> {
   const relay = new LazyRelay({
     create: () => {
-      const fake = fakeRelay([machine(), BOX, OLDER, ASLEEP], respond);
+      const fake = fakeRelay([machine(), BOX, OLDER, ASLEEP, CODEX], respond);
       fake.setState({ scheduler: { kind: "ready", deviceId: BOX.deviceId, term: 1 } });
       return fake;
     },
@@ -115,6 +125,24 @@ describe("list_machines: a login", () => {
     // No capability: "not listed" means nothing, so a lapse in its status is not claimed.
     const older = listed.find((entry) => entry.name === OLDER.name);
     expect(older?.exclaves?.map((e) => e.auth)).toEqual(["unknown"]);
+  });
+});
+
+describe("list_machines: an agent login", () => {
+  test("each login says its agent, account, email, name, version and health; a machine predating logins lists none", async () => {
+    const listed = JSON.parse(await call("list_machines")) as { name: string; logins?: Record<string, unknown>[] }[];
+    expect(listed.find((entry) => entry.name === CODEX.name)?.logins).toEqual([
+      {
+        agent: "codex",
+        accountId: "codex:ws:user",
+        email: "gpt@example.com",
+        account: "gpt@example.com",
+        version: "0.170.0",
+        auth: "expired",
+      },
+      { agent: "codex", auth: "signed_out" },
+    ]);
+    expect(listed.find((entry) => entry.name === OLDER.name)).not.toHaveProperty("logins");
   });
 });
 

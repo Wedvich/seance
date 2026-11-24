@@ -795,7 +795,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     leg: { store: (frame) => client.store(frame) },
     key,
     deviceId: state.deviceId,
-    observations: () => newestReadings(status.latest(), registered.scan, registered.exclaves.info),
+    observations: () => newestReadings(status.latest(), registered.scan, registered.exclaves.info, registered.logins),
     ready: () => client.registered,
     now,
     ...(opts.fleetQuota?.intervalMs === undefined ? {} : { intervalMs: opts.fleetQuota.intervalMs }),

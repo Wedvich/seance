@@ -377,6 +377,25 @@ describe("push-sw.js", () => {
     });
   });
 
+  test("a Codex login's alert, under its fixed key, has its own fixed text; an expiring one, which Codex never sends, the fallback", async () => {
+    const worker = boot();
+    const codex = (state: string): string =>
+      JSON.stringify({ v: 1, kind: "auth", at: 1, deviceId: "dev-1", exclave: "login.codex", state });
+    await worker.push(codex("expired"));
+    await worker.push(codex("expiring"));
+    expect(worker.shown[0]?.options).toEqual({
+      body: "A Codex login needs seance codex login.",
+      tag: "auth:dev-1:login.codex",
+      renotify: true,
+      data: { url: "/?screen=machines" },
+    });
+    expect(worker.shown[1]?.options).toEqual({
+      body: "Something needs your attention.",
+      tag: "seance",
+      renotify: true,
+    });
+  });
+
   test("a login alert with an id isTaskId refuses, or a state it does not know, shows only the fallback and nothing the payload says", async () => {
     const worker = boot();
     const auth = (fields: Record<string, unknown>): string =>
