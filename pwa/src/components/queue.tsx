@@ -43,7 +43,7 @@ const ARM_MS = 4_000;
 /** How long a notification's row stays marked. */
 const MARK_MS = 3_000;
 
-/** The Queue's title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+/** The Work screen's title block (named Queue until WS3); the app puts it in a header (the phone's or the desk column's). */
 export function QueueHeading(props: {
   summary: string | null;
   /** Opens the Limits sheet; null while there is no limit to change, and the line is then plain text. */
@@ -52,7 +52,7 @@ export function QueueHeading(props: {
   const { summary, onLimits } = props;
   return (
     <div>
-      <h1 className="header-title">Queue</h1>
+      <h1 className="header-title">Work</h1>
       {summary !== null &&
         (onLimits === null ? (
           <p className="header-meta">{summary}</p>
@@ -1168,7 +1168,7 @@ function Lineage(props: { line: LineageLine; onReveal: (taskId: string) => void 
       <button
         type="button"
         className="queue-reveal"
-        aria-label={`${text}, show in queue`}
+        aria-label={`${text}, show its row`}
         onClick={() => props.onReveal(reveal)}
       >
         {text}

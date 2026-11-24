@@ -372,7 +372,7 @@ describe("share text and markers", () => {
     ]);
     expect(reloadCostText({ files: 3, submitting: true })).toEqual([
       "3 files that were on the form before the share were removed; add them again.",
-      "A Queue was in progress when the share arrived; check the Queue before queueing again.",
+      "A Queue was in progress when the share arrived; check the Work screen before queueing again.",
     ]);
   });
 });

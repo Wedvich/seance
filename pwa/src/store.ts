@@ -1886,7 +1886,7 @@ export class Store {
   #refusalText(code: StoreRefusal["code"]): string {
     const unreadable = code === "store_full" ? this.#queue.unreadableCount() : 0;
     return unreadable > 0
-      ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Queue screen, then try again.`
+      ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Work screen, then try again.`
       : sentence(storeErrorText(code));
   }
 

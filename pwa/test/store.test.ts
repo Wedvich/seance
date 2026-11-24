@@ -1654,7 +1654,7 @@ describe("auto's error paths", () => {
       expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false, retry: expect.anything() });
       const message = verdict?.kind === "unqueued" ? verdict.message : "";
       expect(message).toContain(says);
-      expect(message.endsWith("Clear them on the Queue screen, then try again.")).toBe(count > 0);
+      expect(message.endsWith("Clear them on the Work screen, then try again.")).toBe(count > 0);
     }
   });
 
@@ -2580,7 +2580,7 @@ describe("start now", () => {
     await poll(client, { ...created, state: "ready" });
     await until(() => store.getState().startNowRefusal !== null, "the note");
     expect(client.runNows).toHaveLength(2);
-    expect(store.getState().startNowRefusal?.message).toContain("Start now on the Queue screen");
+    expect(store.getState().startNowRefusal?.message).toContain("Start now on the Work screen");
 
     await poll(client, { ...created, state: "ready" });
     expect(client.runNows).toHaveLength(2);

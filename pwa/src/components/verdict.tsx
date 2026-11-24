@@ -207,7 +207,7 @@ export function VerdictView(props: {
           </button>
           {verdict.kind === "queued" && props.onQueue !== undefined && (
             <button type="button" className="quiet" onClick={props.onQueue}>
-              See the queue
+              See it on Work
             </button>
           )}
           {content.showBack && (
