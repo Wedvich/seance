@@ -12,7 +12,8 @@
  * With `turn` set, the first turn runs as the real 0.170.0's did in the item 7 spike: `thread/status/changed` to
  * active, `turn/started`, `account/rateLimits/updated` (to every connection, as the real server's per-thread
  * subscription would), then by `turn`: `complete` goes idle and `turn/completed`; `approval` waits on an approval,
- * sending the server request no daemon may answer; `hold` stays busy. `turn/interrupt` ends a running turn
+ * sending the server request no daemon may answer; `hold` stays busy. `turn/steer` is taken only into the running
+ * turn it names. `turn/interrupt` ends a running turn
  * `interrupted`. Each turn also announces a decoy: another thread's approval wait, which no reader may take as its own.
  * `thread/resume` subscribes its connection and answers the thread's status; on a server that has started no thread it
  * loads the one named, as the real server loads a thread from the home's store for a continuation (`resumeError`
@@ -183,6 +184,13 @@ async function listen(url: string): Promise<void> {
         } else if (message.method === "turn/start") {
           reply({ result: { turn: { id: "turn-1", status: "inProgress" } } });
           runTurn();
+        } else if (message.method === "turn/steer") {
+          // As the real one: taken only into the running turn it names, else an error the caller falls back on.
+          reply(
+            turnStatus === "inProgress" && message.params?.expectedTurnId === "turn-1"
+              ? { result: { turnId: "turn-1" } }
+              : { error: { code: -32600, message: "no active turn to steer" } },
+          );
         } else if (message.method === "thread/resume") {
           if (scenario.resumeError !== undefined) {
             reply({ error: { code: scenario.resumeError, message: "stub refused" } });

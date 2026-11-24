@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,12 +12,15 @@ import {
   type WatchSet,
 } from "@seance/shared";
 import { watchAudit } from "../src/audit.ts";
-import { sessionAlive } from "../src/claude-process.ts";
+import { sessionAlive, sessionProcessOf } from "../src/claude-process.ts";
+import { exec } from "../src/exec.ts";
 import { exchange } from "../src/local-client.ts";
+import type { InboxLine } from "../src/message-frame.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { createMessages, type ListenerSink, type Messages, type MessagesDeps } from "../src/messages.ts";
 import { paneHolds } from "../src/pane-holds.ts";
 import { processNames } from "../src/peer.ts";
+import { shq } from "../src/shq.ts";
 import { listPanePids, type BoundPane } from "../src/session-events.ts";
 import { tmuxOk } from "../src/tmux.ts";
 import type { LeaderVerdict, WatchLeader } from "../src/watch-leader.ts";
@@ -1012,6 +1015,55 @@ describe("through the socket", () => {
     const bare = join(base, "run", `watch-${(counter += 1)}.sock`);
     socket = await startLocalSocket({ handle: () => Promise.resolve(null), path: bare });
     expect(await ask(bare)).toEqual({ ok: false, code: "unsupported" });
+  });
+});
+
+describe("a Codex session (docs/codex.md item 12): its listener is the daemon's own inbox", () => {
+  const runDirs: string[] = [];
+  let codexBin = "";
+
+  beforeAll(async () => {
+    codexBin = await bunNamed("codex");
+    // Its first exec outside any timed window: macOS scans a fresh executable first.
+    await exec([codexBin, "--version"]);
+  });
+
+  afterAll(async () => {
+    await Promise.all(runDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  /** A pane as a Codex launch makes one: `exec /bin/sh '<run dir>/run.sh'` under the start mark, its process `codex`. */
+  async function codexPane(name: string): Promise<Pane> {
+    const runDir = await mkdtemp("/tmp/seance-cx-");
+    runDirs.push(runDir);
+    await writeFile(join(runDir, "run.sh"), `exec ${shq(codexBin)} -e 'await Bun.sleep(600_000);'\n`);
+    counter += 1;
+    const made = await newWindow(`${name}-${counter}`, [`exec /bin/sh ${shq(join(runDir, "run.sh"))}`]);
+    await pollUntil(async () => (await processNames(made.pid)).includes("codex"), `${name}'s codex to exec`);
+    return made;
+  }
+
+  test("an add from the pane is taken once its inbox is attached, and the event's wake note reaches that inbox", async () => {
+    const r = rig();
+    const target = await codexPane("cx-watch");
+    // Before the session's connection is held there is no listener: refused as for a Claude pane without its mod.
+    expect(await r.watches.handle(addFrame(pr(1)), target.pid)).toEqual({ ok: false, code: "nolistener" });
+
+    const bound = (await listPanePids()).find((p) => p.id === target.id);
+    if (bound === undefined) throw new Error("the Codex pane is not listed");
+    expect(bound.agent).toBe("codex");
+    const taken: InboxLine[] = [];
+    const gone = new AbortController();
+    r.messages.attachCodex(bound, (await sessionProcessOf([target.pid], "codex"))?.key ?? null, {
+      take: (line) => taken.push(line) > 0,
+      close: () => gone.abort(),
+      gone: gone.signal,
+    });
+
+    const id = await added(r, target, pr(1));
+    expect(await r.watches.onEvent({ events: [checksFail(id)] })).toEqual({ ok: true, delivered: [id] });
+    expect(taken).toEqual([expect.objectContaining({ messageKind: "note", wake: true })]);
+    expect(taken[0]?.push).toContain("A check failed");
   });
 });
 

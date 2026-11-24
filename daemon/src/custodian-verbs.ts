@@ -796,8 +796,6 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
       taskId = info.taskId;
       if (info.custodian || pane === deps.roundPane()) return await refuse("marked", taskId);
       if (!info.ours) return await refuse("foreign", taskId);
-      // A Codex pane has no inbox mod to deliver through (docs/codex.md, "V1 refusals").
-      if (info.agent !== "claude") return await refuse("unsupported", taskId);
       if (deps.untouchable(pane)) return await refuse("marked", taskId);
       // C7: a session waiting on the owner is the needs-input alert's.
       if (deps.activity(pane)?.state === "needs-input") return await refuse("waiting", taskId);
@@ -1053,20 +1051,16 @@ export function createCustodianVerbs(deps: CustodianVerbDeps): CustodianVerbs {
     try {
       const info = await infoOf(pane);
       if (info === null || !info.ours || info.dead || info.pid === null || info.custodian) return false;
-      // A Codex pane takes no nudge (no inbox mod), and an interrupt only where its connection is wired.
-      const codex = info.agent !== "claude";
-      if (codex && deps.codexInterrupt === undefined) return false;
+      // A nudge reaches a Codex pane as a turn (its daemon-run inbox); an interrupt only where its connection is wired.
+      const interruptible = info.agent === "claude" || deps.codexInterrupt !== undefined;
       // What the verbs would refuse and refund never counts, or a round would be due for good over a pane nothing can
       // act on: two panes under one task id (`marked`), a screen that is not a live prompt, a nudge nobody can receive.
       if (sharesTask(await panesNow(), info)) return false;
       const held = await deps.flags.counts(info.taskId ?? pane, info.pid);
       const target = info.taskId === null ? null : { pid: info.pid, taskId: info.taskId };
       const couldNudge =
-        !codex &&
-        target !== null &&
-        deps.tasks.launchedAt(target.taskId) !== undefined &&
-        held.nudges < deps.settings.maxNudges;
-      const couldInterrupt = stillMs >= interruptAfterMs && !held.interrupted;
+        target !== null && deps.tasks.launchedAt(target.taskId) !== undefined && held.nudges < deps.settings.maxNudges;
+      const couldInterrupt = interruptible && stillMs >= interruptAfterMs && !held.interrupted;
       if (!couldNudge && !couldInterrupt) return false;
       if ((await classify(info)) !== "live") return false;
       // An interrupt needs no listener; a nudge does, and only a nudge is left to count when none could be sent.

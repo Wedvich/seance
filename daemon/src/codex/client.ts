@@ -28,6 +28,7 @@ export type CodexMethod =
   | "initialize"
   | "thread/start"
   | "turn/start"
+  | "turn/steer"
   | "thread/resume"
   | "turn/interrupt"
   | "account/rateLimits/read"

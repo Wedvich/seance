@@ -3,8 +3,9 @@ import { join } from "node:path";
 import { isAgentSessionId, isRecord } from "@seance/shared";
 import { CODEX_PANES, CODEX_RUN_PREFIX } from "../agents/panes.ts";
 import { DRAIN_PROMPT } from "../drain-ask.ts";
-import { sessionKey, type ClaudeProcess } from "../claude-process.ts";
+import { sessionKey, type ClaudeProcess, type SessionKey } from "../claude-process.ts";
 import { log } from "../log.ts";
+import type { SessionInbox } from "../messages.ts";
 import { ancestorBelow, processNames, processStart } from "../peer.ts";
 import { listPanePids, type BoundPane, type CodexState } from "../session-events.ts";
 import { tmux } from "../tmux.ts";
@@ -16,6 +17,7 @@ import {
   type CodexConnection,
   type CodexNotification,
 } from "./client.ts";
+import { createCodexDelivery, type CodexDelivery } from "./delivery.ts";
 import { codexSignals, stateOfStatus, turnIdOf, type CodexSignal } from "./events.ts";
 
 /**
@@ -52,6 +54,11 @@ export interface CodexSessionsConfig {
   readonly home: string;
   /** The thread id the launch ledger noted for a task's launch here: what a reconnect's `thread` must equal. */
   readonly launchSession: (taskId: string) => string | undefined;
+  /**
+   * Where a held session's inbox goes (`Messages.attachCodex`): registered each time its connection is held, closed when
+   * the connection goes. Absent where this host runs no messaging: nothing reaches a Codex session then.
+   */
+  readonly inbox?: (pane: BoundPane, session: SessionKey | null, inbox: SessionInbox) => void;
 }
 
 export interface CodexSessionsOptions {
@@ -129,6 +136,10 @@ interface Session {
   lastRead: number;
   readTimer: ReturnType<typeof setTimeout> | null;
   reading: boolean;
+  /** Messages into the session: its held notes outlive a lost connection, as the session does. */
+  readonly delivery: CodexDelivery;
+  /** The inbox registered for the connection now held; aborted when it goes. */
+  inbox: AbortController | null;
 }
 
 export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
@@ -177,8 +188,12 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
       return;
     }
     if (s.kind === "turn") {
-      if (s.turn === null) endTurn(session);
-      else session.turn = s.turn;
+      if (s.turn === null) {
+        endTurn(session);
+        return;
+      }
+      session.turn = s.turn;
+      session.delivery.turnStarted(s.turn);
       return;
     }
     const sink = config?.sink;
@@ -207,6 +222,8 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
   const onClosed = async (session: Session, connection: CodexConnection): Promise<void> => {
     if (session.connection !== connection) return;
     session.connection = null;
+    // The inbox drops with it: messaging holds what arrives for the reconnect's grace, as for a mod's child.
+    closeInbox(session);
     // Nothing more will say the turn ended on this connection: a close waiting on it stops waiting.
     endTurn(session);
     for (const delay of delays) {
@@ -230,6 +247,28 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
   const hold = (session: Session, connection: CodexConnection): void => {
     session.connection = connection;
     void connection.closed.then(() => onClosed(session, connection));
+    openInbox(session);
+  };
+
+  /** The session's inbox for the connection now held: messaging's one listener for the pane. */
+  const openInbox = (session: Session): void => {
+    const attach = config?.inbox;
+    closeInbox(session);
+    if (attach === undefined || stopped) return;
+    const controller = new AbortController();
+    session.inbox = controller;
+    attach(session.pane, session.process?.key ?? null, {
+      take: (line) => !controller.signal.aborted && session.delivery.take(line),
+      close: () => {
+        controller.abort();
+      },
+      gone: controller.signal,
+    });
+  };
+
+  const closeInbox = (session: Session): void => {
+    session.inbox?.abort();
+    session.inbox = null;
   };
 
   /**
@@ -282,19 +321,34 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
     return start === null ? null : { pid, start, key: sessionKey(pid, start) };
   };
 
-  const fresh = (thread: string, runDir: string, pane: BoundPane): Session => ({
-    thread,
-    runDir,
-    pane,
-    process: null,
-    connection: null,
-    turn: null,
-    chain: Promise.resolve(),
-    turnEnds: new Set(),
-    lastRead: -Infinity,
-    readTimer: null,
-    reading: false,
-  });
+  const fresh = (thread: string, runDir: string, pane: BoundPane): Session => {
+    const session: Session = {
+      thread,
+      runDir,
+      pane,
+      process: null,
+      connection: null,
+      turn: null,
+      chain: Promise.resolve(),
+      turnEnds: new Set(),
+      lastRead: -Infinity,
+      readTimer: null,
+      reading: false,
+      delivery: createCodexDelivery({
+        thread,
+        connection: () => session.connection,
+        turn: () => session.turn,
+        refused: (method, answer) =>
+          log.warn(
+            `codex: a message into a session was lost: its ${method} was refused (${
+              answer.kind === "error" ? `error ${answer.code ?? "without a code"}` : answer.kind
+            })`,
+          ),
+      }),
+      inbox: null,
+    };
+    return session;
+  };
 
   /** The session held for the pane, only while it runs under the pid the caller read: never a reused pane id's. */
   const heldAt = (pane: CodexPaneRef): Session | null => {
@@ -304,6 +358,7 @@ export function createCodexSessions(opts: CodexSessionsOptions): CodexSessions {
 
   const drop = (session: Session): void => {
     if (session.readTimer !== null) clearTimeout(session.readTimer);
+    closeInbox(session);
     session.connection?.close();
     endTurn(session);
   };

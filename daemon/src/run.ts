@@ -989,6 +989,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         sink: { state: codexState, rateLimits: codexAccount.observe },
         home: codexHomeReal,
         launchSession: (taskId) => endedTasks.launchSession(taskId),
+        // Messages into a session reach it as turns (DESIGN.md, "Session messages", "A Codex session").
+        ...(capabilities.messages === undefined ? {} : { inbox: capabilities.messages.attachCodex }),
       });
       void codexSessions.reconnectAll().catch((err: unknown) => log.warn(`codex: reconnect failed (${String(err)})`));
     }

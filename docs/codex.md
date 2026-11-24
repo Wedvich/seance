@@ -1,7 +1,8 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8), item 10 and item 11 built, the rest design.** Item 11
-(2026-11-24), a Codex task's pass to a successor (every trigger), the drain's ask and the custodian's `interrupt` over
+**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and items 10, 11 and 12 built, the rest design.** Item 12
+(2026-11-24), messages into a Codex session (O4), is in DESIGN.md: Session messages, "A Codex session"; Watches; the
+custodian frame kind's `nudge`; and the threat model's "Messages into a Codex session". Item 11 (2026-11-24), a Codex task's pass to a successor (every trigger), the drain's ask and the custodian's `interrupt` over
 the session's connection, is in DESIGN.md: Scheduler, "Codex tasks" ("Passing one"); Daemon, "The drain's session ask"
 ("A Codex pane"); "Codex session events" (the pane's own frames); the custodian's `interrupt`; Wire protocol's
 compatibility list (`CAPABILITIES.codexPass`); and the threat model's "A Codex task's pass, drain ask and interrupt".
@@ -392,7 +393,8 @@ sequenceDiagram
 6. **The seed is the first `turn/start`'s input**: the preamble, the autonomy note and the task, as text, never argv,
    never a file the model reads. The preamble is agent-aware ("a new independent Codex session", "AGENTS.md or
    CLAUDE.md"), and Codex's autonomy note says to stop on a real choice by ending the turn with the question stated (it
-   has no `AskUserQuestion`). `developerInstructions` carries nothing until messages land.
+   has no `AskUserQuestion`). `developerInstructions` carries only the constant standing instruction for messages,
+   on a tasked launch (item 12).
 7. **Then the TUI joins.** A thread exists for `codex resume` only after its first turn (before it: "No saved session
    found"), so the daemon writes `thread` after `turn/start` is accepted. Joining late loses nothing: the TUI showed the
    thread's history and the approval then pending (S2).
@@ -450,8 +452,9 @@ sequenceDiagram
 `seance mcp` is registered in the home's `config.toml`, so it runs as a child of the pane's server and binds by peer
 pid with no change: `report_task_done`, `hand_off_task`, `pass_to_successor` (item 11) and `send_message` out. The
 binding's session rule (`sessionOf`: the innermost process on the peer's chain called `claude`) learns the pane's
-agent: for a Codex pane, the innermost `codex`, which is the pane's server. Watches need an inbox listener, so a Codex
-session's `watch_github` is refused `nolistener` until messages land.
+agent: for a Codex pane, the innermost `codex`, which is the pane's server. Watches need an inbox listener; a Codex
+session's is the daemon's own while its server's connection is held (item 12), so `watch_github` works there and its
+notes arrive as messages do.
 
 ### Close, despawn and the rest
 
@@ -461,7 +464,7 @@ session's `watch_github` is refused `nolistener` until messages land.
 - **Reap** is unchanged (the worktree is where it looks). The home's `sessions/` grows like a Claude config dir's
   `projects/`; pruning it is later.
 - **The custodian** sees a Codex pane as `ours`, reads its state from the events above, and may `close` and `capture`
-  it. `nudge` (an inbox) answers `unsupported` for a Codex pane until item 12 gives it `turn/steer`; `interrupt` sends
+  it. `nudge` reaches it as any message does (item 12: `turn/steer` or `turn/start`); `interrupt` sends
   `turn/interrupt` over the connection (item 11).
 - **A closed machine** asks its Codex sessions to move as it asks Claude's, over the connection (item 11): `turn/interrupt`
   at the deadline and `DRAIN_PROMPT` as a turn at a turn-ended idle; the outside pass makes a successor for the rest.
@@ -637,7 +640,14 @@ nothing.
     session and then refuse its pass and the ask; the pass bills the machine's Codex login (`accountOf`), as routing
     does. `pass_to_successor` from a Codex pane under a leader without it is refused before the push (a queue read
     names the pane's agent). The custodian's `nudge` stays `unsupported` until item 12.
-12. Messages into a Codex session (O4) (after 7).
+12. **Built 2026-11-24** (DESIGN.md, Session messages, "A Codex session"; the threat model's "Messages into a Codex
+    session"). Messages into a Codex session (O4) (after 7): the daemon's own inbox per held connection
+    (`Messages.attachCodex`), `turn/steer` into a running turn and `turn/start` to wake an idle one, an idle note held
+    for the next turn, the full body (no `read_messages`), `CODEX_STANDING_INSTRUCTION` as `developerInstructions` on a
+    tasked `thread/start` (a resumed thread keeps it); watches and the custodian's `nudge` reach a Codex pane through
+    it. `codex-spawn.test.ts` reads each launch's run dir from the stub server's `--listen` argv (item 10's _Left_).
+    _Left:_ a turn the server refuses after the hand-off loses the message (logged by method and code); held notes do
+    not survive a daemon restart.
 
 **Phase 4** (after 3 and 9 to 12): the leader's `auto` choosing the agent as well as the account, a policy the owner
 sets.

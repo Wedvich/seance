@@ -13,7 +13,7 @@ import {
   type SessionMessage,
 } from "@seance/shared";
 import { messageAudit, type MessageAudit } from "../src/audit.ts";
-import { claudeProcessOf, type SessionKey } from "../src/claude-process.ts";
+import { claudeProcessOf, sessionProcessOf, type SessionKey } from "../src/claude-process.ts";
 import { exec } from "../src/exec.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import type { InboxLine, MessageReply } from "../src/message-frame.ts";
@@ -2576,5 +2576,181 @@ describe("a watch's note", () => {
     await messages.listen(INBOX, target.pid, listener.sink);
     expect(fate.fates).toEqual(["ended"]);
     expect(listener.lines).toHaveLength(1);
+  });
+});
+
+describe("a Codex session's inbox (attachCodex: the daemon's own, no mod)", () => {
+  const runDirs: string[] = [];
+  let codexBin = "";
+
+  beforeAll(async () => {
+    codexBin = await bunNamed("codex");
+    // Its first exec outside any timed window: macOS scans a fresh executable first.
+    await exec([codexBin, "--version"]);
+  });
+
+  afterAll(async () => {
+    await Promise.all(runDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  /**
+   * A pane as a Codex launch makes one: started by `exec /bin/sh '<run dir>/run.sh'` under the literal `/tmp/seance-cx-`
+   * (the pane's start mark), its process the session's `codex`, as the server is for a peer in that pane.
+   */
+  async function codexPane(name: string, taskId?: string): Promise<Pane> {
+    const runDir = await mkdtemp("/tmp/seance-cx-");
+    runDirs.push(runDir);
+    await writeFile(join(runDir, "run.sh"), `exec ${shq(codexBin)} -e 'await Bun.sleep(600_000);'\n`);
+    const out = (
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id} #{pane_pid}",
+        "-t",
+        "msg:",
+        "-n",
+        name,
+        "-c",
+        base,
+        `exec /bin/sh ${shq(join(runDir, "run.sh"))}`,
+      ])
+    ).trim();
+    const [id, pid] = out.split(" ");
+    if (id === undefined || pid === undefined) throw new Error(`no pane from ${out}`);
+    await pollUntil(async () => (await processNames(Number(pid))).includes("codex"), `${name}'s codex to exec`);
+    if (taskId !== undefined) await tmuxOk(["set-option", "-p", "-t", id, "@seance-task", taskId]);
+    return { id, pid: Number(pid) };
+  }
+
+  /** What `codex/sessions.ts` registers: the pane as listed, its server's key, and an inbox that records each line. */
+  async function attach(
+    messages: Messages,
+    target: Pane,
+  ): Promise<{ readonly lines: InboxLine[]; readonly close: () => void; readonly closed: () => boolean }> {
+    const bound = (await listPanePids()).find((p) => p.id === target.id);
+    if (bound === undefined) throw new Error("the Codex pane is not listed");
+    expect(bound.agent).toBe("codex");
+    const session = await sessionOfCodex(target.pid);
+    const taken: InboxLine[] = [];
+    const gone = new AbortController();
+    messages.attachCodex(bound, session, {
+      take: (line) => {
+        if (gone.signal.aborted) return false;
+        taken.push(line);
+        return true;
+      },
+      close: () => gone.abort(),
+      gone: gone.signal,
+    });
+    return { lines: taken, close: () => gone.abort(), closed: () => gone.signal.aborted };
+  }
+
+  async function sessionOfCodex(pid: number): Promise<SessionKey | null> {
+    return (await sessionProcessOf([pid], "codex"))?.key ?? null;
+  }
+
+  test("a message to the task is handed to the session's inbox as a line, never written anywhere else, audited as delivered", async () => {
+    const messages = setup();
+    const receiver = await launched("cx-recv");
+    const target = await codexPane("cx-recv", receiver);
+    const inbox = await attach(messages, target);
+    const from = await pane("cx-from", await launched("cx-from"));
+    const reply = await messages.send(message(receiver, "request", "rebase onto main"), from.pid);
+    expect(reply).toMatchObject({ ok: true, outcome: "delivered" });
+    expect(inbox.lines).toEqual([{ v: 1, id: idOf(reply), messageKind: "request", push: expect.any(String) }]);
+    expect(inbox.lines[0]?.push).toContain("rebase onto main");
+    expect(inAudits("delivered").map((a) => a.to)).toEqual([receiver]);
+  });
+
+  test("an inbox frame from a process in a Codex pane is refused unbound and takes nothing from the daemon's inbox", async () => {
+    const messages = setup();
+    const receiver = await launched("cx-steal");
+    const target = await codexPane("cx-steal", receiver);
+    const inbox = await attach(messages, target);
+    const thief = sinkDouble();
+    await messages.listen(INBOX, target.pid, thief.sink);
+    expect(thief.lines.map((l) => JSON.parse(l))).toEqual([{ ok: false, code: "unbound" }]);
+    expect(inbox.closed()).toBe(false);
+    const from = await pane("cx-steal-from", await launched("cx-steal-from"));
+    expect(await messages.send(message(receiver, "note", "for the session"), from.pid)).toMatchObject({
+      outcome: "delivered",
+    });
+    expect(inbox.lines).toHaveLength(1);
+  });
+
+  test("a lost connection's inbox starts the grace: a message is held, and the reconnect's inbox is handed it", async () => {
+    const messages = setup({ graceMs: 60_000 });
+    const receiver = await launched("cx-lost");
+    const target = await codexPane("cx-lost", receiver);
+    const first = await attach(messages, target);
+    // Past the launch's own grace: only the disconnect's holds now.
+    clock.now += 120_000;
+    first.close();
+    const from = await pane("cx-lost-from", await launched("cx-lost-from"));
+    expect(await messages.send(message(receiver, "question", "still there?"), from.pid)).toMatchObject({
+      outcome: "sent",
+    });
+    expect(first.lines).toEqual([]);
+    const second = await attach(messages, target);
+    expect(second.lines.map((l) => l.messageKind)).toEqual(["question"]);
+  });
+
+  test("a Codex session's question, sent from its pane, is answered by handle into its inbox and wakes it", async () => {
+    const messages = setup();
+    const asker = await launched("cx-ask");
+    const target = await codexPane("cx-ask", asker);
+    const inbox = await attach(messages, target);
+    const answererTask = await launched("cx-answer");
+    const answerer = await pane("cx-answer", answererTask);
+    const answererInbox = sinkDouble();
+    await messages.listen(INBOX, answerer.pid, answererInbox.sink);
+
+    // The pane's own process stands as the peer, as `seance mcp` under its server does: the session is that `codex`.
+    const asked = await messages.send(message(answererTask, "question", "which branch?"), target.pid);
+    expect(asked).toMatchObject({ ok: true, outcome: "delivered" });
+    const answered = await messages.send(replyFrame(idOf(asked), "note", "main"), answerer.pid);
+    expect(answered).toMatchObject({ ok: true, outcome: "delivered" });
+    expect(inbox.lines).toEqual([
+      { v: 1, id: idOf(answered), messageKind: "note", push: expect.stringContaining("main"), wake: true },
+    ]);
+  });
+
+  test("a custodian nudge reaches a Codex pane's inbox, and canDeliver says so", async () => {
+    const messages = setup({ graceMs: 1_000 });
+    const receiver = await launched("cx-nudge");
+    const target = await codexPane("cx-nudge", receiver);
+    clock.now += 10_000;
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(false);
+    const inbox = await attach(messages, target);
+    expect(await messages.canDeliver(target.id, of(target, receiver))).toBe(true);
+    texts.push("commit and push");
+    expect(await messages.deliverAsCustodian(target.id, "commit and push", of(target, receiver))).toEqual({
+      ok: true,
+      taskId: receiver,
+      outcome: "delivered",
+    });
+    expect(inbox.lines.map((l) => l.messageKind)).toEqual(["request"]);
+  });
+
+  test("an inbox for a pane that is not a Codex one is closed, and nothing is registered", async () => {
+    const messages = setup();
+    const receiver = await launched("cx-wrong");
+    const target = await pane("cx-wrong", receiver);
+    const bound = (await listPanePids()).find((p) => p.id === target.id);
+    if (bound === undefined) throw new Error("not listed");
+    const gone = new AbortController();
+    const taken: InboxLine[] = [];
+    messages.attachCodex(bound, null, {
+      take: (line) => taken.push(line) > 0,
+      close: () => gone.abort(),
+      gone: gone.signal,
+    });
+    expect(gone.signal.aborted).toBe(true);
+    clock.now += 600_000;
+    const from = await pane("cx-wrong-from", await launched("cx-wrong-from"));
+    await messages.send(message(receiver, "note", "x"), from.pid);
+    expect(taken).toEqual([]);
   });
 });

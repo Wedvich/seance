@@ -103,17 +103,19 @@ act, no text in logs, a new act is a threat-model change) hold throughout.
     and realpath (`roundReadDenies`). The note is display-only and never logged, audited, pushed,
     archived, put in `get_queue` or returned by `sessions`.
 - `nudge` (text on stdin) delivers one `request` message only through messaging's local delivery
-  (`Messages.deliverAsCustodian`, the `inbox` mod's submit: never a key, `asUser`, `$.prompt.fill` or
+  (`Messages.deliverAsCustodian`, the `inbox` mod's submit or a Codex session's turn: never a key, `asUser`, `$.prompt.fill` or
   tmux), the daemon its sender in the fixed `custodianRequest` wrapper, only to an `ours` pane carrying a
   task this machine's launch ledger holds — never one that is marked, the round's, sharing its task id
   with another live pane, or whose last state is `needs-input` or whose screen is a dialog or exit
   prompt. The pane is read again after its count is written and handed to the delivery with the pid and
   task counted under (`gone` for any other). Its text is at most `MESSAGE_PUSH_MAX` bytes, never logged
   or audited; at most `maxNudges` per session and one per round.
-- `nudge` answers `unsupported` for a Codex pane (no inbox mod). `interrupt` reaches one only as
-  `turn/interrupt` over the daemon's connection to its server (`CodexSessions.interruptTurn`, under the pid the verb
-  read), never a key, with Claude's verdict, counts and audit but no box-draft check (nothing touches the composer),
-  and `unsupported` where that is not wired; `close` reads no Codex composer for a draft.
+- A `nudge` reaches a Codex pane through the same `deliverAsCustodian` (the daemon's own inbox for it,
+  `turn/steer` or `turn/start`), never a key. `interrupt` reaches one only as `turn/interrupt` over the
+  daemon's connection to its server (`CodexSessions.interruptTurn`, under the pid the verb read), never a
+  key, with Claude's verdict, counts and audit but no box-draft check (nothing touches the composer), and
+  `unsupported` where that is not wired (`reach` then counts only a nudge for one); `close` reads no Codex
+  composer for a draft.
 - `interrupt` sends only the constant key Escape (`["Escape"]`, never a frame field), once per session,
   only to an `ours`, unmarked, `live` pane whose last state is `busy` (never `needs-input`), whose input
   box holds no draft and whose screen, as read by a sampling pass taken after the count is written, has
