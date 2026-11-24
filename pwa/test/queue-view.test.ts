@@ -562,6 +562,9 @@ describe("deriveQueue", () => {
         accessibleName: "Open pull request #123 (open, checks failing, read 3m ago)",
       });
       expect(chip({ state: "draft", at: NOW })?.description).toBe("Pull request #123 · draft · read just now");
+      expect(chip({ state: "open", checks: "unrun", at: NOW })?.description).toBe(
+        "Pull request #123 · open · a check never ran · read just now",
+      );
     });
 
     test("a merged chip shows no CI dot, whatever the reading carried", () => {

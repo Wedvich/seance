@@ -400,6 +400,13 @@ function bodyLine(
   return null;
 }
 
+const PR_CHECKS_READING: Record<PrChecks, string> = {
+  pending: "checks pending",
+  passing: "checks passing",
+  failing: "checks failing",
+  unrun: "a check never ran",
+};
+
 const PR_BLOCKED_LABEL: Record<PrBlockedReason, string> = {
   checks: "check failing",
   conflict: "conflict",
@@ -448,7 +455,7 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
   const blocked = reason === null ? null : PR_BLOCKED_LABEL[reason];
   const reading = [
     pr.state,
-    ...(checks === null ? [] : [`checks ${checks}`]),
+    ...(checks === null ? [] : [PR_CHECKS_READING[checks]]),
     ...(blocked === null ? [] : [blocked]),
     `read ${formatSeen(pr.at, leaderNow)}`,
   ];

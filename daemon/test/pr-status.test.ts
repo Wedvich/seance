@@ -66,6 +66,12 @@ type Fake = {
   readonly inMergeQueue?: boolean;
   readonly reviewRequests?: number;
   readonly blocked?: null;
+  /** The failing rollup's second look at `f<i>`: the rollup state and its contexts; `null` answers a null alias. */
+  readonly rejudge?: {
+    readonly state?: string;
+    readonly contexts: readonly unknown[];
+    readonly totalCount?: number;
+  } | null;
 } | null;
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
@@ -90,6 +96,17 @@ function run(
     ...(suite === undefined ? {} : { checkSuite: { databaseId: suite } }),
     ...(detailsUrl === undefined ? {} : { detailsUrl }),
   };
+}
+
+/** A CheckRun as the failing rollup's second look reads it: with how many steps it ran. */
+function ran(
+  name: string,
+  conclusion: string | null,
+  steps: number,
+  status = "COMPLETED",
+  databaseId?: number,
+): unknown {
+  return { __typename: "CheckRun", databaseId, name, status, conclusion, steps: { totalCount: steps } };
 }
 
 function statusContext(context: string, state: string, required = true): unknown {
@@ -134,6 +151,31 @@ function reply(...prs: readonly Fake[]): string {
     // One body answers both runs: the stub replies the same to each, and each run reads its own aliases.
     if (fake?.landed !== undefined) {
       data[`c${i}`] = fake.landed === null ? null : { defaultBranchRef: { compare: { status: fake.landed } } };
+    }
+    if (fake?.rejudge !== undefined) {
+      const { rejudge } = fake;
+      data[`f${i}`] =
+        rejudge === null
+          ? null
+          : {
+              pullRequest: {
+                commits: {
+                  nodes: [
+                    {
+                      commit: {
+                        statusCheckRollup: {
+                          state: rejudge.state ?? "FAILURE",
+                          contexts: {
+                            totalCount: rejudge.totalCount ?? rejudge.contexts.length,
+                            nodes: rejudge.contexts,
+                          },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            };
     }
     if (fake !== null && wideOf(fake)) {
       data[`b${i}`] =
@@ -280,6 +322,58 @@ describe("the poller's read", () => {
       ["open", undefined],
     ]);
     expect(seen[0]?.status).not.toHaveProperty("checks");
+  });
+
+  test("a failing rollup is looked at again: a run that never ran is unrun, or pending beside one still running", async () => {
+    const starved = ran("test (macos)", "CANCELLED", 0);
+    await gh.setReply(
+      reply(
+        { state: "OPEN", rollup: "FAILURE", rejudge: { contexts: [ran("lint", "SUCCESS", 9), starved] } },
+        { state: "OPEN", rollup: "FAILURE", rejudge: { contexts: [ran("lint", null, 3, "IN_PROGRESS"), starved] } },
+        { state: "OPEN", rollup: "FAILURE", rejudge: { contexts: [starved, ran("test (linux)", "CANCELLED", 4)] } },
+        { state: "OPEN", rollup: "FAILURE", rejudge: { contexts: [starved, statusContext("ci/legacy", "ERROR")] } },
+        // A superseded run that never ran: the newest of its name passed.
+        {
+          state: "OPEN",
+          rollup: "FAILURE",
+          rejudge: { contexts: [ran("t", "CANCELLED", 0, "COMPLETED", 1), ran("t", "SUCCESS", 9, "COMPLETED", 2)] },
+        },
+        { state: "OPEN", isDraft: true, rollup: "FAILURE", rejudge: { contexts: [starved] } },
+        // Nothing the second look can stand on: the reading stays the rollup's.
+        { state: "OPEN", rollup: "FAILURE", rejudge: { contexts: [starved], totalCount: 51 } },
+        { state: "OPEN", rollup: "FAILURE", rejudge: { state: "PENDING", contexts: [starved] } },
+        { state: "OPEN", rollup: "FAILURE", rejudge: { contexts: [] } },
+        { state: "OPEN", rollup: "FAILURE", rejudge: null },
+        { state: "OPEN", rollup: "FAILURE" },
+        // Only an open or draft PR is looked at again.
+        { state: "CLOSED", rollup: "FAILURE", rejudge: { contexts: [starved] } },
+      ),
+      0,
+    );
+    const tasks = Array.from({ length: 12 }, (_, n) => pr(n + 1));
+    const { seen, stop } = start(tasks);
+    await pollUntil(() => seen.length >= 12, "twelve readings");
+    stop();
+    expect(seen.slice(0, 12).map((s) => s.status.checks)).toEqual([
+      "unrun",
+      "pending",
+      "failing",
+      "failing",
+      "passing",
+      "unrun",
+      "failing",
+      "failing",
+      "failing",
+      "failing",
+      "failing",
+      "failing",
+    ]);
+    const queries = (await gh.argvs()).map((argv) => argv.find((arg) => arg.startsWith("query=")) ?? "");
+    const second = queries.filter((query) => query.includes("steps(first:1)"));
+    const aliases = second.map((query) => [...query.matchAll(/\bf(\d+):/gu)].map((m) => Number(m[1])));
+    // Ten to a run; the closed PR is never asked.
+    expect(aliases.every((asked) => asked.length > 0 && asked.length <= 10)).toBe(true);
+    expect(new Set(aliases.flat())).toEqual(new Set(Array.from({ length: 11 }, (_, i) => i)));
   });
 
   test("an answer with one PR the forge gives nothing for (exit 1, JSON on stdout) reports the good one and warns once with the error's type", async () => {

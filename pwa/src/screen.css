@@ -3410,7 +3410,8 @@
   color: var(--err);
 }
 
-.queue-pr-ci-pending {
+.queue-pr-ci-pending,
+.queue-pr-ci-unrun {
   color: var(--warn);
 }
 
