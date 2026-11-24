@@ -5026,7 +5026,12 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
       readonly idle?: number;
       readonly waitingOnYou: number;
       readonly moved: number;
-      readonly stuck: readonly { readonly taskId?: string; readonly reason: string }[];
+      readonly stuck: readonly {
+        readonly taskId?: string;
+        readonly reason: string;
+        readonly window?: string;
+        readonly pane?: string;
+      }[];
       readonly empty: boolean | null;
     };
   }
