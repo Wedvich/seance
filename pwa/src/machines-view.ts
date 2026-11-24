@@ -26,6 +26,7 @@ import {
   type KnownAccount,
   effectivePct,
   exclaveAuth,
+  loginHealth,
   exclaveTraitHealth,
   isRemoteSessionId,
   lastHeardAt,
@@ -35,6 +36,9 @@ import {
   newestQuotaByAccount,
   sameCreditMonth,
   schedulerRole,
+  AGENT_NAMES,
+  type AgentLogin,
+  type AgentLoginKind,
   type ArchiveStatusResponse,
   type DrainStuck,
   type SessionEntry,
@@ -86,8 +90,14 @@ export interface Gauge {
   readonly level: Level;
 }
 
-export interface ExclaveRow {
+/**
+ * One sign-in on a machine card: an exclave, or an agent login (DESIGN.md, Daemon, "Codex login"), one row type for
+ * both, told apart by `agent` alone. Drawn only when something needs attention.
+ */
+export interface SignInRow {
+  /** The exclave's id; a login's agent name (one login per agent per machine, D1). */
   readonly id: string;
+  readonly agent: AgentMark;
   readonly account: string;
   /** Running sessions from the latest status; null when it doesn't say. */
   readonly sessions: number | null;
@@ -111,7 +121,8 @@ export interface MachineCard {
   /** CPU, memory, and disk fill (percent used on the fullest watched path; red under the scheduler's floor). */
   readonly gauges: readonly Gauge[];
   readonly note: string | null;
-  readonly exclaves: readonly ExclaveRow[];
+  /** Its exclaves, then its agent logins. */
+  readonly signIns: readonly SignInRow[];
   /** Whether a chart can be asked for: connected and the daemon serves `metrics`, or asleep while the archive charts machines. */
   readonly charts: boolean;
   /** Its newest status carries `cl`: closed to new scheduled work. */
@@ -486,13 +497,18 @@ export interface AccountCard {
   readonly accountId: string;
   /** The name set for this account from any client, if one is; it becomes `title`. */
   readonly alias: string | null;
-  /** The alias, else `exclaves`. */
+  /** The alias, else `members`, made unique among the cards. */
   readonly title: string;
-  /** The exclave ids that sign in as this account, anywhere in the fleet. */
-  readonly exclaves: string;
+  /**
+   * What signs in as this account, anywhere in the fleet: a Claude account's exclave ids; an agent login's agent name
+   * (one login per agent per machine, so `detail`'s machines say the rest). The card reads alike for both.
+   */
+  readonly members: string;
+  /** Whose account it is, shown as the agent's logo before the title, on every card so the list reads alike. */
+  readonly agent: AgentMark;
   /** What it reads as without its alias: email, else short id, with any twin tag. */
   readonly plainName: string;
-  /** Named, `exclaves` leads it, since the title no longer says them. */
+  /** Named, what the title no longer says leads it, then its machines. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
   readonly observed: Timed;
@@ -565,7 +581,7 @@ export function until(at: number, now: number): Moment {
  * One exclave's login line (`exclaveAuth` is the one rule). Whole days from a day out, else whole hours,
  * floored like `formatUntil` and never under 1h: "expires in 0h" would read as lapsed.
  */
-function authNote(machine: Machine, index: number, now: number): ExclaveRow["auth"] {
+function authNote(machine: Machine, index: number, now: number): SignInRow["auth"] {
   const auth = exclaveAuth(machine, index, now);
   if (auth.state === "expired") return { text: "needs /login", level: "err" };
   if (auth.state !== "expiring") return null;
@@ -575,7 +591,7 @@ function authNote(machine: Machine, index: number, now: number): ExclaveRow["aut
 }
 
 /** The exclave's failing probes, by trait: "atlas probe failing", "atlas, az probes failing". */
-function probeNote(machine: Machine, exclave: ExclaveInfo, index: number, now: number): ExclaveRow["probes"] {
+function probeNote(machine: Machine, exclave: ExclaveInfo, index: number, now: number): SignInRow["probes"] {
   const failing = (exclave.traits ?? []).filter(
     (trait) => exclaveTraitHealth(machine, index, trait, now) === "failing",
   );
@@ -594,11 +610,66 @@ export function accountDisplayName(
 
 // Through `known`, not the row's own email: one account reports an email on one machine and none on
 // another, and has one label everywhere.
-function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases, known: readonly KnownAccount[]): string {
-  if (exclave.accountId !== null) {
-    return accountNameIn(known, exclave.accountId, aliasOf(aliases, exclave.accountId));
+function accountLabel(
+  login: Pick<ExclaveInfo | AgentLogin, "accountId" | "authOk">,
+  aliases: AccountAliases,
+  known: readonly KnownAccount[],
+): string {
+  if (login.accountId !== null) {
+    return accountNameIn(known, login.accountId, aliasOf(aliases, login.accountId));
   }
-  return exclave.authOk ? "signed in" : "not signed in";
+  return login.authOk ? "signed in" : "not signed in";
+}
+
+/** The agent's own sign-in verb: a login is signed in on its machine's shell, never from the PWA. */
+/** An agent's logo key and its name, the name being the logo's text for a screen reader and a hover. */
+export interface AgentMark {
+  readonly kind: AgentKind;
+  readonly name: string;
+}
+
+/** Claude, which owns the exclaves, beside every agent that signs in as a login. */
+export type AgentKind = "claude" | AgentLoginKind;
+
+function agentMark(agent: AgentLoginKind | null): AgentMark {
+  return agent === null ? { kind: "claude", name: "Claude" } : { kind: agent, name: AGENT_NAMES[agent] };
+}
+
+const LOGIN_VERBS: Readonly<Record<AgentLoginKind, string>> = { codex: "seance codex login" };
+
+/** `loginHealth` in words; null for ok, and for unknown: unread says nothing, as for an exclave. */
+function loginNote(machine: Machine, login: AgentLogin, index: number, now: number): SignInRow["auth"] {
+  switch (loginHealth(machine, index, now)) {
+    case "expired":
+      return { text: `expired: run ${LOGIN_VERBS[login.agent]}`, level: "err" };
+    case "signed_out":
+      return { text: `run ${LOGIN_VERBS[login.agent]}`, level: "warn" };
+    case "unidentified":
+      return { text: "account not identified", level: "warn" };
+    case "blocked":
+      return { text: "included usage blocked", level: "err" };
+    case "ok":
+    case "unknown":
+      return null;
+  }
+}
+
+function loginRow(
+  machine: Machine,
+  login: AgentLogin,
+  index: number,
+  aliases: AccountAliases,
+  known: readonly KnownAccount[],
+  now: number,
+): SignInRow {
+  return {
+    id: AGENT_NAMES[login.agent],
+    agent: agentMark(login.agent),
+    account: accountLabel(login, aliases, known),
+    sessions: null,
+    auth: loginNote(machine, login, index, now),
+    probes: null,
+  };
 }
 
 function machineNote(machine: Machine): string | null {
@@ -709,13 +780,17 @@ function machineCard(
     updateNote: updateNote(machine, now),
     gauges,
     note: machineNote(machine),
-    exclaves: (machine.exclaves ?? []).map((exclave, index) => ({
-      id: exclave.id,
-      account: accountLabel(exclave, aliases, known),
-      sessions: status?.sess?.[index] ?? null,
-      auth: authNote(machine, index, now),
-      probes: probeNote(machine, exclave, index, now),
-    })),
+    signIns: [
+      ...(machine.exclaves ?? []).map((exclave, index) => ({
+        id: exclave.id,
+        agent: agentMark(null),
+        account: accountLabel(exclave, aliases, known),
+        sessions: status?.sess?.[index] ?? null,
+        auth: authNote(machine, index, now),
+        probes: probeNote(machine, exclave, index, now),
+      })),
+      ...(machine.logins ?? []).map((login, index) => loginRow(machine, login, index, aliases, known, now)),
+    ],
     // An asleep machine's history is the archive's alone (A36f); a connected one's daemon keeps the short ranges.
     charts: servesMetrics(machine) || (archived && !machine.connected),
     closed,
@@ -745,7 +820,10 @@ function sessionsOfCard(
 
 interface AccountGroup {
   readonly accountId: string;
-  readonly exclaves: Set<string>;
+  /** Null for Claude. An id is one agent's by construction (a login's is prefixed), so one group has one. */
+  readonly agent: AgentLoginKind | null;
+  /** Exclave ids for Claude; the agent's name for a login. */
+  readonly members: Set<string>;
   readonly machines: Set<string>;
   /** Online hosts that serve `metrics`, in fleet order. */
   readonly charted: string[];
@@ -766,16 +844,18 @@ function quotaBar(label: string, pct: number, resetsAt: number | undefined, now:
 
 /**
  * Credits show only while a window is full: that is when use spills into them,
- * and until then they are a monthly figure nothing on the card is spending.
- * Last month's figure says nothing about this one's, so it shows no bar.
+ * and until then they are a figure nothing on the card is spending.
+ * Last month's Claude figure says nothing about this one's, so it shows no bar;
+ * an agent login's `c` is no monthly figure (`loginCreditsBar`).
  */
-function quotaBars(observation: QuotaReading, now: number): QuotaBar[] {
+function quotaBars(observation: QuotaReading, now: number, login: boolean): QuotaBar[] {
   const bars: QuotaBar[] = [];
   if (observation.h !== undefined) bars.push(quotaBar("5h", observation.h, observation.hr, now));
   if (observation.d !== undefined) bars.push(quotaBar("7d", observation.d, observation.dr, now));
   for (const window of observation.w ?? []) bars.push(quotaBar(`7d ${window.m}`, window.p, window.r, now));
-  if (observation.c === undefined || !sameCreditMonth(observation.at, now / 1000)) return bars;
-  if (!bars.some((bar) => bar.pct >= 100)) return bars;
+  if (observation.c === undefined || !bars.some((bar) => bar.pct >= 100)) return bars;
+  if (login) return [...bars, loginCreditsBar(observation.c)];
+  if (!sameCreditMonth(observation.at, now / 1000)) return bars;
   return [...bars, creditsBar(observation)];
 }
 
@@ -797,6 +877,20 @@ function creditsBar({ c, cu, cl }: QuotaReading): QuotaBar {
 }
 
 /**
+ * An agent login's Credits bar (docs/codex.md, "Credits and spill"): `c` is 100 less the member limit's remaining
+ * percent where one is reported, else 0 while the account can spend and 100 once it cannot. So the note names the
+ * state where the dollar note would go: available at 0 (a member limit untouched reads the same, and is), spent at
+ * 100, the member limit's share between. Never an amount: Codex's unit is unstated until a real spill settles it (O2).
+ */
+function loginCreditsBar(c: number): QuotaBar {
+  const base = gauge("Credits", c);
+  // As Claude's (`creditsBar`): on screen only while spending, so never green.
+  const bar = base.level === "ok" ? { ...base, level: "warn" as const } : base;
+  const note = bar.pct >= 100 ? "spent" : bar.pct <= 0 ? "available" : "member limit";
+  return { ...bar, note: [note] };
+}
+
+/**
  * Each daemon stores only what its own exclaves observed, so the host that saw
  * the account last has the freshest history; any other online host beats none.
  */
@@ -806,9 +900,8 @@ function historyHost(group: AccountGroup, newest: Machine | undefined): string |
 }
 
 function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): Timed {
-  if (quota === undefined) {
-    return ["No quota seen yet. It shows once a session has run and its machine has reported."];
-  }
+  // One text for every kind: a Claude account's reading comes from a session, a login's from its machine's probe.
+  if (quota === undefined) return ["No quota seen yet. It shows once its machine has reported."];
   // Only the fleet quota record outlives its observer's registry entry.
   if (observer === undefined) {
     return timed`${quota.observation.s} · ${seen(quota.observation.at * 1000, now)} on a machine no longer listed`;
@@ -822,8 +915,10 @@ function observedLine(quota: NewestQuota | undefined, observer: Machine | undefi
  * `newestQuotaByAccount`'s rule (DESIGN.md, PWA), over the statuses and the fleet quota
  * record. An asleep machine's kept status counts like a live one, its age on the observed
  * line; a machine with no status at all names the account but contributes no numbers, unless
- * the record holds a reading for it. Exclaves that
+ * the record holds a reading for it. Exclaves and agent logins that
  * aren't signed in have no account to group under and appear only on their card.
+ * An agent login's account is a card like a Claude one (docs/codex.md, "Goal"), badged with its agent
+ * and titled by its name rather than by exclave ids, which it has none of.
  */
 function deriveAccounts(
   machines: readonly Machine[],
@@ -835,34 +930,38 @@ function deriveAccounts(
   holds: AccountHolds,
 ): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
+  const join = (machine: Machine, accountId: string, agent: AgentLoginKind | null, member: string): void => {
+    const group = groups.get(accountId) ?? {
+      accountId,
+      agent,
+      members: new Set(),
+      machines: new Set(),
+      charted: [],
+    };
+    group.members.add(member);
+    group.machines.add(machine.name);
+    if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
+    groups.set(accountId, group);
+  };
   for (const machine of machines) {
-    const exclaves = machine.exclaves ?? [];
-    for (const exclave of exclaves) {
-      if (exclave.accountId === null) continue;
-      const group = groups.get(exclave.accountId) ?? {
-        accountId: exclave.accountId,
-        exclaves: new Set(),
-        machines: new Set(),
-        charted: [],
-      };
-      group.exclaves.add(exclave.id);
-      group.machines.add(machine.name);
-      if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
-      groups.set(exclave.accountId, group);
+    for (const exclave of machine.exclaves ?? []) {
+      if (exclave.accountId !== null) join(machine, exclave.accountId, null, exclave.id);
+    }
+    for (const login of machine.logins ?? []) {
+      if (login.accountId !== null) join(machine, login.accountId, login.agent, AGENT_NAMES[login.agent]);
     }
   }
 
   const newest = newestQuotaByAccount(machines, fleetQuota);
-  // Titles tell the cards, and their ⋯ labels, apart: a repeated one gains the exclave ids, then the
-  // machines, and finally the account id, which no other account shares.
+  // Titles tell the cards, and their ⋯ labels, apart: a repeated one gains the exclave ids, then the machines, and
+  // finally the account id, which no other account shares.
   const tiers = (group: AccountGroup): string[] => {
     const alias = aliasOf(aliases, group.accountId);
-    const exclaves = [...group.exclaves].join(" · ");
+    const on = [...group.machines].join(", ");
+    const exclaves = [...group.members].join(" · ");
     const base = alias ?? exclaves;
-    const withExclaves = alias === undefined ? exclaves : `${alias} (${exclaves})`;
-    const onMachines = `${exclaves} on ${[...group.machines].join(", ")}`;
-    const withMachines = alias === undefined ? onMachines : `${alias} (${onMachines})`;
-    return [base, withExclaves, withMachines, `${base} (${group.accountId})`];
+    const named = (inner: string): string => (alias === undefined ? inner : `${alias} (${inner})`);
+    return [base, named(exclaves), named(`${exclaves} on ${on}`), `${base} (${group.accountId})`];
   };
   const candidates = new Map([...groups.values()].map((group) => [group.accountId, tiers(group)]));
   const taken = (tier: number, title: string): number =>
@@ -876,19 +975,20 @@ function deriveAccounts(
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
     const alias = aliasOf(aliases, group.accountId);
-    const exclaves = [...group.exclaves].join(" · ");
+    const members = [...group.members].join(" · ");
     const plainName = accountNameIn(known, group.accountId);
-    const where = `${plainName} · on ${[...group.machines].join(", ")}`;
+    const on = `on ${[...group.machines].join(", ")}`;
     const historyFrom = historyHost(group, observer);
     const held = holds.known ? accountHold(holds.holds, group.accountId, now) : undefined;
     return {
       accountId: group.accountId,
       alias: alias ?? null,
       title: titleOf(group.accountId),
-      exclaves,
+      members,
+      agent: agentMark(group.agent),
       plainName,
-      detail: alias === undefined ? where : `${exclaves} · ${where}`,
-      bars: quota === undefined ? [] : quotaBars(quota.observation, now),
+      detail: [...(alias === undefined ? [] : [members]), plainName, on].join(" · "),
+      bars: quota === undefined ? [] : quotaBars(quota.observation, now, group.agent !== null),
       observed: observedLine(quota, observer, now),
       historyFrom,
       charts: archived || historyFrom !== null,

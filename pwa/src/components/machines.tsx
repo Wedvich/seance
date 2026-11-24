@@ -24,7 +24,7 @@ import {
 import { ACCOUNT_ALIAS_MAX_LENGTH, type CustodianRequest, type Machine } from "@seance/shared";
 import type { Timed } from "../timed.ts";
 import { canDrainNow, type CloseKind, type ConnectionState } from "../view.ts";
-import { StrokeIcon } from "./icons.tsx";
+import { AgentLogo, StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuGroup, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
@@ -260,6 +260,7 @@ function MachineCardView(props: {
   const menu = useMenu();
   // Kept while a chart is open even if its source drops: the item is the chart's only close.
   const offersHistory = card.charts || history !== null;
+  const attention = card.signIns.filter((row) => row.auth !== null || row.probes !== null);
 
   return (
     <section className="fleet-card card">
@@ -375,21 +376,22 @@ function MachineCardView(props: {
         </p>
       )}
 
-      {card.connected && card.exclaves.some((row) => row.auth !== null || row.probes !== null) && (
+      {card.connected && attention.length > 0 && (
         <ul className="exclaves">
-          {card.exclaves
-            .filter((row) => row.auth !== null || row.probes !== null)
-            .map((row) => (
-              <li key={row.id} className="exclave">
-                <span className="exclave-id">{row.id}</span>
-                {row.auth !== null && (
-                  <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
-                )}
-                {row.probes !== null && (
-                  <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
-                )}
-              </li>
-            ))}
+          {attention.map((row) => (
+            <li key={`${row.agent.kind}:${row.id}`} className="exclave">
+              <span className="exclave-id">
+                <AgentLogo kind={row.agent.kind} name={row.agent.name} size={12} className="exclave-logo" />
+                {row.id}
+              </span>
+              {row.auth !== null && (
+                <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
+              )}
+              {row.probes !== null && (
+                <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
+              )}
+            </li>
+          ))}
         </ul>
       )}
 
@@ -478,6 +480,7 @@ function AccountCardView(props: {
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <div className="fleet-name-row">
+            <AgentLogo kind={account.agent.kind} name={account.agent.name} size={15} className="fleet-agent-logo" />
             <h2 className="fleet-name">{account.title}</h2>
             {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
@@ -634,7 +637,7 @@ function RenameDialog(props: {
         }}
       >
         <p className="rename-account">
-          {account.plainName} · {account.exclaves}
+          {account.plainName} · {account.members}
         </p>
         <label className="rename-label" htmlFor={inputId}>
           Account name
@@ -657,7 +660,7 @@ function RenameDialog(props: {
             <span>
               {blocked
                 ? "Another account's name is still saving. Save is on hold until it lands."
-                : `Shown as the card title. Leave it empty to go back to “${account.exclaves}”.`}
+                : `Shown as the card title. Leave it empty to go back to “${account.members}”.`}
             </span>
             <span className="rename-count">
               {draft.length}/{ACCOUNT_ALIAS_MAX_LENGTH}

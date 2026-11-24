@@ -2411,6 +2411,18 @@
   color: var(--auto);
 }
 
+/* Which agent an account is: a fact, not a state, so neutral where Leader and Closed are coloured. */
+/*
+ * The meta line's colour, faded further (a sign-in row's logo too): a filled mark reads darker than thin mono text in the same colour, and the
+ * palette is locked, so opacity rather than a new token.
+ */
+.fleet-agent-logo,
+.exclave-logo {
+  flex: none;
+  color: var(--fg2);
+  opacity: 0.6;
+}
+
 .fleet-badge-unverified,
 .fleet-badge-closed {
   border-color: var(--warn);
@@ -2554,6 +2566,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Inline in the id's text run, so the id keeps its ellipsis. */
+.exclave-logo {
+  margin-right: 6px;
+  vertical-align: -1px;
 }
 
 .exclave-account {

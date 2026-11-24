@@ -1,6 +1,6 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 items 1, 2 and 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
+**Status: phase 1 (items 1, 2, 3) and item 5 built, the rest design.** Item 1 (2026-11-23), the daemon's side of the account — the
 `codex` config block, the home and its generated `config.toml`, the version floor, the probe, `seance codex login |
 logout | status`, `MachineInfo.logins` and `MachineStatus.lq`/`lx`/`lu`/`lb` — is recorded in DESIGN.md: Daemon, "Codex
 login"; Presence & identity (the status fields and their trim); and the threat model's "A second credential store, never
@@ -8,7 +8,8 @@ opened", "Identity, quota and login health come over Codex's API", "A second bin
 doc's threat-model items 1–3 and 12's login line). Item 5, the driver seam, is in DESIGN.md, Daemon, "Agent drivers".
 Item 2 (2026-11-24), the fleet's readers of a login, is in DESIGN.md, Daemon, "Codex login", "Fleet readers"; Scheduler,
 "Auth alerts" and "Fleet quota record"; Archivist, "Metrics"; and the threat model's "The fleet reads an agent login
-as it reads an exclave". Where this doc and DESIGN.md differ on those, DESIGN.md is the record.
+as it reads an exclave". Item 3 (2026-11-24), the PWA's view of a login, is in DESIGN.md, PWA, "An agent login is an
+account like a Claude one", and Account records (only a twin of the same kind is tagged). Where this doc and DESIGN.md differ on those, DESIGN.md is the record.
 Written 2026-11-23 from docs/agents.md (the scoping, both Codex spikes
 of 2026-11-19 on 0.166.0, the owner's decisions of 2026-11-19) and a read of the code at `923bb32`. API names were
 checked against the app-server schema that **codex-cli 0.170.0** generates. Spikes S2, S3 and S6 ran on macOS against
@@ -196,7 +197,7 @@ stateDir()/codex/              0700, the daemon's own
 - **On the wire, `c` and never `cu`/`cl`.** `c` is `100 − individualLimit.remainingPercent` when a member limit is
   reported, else `0` while the account can spend and `100` once it cannot, so routing's `creditsSpent` reads it
   unchanged. `cu` and `cl` are USD cents; Codex's `balance`, `used` and `limit` are strings in a unit no response states.
-  _Decided: no amount shown, because_ O2 leaves the unit to the first real spill: the account card shows credits as
+  _Decided: no amount shown, because_ O2 leaves the unit to the first real spill: the account card's Credits bar notes
   available, a percent of the member limit, or spent. The Business login in S6 reported `hasCredits: false`, so it
   cannot spill today.
 
@@ -541,8 +542,12 @@ task (2026-11-23) after the ones it names.
    `newestQuotaByAccount` and the fleet quota writer fold `lq`; `knownAccounts` reads `logins`; MCP `list_machines`;
    the archivist's quota series; the leader's login alert and its `authAlerts` key. _Corrected at build:_
    `list_machines` shows no quota for an exclave, so it shows none for a login either ("as it shows an exclave's").
-3. **The PWA** (after 2): the account card (an agent badge, the windows, the credits state, rename, the "Open for work"
-   switch through the existing account hold) and the Machines card's login row.
+3. **Built 2026-11-24** (DESIGN.md, PWA, "An agent login is an account like a Claude one"). **The PWA** (after 2): the
+   account card (an agent badge, built as a logo on every card, the windows, the credits state, rename, the "Open for work" switch through the existing
+   account hold) and the Machines card's login row. Built as one card and one row type for every kind, the logo
+   the only difference (owner, 2026-11-24): no outdated-binary note, plan or workspace. _Corrected at build:_ item 2's
+   labels tagged a Codex twin of a Claude account with both org halves; only a twin of the same kind is tagged now
+   (DESIGN.md, Account records).
 
 **Phase 2: auto tasks run.** Checks S1's and S4's rest and S8's macOS half first; they need the owner, and decide
 nothing.

@@ -1,9 +1,12 @@
 import {
+  AGENT_ACCOUNT_PREFIXES,
+  AGENT_LOGIN_KINDS,
   APP_ID,
   AT_REST_OPS,
   STORE_PREFIXES,
   type AccountRecord,
   type AgentLogin,
+  type AgentLoginKind,
   type Envelope,
   type RecordUnreadable,
   type ExclaveInfo,
@@ -78,11 +81,22 @@ const orgHalf = (accountId: string): string => {
  * the whole account id where a twin shares the org half (two accounts of one org
  * whose account halves share a prefix) or there is no org half to name.
  */
-function twinTag(accountId: string, twins: readonly KnownAccount[]): string {
+function twinTag(accountId: string, twinIds: readonly string[]): string {
   const org = orgHalf(accountId);
-  if (org === "" || twins.some((twin) => orgHalf(twin.accountId) === org)) return `id ${accountId}`;
+  if (org === "" || twinIds.some((twin) => orgHalf(twin) === org)) return `id ${accountId}`;
   const short = org.slice(0, 8);
-  return twins.some((twin) => orgHalf(twin.accountId).slice(0, 8) === short) ? `org ${org}` : `org ${short}`;
+  return twinIds.some((twin) => orgHalf(twin).slice(0, 8) === short) ? `org ${org}` : `org ${short}`;
+}
+
+/** The agent whose login an id names, by its prefix; null for Claude's, which carry none. */
+function agentOf(accountId: string): AgentLoginKind | null {
+  return AGENT_LOGIN_KINDS.find((kind) => accountId.startsWith(AGENT_ACCOUNT_PREFIXES[kind])) ?? null;
+}
+
+/** The id less its agent prefix, so an agent login's twin tag names its workspace half as a Claude one names its org. */
+function bareId(accountId: string): string {
+  const agent = agentOf(accountId);
+  return agent === null ? accountId : accountId.slice(AGENT_ACCOUNT_PREFIXES[agent].length);
 }
 
 /**
@@ -98,6 +112,10 @@ function twinTag(accountId: string, twins: readonly KnownAccount[]): string {
  * unaliased twin is tagged all the same: the label of one account then reads
  * alike in every client, whether or not that client could read the aliases
  * (a keyless `seance mcp`, a refused listing).
+ *
+ * Only a twin of the same kind counts: one person's Claude login and ChatGPT login under one email both read as the
+ * email, since every client already shows the kind beside the label (the PWA's logo, MCP's `exclaves` and `logins`),
+ * and signing in to Codex then never retags a Claude account.
  */
 export function accountName(
   accountId: string,
@@ -108,8 +126,18 @@ export function accountName(
   if (alias !== undefined) return alias;
   const name = fallbackName(accountId, email);
   const key = name.toLowerCase();
-  const twins = known.filter((other) => other.accountId !== accountId && nameKey(other.accountId, other.email) === key);
-  return twins.length === 0 ? name : `${name} (${twinTag(accountId, twins)})`;
+  const agent = agentOf(accountId);
+  const twins = known.filter(
+    (other) =>
+      other.accountId !== accountId &&
+      agentOf(other.accountId) === agent &&
+      nameKey(other.accountId, other.email) === key,
+  );
+  if (twins.length === 0) return name;
+  return `${name} (${twinTag(
+    bareId(accountId),
+    twins.map((other) => bareId(other.accountId)),
+  )})`;
 }
 
 /** `accountName` for an id alone, its email whatever `known` reports for it. */

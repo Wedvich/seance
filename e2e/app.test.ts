@@ -158,7 +158,7 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
       // The daemon runs from this checkout, so its register blob names the build. Needs a git checkout (readSource).
       expect(plain(card?.build ?? [])).toMatch(/^[0-9a-f]{12} · committed /u);
-      expect(card?.exclaves.map((row) => row.id)).toContain("default");
+      expect(card?.signIns.map((row) => row.id)).toContain("default");
     } finally {
       app.stop();
     }

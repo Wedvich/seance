@@ -1,4 +1,11 @@
-import { AGENT_LOGIN_TEXT_MAX, isRecord, TASK_SPEC_LIMITS, type QuotaReading, type ScopedWindow } from "@seance/shared";
+import {
+  AGENT_ACCOUNT_PREFIXES,
+  AGENT_LOGIN_TEXT_MAX,
+  isRecord,
+  TASK_SPEC_LIMITS,
+  type QuotaReading,
+  type ScopedWindow,
+} from "@seance/shared";
 import { childEnv, exec } from "../exec.ts";
 
 /**
@@ -381,7 +388,7 @@ export function parseRateLimits(value: unknown): RateLimitsRead | null {
 /** `codex:<account>:<user>`, or null when either half is missing or the whole would not pass `isAccountId`. */
 export function codexAccountId(accountId: string | null, userId: string | null): string | null {
   if (accountId === null || userId === null || accountId === "" || userId === "") return null;
-  const id = `codex:${accountId}:${userId}`;
+  const id = `${AGENT_ACCOUNT_PREFIXES.codex}${accountId}:${userId}`;
   return id.length > TASK_SPEC_LIMITS.account ? null : id;
 }
 

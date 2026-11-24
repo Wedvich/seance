@@ -990,6 +990,15 @@ export interface ExclaveInfo {
 export const AGENT_LOGIN_KINDS = ["codex"] as const;
 export type AgentLoginKind = (typeof AGENT_LOGIN_KINDS)[number];
 
+/** An agent's name to a person: the PWA's account badge and login row, and an account label's kind tag. */
+export const AGENT_NAMES: Readonly<Record<AgentLoginKind, string>> = { codex: "Codex" };
+
+/**
+ * What a login's account id starts with: `codex:<account>:<user>` (DESIGN.md, Daemon, "Codex login"). Claude's ids
+ * carry no prefix, so the prefix alone names an id's kind (docs/codex.md, "Identity").
+ */
+export const AGENT_ACCOUNT_PREFIXES: Readonly<Record<AgentLoginKind, string>> = { codex: "codex:" };
+
 /** `AgentLogin`'s display strings at most: a skewed blob must not carry a large one around. */
 export const AGENT_LOGIN_TEXT_MAX = 256;
 
