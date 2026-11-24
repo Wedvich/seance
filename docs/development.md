@@ -335,10 +335,14 @@ the file's other tests are what a new one leaks into.
 2. **The same under CPU load.** Busy every core for the length of a run:
 
    ```bash
-   trap 'kill $(jobs -p) 2>/dev/null' EXIT
-   for i in $(seq "$(getconf _NPROCESSORS_ONLN)"); do (while :; do :; done) & done
+   pids=()
+   for i in $(seq "$(getconf _NPROCESSORS_ONLN)"); do (while :; do :; done) & pids+=($!); done
+   trap 'kill "${pids[@]}" 2>/dev/null' EXIT
    bun run test <file> --rerun-each=20
    ```
+
+   Track the PIDs explicitly: in zsh `$(jobs -p)` runs in a subshell with no jobs, so a
+   `kill $(jobs -p)` trap kills nothing and the loops outlive the shell.
 
 3. **No real-time window the test does not drive.** List every timer the code under test arms while the
    test is waiting on it: a grace, a debounce, a timeout, an interval. Each must be driven by the test (an
