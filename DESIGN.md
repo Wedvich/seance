@@ -8382,7 +8382,7 @@ of this section built.
   session — the window only; its worktree and branch are `seance reap`'s. The
   wire op `despawn { id, force?, client? }`, `seance despawn <id> [--force]`
   and the MCP tool `despawn_session` all reach `SessionBackend.despawn`. The PWA's
-  Queue screen sends it graceful only (Close, no `force`, since 2026-11-24: docs/work.md); no Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
+  Work screen sends it graceful only (Close, no `force`, since 2026-11-24: docs/work.md); no Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
   the session list now carries (optional on the wire, so an older daemon simply
   omits it). A wire-supplied id must match `^%\d+$` before tmux sees it —
   `-t` would also resolve `main:1.0`, `{marked}` or `=name` — and must name a
@@ -9414,20 +9414,21 @@ per-platform `procStart` read come from the spikes (docs/tags.md, "Spikes").
 **The join and the name.** `joinTags(task?, conversation?, process?)` is the one place precedence lives; a key exists
 at one scope by construction, bar `owner.label`, where the task's wins. `displayName` is used only on the owner's own
 surfaces (the PWA) and in an adapter's `Session`; anything that puts a name in another agent's context (a message
-wrapper, a receipt, the custodian's `sessions`, MCP) keeps the task's title or the window, since `self.name` is
+wrapper, a receipt, the custodian's `sessions`, MCP, the `seance` CLI: a session can run it) keeps the task's title or the window, since `self.name` is
 session-chosen text. The reader joins, since no single process holds both scopes; the daemon gets only a task's ref
 (`SpawnRequest.ref`, for adapters), never `owner.*`, so there is no stale second copy of the owner's label.
 
-| Surface                                  | Gets                                                                               |
-| ---------------------------------------- | ---------------------------------------------------------------------------------- |
-| PWA (Queue, task details)                | a task's label and ref; on the Queue screen, each session's joined tags and `live` |
-| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included, and `live`              |
-| `sessions` op sealed from the scheduler  | none, and no `live`                                                                |
-| MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                              |
-| adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref              |
-| custodian `sessions` verb                | no tag                                                                             |
-| `MachineStatus`, push, logs, audit, argv | never                                                                              |
-| archive                                  | `creator.ref`, `creator.ref-url` only                                              |
+| Surface                                    | Gets                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| PWA (Work, task details)                   | a task's label and ref; on the Work screen, each session's joined tags and `live`    |
+| `seance close --wait`, MCP `list_machines` | an untasked stuck pane's window (and MCP: its pane id), never a label or `self.name` |
+| `sessions` op to an app                    | session tags (`SessionEntry.tags`), adapter tags included, and `live`                |
+| `sessions` op sealed from the scheduler    | none, and no `live`                                                                  |
+| MCP `get_sessions`, `get_queue`            | `AGENT_VISIBLE_TAG_KEYS` only (below)                                                |
+| adapter `Session`                          | session tags but other adapters' `adapter.*`, plus the dispatched ref                |
+| custodian `sessions` verb                  | no tag                                                                               |
+| `MachineStatus`, push, logs, audit, argv   | never                                                                                |
+| archive                                    | `creator.ref`, `creator.ref-url` only                                                |
 
 **The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`; off the Machines card
 since 2026-11-19, on the Queue screen since 2026-11-24, docs/work.md Order step 2: a session's row there, or the row of
@@ -9986,7 +9987,15 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
   must not cost a read per nudge), when the Machines screen opens and when its status's session
   counts change; a sessions read not yet answered reads "reading", an unanswered one "unknown". The
   sheet folds a `needs-input` task into "N running tasks" (on a `drainAsk` target it adds a separate
-  "waiting on you" line, below), and lists an untasked pane per line rather than counting it. `seance close
+  "waiting on you" line, below), and lists an untasked pane per line rather than counting it. Since 2026-11-24
+  (docs/work.md WS7) such a line names the session: `DrainStuck.session` carries the `SessionEntry` beside
+  `untasked` (display-only), the sheet and row name it by `displayName` (owner label, else `self.name`, else the
+  window, the last two marked), and on a closed machine's row the line is a link opening that session's row on the
+  Work screen (`sessionRowId`, focused as a deep link's task is) when the daemon sends the pane id, where Close is.
+  `seance close --wait` names it by its window alone, JSON-quoted (`drainStuckLabel`, `daemon/src/cli-auto.ts`,
+  injected into `waitForDrain` so the naming stays out of `seance mcp`'s closure): the CLI is not an owner-only
+  surface, since any process holding the app keys can run it, a session included, so it never prints `owner.label`
+  or `self.name`; MCP `list_machines`, read by sessions, gives only `window` and `pane`. No name reaches a log or audit line. `seance close
   [--wait]` exits 0 when empty (a successor still `unplaced` is listed after "is empty" and does not
   block it), 2 when only stuck work is left, 1 on a failure; it uses the close reply's `closed` as the
   drain's `cl` since status lags. Exit 1 also covers a reopen (a status without `cl` that was sampled after
@@ -11859,6 +11868,31 @@ as the default.
   `store-changed` ignored while hidden lists the accounts again the same way. A pending enqueue is not persisted across a reload: a lost
   reply there leaves the task queued and visible on the Queue screen, which is the way back to it.
   A picked machine or account is a pin on the same task (above).
+- **The Work screen** (2026-11-24, docs/work.md; named the Queue screen until then, and so throughout older entries
+  here) lists every live session a connected machine reports beside the queue's tasks (WS1). Reads: `sessions` from
+  each connected machine when it opens and, while it shows, on each `MachineStatus.sg` change for a machine advertising
+  `CAPABILITIES.sessionLive` (else on the `sess` counts, the drain row's key), spaced at most once per ten seconds per
+  machine with a trailing read, only while the document is visible; an asleep or offline machine keeps its last read.
+  Join (`deriveQueue`, `pwa/src/queue-view.ts`): a session whose `taskId` the queue lists folds into that task's row
+  (its pane, Close, tags); one the capped list leaves out is a session row marked "Task not listed" (shown only once a
+  list was read, since before one every tasked session would read unlisted; a failed queue's reason stays shown beside
+  session rows), a second session
+  of a listed task one marked "Another session of a task", and one with no `taskId` an untasked row, marked "Not a
+  task". A session that is not a task is a `claude` in a pane of the daemon's tmux server with no `@seance-task` (a
+  hand-started session, or an old `spawnUntracked`); one in a plain terminal or an IDE binds to nothing and never
+  shows, and the custodian's round is never a session. A session row is named by `displayName`, carries Rename
+  (`CAPABILITIES.sessionTag`), Close (the owner's graceful despawn), Open on claude.ai and Tags, never Continue, Pass,
+  Mark done or Cancel (those need a record), and its id is `session:<deviceId>:<pane or window>` (`sessionRowId`),
+  which focus and a drain line's link use. Sections by `live` (WS2, WS4): `needs-input` to Needs you, `busy` or no
+  `live` to Running ("state unknown"), `idle` to Idle, an asleep machine's to Asleep; a task row without `live` keeps
+  the leader's idle list. Within a section task rows come first, then session rows by `live.since` (this device's
+  clock), oldest first, no `live` last. The summary's "N/max running" follows the leader's slot accounting and counts
+  session rows apart ("· 2 sessions"), never against the cap. Close is on a tasked row too, after Cancel, asking twice:
+  a direct request to the machine, so it works while no leader leads; the task ends with its session, not as a cancel.
+  The rename changed words only: `Screen` stays `"queue"` in code and history state, so deep links and persisted state
+  are unchanged, and the composer's Queue button (it queues a task) keeps its name. `live` reaches no log, audit line
+  or push, and Close is the existing owner despawn: no new act. No push alert for an untasked session waiting on you
+  (WS5), and `live` stays off MCP (WS6). What follows describes the task rows.
 - **The Queue screen** (M3 item 6) is the app's view of the relay's queue, opened from the
   phone's header menu (an attention dot on it while a task is escalated). It reads `queue` from the leader
   and so shows nothing while none leads — it says why ("No scheduler is leading right now") and

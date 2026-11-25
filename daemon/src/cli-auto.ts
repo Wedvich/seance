@@ -1,10 +1,12 @@
 import {
   CAPABILITIES,
   creatorTaskTags,
+  displayLine,
   refTags,
   resolveNotBefore,
   withAutonomy,
   type AmendDraft,
+  type DrainStuck,
 } from "@seance/shared";
 import { setAccountOpen, setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
@@ -452,9 +454,21 @@ export async function cmdAvailabilityAuto(
     closedAt: outcome.closed.at,
     draining: outcome.closed.draining,
     print: (line) => console.log(line),
+    label: drainStuckLabel,
   }).finally(() => built.fleet.stop());
   (drained.code === 0 ? console.log : console.error)(drained.text);
   process.exit(drained.code);
+}
+
+/**
+ * What a `--wait` line names an item by: a task by its id, an untasked session by its window. Never `displayName`:
+ * any process holding the app keys can run `seance close --wait`, a session included, so the CLI keeps to what
+ * `get_sessions` gives an agent and never prints `owner.label` or the session-chosen `self.name` (DESIGN.md, "The
+ * join and the name"). JSON-quoted, so a quote or an empty name stays unambiguous.
+ */
+export function drainStuckLabel(stuck: DrainStuck): string {
+  if (stuck.session === undefined) return stuck.taskId ?? "-";
+  return `window ${JSON.stringify(displayLine(stuck.session.window))}`;
 }
 
 export async function cmdPassAuto(args: PassCliArgs): Promise<void> {

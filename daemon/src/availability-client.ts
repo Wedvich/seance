@@ -17,6 +17,7 @@ import {
   leadsQueue,
   schedulerErrorText,
   type AvailabilityRequest,
+  type DrainStuck,
   type SessionsResponse,
   type Task,
 } from "@seance/shared";
@@ -272,10 +273,16 @@ export async function waitForDrain(opts: {
   /** How long a machine may stay offline before the wait gives up; tests only. */
   readonly offlineGraceMs?: number;
   readonly print?: (line: string) => void;
+  /**
+   * What a line names an item by; the task id (`-` for none) by default. The owner's CLI passes one naming an untasked
+   * session (`cli-auto.ts`), kept there so no session name enters `seance mcp`'s module graph, which reaches this one.
+   */
+  readonly label?: (stuck: DrainStuck) => string;
 }): Promise<DrainWaitOutcome> {
   const { fleet, deviceId } = opts;
   const pollMs = opts.pollMs ?? 5_000;
   const print = opts.print ?? ((): void => undefined);
+  const label = opts.label ?? ((s: DrainStuck): string => s.taskId ?? "-");
   let sawCurrent = false;
   let saidSoft = false;
   let saidIdle = false;
@@ -342,7 +349,7 @@ export async function waitForDrain(opts: {
         unreadable = 0;
         const { tasks } = queue;
         const view = drainView(machine, tasks, sessions.sessions, { cl: opts.closedAt, draining, idle: queue.idle });
-        const lineOf = (s: (typeof view.stuck)[number]): string => `${s.taskId ?? "-"} ${drainStuckText(s)}`;
+        const lineOf = (s: DrainStuck): string => `${label(s)} ${drainStuckText(s)}`;
         if (view.empty === true) {
           const unplaced = view.stuck.filter((s) => s.reason === "unplaced").map(lineOf);
           return { code: 0, text: [`${machine.name} is empty`, ...unplaced].join("\n") };

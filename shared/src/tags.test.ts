@@ -6,6 +6,7 @@ import {
   creatorTaskTags,
   displayLine,
   displayName,
+  joinSessionTags,
   joinTags,
   linearRefTags,
   ownerTagsOf,
@@ -249,6 +250,26 @@ describe("joinTags and displayName", () => {
     expect(displayName(self, { title: " \n" }, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName(self, null, "zsh")).toEqual({ text: "self named", source: "self" });
     expect(displayName({}, undefined, "zsh\u0007")).toEqual({ text: "zsh", source: "window" });
+  });
+
+  test("joinSessionTags splits a SessionEntry's tags by scope, drops what fails, and the task layer wins", () => {
+    const raw = {
+      "owner.label": { value: "conv label", at: 2, scope: "conversation" },
+      "self.name": { value: "self named", at: 1, scope: "process" },
+      "agent.kind": { value: "claude", at: 1, scope: "task" },
+      "bogus key": { value: "x", at: 1, scope: "process" },
+    };
+    expect(joinSessionTags(raw)).toEqual({
+      "owner.label": { value: "conv label", at: 2, scope: "conversation" },
+      "self.name": { value: "self named", at: 1, scope: "process" },
+    });
+    expect(joinSessionTags(raw, { "owner.label": { value: "task label", at: 3 } })["owner.label"]).toEqual({
+      value: "task label",
+      at: 3,
+      scope: "task",
+    });
+    expect(joinSessionTags(undefined)).toEqual({});
+    expect(displayName(joinSessionTags(raw), null, "zsh")).toEqual({ text: "conv label", source: "owner" });
   });
 
   test("an adapter's tag is never the name, whatever its suffix", () => {

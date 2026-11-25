@@ -24,6 +24,11 @@ export interface DrainStuck {
   readonly reason: DrainStuckReason;
   /** The pass refusal behind `refused`. */
   readonly code?: DrainRefusal;
+  /**
+   * The pane behind `untasked`, as `sessions` read it: display-only, each surface names it by its own rule (the owner's
+   * by `displayName`, an agent's by the window alone; docs/work.md WS7).
+   */
+  readonly session?: SessionEntry;
 }
 
 export interface DrainMoving {
@@ -115,7 +120,7 @@ export function drainView(
 
   for (const session of sessions ?? []) {
     if (session.taskId === undefined) {
-      stuck.push({ reason: "untasked" });
+      stuck.push({ reason: "untasked", session });
       continue;
     }
     if (counted.has(session.taskId)) continue;

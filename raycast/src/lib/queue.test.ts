@@ -65,7 +65,7 @@ describe("enqueue", () => {
       // oxlint-disable-next-line no-await-in-loop -- each case in turn
       const outcome = await enqueue(throwing(new RequestFailure(reason, "lost", "relay")), task);
       expect(outcome.kind).toBe("unsure");
-      expect(outcome.kind === "unsure" && outcome.message).toContain("check the Queue in the app");
+      expect(outcome.kind === "unsure" && outcome.message).toContain("check the Work screen in the app");
     }
   });
 

@@ -432,7 +432,7 @@ Beside the mods it writes a few **settings hooks** into each config directory's
 `settings.json` (`SessionStart`, `Stop`, `StopFailure`, `Elicitation`,
 `ElicitationResult`), running the same command with `--hook`. They fill gaps the mod can't
 see: a fresh session's idle, an MCP server asking you something, and what a turn left
-running when it ended. That last one lets the Queue screen say an idle task is "waiting on
+running when it ended. That last one lets the Work screen say an idle task is "waiting on
 its background work (1 shell)", such as a CI watch, rather than just sitting at its prompt.
 Only séance's own entries are touched, and `seance mod uninstall` removes them.
 
@@ -773,9 +773,11 @@ queues and waits there until one does; only the placement preview needs a leader
 Queuing is greyed only when the app isn't connected to the relay. A pinned task waits for
 its machine or account when it is offline or over a limit, and says why; one still waiting
 after 30 days fails, so a machine back later never runs a month-old prompt. Pinning an
-account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
-desktop, in the header menu on a phone) shows everything queued: what needs you, what
-is running or waiting, and what finished. Each card shows its likeliest next step and keeps
+account needs a leader that supports it, and says so otherwise. The **Work screen** (a column on
+desktop, in the header menu on a phone; named Queue until 2026-11-24) shows everything queued: what needs you, what
+is running or waiting, and what finished, and beside the tasks every live session that is not one (a hand-started
+`claude`), placed by its live state, with **Close**. A closed machine's drain row names each such session and opens
+its row there. Each card shows its likeliest next step and keeps
 every action behind its ⋯ menu, **Cancel** and **Mark done** included (each takes a second
 tap when it would end a running session); the footer has **Pause** / **Resume**, for the
 whole queue; a hold on one account shows with its own **Resume**. The queue

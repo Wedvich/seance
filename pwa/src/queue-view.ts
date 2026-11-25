@@ -48,6 +48,7 @@ import { settlingInput } from "./input-debounce.ts";
 import {
   accountDisplayName,
   formatUntil,
+  sessionRowId,
   sessionRows,
   type SessionRow,
   type SessionTagGroup,
@@ -254,7 +255,7 @@ export interface CloseTarget {
  * capped list leaves out. It has no record to act on, so it offers only what acts on the session itself.
  */
 export interface SessionQueueRow {
-  /** `session:<deviceId>:<pane>`: never a task id, so no task act or reveal can name it. */
+  /** `sessionRowId`: never a task id, so no task act can name it; the drain row's link focuses it (WS7). */
   readonly id: string;
   readonly deviceId: string;
   /** `displayName` through `sessionRows`. */
@@ -290,6 +291,11 @@ export interface QueueSection {
   readonly rows: readonly QueueRow[];
   /** The sessions it places beside its tasks, after them; only Needs you, Running, Idle and Asleep hold any. */
   readonly sessions: readonly SessionQueueRow[];
+}
+
+/** The section holding a row, a task's or a session's (the focus a link names); undefined while none lists it. */
+export function sectionOf(sections: readonly QueueSection[], rowId: string): string | undefined {
+  return sections.find((s) => s.rows.some((r) => r.id === rowId) || s.sessions.some((r) => r.id === rowId))?.title;
 }
 
 export interface HoldRow {
@@ -900,7 +906,7 @@ function sessionRowOf(
   const [row] = sessionRows([entry], tasks, renameable, now);
   const tasked = entry.taskId !== undefined;
   return {
-    id: `session:${machine.deviceId}:${entry.id ?? entry.window}`,
+    id: sessionRowId(machine.deviceId, entry),
     deviceId: machine.deviceId,
     name: row?.name ?? entry.window,
     nameMark: row?.mark ?? null,

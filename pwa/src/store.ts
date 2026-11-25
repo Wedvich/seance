@@ -1069,7 +1069,10 @@ export class Store {
     this.#readQueueSessions();
   }
 
-  /** Marks a task for the Queue screen to bring into view (a notification's link); `clearFocus` ends it. */
+  /**
+   * Marks a row for the Work screen to bring into view: a task (a notification's link) or a session row by its
+   * `sessionRowId` (a drain row's "Not a task" line); `clearFocus` ends it.
+   */
   focusTask(taskId: string): void {
     this.#patch({ focusedTask: taskId });
   }
@@ -1883,7 +1886,7 @@ export class Store {
   #refusalText(code: StoreRefusal["code"]): string {
     const unreadable = code === "store_full" ? this.#queue.unreadableCount() : 0;
     return unreadable > 0
-      ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Queue screen, then try again.`
+      ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Work screen, then try again.`
       : sentence(storeErrorText(code));
   }
 

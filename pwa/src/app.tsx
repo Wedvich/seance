@@ -195,6 +195,11 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
           drainSheet={(machine) => deriveDrainSheet(machine, drainInputs())}
           machines={state.relay.machines}
           onReadDrain={(deviceId) => store.readDrain(deviceId)}
+          onOpenSession={(row) => {
+            // A notification's sequence (`openDeepLink`): the mark first, so the screen finds it as it opens.
+            store.focusTask(row);
+            store.openQueue();
+          }}
           onSetOpen={(deviceId, open, close) => void store.setMachineOpen(deviceId, open, close)}
           accountOpen={state.accountOpen}
           pausing={state.pausing}

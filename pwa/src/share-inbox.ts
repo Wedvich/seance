@@ -287,7 +287,7 @@ export function reloadCostText(before: FormBeforeShare | null): readonly string[
     );
   }
   if (before.submitting) {
-    problems.push("A Queue was in progress when the share arrived; check the Queue before queueing again.");
+    problems.push("A Queue was in progress when the share arrived; check the Work screen before queueing again.");
   }
   return problems;
 }

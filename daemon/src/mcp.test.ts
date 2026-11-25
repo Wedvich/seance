@@ -5026,7 +5026,12 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
       readonly idle?: number;
       readonly waitingOnYou: number;
       readonly moved: number;
-      readonly stuck: readonly { readonly taskId?: string; readonly reason: string }[];
+      readonly stuck: readonly {
+        readonly taskId?: string;
+        readonly reason: string;
+        readonly window?: string;
+        readonly pane?: string;
+      }[];
       readonly empty: boolean | null;
     };
   }
@@ -5063,17 +5068,39 @@ describe("list_machines drain and set_machine_open's wording under a drainPass l
         ],
         at: 1,
       }),
-      () => ({ sessions: [pane("t1"), pane("t2"), pane("t3"), pane()], at: 1 }),
+      () => ({
+        sessions: [
+          pane("t1"),
+          pane("t2"),
+          pane("t3"),
+          pane(),
+          {
+            ...pane(),
+            id: "%7",
+            tags: {
+              "owner.label": { value: "owner's notes", at: 1, scope: "conversation" },
+              "self.name": { value: "self chosen", at: 1, scope: "process" },
+            },
+          },
+        ],
+        at: 1,
+      }),
     );
     const listed = await list(fake);
+    // An untasked pane by its window and pane, never a label or `self.name`: this reaches an agent's context.
     expect(listed.find((m) => m.name === "homelab")?.drain).toEqual({
       draining: true,
       moving: 2,
       waitingOnYou: 1,
       moved: 1,
-      stuck: [{ taskId: "t3", reason: "Can't move: runs in the clone" }, { reason: "Not a task: close it yourself" }],
+      stuck: [
+        { taskId: "t3", reason: "Can't move: runs in the clone" },
+        { reason: "Not a task: close it yourself", window: "w" },
+        { reason: "Not a task: close it yourself", window: "w", pane: "%7" },
+      ],
       empty: false,
     });
+    expect(JSON.stringify(listed)).not.toMatch(/owner's notes|self chosen/u);
     expect(listed.find((m) => m.name === "MacBook Pro")).not.toHaveProperty("drain");
   });
 

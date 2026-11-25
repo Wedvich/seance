@@ -25,6 +25,7 @@ import {
   autoFleet,
   availabilityViaFleet,
   continueTaskAuto,
+  drainStuckLabel,
   passTaskAuto,
   spawnAuto,
   startTaskAuto,
@@ -1346,6 +1347,8 @@ describe("seance close --wait", () => {
         pollMs,
         offlineGraceMs,
         print: (line) => printed.push(line),
+        // As `seance close --wait` passes it.
+        label: drainStuckLabel,
       });
       return { ...outcome, printed };
     } finally {
@@ -1411,15 +1414,21 @@ describe("seance close --wait", () => {
     expect(outcome.printed).toEqual(["MacBook Pro: moving 1"]);
   });
 
-  test("exits 2 listing what cannot move, one line each", async () => {
+  test("exits 2 listing what cannot move, one line each, a session that is not a task by its window, never its label", async () => {
+    const labelled = { ...pane(), id: "%7", tags: { "owner.label": { value: "notes", at: 1, scope: "conversation" } } };
     const fake = polled(closedBox(), {
-      sessions: () => ({ sessions: [pane("t1"), pane()], at: 1 }),
+      sessions: () => ({ sessions: [pane("t1"), pane(), labelled], at: 1 }),
       queue: () => ({ tasks: [task("t1", { spec: { repo: ORIGIN, mode: "here", prompt: "x" } })], at: 1 }),
     });
     const outcome = await wait(fake);
     expect(outcome.code).toBe(2);
     expect(outcome.text).toBe(
-      "MacBook Pro still runs:\nt1 Can't move: runs in the clone\n- Not a task: close it yourself",
+      [
+        "MacBook Pro still runs:",
+        "t1 Can't move: runs in the clone",
+        'window "w" Not a task: close it yourself',
+        'window "w" Not a task: close it yourself',
+      ].join("\n"),
     );
   });
 

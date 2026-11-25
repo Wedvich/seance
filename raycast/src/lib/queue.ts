@@ -44,7 +44,7 @@ export type Enqueued =
 
 /** Same remedy as the PWA's `STORE_UNREADABLE`. */
 const UNREADABLE = "Couldn't read the relay's answer. Update the extension and the relay to matching versions.";
-const CHECK_QUEUE = "It may have queued — check the Queue in the app; Queue again re-sends the same task.";
+const CHECK_QUEUE = "It may have queued — check the Work screen in the app; Queue again re-sends the same task.";
 
 export async function enqueue(
   create: (task: Task) => Promise<TaskCreated | StoreRefusal | null>,

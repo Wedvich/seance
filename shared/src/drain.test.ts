@@ -90,9 +90,10 @@ describe("drainView", () => {
     expect(view.moved).toEqual([]);
   });
 
-  test("a pane with no task is stuck untasked; one whose task is not listed counts as moving", () => {
-    const view = drainView(box(), [], [pane(), pane("unlisted")]);
-    expect(view.stuck).toEqual([{ reason: "untasked" }]);
+  test("a pane with no task is stuck untasked, carrying its session; one whose task is not listed counts as moving", () => {
+    const hand: SessionEntry = { ...pane(), id: "%7", window: "notes" };
+    const view = drainView(box(), [], [hand, pane("unlisted")]);
+    expect(view.stuck).toEqual([{ reason: "untasked", session: hand }]);
     expect(view.moving).toEqual([{ taskId: "unlisted", waitingOnYou: false, idle: false }]);
   });
 
@@ -118,7 +119,10 @@ describe("drainView", () => {
       { draining: true },
     );
     expect(view.moving.map((m) => m.taskId)).toEqual(["t1", "t3"]);
-    expect(view.stuck).toEqual([{ taskId: "t2", reason: "here" }, { reason: "untasked" }]);
+    expect(view.stuck).toEqual([
+      { taskId: "t2", reason: "here" },
+      { reason: "untasked", session: pane() },
+    ]);
     expect(view.moved).toEqual([]);
   });
 
@@ -153,7 +157,7 @@ describe("drainView on a soft close", () => {
   test("a task run in place is still running there, not stuck; an untasked pane is still stuck", () => {
     const view = drainView(soft(), [task("t1", {}, { mode: "here" })], [pane("t1"), pane()]);
     expect(view.moving).toEqual([{ taskId: "t1", waitingOnYou: false, idle: false }]);
-    expect(view.stuck).toEqual([{ reason: "untasked" }]);
+    expect(view.stuck).toEqual([{ reason: "untasked", session: pane() }]);
   });
 
   test("tells a running task from one idle at its prompt and one waiting on you, listed or only a pane", () => {

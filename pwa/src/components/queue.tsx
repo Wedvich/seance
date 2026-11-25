@@ -8,6 +8,7 @@ import {
   armTap,
   disarmRow,
   parseLimitDraft,
+  sectionOf,
   type ArmOp,
   type CloseTarget,
   type LimitView,
@@ -39,10 +40,13 @@ export interface OlderActions {
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
 
+/** How long an unmatched session link waits for its row before the focus is forgotten. */
+const FOCUS_WAIT_MS = 10_000;
+
 /** How long a notification's row stays marked. */
 const MARK_MS = 3_000;
 
-/** The Queue's title block; the app puts it in a header (the phone's fixed one, or the desk column's). */
+/** The Work screen's title block (named Queue until WS3); the app puts it in a header (the phone's or the desk column's). */
 export function QueueHeading(props: {
   summary: string | null;
   /** Opens the Limits sheet; null while there is no limit to change, and the line is then plain text. */
@@ -51,7 +55,7 @@ export function QueueHeading(props: {
   const { summary, onLimits } = props;
   return (
     <div>
-      <h1 className="header-title">Queue</h1>
+      <h1 className="header-title">Work</h1>
       {summary !== null &&
         (onLimits === null ? (
           <p className="header-meta">{summary}</p>
@@ -228,7 +232,7 @@ export function QueueScreen(props: {
   onOpenLimits: () => void;
   onCloseLimits: () => void;
   onSetLimit: (fleet: number | null) => void;
-  /** A notification's task: scrolled to and marked once its row is listed. */
+  /** A row id, a notification's task or the drain row's session (`sessionRowId`): scrolled to and marked once listed. */
   focusedTask: string | null;
   /**
    * The focus was acted on: the store forgets it. Only here, never on unmount: a callback that is a new
@@ -305,7 +309,7 @@ export function QueueScreen(props: {
   const [pendingReveal, setPendingReveal] = useState<string | null>(null);
   const revealOpening = useCallback(
     (taskId: string): void => {
-      const asleep = view.sections.some((s) => s.title === ASLEEP_SECTION && s.rows.some((r) => r.id === taskId));
+      const asleep = sectionOf(view.sections, taskId) === ASLEEP_SECTION;
       if (!asleep || asleepOpen) {
         reveal(taskId);
         return;
@@ -324,8 +328,8 @@ export function QueueScreen(props: {
   // The row a notification named, marked while it fades; one view, never again on a re-render.
   const [marked, setMarked] = useState<string | null>(null);
   const { focusedTask, onFocused } = props;
-  const focusedIn =
-    focusedTask === null ? undefined : view.sections.find((s) => s.rows.some((r) => r.id === focusedTask))?.title;
+  // A task's row, or a session's (the drain row's link, WS7).
+  const focusedIn = focusedTask === null ? undefined : sectionOf(view.sections, focusedTask);
 
   useEffect(() => {
     if (focusedTask === null || focusedIn === undefined) return;
@@ -338,6 +342,14 @@ export function QueueScreen(props: {
     setMarked(focusedTask);
     onFocused();
   }, [focusedTask, focusedIn, asleepOpen, onFocused, reveal]);
+
+  // A session's row id can be reused (a tmux restart, a window name), so a link whose session is gone must not wait
+  // for a later namesake: forget an unmatched session focus once its sessions have had time to be read.
+  useEffect(() => {
+    if (focusedTask === null || focusedIn !== undefined || !focusedTask.startsWith("session:")) return;
+    const timer = setTimeout(onFocused, FOCUS_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [focusedTask, focusedIn, onFocused]);
 
   useEffect(() => {
     if (marked === null) return;
@@ -493,6 +505,7 @@ export function QueueScreen(props: {
                   <SessionCard
                     key={row.id}
                     row={row}
+                    marked={marked === row.id}
                     armed={armed}
                     closing={closing === row.id}
                     onClose={closeTap}
@@ -941,6 +954,8 @@ function CloseItem(props: {
  */
 function SessionCard(props: {
   row: SessionQueueRow;
+  /** The row the drain row's link opened: marked while it fades, as a notification's task is. */
+  marked: boolean;
   armed: string | null;
   closing: boolean;
   onClose: (row: SessionQueueRow) => void;
@@ -966,7 +981,11 @@ function SessionCard(props: {
   }, [hasMenu, row.id, onMenuClosed]);
 
   return (
-    <section className="fleet-card card" tabIndex={-1}>
+    <section
+      className={props.marked ? "fleet-card card fleet-card-marked" : "fleet-card card"}
+      data-task={row.id}
+      tabIndex={-1}
+    >
       <div className="fleet-card-head">
         <div className="fleet-card-title">
           <h3 className="fleet-name">
@@ -1160,7 +1179,7 @@ function Lineage(props: { line: LineageLine; onReveal: (taskId: string) => void 
       <button
         type="button"
         className="queue-reveal"
-        aria-label={`${text}, show in queue`}
+        aria-label={`${text}, show its row`}
         onClick={() => props.onReveal(reveal)}
       >
         {text}

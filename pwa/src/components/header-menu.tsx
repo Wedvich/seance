@@ -20,7 +20,8 @@ export function HeaderMenu(props: {
   onSettings: () => void;
 }): JSX.Element {
   const { state, current } = props;
-  // The Queue on screen shows what needs you; a dot pointing at it would point at the page itself.
+  // The Work screen shows what needs you; a dot pointing at it would point at the page itself. Its `Screen` key stays
+  // "queue" (docs/work.md WS3): only the words changed.
   const queueAttention = props.queueAttention && current !== "queue";
   const menu = useMenu();
   const go = (screen: Screen, open: () => void): (() => void) | undefined => (screen === current ? undefined : open);
@@ -53,7 +54,7 @@ export function HeaderMenu(props: {
           onClick={go("prompt", props.onPrompt)}
         />
         <MenuItem
-          label="Queue"
+          label="Work"
           icon={<QueueIcon />}
           current={current === "queue"}
           onClick={go("queue", props.onQueue)}
@@ -110,7 +111,7 @@ function PromptIcon(): JSX.Element {
   );
 }
 
-/** A list with bullets: tasks waiting in order. */
+/** A list with bullets: the tasks and sessions the Work screen lists. */
 function QueueIcon(): JSX.Element {
   return (
     <Icon size={18}>
