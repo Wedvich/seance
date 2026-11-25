@@ -88,8 +88,8 @@ export const AGENT_LABELS: Record<FormAgent, string> = { claude: "Claude", ...AG
  * noise on a phone. A `Record`, so a model added to the list cannot ship without a name.
  */
 const CODEX_MODEL_LABELS: Record<CodexModel, string> = {
-  "gpt-6.2-sol": "Sol",
   "gpt-6.2-astra": "Astra",
+  "gpt-6.2-sol": "Sol",
   "gpt-6.1-terra": "Terra",
   "gpt-6-luna": "Luna",
 };
