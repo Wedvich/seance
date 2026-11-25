@@ -9414,17 +9414,17 @@ wrapper, a receipt, the custodian's `sessions`, MCP, the `seance` CLI: a session
 session-chosen text. The reader joins, since no single process holds both scopes; the daemon gets only a task's ref
 (`SpawnRequest.ref`, for adapters), never `owner.*`, so there is no stale second copy of the owner's label.
 
-| Surface                                  | Gets                                                                              |
-| ---------------------------------------- | --------------------------------------------------------------------------------- |
-| PWA (Work, task details)                 | a task's label and ref; on the Work screen, each session's joined tags and `live` |
+| Surface                                    | Gets                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| PWA (Work, task details)                   | a task's label and ref; on the Work screen, each session's joined tags and `live`    |
 | `seance close --wait`, MCP `list_machines` | an untasked stuck pane's window (and MCP: its pane id), never a label or `self.name` |
-| `sessions` op to an app                  | session tags (`SessionEntry.tags`), adapter tags included, and `live`             |
-| `sessions` op sealed from the scheduler  | none, and no `live`                                                               |
-| MCP `get_sessions`, `get_queue`          | `AGENT_VISIBLE_TAG_KEYS` only (below)                                             |
-| adapter `Session`                        | session tags but other adapters' `adapter.*`, plus the dispatched ref             |
-| custodian `sessions` verb                | no tag                                                                            |
-| `MachineStatus`, push, logs, audit, argv | never                                                                             |
-| archive                                  | `creator.ref`, `creator.ref-url` only                                             |
+| `sessions` op to an app                    | session tags (`SessionEntry.tags`), adapter tags included, and `live`                |
+| `sessions` op sealed from the scheduler    | none, and no `live`                                                                  |
+| MCP `get_sessions`, `get_queue`            | `AGENT_VISIBLE_TAG_KEYS` only (below)                                                |
+| adapter `Session`                          | session tags but other adapters' `adapter.*`, plus the dispatched ref                |
+| custodian `sessions` verb                  | no tag                                                                               |
+| `MachineStatus`, push, logs, audit, argv   | never                                                                                |
+| archive                                    | `creator.ref`, `creator.ref-url` only                                                |
 
 **The PWA's per-namespace view** (built 2026-11-18, `sessionRows` in `pwa/src/machines-view.ts`; off the Machines card
 since 2026-11-19, on the Queue screen since 2026-11-24, docs/work.md Order step 2: a session's row there, or the row of
