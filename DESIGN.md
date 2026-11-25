@@ -4001,6 +4001,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     machine advertising it, since an older daemon of the Codex build would run the session but refuse its pass and
     ask. The pass's account is `accountOf(machine, exclave, agent)`, the Codex login's, as routing bills, so the
     predecessor check and the quota trigger read the same account; a machine with no login reads `account_unknown`.
+  - **The agent stays explicit** (2026-11-25): no task leaves it to the leader. The owner chose the policy for when
+    one may (Codex as overflow, judged only once every Claude candidate is rejected; no credits or extra usage while
+    either account has included usage left) and deferred the ask that would let a task leave it (docs/codex.md,
+    "Choosing the agent (phase 4)"); nothing of it is built.
   - **Models**: `CODEX_MODELS` and `DEFAULT_CODEX_MODEL` (`shared/src/types.ts`), from `model/list` on
     `codex app-server` 0.171.0 (2026-11-24): the models it lists with no `upgrade`, only the newest version in each
     family (an older one stays runnable by name), in its order, and the one it marks `isDefault`. `model` stays a free bounded string; no reader infers the agent from it.
