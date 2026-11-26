@@ -594,6 +594,43 @@ describe("the broker's scheduler actions", () => {
       broker.stop();
     });
 
+    test("with files, only to a leader advertising codexAttachments", async () => {
+      const attachments = [
+        {
+          id: "0b6f0c9e-1a2b-4c3d-8e9f-000000000001",
+          name: "shot.png",
+          type: "image/png",
+          size: 1024,
+          hash: "A".repeat(43),
+        },
+      ];
+      const older = rig(undefined, {
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.codex, CAPABILITIES.attachments],
+      });
+      expect(failed(await older.broker.handle(enqueue({ ...spec, attachments })))).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("does not give Codex tasks files"),
+      });
+      expect(older.fakes[0]?.creates ?? []).toEqual([]);
+      // The same spec without files is what the older leader takes: the new clause is what refused.
+      expect(await older.broker.handle(enqueue(spec))).toMatchObject({ ok: true, data: { ok: true } });
+      older.broker.stop();
+
+      // A Claude task's manifest needs the leader's `attachments` flag alone.
+      const bare = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
+      expect(failed(await bare.broker.handle(enqueue({ ...spec, attachments })))).toMatchObject({
+        message: expect.stringContaining("does not take attachments"),
+      });
+      bare.broker.stop();
+
+      const capabilities = [CAPABILITIES.codex, CAPABILITIES.attachments, CAPABILITIES.codexAttachments];
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities });
+      expect(await broker.handle(enqueue({ ...spec, attachments }))).toMatchObject({ ok: true, data: { ok: true } });
+      expect(fakes[0]?.creates[0]?.spec).toMatchObject({ ...spec, attachments });
+      broker.stop();
+    });
+
     test("is refused beside a field V1 does not run, even to a leader that takes codex", async () => {
       const capabilities = [CAPABILITIES.codex, CAPABILITIES.codexCheckpoint];
       const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities });

@@ -1,6 +1,9 @@
 # Codex as a first-class account — design
 
-**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and items 9 to 12 built, the rest design.** Item 12
+**Status: phase 1 (items 1, 2, 3), phase 2 (items 4 to 8) and items 9 to 13 built, the rest design.** Item 13
+(2026-11-26), attachments on a Codex task (their paths in the seed, the gate `CAPABILITIES.codexAttachments`), is in
+DESIGN.md: Scheduler, "Codex tasks"; Daemon, "Codex sessions"; Wire protocol's compatibility list; and the threat
+model's "What the daemon sends a Codex server, and keeps" (unchanged: paths only, as seed text). Item 12
 (2026-11-24), messages into a Codex session (O4), is in DESIGN.md: Session messages, "A Codex session"; Watches; the
 custodian frame kind's `nudge`; and the threat model's "Messages into a Codex session". Item 11 (2026-11-24), a Codex task's pass to a successor (every trigger), the drain's ask and the custodian's `interrupt` over
 the session's connection, is in DESIGN.md: Scheduler, "Codex tasks" ("Passing one"); Daemon, "The drain's session ask"
@@ -335,8 +338,8 @@ the machine's Codex login instead of the exclave's Claude login (`accountOf(mach
   something nobody asked for. 0.171.0 lists `max` on most models: lifting the refusal is a later choice, per model). The record always says `agent` explicitly; no reader infers it from a model name.
 - **Refused beside `agent: "codex"` in V1:** effort `max`, `steer`/`plan` (no plan mode reaches the app-server's
   `turn/start` in 0.170, and only a tightening may stand in), any level but `auto` in phase 2 (D6, lifted for
-  `checkpoint` at item 9) and `attachments` (`continues` until item 10; `succeeds` until item 11, gated on
-  `CAPABILITIES.codexPass`). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
+  `checkpoint` at item 9) (`continues` until item 10; `succeeds` until item 11, gated on `CAPABILITIES.codexPass`;
+  `attachments` until item 13, gated on `CAPABILITIES.codexAttachments`). Clients refuse them before a write (`specError` in `daemon/src/auto.ts` for MCP,
   the broker and the CLI; the PWA's form). A record that carries one anyway stays readable and the leader places it
   nowhere (`agent_unsupported` on every candidate), so a later build that supports it can run it. `until`, deps,
   batches, tags and `pin`/`avoid` are agent-neutral and pass.
@@ -399,7 +402,8 @@ sequenceDiagram
    never a file the model reads. The preamble is agent-aware ("a new independent Codex session", "AGENTS.md or
    CLAUDE.md"), and Codex's autonomy note says to stop on a real choice by ending the turn with the question stated (it
    has no `AskUserQuestion`). `developerInstructions` carries only the constant standing instruction for messages,
-   on a tasked launch (item 12).
+   on a tasked launch (item 12). A task's fetched files (item 13) are listed in it by path, as Claude's seed lists
+   them; the model opens them with its own tools.
 7. **Then the TUI joins.** A thread exists for `codex resume` only after its first turn (before it: "No saved session
    found"), so the daemon writes `thread` after `turn/start` is accepted. Joining late loses nothing: the TUI showed the
    thread's history and the approval then pending (S2).
@@ -525,7 +529,8 @@ To land in DESIGN.md's threat model with the code that makes them true:
    socket in its own 0700 `/tmp/codex-daemon-<uid>/`; the daemon dials it only after `lstat` shows both its own, and
    only for a pane it launched. Any same-uid process can dial it too, as it can drive tmux: the boundary is unchanged.
 5. **What the daemon sends a server**: constant method names; `cwd` its own path; approval, sandbox and reviewer from
-   `config.json` only; `model` and `effort` from the parsed spec; the seed as data; `turn/interrupt`. No other frame
+   `config.json` only; `model` and `effort` from the parsed spec; the seed as data (a task's files by their daemon
+   paths in it, item 13); `turn/interrupt`. No other frame
    field reaches a param, and nothing reaches argv but daemon paths and the thread id, through `shq()`.
 6. **What the daemon keeps from a server**: thread status and ids, turn lifecycle, rate-limit and credit numbers, after
    a parse that requires what it keeps. Never model text (`item/completed`, an agent message, a reviewer's rationale) in
@@ -661,8 +666,22 @@ nothing.
     it. `codex-spawn.test.ts` reads each launch's run dir from the stub server's `--listen` argv (item 10's _Left_).
     _Left:_ a turn the server refuses after the hand-off loses the message (logged by method and code); held notes do
     not survive a daemon restart.
+13. **Built 2026-11-26** (DESIGN.md, Scheduler, "Codex tasks"; Daemon, "Codex sessions"; Wire protocol's
+    compatibility list). Attachments on a Codex task (after 6): V1's refusal lifted. The daemon fetches and stages
+    the files as for Claude, and the seed's agent-neutral "Attached files (the user's originals, at these paths)"
+    block lists each path, name, type and size in the first `turn/start`'s text; `LaunchSpec.readDirs` (Claude's
+    `--add-dir`) goes unused, since `workspace-write` reads outside cwd (S8). A file-only task launches: the block is
+    a seed. Gated by `CAPABILITIES.codexAttachments`, both halves in one build, advertised by every daemon: the leader
+    places a Codex task carrying files (or a preview flagged so) only on a machine advertising it (`agent_unsupported`
+    otherwise), and the PWA and the broker write one only to a verified leader advertising it. No sentinel: an older
+    leader of the Codex build already rejects every candidate (`agent_unsupported`) and holds the record readable.
+    _Decided: paths only_ (spike 2026-11-26, codex-cli 0.172.0, Linux): with the seed's paths Codex read a text file
+    with `cat` and opened a PNG with its `view_image` tool. _Alternative:_ `turn/start`'s `{type: "localImage", path}`
+    input item, rejected: it spends image tokens up front, covers images only where paths cover every
+    `ATTACHMENT_EXTENSIONS` type, and would split Claude's seam and change `converse`. _Left:_ the macOS seatbelt
+    `workspace-write` sandbox reading the state dir's attachments is unverified (a dev check).
 
-**Phase 4** (after 3 and 9 to 12): the leader's `auto` choosing the agent as well as the account, a policy the owner
+**Phase 4** (after 3 and 9 to 13): the leader's `auto` choosing the agent as well as the account, a policy the owner
 sets. The owner chose policy A and deferred the ask (2026-11-25): "Choosing the agent (phase 4)", below. Nothing is
 built: with no way for a task to ask for either agent, A has nothing to route.
 
@@ -704,8 +723,9 @@ Whatever is chosen below, these hold, since every record and client written so f
   shared (`EFFORTS` minus `max`, which Codex refuses; `max` beside `"any"` is refused, never silently made Claude).
   _Alternative:_ a model per agent (`models: { claude, codex }`), more to parse and to show, for a choice nobody has
   asked for yet.
-- **What only Claude can run** (`codexSpecRefusal`: `steer`/`plan`, attachments) beside `"any"`: the Codex candidates
-  are rejected `agent_unsupported`, as for a pinned Codex task, so the task runs on Claude and the decision record says
+- **What only Claude can run** (`codexSpecRefusal`: `steer`/`plan`; and attachments on a machine not advertising
+  `CAPABILITIES.codexAttachments`, item 13) beside `"any"`: the Codex candidates are rejected `agent_unsupported`, as
+  for a pinned Codex task, so the task runs on Claude and the decision record says
   why. Not refused at the client: "either" is honest about it, and nothing runs that was not asked for.
 - **Clients:** the PWA's model sheet gains an "Either agent" row above the groups (agent `"any"`, no model, the effort
   row shared); MCP `spawn_session` and `queue_batch` take `agent: "any"`; `seance spawn --agent any`. The queue's badge

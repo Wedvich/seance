@@ -6205,6 +6205,85 @@ describe("a Codex pick", () => {
     expect(oldStore.getState().form).toMatchObject(codex);
   });
 
+  test("with files, goes only to a leader advertising codexAttachments, the manifest beside agent codex", async () => {
+    const shot = (): File => new File(["png bytes"], "shot.png", { type: "image/png" });
+    const takesFiles = [CAPABILITIES.codex, CAPABILITIES.codexCheckpoint, CAPABILITIES.attachments];
+    const older = fleet(takesFiles);
+    const olderStore = new Store(older, form);
+    olderStore.setModel(codex);
+    olderStore.addFiles([shot()]);
+    const refused = deriveView(olderStore.getState(), 0);
+    expect(refused.formStatus).toBe(
+      "The scheduler's leader can't give Codex tasks files yet. Update seanced on its machine, or remove the files",
+    );
+    expect(refused.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    await olderStore.spawn();
+    expect(older.creates).toEqual([]);
+
+    // A leader that takes no files at all keeps the attachments' own words.
+    const none = new Store(fleet([CAPABILITIES.codex, CAPABILITIES.codexCheckpoint]), form);
+    none.setModel(codex);
+    none.addFiles([shot()]);
+    expect(deriveView(none.getState(), 0).formStatus).toContain("doesn't take attachments yet");
+
+    const current = fleet([...takesFiles, CAPABILITIES.codexAttachments]);
+    const store = new Store(current, form);
+    store.setModel(codex);
+    store.addFiles([shot()]);
+    expect(deriveView(store.getState(), 0).formStatus ?? "").not.toContain("Codex");
+    await store.spawn();
+    const created = firstCreate(current).spec;
+    expect(created.agent).toBe("codex");
+    expect(created.attachments?.map(({ name, type }) => ({ name, type }))).toEqual([
+      { name: "shot.png", type: "image/png" },
+    ]);
+  });
+
+  test("a retry of an unqueued Codex task with files meets the leader's codexAttachments again", async () => {
+    const takes = [CAPABILITIES.codex, CAPABILITIES.codexCheckpoint, CAPABILITIES.attachments];
+    const client = fleet([...takes, CAPABILITIES.codexAttachments]);
+    client.onCreate = async () => ({ ok: false, code: "rate_limited" });
+    const store = new Store(client, form);
+    const detach = store.attach();
+    store.setModel(codex);
+    store.addFiles([new File(["png bytes"], "shot.png", { type: "image/png" })]);
+    await store.spawn();
+    const verdict = store.getState().verdict;
+    if (verdict?.kind !== "unqueued") throw new Error("no verdict");
+    expect(client.creates).toHaveLength(1);
+
+    client.emit({ machines: [autoMachine("dev-a", { capabilities: takes }), autoMachine("dev-b")] });
+    await store.retryEnqueue(verdict);
+    expect(client.creates).toHaveLength(1);
+    const refused = store.getState().verdict;
+    expect(refused).toMatchObject({ kind: "unqueued", retry: verdict.retry });
+    expect(refused?.kind === "unqueued" ? refused.message : "").toContain("can't give Codex tasks files yet");
+    detach();
+  });
+
+  test("asks the route preview about files beside a Codex pick only of a leader that takes them", async () => {
+    const takes = [CAPABILITIES.codex, CAPABILITIES.codexCheckpoint, CAPABILITIES.attachments];
+    const shot = (): File => new File(["png bytes"], "shot.png", { type: "image/png" });
+    const older = fleet(takes);
+    const olderStore = new Store(older, form);
+    olderStore.attach();
+    olderStore.setModel(codex);
+    olderStore.addFiles([shot()]);
+    older.previews.length = 0;
+    await olderStore.refreshPreview();
+    expect(older.previews).toEqual([]);
+    expect(olderStore.getState().preview).toBeNull();
+
+    const current = fleet([...takes, CAPABILITIES.codexAttachments]);
+    const store = new Store(current, form);
+    store.attach();
+    store.setModel(codex);
+    store.addFiles([shot()]);
+    current.previews.length = 0;
+    await store.refreshPreview();
+    expect(current.previews.at(-1)).toMatchObject({ attachments: true });
+  });
+
   test("picking the other agent's model keeps an effort both offer", () => {
     const store = new Store(fleet(), { ...form, effort: "high" });
     store.setModel(codex);

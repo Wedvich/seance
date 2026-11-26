@@ -452,6 +452,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         // Unconditional: its leader half routes a Codex continuation whatever this machine's own login, and `codex`
         // already says whether a Codex task is placed here at all (docs/codex.md, build order item 10).
         CAPABILITIES.codexContinue,
+        // Unconditional, as `codexContinue`: this build launches a Codex spawn carrying files, and its leader places one
+        // (docs/codex.md, build order item 13).
+        CAPABILITIES.codexAttachments,
         // As `sessionTag`: `live` and `sg` read the same table, which always runs.
         CAPABILITIES.sessionLive,
       ],

@@ -22,7 +22,8 @@ record's `attachments` field and its sentinel are task-records.md.
   config's `relayUrl` with the manifest's id, before the launch ledger's write-ahead record, checks its
   length and `attachmentHash` before `openAttachment`, writes it only as `<index>.<ext>`
   (`ATTACHMENT_EXTENSIONS`, never the name) under the 0700 `stateDir()/attachments/<taskId>`, refuses
-  `attachment_unavailable` on any failure with nothing left behind, puts names only in the seed on stdin,
+  `attachment_unavailable` on any failure with nothing left behind, puts names only in the seed (stdin for Claude,
+  the first `turn/start`'s text for Codex, never argv),
   and audits a count and total bytes, never names, ids or hashes (`daemon/src/attachments.ts`).
 - The PWA writes a task carrying `attachments` only to a verified leader advertising
   `CAPABILITIES.attachments`, only once every file in it answered `201 stored`, uploads only through

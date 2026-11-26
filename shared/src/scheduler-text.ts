@@ -154,7 +154,7 @@ export function reasonText(reason: Reason): string {
     case "base_unsupported":
       return "its daemon can't stack on another task's branch yet (needs seance update)";
     case "agent_unsupported":
-      return "it can't run this agent, or not with what the task asks";
+      return "it can't run this agent, or not with what the task asks (or its daemon is too old: seance update)";
     case "login_absent":
       return "no Codex login there";
     case "login_outdated":

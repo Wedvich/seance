@@ -39,6 +39,7 @@ change) hold throughout; the `message`, `inbox` and `watch` frames have files of
   - a continue spec's `continues` is carried, and only while the leader advertises `continueTask`;
   - its `requires` is carried only while the leader advertises `traits` and the broker's own daemon does
     (an older one would drop it and queue the task unrestricted);
+  - its `attachments` manifest only while the leader advertises `attachments` (a Codex task's also `codexAttachments`);
   - its `tags` are only `creator.*` and only while the leader advertises `taskTags`, and its `amend`
     never carries `ownerTags`.
 - It serves a client of `mcp` or `cli` only, audited as `claimed_client` (the peer's unverified word). A

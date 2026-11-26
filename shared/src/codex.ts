@@ -31,24 +31,21 @@ export function versionAtLeast(version: string, floor: string = CODEX_MIN_VERSIO
 }
 
 /**
- * What V1 refuses beside `agent: "codex"` (docs/codex.md, "The task"), named for a client's refusal: effort `max`,
- * autonomy `steer` (plan mode, which the app-server's `turn/start` does not reach) and `attachments`. `checkpoint` runs
- * since build order item 9 lifted D6; a client still writes it only to a leader advertising
- * `CAPABILITIES.codexCheckpoint` (`codexNeedsCheckpointLeader`). `continues` passes (item 10), its gate
- * `CAPABILITIES.codexContinue`; `succeeds` passes (item 11), its gate `CAPABILITIES.codexPass`; each the leader's and
- * the target's, never this one. Null for a Claude task or a Codex one V1 runs. `specError` refuses on it before a
- * write; routing rejects every candidate of a record that carries one anyway (`agent_unsupported`), so it stays
- * readable and is placed nowhere until a build that supports it.
+ * What V1 refuses beside `agent: "codex"` (docs/codex.md, "The task"), named for a client's refusal: effort `max` and
+ * autonomy `steer` (plan mode, which the app-server's `turn/start` does not reach). `checkpoint` runs since build order
+ * item 9 lifted D6; a client still writes it only to a leader advertising `CAPABILITIES.codexCheckpoint`
+ * (`codexNeedsCheckpointLeader`). `continues` passes (item 10), its gate `CAPABILITIES.codexContinue`; `succeeds`
+ * passes (item 11), its gate `CAPABILITIES.codexPass`; `attachments` pass (item 13), their gate
+ * `CAPABILITIES.codexAttachments`; each the leader's and the target's, never this one. Null for a Claude task or a
+ * Codex one V1 runs. `specError` refuses on it before a write; routing rejects every candidate of a record that
+ * carries one anyway (`agent_unsupported`), so it stays readable and is placed nowhere until a build that supports it.
  */
-export function codexSpecRefusal(
-  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments">,
-): string | null {
+export function codexSpecRefusal(spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy">): string | null {
   if (spec.agent === undefined) return null;
   if (spec.effort === "max") return "effort max";
   // `plan: true` alone reads `steer`; an absent level reads `checkpoint`, which runs.
   const level = autonomyOf(spec);
   if (level === "steer") return `autonomy ${level}`;
-  if (spec.attachments !== undefined) return "attachments";
   return null;
 }
 
@@ -73,7 +70,7 @@ export function codexRefusalText(refusal: string): string {
  * reads, and by the leader's `amendSpec` on the one it holds, as a create would be, instead of being placed nowhere.
  */
 export function codexAmendRefusal(
-  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments" | "succeeds">,
+  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy">,
   amend: { readonly effort?: string | null },
 ): string | null {
   return amend.effort === "max" ? codexSpecRefusal({ ...spec, effort: amend.effort }) : null;

@@ -325,6 +325,17 @@ export function createBroker(opts: BrokerOpts): Broker {
             );
           }
         }
+        // A manifest to a leader that cannot take files is held unreadable (`ATTACHMENTS_DEP_SENTINEL`), so none is written to one.
+        if (request.spec.attachments !== undefined) {
+          const { machines, scheduler } = client.getState();
+          if (!advertises(machines, scheduler, CAPABILITIES.attachments)) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not take attachments yet, or no verified scheduler is leading",
+            );
+          }
+        }
         // An older leader holds a Codex record unreadable (`AGENT_DEP_SENTINEL`), so none is written to one, or to none.
         if (request.spec.agent !== undefined) {
           const { machines, scheduler } = client.getState();
@@ -352,6 +363,17 @@ export function createBroker(opts: BrokerOpts): Broker {
               id,
               "invalid_request",
               "the scheduler's leader runs Codex tasks only at autonomy auto, or no verified scheduler is leading",
+            );
+          }
+          // An older leader refuses `attachments` beside `agent` and would hold the record forever.
+          if (
+            request.spec.attachments !== undefined &&
+            !advertises(machines, scheduler, CAPABILITIES.codexAttachments)
+          ) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not give Codex tasks files yet, or no verified scheduler is leading",
             );
           }
         }

@@ -41,6 +41,7 @@ import {
   deriveRunNowAvailability,
   deriveTaskTagsAvailability,
   deriveTraitsAvailability,
+  deriveCodexAttachmentsAvailability,
   deriveCodexAvailability,
   TASK_TAGS_UNAVAILABLE,
   previewAsked,
@@ -664,7 +665,12 @@ export class SchedulerStore {
     this.#previewedFleet = fleetKey(relay.machines);
     const repo = resolveRepo(scopedRepos(relay.machines, form), form);
     // An older leader's parser drops `agent` and would preview Claude's routing: no card, as the form says why.
-    const codexUnrouted = form.agent !== "claude" && !deriveCodexAvailability(relay);
+    // Likewise for files beside a Codex pick: an older Codex leader never reads the preview's `attachments` flag, so it
+    // would show a placement the form refuses (`deriveCodexProblem`).
+    const codexUnrouted =
+      form.agent !== "claude" &&
+      (!deriveCodexAvailability(relay) ||
+        (this.#state.attachments.length > 0 && !deriveCodexAttachmentsAvailability(relay)));
     if (
       !previewAsked(form, this.#state.notBefore) ||
       !deriveAutoAvailability(relay).available ||
