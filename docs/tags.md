@@ -33,7 +33,8 @@ What is left here: the open questions and the spikes' evidence that `agent.sessi
    unless the owner wants tools to show the label; then a scheduler-sealed push of `owner.label` to the task's machine,
    memory only.
 5. **Filtering `get_queue` by `creator.ref`** for an orchestrator (orchestrator.md's "find its own tasks").
-   _Recommend yes, with orchestrator.md's project-wide read_, not in this spec's PRs.
+   Superseded by orchestrator.md, milestone 2: a new `find` op, not a `get_queue` filter, which older leaders and
+   brokers would ignore and answer unfiltered (its Q5).
 6. **`agent.kind` for Codex**: whether the daemon can corroborate it as it does for `claude` (`processNames`).
    Part of docs/agents.md's spike.
 7. _Folded_: `creator.*` and `scheduler.*` were decided 2026-11-17 and sized at step 3 (DESIGN.md, "Tags and session
