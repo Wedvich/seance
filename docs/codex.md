@@ -681,7 +681,7 @@ nothing.
     `ATTACHMENT_EXTENSIONS` type, and would split Claude's seam and change `converse`. _Left:_ the macOS seatbelt
     `workspace-write` sandbox reading the state dir's attachments is unverified (a dev check).
 
-**Phase 4** (after 3 and 9 to 12): the leader's `auto` choosing the agent as well as the account, a policy the owner
+**Phase 4** (after 3 and 9 to 13): the leader's `auto` choosing the agent as well as the account, a policy the owner
 sets. The owner chose policy A and deferred the ask (2026-11-25): "Choosing the agent (phase 4)", below. Nothing is
 built: with no way for a task to ask for either agent, A has nothing to route.
 

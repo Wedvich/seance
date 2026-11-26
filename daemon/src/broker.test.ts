@@ -604,14 +604,27 @@ describe("the broker's scheduler actions", () => {
           hash: "A".repeat(43),
         },
       ];
-      const older = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
+      const older = rig(undefined, {
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.codex, CAPABILITIES.attachments],
+      });
       expect(failed(await older.broker.handle(enqueue({ ...spec, attachments })))).toMatchObject({
         code: "invalid_request",
+        message: expect.stringContaining("does not give Codex tasks files"),
       });
       expect(older.fakes[0]?.creates ?? []).toEqual([]);
+      // The same spec without files is what the older leader takes: the new clause is what refused.
+      expect(await older.broker.handle(enqueue(spec))).toMatchObject({ ok: true, data: { ok: true } });
       older.broker.stop();
 
-      const capabilities = [CAPABILITIES.codex, CAPABILITIES.codexAttachments];
+      // A Claude task's manifest needs the leader's `attachments` flag alone.
+      const bare = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.codex] });
+      expect(failed(await bare.broker.handle(enqueue({ ...spec, attachments })))).toMatchObject({
+        message: expect.stringContaining("does not take attachments"),
+      });
+      bare.broker.stop();
+
+      const capabilities = [CAPABILITIES.codex, CAPABILITIES.attachments, CAPABILITIES.codexAttachments];
       const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities });
       expect(await broker.handle(enqueue({ ...spec, attachments }))).toMatchObject({ ok: true, data: { ok: true } });
       expect(fakes[0]?.creates[0]?.spec).toMatchObject({ ...spec, attachments });

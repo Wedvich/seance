@@ -70,7 +70,7 @@ export function codexRefusalText(refusal: string): string {
  * reads, and by the leader's `amendSpec` on the one it holds, as a create would be, instead of being placed nowhere.
  */
 export function codexAmendRefusal(
-  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy" | "attachments" | "succeeds">,
+  spec: Pick<TaskSpec, "agent" | "effort" | "plan" | "autonomy">,
   amend: { readonly effort?: string | null },
 ): string | null {
   return amend.effort === "max" ? codexSpecRefusal({ ...spec, effort: amend.effort }) : null;

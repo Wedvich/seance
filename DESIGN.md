@@ -5772,7 +5772,8 @@ invariants it makes true to its area's file in `.claude/rules/`, as earlier mile
   than strip the field.
 - **Daemon**: downloads before launch, from the relay origin in its own config only. It
   verifies, decrypts and writes under `stateDir()/attachments/`, passes the directory with
-  `--add-dir`, and refuses the spawn `attachment_unavailable` on any failure: there is
+  `--add-dir` (Claude; a Codex session gets only the paths in its first turn's text, "Codex
+  sessions"), and refuses the spawn `attachment_unavailable` on any failure: there is
   never a session without its files. It audits the count and total bytes, never names. A
   continuation reuses the directory. Cleanup happens at reap and by age.
 - **No Cloudflare operation by any build task**: the owner creates the bucket and its
@@ -6208,14 +6209,14 @@ Where the build adds to or departs from the wording above:
   - /…/attachments/<taskId>/1.png — "screenshot.png", image/png, 245312 bytes
   ```
 
-  The name is written `JSON.stringify`'d. The seed travels on stdin like the prompt, so
-  names never reach argv.
+  The name is written `JSON.stringify`'d. The seed travels on stdin like the prompt (a Codex
+  session's, as its first `turn/start`'s text), so names never reach argv.
 
 - **Audit**: the spawn request line gains `attachments=<n> attachmentBytes=<sum>`, only
   when present, beside `promptLen`. No names, no ids, no hashes: names are treated as
   prompt text. A refusal is `failed code=attachment_unavailable`, as every code is.
 - **Continuation**: a continue spec carries no manifest (the parser refuses one). The
-  daemon adds ` --add-dir` for every `attachments/<id>` whose sidecar's `worktree` is the
+  daemon (Claude's driver only) adds ` --add-dir` for every `attachments/<id>` whose sidecar's `worktree` is the
   worktree the continuation resumes in. That covers a chain of continuations, since they
   share the worktree. None found is not a refusal: the session's transcript holds the
   paths, and they are either still there or reaped.
