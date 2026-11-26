@@ -440,13 +440,16 @@ archivist updates with the fleet; until it does, `find_tasks` reports the archiv
 
 ### Milestone 3: the orchestrator by hand
 
-Docs only: no packages, no capability, no tests. `docs/orchestrator-dry-run.md` holds what a run needs and nothing
-this file decides:
+No code and nothing committed: no packages, no capability, no tests. The runbook is the owner's local one-off, not
+checked in (owner, 2026-11-26): a log to learn from, whose findings come back here. It holds what a run needs and
+nothing this file decides:
 
 - the project and repo, picked when the brief is ready (Q10);
 - a paste-ready brief for an orchestrator session: one Linear project; `queue_batch` and `spawn_session` with `after`
-  and `ref: "linear:<ID>"`; amend and amend deps as issues change; mark-done when an issue closes; never implements;
-  keeps its state in Linear and the queue, so it can be cleared and restarted from the brief;
+  and `ref: "linear:<ID>"`; amend (and amend deps once milestone 1 lands) as issues change; never implements; keeps
+  its state in Linear and the queue, so it can be cleared and restarted from the brief. A task settles on its PR's
+  merge; one that must settle otherwise (an issue closed with no PR) is the owner's mark-done in the PWA, since no MCP
+  tool settles another task, and the log counts each such ask;
 - its fence in words, since milestone 4's is not built: the repos it may name, caps on tasks in flight and per day,
   its tasks' autonomy, and asking the owner before queueing anything that is not an issue in the project;
 - CI as the definition of done, with worker prompts pointing at the repo's checks rather than restating rules;
@@ -586,7 +589,7 @@ project, so "by ref" means the set of refs the orchestrator reads from the track
 If milestone 3 asks for a key, a third `creator.*` key fits `TASK_TAG_BUDGET.creator` with no new record field.
 Rejected for now: a `creator.project` tag. Whether people see a project as one thing in the queue and the PWA is Q17.
 
-**Q8. Order.** Milestone 3 runs beside milestone 1, before milestone 2 is built: the dry-run doc is written now and run
+**Q8. Order.** Milestone 3 runs beside milestone 1, before milestone 2 is built: the runbook is written now and run
 on a project of 5 to 8 issues, few enough for `get_queue`'s 20. Milestone 1's shape needed no evidence; milestone 2's
 does, and a run is the best way to get it. Until milestone 1 lands, changing deps means cancel and requeue, which fails
 every dependent `dependency_failed`, so the graph stays shallow and the log records each requeue as evidence for
