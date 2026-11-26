@@ -22,6 +22,10 @@ constraints.
   (`stateDir()/codex/home`, 0700, its `config.toml` generated 0600 with the file store), under the bare
   `childEnv` plus `CODEX_HOME`; the file is only `lstat`ed for a reprobe signature. `CODEX_HOME` never
   points at the owner's `~/.codex`, and no answer's text reaches a log or an audit line.
+- The owner's `~/.codex/auth.json` is only `lstat`ed, by `ownerCodexAuth` under `codexEnv`'s `userHome` (never
+  `CODEX_HOME`), only while Séance's login reads signed out, and only its existence is kept or sent
+  (`AgentLogin.ownerHome`). Opening, reading, copying or linking it, or any other look at `~/.codex`, is a
+  threat-model change.
 - A Codex session's pane (DESIGN.md, Daemon, "Codex sessions") gets `CODEX_HOME` only from its own `run.sh`, set to
   Séance's home through `shq()`, with `OPENAI_API_KEY` and `CODEX_API_KEY` unset; the daemon dials its server only
   after `socketState` and accepts it only when `initialize` answers that home's realpath.

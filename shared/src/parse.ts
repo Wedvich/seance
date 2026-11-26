@@ -482,11 +482,12 @@ export function parseAgentLogin(value: unknown): AgentLogin | null {
   if (!isRecord(value)) return null;
   const agent = AGENT_LOGIN_KINDS.find((kind) => kind === value["agent"]);
   if (agent === undefined) return null;
-  const { accountId, email, plan, workspace, authOk, credits, paired, version } = value;
+  const { accountId, email, plan, workspace, authOk, credits, paired, ownerHome, version } = value;
   if (accountId !== null && !isAccountId(accountId)) return null;
   if (typeof authOk !== "boolean") return null;
   if (credits !== undefined && credits !== true) return null;
   if (paired !== undefined && paired !== true) return null;
+  if (ownerHome !== undefined && ownerHome !== true) return null;
   const text = (field: unknown): field is string | undefined =>
     field === undefined || (isBoundedString(field, AGENT_LOGIN_TEXT_MAX) && field !== "");
   if (!text(email) || !text(plan) || !text(workspace) || !text(version)) return null;
@@ -499,6 +500,7 @@ export function parseAgentLogin(value: unknown): AgentLogin | null {
     authOk,
     ...(credits === true ? { credits } : {}),
     ...(paired === true ? { paired } : {}),
+    ...(ownerHome === true ? { ownerHome } : {}),
     ...(version === undefined ? {} : { version }),
   };
 }

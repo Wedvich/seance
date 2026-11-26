@@ -1,4 +1,4 @@
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, lstat, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { writeDurable } from "../durable-write.ts";
 import { resolvedMain } from "../link.ts";
@@ -33,6 +33,15 @@ export function codexBin(): string {
  */
 export function codexEnv(home: string, userHome: string): Readonly<Record<string, string>> {
   return { ...baseChildEnv(userHome), CODEX_HOME: home };
+}
+
+/**
+ * Whether the owner's own Codex home holds a sign-in: `~/.codex/auth.json` under the children's `HOME` (`codexEnv`'s
+ * `userHome`), never `CODEX_HOME`. Asked only while Séance's home is signed out, to tell a plain `codex login` from no
+ * sign-in at all. `lstat` reads the directory entry alone: the file is never opened, read, copied or linked.
+ */
+export async function ownerCodexAuth(userHome: string): Promise<boolean> {
+  return (await lstat(join(userHome, ".codex", "auth.json")).catch(() => null)) !== null;
 }
 
 /** How Codex starts Séance's MCP server: bun by its `PATH` name and this checkout's entry point. */

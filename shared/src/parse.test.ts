@@ -2563,6 +2563,8 @@ describe("M4 shapes", () => {
     expect(parseMachineInfo(blob)).not.toHaveProperty("logins");
     const signedOut = { agent: "codex", accountId: null, authOk: false } as const;
     expect(parseMachineInfo({ ...blob, logins: [signedOut] })?.logins).toEqual([signedOut]);
+    const elsewhere = { ...signedOut, ownerHome: true } as const;
+    expect(parseMachineInfo({ ...blob, logins: [elsewhere] })?.logins).toEqual([elsewhere]);
     for (const bad of [
       { ...login, agent: "agy" },
       { ...login, accountId: "" },
@@ -2570,6 +2572,7 @@ describe("M4 shapes", () => {
       { ...login, authOk: "yes" },
       { ...login, credits: false },
       { ...login, paired: false },
+      { ...login, ownerHome: false },
       { ...login, email: "" },
       { ...login, version: "v".repeat(257) },
     ]) {

@@ -662,7 +662,14 @@ function loginNote(machine: Machine, login: AgentLogin, index: number, now: numb
     case "expired":
       return { text: `expired: run ${LOGIN_VERBS[login.agent]}`, level: "err" };
     case "signed_out":
-      return { text: `run ${LOGIN_VERBS[login.agent]}`, level: "warn" };
+      // `ownerHome`: a plain `codex login` signed in the owner's own home, which Séance never reads.
+      return {
+        text:
+          login.ownerHome === true
+            ? `signed in to ${login.agent}, not to Séance's home: run ${LOGIN_VERBS[login.agent]}`
+            : `run ${LOGIN_VERBS[login.agent]}`,
+        level: "warn",
+      };
     case "unidentified":
       return { text: "account not identified", level: "warn" };
     case "blocked":

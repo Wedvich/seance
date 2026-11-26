@@ -239,6 +239,8 @@ stateDir()/codex/              0700, the daemon's own
   - **`ok`**: it answers, and both id halves are present (one missing is unidentified: "Identity").
   - **Signed out** (`authOk: false`): JSON-RPC error `-32600`, "authentication required", answered with no network
     call. A home with no `auth.json` and one Codex cannot parse answer alike (S4); `seance codex login` fixes both.
+    While signed out, the daemon `lstat`s the owner's `~/.codex/auth.json` and sets `ownerHome` when it exists, so the
+    hint says a plain `codex login` is not Séance's (DESIGN.md, Daemon, "Codex login", "Signed in elsewhere").
   - **Expired** (`lx`): error `-32603` whose message carries `401 Unauthorized`, the backend refusing the login (S4).
     The parser tests that one fixed text and keeps nothing of the message, which quotes the backend's response body,
     so a change of wording reads as unknown, never as signed in.

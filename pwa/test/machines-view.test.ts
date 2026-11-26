@@ -1033,6 +1033,10 @@ describe("an agent login", () => {
         account: "not signed in",
         auth: { text: "run seance codex login", level: "warn" },
       });
+      expect(rowOf({}, login({ accountId: null, authOk: false, ownerHome: true }))?.auth).toEqual({
+        text: "signed in to codex, not to Séance's home: run seance codex login",
+        level: "warn",
+      });
       expect(rowOf({}, login({ accountId: null }))).toMatchObject({
         account: "signed in",
         auth: { text: "account not identified", level: "warn" },
