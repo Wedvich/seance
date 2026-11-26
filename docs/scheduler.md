@@ -412,7 +412,7 @@ of M4 has landed.
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
 | 2     | Traits: keep free — **Done** (#414)                                | traits core                                                            | S                        |
-| 2     | Linear                                                             | settings; authoring surface                                            | L                        |
+| 2     | Linear — **Withdrawn** (2026-11-26, docs/orchestrator.md §2)       | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — **Done** (#408, #416, #425, #429)                | account records; fleet quota record; Web Push                          | M–L                      |
 | 2     | Not before (new) — **Done**                                        | amending a waiting task (built)                                        | M                        |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
@@ -774,7 +774,12 @@ of M4 has landed.
     daemon per node or the leader, not every LXC — and where a node-level reading lives, since
     `MachineStatus` is one machine reporting itself.
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal. Needs settings
-  and the authoring surface. _Decided (#18):_
+  and the authoring surface. _Withdrawn by the owner (2026-11-26), before any of it was built:_ an
+  orchestrator session holding the tracker's tools writes the edges from the issue's relations, keeps them
+  current with amend deps (which a read at admission could not), and marks a task done when its issue
+  closes, so the leader holds no tracker key (docs/orchestrator.md §1, §2). `SettingsRecord.linearKey` stays
+  an unused slot and `doneBy: "linear"` a value the parser knows and nothing writes. What was decided
+  (#18), kept for the record:
   - Only `blocks` / `blocked by` count; `related` and `duplicate` carry no order.
   - A blocks B maps to B `after: "done"` on A (#21; the authoring surface now writes the edge and
     `until`), so a block behind a deploy works when A is `until: "reported"`, and is a merge otherwise. Not `opened` (every block would stack) nor
