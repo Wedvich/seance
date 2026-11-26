@@ -855,7 +855,12 @@ nothing checked it. The last is the gap they leave.
   keychain). The daemon never opens, reads, copies, links or backs it up, not even through a child: its one look is an
   `lstat` of the directory entry, a signature of inode, size and mtime that says when to probe again. A copy is worse
   than a leak: the first refresh of a copy logs every other copy out. `stateDir()` is already in the custodian's masks.
-  A backup restoring an older copy logs the machine out: accepted, the owner signs in again. No test, live check or
+  A backup restoring an older copy logs the machine out: accepted, the owner signs in again. Its one look at the
+  owner's own home is the same kind (2026-11-26): while the login reads signed out, an `lstat` of
+  `~/.codex/auth.json` (`ownerCodexAuth`, under the `HOME` `codexEnv` gives its children, never `CODEX_HOME`), whose
+  existence alone becomes `AgentLogin.ownerHome`, so a plain `codex login` is told apart from no sign-in. Never asked
+  while signed in, never opened, read, copied or linked, and nothing of the entry but that bit kept or sent; it
+  names only that the owner signed a ChatGPT login in somewhere on that box, which their fleet may know. No test, live check or
   verb points `CODEX_HOME` at the owner's `~/.codex`: every probe and verb child gets the env `codexEnv` builds
   (bare, plus `CODEX_HOME`), never an inherited one. A session's pane is the exception, as a Claude pane is: its
   server and TUI run in the tmux server's environment (a session needs the owner's `PATH`, toolchains and agent
@@ -7722,6 +7727,14 @@ of this section built.
     knew, its reading still sent in `lq` with its own `at`: one failed read is not a sign-out. Before the first
     probe the login is `accountId: null`, `authOk: false` and in `lu`. The version is the last one read, below the
     floor included, so a reader can say why (`login_outdated`, item 2).
+  - **Signed in elsewhere** (2026-11-26, after the owner lost time to "run seance codex login" on a machine they
+    had signed in with a plain `codex login`). A signed-out result also looks up whether `~/.codex/auth.json`
+    exists (threat model, "A second credential store, never opened"), and `due` looks again at each tick while signed
+    out, re-registering on a change with no probe; `AgentLogin.ownerHome` is set only then, dropped by any other
+    health but `unknown`. _Decided: a flag on the login, not a `LoginHealth` value, because_ it is display only: the
+    leader and `loginHealth` read it as signed out either way, and an older reader drops the field (`parseAgentLogin`
+    projects), so no capability gates it. The PWA's row and `seance codex status` say `signed in to codex, not to
+    Séance's home`, MCP `list_machines` gives `ownerHome: true`.
   - **Cadence.** One probe at start, then a 60 s timer: probed again when the reading is older than
     `quota.staleAfterMinutes` (floored at 60 s, as the `/usage` refresh's) for `ok` and `unknown`, never on the clock
     for signed out or expired, and at once, in any health, when the `lstat` signature of `auth.json` changes (a
@@ -7752,7 +7765,7 @@ of this section built.
     the exclaves' quota (Scheduler, "Fleet quota record"); `knownAccounts` reads `logins`, so `accountName` names a
     Codex account by its email; the archivist imports a live `lq` as the daemon stores it, the account by its store
     key (Archivist, "Metrics"); the leader's login alert is Scheduler, "Auth alerts"; MCP `list_machines` gives each
-    machine `logins: [{agent, accountId?, email?, account?, alias?, auth, version?}]`, `auth` being `loginHealth`.
+    machine `logins: [{agent, accountId?, email?, account?, alias?, auth, version?, paired?, ownerHome?}]`, `auth` being `loginHealth`.
     Nothing that places, pins or holds reads a login yet: `resolveAccount` (pins, `set_account_open`) and the
     candidates still read exclaves only, so a Codex account cannot be pinned or held from MCP before item 4.
   - **The owner's verbs** (`codex-cli.ts`; threat model, "`seance codex`"): `login` and `logout` refuse without a
@@ -11682,7 +11695,8 @@ as the default.
   - **The Machines card's sign-in rows** (`SignInRow`): an exclave and a login are one row type, the login's after
     the exclaves', its id the agent's name, told apart by `agent` (the logo before the id), drawn only while
     connected and only when something needs attention. A login's note is `loginHealth` in words —
-    `expired: run seance codex login` (err), `run seance codex login` (signed out, warn), `account not identified`
+    `expired: run seance codex login` (err), `run seance codex login` (signed out, warn; `signed in to codex, not to
+    Séance's home: run seance codex login` with `ownerHome`, Daemon, "Codex login"), `account not identified`
     (warn), `included usage blocked` (err), nothing for ok or unknown. Decided: no outdated-binary note, though the
     login carries its `version`: the owner keeps every machine at or above `CODEX_MIN_VERSION` before Codex goes
     live (2026-11-24), so a binary below it reads as unknown, like any login not read.

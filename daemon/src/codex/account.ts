@@ -1,7 +1,7 @@
 import { versionAtLeast, type AgentLogin, type QuotaReading } from "@seance/shared";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import { codexBin, codexEnv, prepareCodexHome } from "./home.ts";
+import { codexBin, codexEnv, ownerCodexAuth, prepareCodexHome } from "./home.ts";
 import {
   creditView,
   parseRateLimits,
@@ -121,6 +121,8 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
   let signature: string | null = null;
   let failure: ProbeFailure | null = null;
   let paired = false;
+  /** `AgentLogin.ownerHome`: looked up only while signed out, false in any other health. */
+  let ownerHome = false;
   let pairing: Promise<void> | null = null;
 
   let running: number | null = null;
@@ -137,16 +139,20 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     authOk,
     ...(credits ? { credits: true } : {}),
     ...(paired ? { paired: true } : {}),
+    ...(ownerHome ? { ownerHome: true } : {}),
     ...(version === null ? {} : { version }),
   });
   const view = (): LoginView => ({ health, quota, blocked });
 
-  const apply = (result: ProbeResult): void => {
+  /** `owner`: `ownerCodexAuth`'s answer, asked only for a signed-out result. */
+  const apply = (result: ProbeResult, owner: boolean): void => {
     const infoBefore = JSON.stringify(login());
     const viewBefore = JSON.stringify(view());
     const healthBefore = health;
     if (result.version !== null) version = result.version;
     health = result.health;
+    // `unknown` keeps it with everything else it knew.
+    if (result.health !== "unknown") ownerHome = result.health === "signed_out" && owner;
     if (result.health === "ok") {
       identity = { accountId: result.accountId, ...result.display };
       authOk = true;
@@ -203,14 +209,25 @@ export function createCodexAccount(deps: CodexAccountDeps): CodexAccount {
     });
     running = null;
     if (stopped) return;
-    apply(result);
+    const owner = result.health === "signed_out" && (await ownerCodexAuth(deps.userHome));
+    if (stopped) return;
+    apply(result, owner);
   };
 
   const due = async (): Promise<boolean> => {
     if (attemptedAt === null) return true;
     // A sign-in, a sign-out or Codex's own refresh rewrote the file: whatever the health, read it now.
     if ((await authSignature(deps.home)) !== signature) return true;
-    if (health === "signed_out" || health === "expired") return false;
+    if (health === "signed_out") {
+      // A plain `codex login` or logout in the owner's home changes the hint, never Séance's login: no probe.
+      const owner = await ownerCodexAuth(deps.userHome);
+      if (!stopped && health === "signed_out" && owner !== ownerHome) {
+        ownerHome = owner;
+        deps.onInfoChange();
+      }
+      return false;
+    }
+    if (health === "expired") return false;
     return now() - attemptedAt >= staleAfterMs;
   };
 

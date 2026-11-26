@@ -177,11 +177,11 @@ describe("the probe", () => {
 describe("the account", () => {
   let account: CodexAccount | null = null;
 
-  const start = async (home: string, staleAfterMs = 3_600_000) => {
+  const start = async (home: string, staleAfterMs = 3_600_000, userHome = base) => {
     const counts = { info: 0, status: 0, paired: 0 };
     account = createCodexAccount({
       home,
-      userHome: base,
+      userHome,
       bin: stub.path,
       staleAfterMs,
       checkIntervalMs: 50,
@@ -251,6 +251,37 @@ describe("the account", () => {
     await writeFile(join(home, "auth.json"), "{}");
     await pollUntil(() => account?.login().authOk === true, "the sign-in read");
     expect(account?.login().accountId).toBe("codex:acct-1:user-1");
+    account?.stop();
+  });
+
+  test("signed out beside the owner's own ~/.codex sign-in says so, re-registering on its change with no probe", async () => {
+    const home = await freshHome();
+    const userHome = await mkdtemp(join(base, "user-"));
+    const ownerAuth = join(userHome, ".codex", "auth.json");
+    await mkdir(join(userHome, ".codex"));
+    // Unreadable: existence is all the daemon may learn of it.
+    await writeFile(ownerAuth, "{}", { mode: 0o000 });
+    await stub.scenario(SIGNED_OUT);
+    const counts = await start(home, 60_000, userHome);
+    expect(account?.login()).toEqual({
+      agent: "codex",
+      accountId: null,
+      authOk: false,
+      ownerHome: true,
+      version: "0.170.0",
+    });
+    await rm(ownerAuth);
+    await pollUntil(() => account?.login().ownerHome === undefined, "the owner's sign-out read");
+    expect(counts.info).toBe(2);
+    await writeFile(ownerAuth, "{}", { mode: 0o000 });
+    await pollUntil(() => account?.login().ownerHome === true, "the owner's sign-in read");
+    expect(counts.info).toBe(3);
+    expect((await stub.calls()).length).toBe(2);
+    // Séance's own sign-in drops it, and nothing looks at the owner's home again while signed in.
+    await stub.scenario(SIGNED_IN);
+    await writeFile(join(home, "auth.json"), "{}");
+    await pollUntil(() => account?.login().authOk === true, "the sign-in read");
+    expect(account?.login()).not.toHaveProperty("ownerHome");
     account?.stop();
   });
 
@@ -461,6 +492,8 @@ describe("seance codex", () => {
       SEANCE_STATE_DIR: join(root, "state"),
       SEANCE_CONFIG_DIR: join(root, "config"),
       SEANCE_CODEX_BIN: stub.path,
+      // The verbs' `homedir()`: never the developer's own `~/.codex`.
+      HOME: root,
     };
   });
 
@@ -528,11 +561,18 @@ describe("seance codex", () => {
     expect(out).toContain("codex:acct-1:user-1");
     expect(out).toContain("5h 3% · 7d 41%");
     await stub.scenario(SIGNED_OUT);
-    expect((await run("status")).out).toContain("signed out");
+    expect((await run("status")).out).toContain("login     signed out (`seance codex login`)");
+    // A plain `codex login` in the owner's own home, never Séance's: named, so the verb's need is plain.
+    await mkdir(join(root, ".codex"));
+    await writeFile(join(root, ".codex", "auth.json"), "{}", { mode: 0o000 });
+    expect((await run("status")).out).toContain(
+      "login     signed out: signed in to codex, not to Séance's home (`seance codex login`)",
+    );
     const lines = await auditLines();
     expect(lines).toEqual([
       "audit codex origin=cli op=status outcome=no_home",
       "audit codex origin=cli op=status outcome=ok",
+      "audit codex origin=cli op=status outcome=signed_out",
       "audit codex origin=cli op=status outcome=signed_out",
     ]);
     for (const line of lines) expect(line).not.toContain("example.com");

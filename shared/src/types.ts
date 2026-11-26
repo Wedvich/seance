@@ -1037,6 +1037,12 @@ export interface AgentLogin {
   readonly authOk: boolean;
   /** The account can spend credits past its included usage (docs/codex.md, "Credits and spill"). */
   readonly credits?: true;
+  /**
+   * Signed out, while the owner's own `~/.codex` holds an `auth.json` (a plain `codex login`, which Séance never uses);
+   * absent whenever the home is signed in. Display only (the hint says why `seance codex login` is still needed), never
+   * a routing input; an older reader drops it.
+   */
+  readonly ownerHome?: true;
   /** The home is paired with a phone (`remote.json`, DESIGN.md, Daemon, "Codex remote control"); display only, never a routing input. */
   readonly paired?: true;
   /** `codex --version`'s number; absent when no `codex` answered. */

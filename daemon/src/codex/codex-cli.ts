@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { codexOwnerAudit, cliSink, type CodexOwnerOp, type CodexOwnerOutcome } from "../audit.ts";
 import { usageLine } from "../commands.ts";
 import { loadConfig } from "../config.ts";
-import { codexBin, codexEnv, codexHome, prepareCodexHome } from "./home.ts";
+import { codexBin, codexEnv, codexHome, ownerCodexAuth, prepareCodexHome } from "./home.ts";
 import { probeCodex, readCodexVersion, type ProbeResult } from "./probe.ts";
 import { printable } from "../custodian-owner-cli.ts";
 import { childEnv } from "../exec.ts";
@@ -116,9 +116,14 @@ async function handOver(op: "login" | "logout"): Promise<void> {
   );
 }
 
-function healthLine(result: ProbeResult): string {
+/** `ownerHome`: `ownerCodexAuth`'s answer, asked only for a signed-out result (`AgentLogin.ownerHome`). */
+function healthLine(result: ProbeResult, ownerHome: boolean): string {
   if (result.health === "ok") return result.accountId === null ? "signed in, unidentified" : "signed in";
-  if (result.health === "signed_out") return "signed out (`seance codex login`)";
+  if (result.health === "signed_out") {
+    return ownerHome
+      ? "signed out: signed in to codex, not to Séance's home (`seance codex login`)"
+      : "signed out (`seance codex login`)";
+  }
   if (result.health === "expired") return "expired: the backend refused the login (`seance codex login`)";
   return `unknown (${result.failure.replace("_", " ")})`;
 }
@@ -134,11 +139,13 @@ async function status(): Promise<void> {
       `${home} does not exist yet — the daemon writes it when it starts with a codex block`,
     );
   }
-  const result = await probeCodex({ bin: codexBin(), env: codexEnv(home, homedir()), home, now: Date.now });
+  const userHome = homedir();
+  const result = await probeCodex({ bin: codexBin(), env: codexEnv(home, userHome), home, now: Date.now });
+  const ownerHome = result.health === "signed_out" && (await ownerCodexAuth(userHome));
   await audit("status", result.health);
   console.log(`home      ${home}`);
   console.log(`codex     ${result.version === null ? "not found" : printable(result.version, 40)}`);
-  console.log(`login     ${healthLine(result)}`);
+  console.log(`login     ${healthLine(result, ownerHome)}`);
   if (result.health !== "ok") return;
   if (result.accountId !== null) console.log(`account   ${printable(result.accountId, 128)}`);
   const { email, plan, workspace } = result.display;
