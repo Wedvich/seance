@@ -864,7 +864,7 @@ const AGENT_FIELD = z
   .enum(AGENT_LOGIN_KINDS)
   .optional()
   .describe(
-    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}). A model name never chooses the agent. A Codex task takes no effort max, steer or attachments for now, and is refused unless the scheduler's leader runs Codex tasks (at checkpoint, unless it runs them there: then retry with autonomy auto)`,
+    `The agent that runs the task. Omitted: Claude Code. "codex": OpenAI's Codex, on a machine's ChatGPT sign-in — only when the user asks for Codex; give it a Codex model (${CODEX_MODELS.join(", ")}; omitted, ${DEFAULT_CODEX_MODEL}). A model name never chooses the agent. A Codex task takes no effort max or steer for now, and is refused unless the scheduler's leader runs Codex tasks (at checkpoint, unless it runs them there: then retry with autonomy auto)`,
   );
 
 const UNTIL_FIELD = z

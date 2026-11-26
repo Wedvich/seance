@@ -609,7 +609,8 @@ export const CODEX_UNAVAILABLE = "The scheduler's leader doesn't run Codex tasks
 /**
  * Why the form's Codex pick can't be queued as it stands, as the status line says it (no full stop), with the
  * button's short label; null for a Claude pick or one that can. V1's refusals (`codexSpecRefusal`) in the form's own
- * words, then the leader. Held (no relay), the leader is asked when it is sent (`#sendOne`).
+ * words, then the leader's capabilities (`codex`, `codexCheckpoint`, `codexAttachments`). Held (no relay), the leader
+ * is asked when it is sent (`#sendOne`); a held task carries no files.
  */
 export function deriveCodexProblem(
   state: Pick<AppState, "form" | "autonomy" | "attachments" | "relay">,
@@ -622,19 +623,29 @@ export function deriveCodexProblem(
       label: `${name} can't ${AUTONOMY_LABELS.steer}`,
     };
   }
-  if (state.attachments.length > 0) {
-    return {
-      text: `${name} tasks can't take files yet. Remove them, or pick a Claude model`,
-      label: "Can't attach files",
-    };
-  }
   if (canHold(state.relay)) return null;
   if (!deriveCodexAvailability(state.relay)) return { text: CODEX_UNAVAILABLE, label: `Can't run ${name}` };
   if (state.autonomy === "checkpoint" && !deriveCodexCheckpointAvailability(state.relay)) {
     return { text: CODEX_CHECKPOINT_UNAVAILABLE, label: `${name} needs ${AUTONOMY_LABELS.auto}` };
   }
+  // Only once the leader takes files at all: until then the attachments' own check says why (verifying, not held).
+  if (
+    state.attachments.length > 0 &&
+    deriveAttachmentsAvailability(state.relay) &&
+    !deriveCodexAttachmentsAvailability(state.relay)
+  ) {
+    return { text: CODEX_ATTACHMENTS_UNAVAILABLE, label: "Can't attach files" };
+  }
   return null;
 }
+
+/** A Codex task carrying files goes only to a verified leader advertising `codexAttachments`: an older one places it nowhere. */
+export function deriveCodexAttachmentsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.codexAttachments);
+}
+
+export const CODEX_ATTACHMENTS_UNAVAILABLE =
+  "The scheduler's leader can't give Codex tasks files yet. Update seanced on its machine, or remove the files";
 
 /** A Codex task at `checkpoint` goes only to a verified leader advertising `codexCheckpoint`: an item 8 one places it nowhere. */
 export function deriveCodexCheckpointAvailability(relay: RelayState): boolean {

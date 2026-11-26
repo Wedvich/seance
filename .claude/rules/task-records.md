@@ -56,9 +56,10 @@ leader's parser refuses.
 - **`agent`**: the sealer appends `AGENT_DEP_SENTINEL` to its deps for an older leader to refuse, and the parser
   drops that sentinel only beside `agent`, drops a stored `"claude"` (so no Claude record changes by a byte) and nulls
   the spec over the sentinel without it or an agent it does not know. A client writes `agent` only to a verified
-  leader advertising `CAPABILITIES.codex`, refusing what `codexSpecRefusal` names before the write; the leader sends
-  it in a spawn only to a machine advertising `codex`, and a daemon without a Codex driver refuses that spawn, never
-  runs it as Claude (DESIGN.md, Scheduler, "Codex tasks").
+  leader advertising `CAPABILITIES.codex`, refusing what `codexSpecRefusal` names before the write, and `attachments`
+  beside it only to one advertising `CAPABILITIES.codexAttachments`; the leader sends it in a spawn only to a machine
+  advertising `codex` (and `codexAttachments` when it carries files), and a daemon without a Codex driver refuses that
+  spawn, never runs it as Claude (DESIGN.md, Scheduler, "Codex tasks").
 
 ## Traits
 

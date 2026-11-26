@@ -905,7 +905,9 @@ nothing checked it. The last is the gap they leave.
   `codex` as malformed (`isSpawnRequest`), and advertises `codex` only while its login is configured, signed in,
   identified and at the floor (`codexRunnable`, item 7); a Codex spawn reaching a machine with no `codex` block is
   `launch_error`, never run as Claude. What V1 refuses beside it (`codexSpecRefusal`) is refused before a write and, in a record
-  that carries it anyway, placed nowhere.
+  that carries it anyway, placed nowhere. Attachments beside it (docs/codex.md item 13, 2026-11-26) are written by a
+  client only to a verified leader advertising `CAPABILITIES.codexAttachments` and placed only on a machine advertising
+  it; the files reach the session as their paths in the seed, as Claude's (next items), so no new act.
 - **A Codex pane's server socket** (Daemon, "Codex sessions"; docs/codex.md threat-model item 4). The pane's
   `codex app-server --listen` path is `s.sock` in a run dir the daemon made: `/tmp/seance-cx-<mkdtemp>`, `chmod`ed
   0700 and then held by `lstat` to a real directory of the daemon's uid at 0700 before anything is written in it.
@@ -927,7 +929,9 @@ nothing checked it. The last is the gap they leave.
   Codex session" below); `cwd` the
   worktree path the spawn path made; `approvalPolicy`, `sandbox` and `approvalsReviewer` from the machine's own
   `config.json` only, never a frame, autonomy level or session; `model` from the parsed spec (else
-  `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input, never argv, a file or
+  `DEFAULT_CODEX_MODEL`) and `effort` only when set; the seed as the first turn's text input (since item 13 listing a
+  task's fetched files by their daemon paths, as Claude's seed does: no `localImage` item, no other input type, no
+  new param), never argv, a file or
   `developerInstructions` (which carries only the constant `CODEX_STANDING_INSTRUCTION`, on a tasked launch). Nothing reaches the pane's argv but daemon paths and the thread id, the id only after
   `isAgentSessionId` passed it and then as a shell variable's value after `--`. The daemon keeps only the answers to
   its own requests (a result, or an error's code: never its message), each frame bounded at 16 MiB; it reads a
@@ -2601,6 +2605,15 @@ an old peer's frames parse as before. Mixed versions:
   (`agent_unsupported`), so every client (the PWA, MCP, the CLI, the broker) writes such a task only to a verified
   leader advertising it, and otherwise refuses before a write, naming `auto` as the retry. A continuation keeps its task's level, so `continueOffer` offers one of a Codex `checkpoint` task only under such a leader too (an item 10 leader continues Codex but would hold it). A successor keeps it as well, so `passOffer` and `pass_to_successor` pass such a task only under one too (an item 11 leader passes Codex but would hold the successor). A daemon of any Codex build
   runs the level (Codex's `checkpoint` preamble shipped with item 6); only this build's daemon hands one the phone.
+- `CAPABILITIES.codexAttachments` (2026-11-26, docs/codex.md item 13; Scheduler, "Codex tasks"): one string for both
+  halves, advertised by every daemon of this build, as `codexContinue`. As a daemon, it launches a Codex spawn carrying
+  attachments (an older one refuses it `launch_error`); as a leader, it places a Codex task carrying them, or a route
+  preview flagged `attachments`, only on a machine advertising it (`agent_unsupported` otherwise). **No sentinel**: a
+  leader of the Codex build before it refuses `attachments` beside `agent` (`codexSpecRefusal`), so it holds such a
+  record readable and places it nowhere, a leader older than `codex` holds it unreadable (`AGENT_DEP_SENTINEL`) and
+  one older than attachments too (`ATTACHMENTS_DEP_SENTINEL`); no older leader acts wrongly on it, which is what a
+  sentinel is for. The PWA (`deriveCodexProblem`, a retry too) and the broker write one only to a verified leader
+  advertising it; MCP and the CLI carry no attachments. No relay change; no rollout order beyond the flag.
 - `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
   capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
@@ -3979,8 +3992,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     spill gated on `AgentLogin.credits` and spent credits on the reading's `c`, as Claude's on extra usage. Every
     Codex plan is estimated at `unknownSeat` (capacity 1) until observed deltas say otherwise. A Claude task's
     candidates never read `logins`: its decision is unchanged by a machine's login and capability (under test).
-  - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max`, `steer` (and `plan`, which reads it) and
-    `attachments`. `checkpoint`, explicit or absent, runs since item 9 (2026-11-24, D6 lifted):
+  - **Refused beside `agent` in V1** (`codexSpecRefusal`): effort `max` and `steer` (and `plan`, which reads it).
+    `attachments` were refused until item 13 (2026-11-26): `agentFilter` now places a Codex task carrying them (or a
+    preview flagged so) only on a machine advertising `CAPABILITIES.codexAttachments` (`agent_unsupported`
+    otherwise; Daemon, "Codex sessions"). `checkpoint`, explicit or absent, runs since item 9 (2026-11-24, D6 lifted):
     `codexNeedsCheckpointLeader` says a spec needs a leader advertising `CAPABILITIES.codexCheckpoint`, and every
     client gates on it as on `codex`; the route needs nothing more of the machine. `continues` was refused until
     item 10 (2026-11-24): `continueFilter` now routes a Codex continuation only to a machine advertising
@@ -4017,8 +4032,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
       GPT-6.2 Sol), since the list holds one version per family. The saved form keeps both and falls back to
       the default when they disagree. Effort is offered per agent (`OFFERED_EFFORTS_BY_AGENT`, no `max` for either).
       `deriveCodexProblem` blocks the button and names why: Steer (the form never switches the level on its own),
-      attached files, no verified leader advertising `codex`, or Checkpoint to one not advertising `codexCheckpoint`
-      (`CODEX_CHECKPOINT_UNAVAILABLE`, which names Auto). A held Codex task is checked against both when sent and
+      no verified leader advertising `codex`, Checkpoint to one not advertising `codexCheckpoint`
+      (`CODEX_CHECKPOINT_UNAVAILABLE`, which names Auto), or attached files to one that takes files but does not
+      advertise `codexAttachments` (`CODEX_ATTACHMENTS_UNAVAILABLE`; a leader taking no files keeps the attachments'
+      own words, and `retryEnqueue` re-checks it). A held Codex task is checked against both when sent and
       fails there, never sent without `agent`. The model tile tags the agent; the Queue row and
       the queued verdict show an agent badge for a non-Claude task (`AGENT_NAMES`); absent reads as Claude, as autonomy
       omits checkpoint.
@@ -7751,9 +7768,13 @@ of this section built.
   a Codex server, and keeps" and "A Codex launch's thread id" hold it.
   - **Before any pane.** `driverFor` gives a spawn carrying `agent: "codex"` the driver only on a machine whose
     `config.json` has a `codex` block (`SpawnOptions.codex`: that block and `codexHome()`, set by `createBackend`),
-    `launch_error` otherwise. The driver refuses what V1 cannot run, before a write: attachments, effort `max`, no
-    prompt on a launch that is not a continuation (the TUI can join a thread only once it has had a turn, and the seed
-    is that turn; a continuation's seed is always written), and a home that is not a real 0700 directory of the daemon's uid (`launch_error` each).
+    `launch_error` otherwise. The driver refuses what V1 cannot run, before a write: effort `max`, no
+    prompt and no files on a launch that is not a continuation (the TUI can join a thread only once it has had a turn,
+    and the seed is that turn; a continuation's seed is always written, and files alone make one), and a home that is
+    not a real 0700 directory of the daemon's uid (`launch_error` each). Attachments run since item 13 (2026-11-26):
+    the seed's "Attached files" block lists their paths, as Claude's does, and `LaunchSpec.readDirs` (Claude's
+    `--add-dir`) goes unused, since Codex's `workspace-write` sandbox reads outside its cwd (docs/codex.md, S8; seen
+    live on Linux with codex-cli 0.172.0, `cat` of a text file and `view_image` of a PNG; macOS's seatbelt unverified).
   - **The worktree** is the spawn path's own, as for a stack: `addStackedWorktree` at `origin/<default>`'s tip after
     the fetch (`defaultBaseTip`, `base-fetch.ts`; `no_default_branch` when it cannot be read), at
     `.claude/worktrees/<slug>` on `worktree-<slug>`, so reap, the custodian, continue and `pushTaskBranch` find it

@@ -71,13 +71,12 @@ export const closeCodex: AgentDriver["close"] = async (pane, opts) => {
  * carries one anyway never reaches a worktree or a pane.
  */
 export function codexRequestRefusal(request: SpawnRequest): SpawnFailure | null {
-  if (request.attachments !== undefined) {
-    return new SpawnFailure("launch_error", "a Codex session can't take attachments yet");
-  }
   if (request.effort === "max") return new SpawnFailure("launch_error", "a Codex session can't run at effort max");
   // The TUI can join a thread only once it has had a turn (S2), and the seed is that turn. A continuation's thread has
-  // had its turns, and its seed is never empty: the preamble says why it was resumed.
-  if (request.mode !== "continue" && (request.prompt === undefined || request.prompt === "")) {
+  // had its turns, and its seed is never empty: the preamble says why it was resumed. Files alone make a seed too: it
+  // lists their paths.
+  const prompted = request.prompt !== undefined && request.prompt !== "";
+  if (request.mode !== "continue" && !prompted && request.attachments === undefined) {
     return new SpawnFailure("launch_error", "a Codex session needs a prompt");
   }
   return null;
@@ -91,7 +90,8 @@ async function launchCodex(spec: LaunchSpec, opts: CodexDriverOptions): Promise<
   if (spec.resume !== undefined && !isAgentSessionId(spec.resume)) {
     throw new SpawnFailure("not_continuable", "its launch record holds no Codex thread id to resume");
   }
-  if (spec.readDirs.length > 0) throw new SpawnFailure("launch_error", "a Codex session can't take attachments yet");
+  // `readDirs` (fetched attachments) is Claude's `--add-dir` and goes unused here: Codex's `workspace-write` sandbox
+  // reads outside its cwd (docs/codex.md, S8 and item 13), and the seed lists each file's path, which is all it needs.
   const seed = spec.seed;
   if (seed === undefined) throw new SpawnFailure("launch_error", "a Codex session needs a prompt");
   const home = await ownDirectory(opts.home);

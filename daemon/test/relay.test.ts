@@ -905,6 +905,7 @@ describe("daemon ↔ relay integration", () => {
         "sessionTag",
         "codexCheckpoint",
         "codexContinue",
+        "codexAttachments",
         "sessionLive",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand

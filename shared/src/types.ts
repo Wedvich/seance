@@ -1331,6 +1331,13 @@ export interface MachineInfo {
  * item 9; DESIGN.md, Scheduler, "Codex tasks"). An older leader holds such a record readable and places it nowhere
  * (`agent_unsupported`), so a client writes a Codex task at `checkpoint` only to a verified leader advertising it.
  * Leader half only: a daemon of any Codex build runs the level, and pairing never decides whether a task starts.
+ * `codexAttachments`: a Codex task carries attachments (docs/codex.md, build order item 13; DESIGN.md, Scheduler,
+ * "Codex tasks"). As a daemon, launches a Codex spawn carrying them, their paths listed in the seed (the first turn's
+ * text); as a leader, places a Codex task carrying them only on a machine advertising it. Advertised by every daemon,
+ * as `codexContinue`: `codex` says whether a machine runs Codex at all. An older leader of the Codex build refuses
+ * `attachments` beside `agent` (`agent_unsupported` on every candidate), so it holds such a record readable and places
+ * it nowhere, and an older daemon refuses the spawn `launch_error`. A client writes a Codex task carrying files only to
+ * a verified leader advertising it. One build does both halves.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1370,6 +1377,7 @@ export const CAPABILITIES = {
   sessionLive: "sessionLive",
   codexPass: "codexPass",
   codexCheckpoint: "codexCheckpoint",
+  codexAttachments: "codexAttachments",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];

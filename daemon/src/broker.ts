@@ -354,6 +354,17 @@ export function createBroker(opts: BrokerOpts): Broker {
               "the scheduler's leader runs Codex tasks only at autonomy auto, or no verified scheduler is leading",
             );
           }
+          // An older leader refuses `attachments` beside `agent` and would hold the record forever.
+          if (
+            request.spec.attachments !== undefined &&
+            !advertises(machines, scheduler, CAPABILITIES.codexAttachments)
+          ) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not give Codex tasks files yet, or no verified scheduler is leading",
+            );
+          }
         }
         // A client's create seals `creator.*` alone (the leader drops anything else from a version-1 record), so refuse
         // rather than store dead text, and only to a leader that takes tags: an older one holds the record unreadable.

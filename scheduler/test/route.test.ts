@@ -1722,12 +1722,7 @@ describe("a Codex task", () => {
     const older = codexMachine({ capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
     expect(codes(only(decide([older], { task: codexTask() })))).toEqual(["agent_unsupported"]);
     // `plan` alone reads `steer`, which a Codex task never runs.
-    const refused: Partial<TaskSpec>[] = [
-      { autonomy: "auto", effort: "max" },
-      { autonomy: "steer" },
-      { plan: true },
-      { autonomy: "auto", attachments: [attachment(1)] },
-    ];
+    const refused: Partial<TaskSpec>[] = [{ autonomy: "auto", effort: "max" }, { autonomy: "steer" }, { plan: true }];
     for (const fields of refused) {
       const decision = decide([codexMachine({ capabilities: [...CODEX_CAPS, CAPABILITIES.attachments] })], {
         task: task({ spec: spec({ agent: "codex", ...fields }) }),
@@ -1740,6 +1735,24 @@ describe("a Codex task", () => {
       const decision = decide([codexMachine()], { task: task({ spec: spec({ agent: "codex", ...fields }) }) });
       expect(decision.chosen).toEqual(target);
     }
+  });
+
+  test("files go only to a machine advertising codexAttachments: an older Codex daemon would refuse the spawn", () => {
+    const fetches = [...CODEX_CAPS, CAPABILITIES.attachments];
+    const attached = codexTask({ attachments: [attachment(1)] });
+    const older = decide([codexMachine({ capabilities: fetches })], { task: attached });
+    expect(older.chosen).toBeNull();
+    expect(codes(only(older))).toEqual(["agent_unsupported"]);
+    // A route preview's flag reads as a manifest.
+    expect(
+      codes(only(decide([codexMachine({ capabilities: fetches })], { task: codexTask(), attachments: true }))),
+    ).toEqual(["agent_unsupported"]);
+
+    const current = [codexMachine({ capabilities: [...fetches, CAPABILITIES.codexAttachments] })];
+    expect(decide(current, { task: attached }).chosen).toEqual(target);
+    expect(decide(current, { task: codexTask(), attachments: true }).chosen).toEqual(target);
+    // Without files the capability is not asked for.
+    expect(decide([codexMachine()], { task: codexTask() }).chosen).toEqual(target);
   });
 
   test("a Codex continuation goes only to a target advertising codexContinue: an older one would refuse it", () => {

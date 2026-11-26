@@ -192,6 +192,47 @@ describe("a Codex spawn (real tmux, real git, stub codex)", () => {
     await despawnSession(await paneOf(outcome), { force: true });
   });
 
+  test("files reach the first turn as their paths in the seed, with or without a prompt (docs/codex.md item 13)", async () => {
+    const dir = join(base, "attachments", "codex-files");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "1.png");
+    await Bun.write(path, "not really a png");
+    const staged = { dirs: [dir], files: [{ path, name: "shot.png", type: "image/png", size: 16 }] };
+    const manifest = [
+      {
+        id: "0b6f0c9e-1a2b-4c3d-8e9f-000000000001",
+        name: "shot.png",
+        type: "image/png",
+        size: 16,
+        hash: "A".repeat(43),
+      },
+    ];
+    for (const [title, prompt] of [
+      ["Codex Files", PROMPT],
+      ["Codex Files Only", ""],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential: each reads the stub's calls of its own launch
+      const outcome = await spawnSession(
+        codex(title, { prompt, attachments: manifest }),
+        repos,
+        opts,
+        undefined,
+        staged,
+      );
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const input = JSON.stringify((await stub.rpc())[2]?.params);
+      expect(input).toContain("Attached files (the user's originals, at these paths):");
+      expect(input).toContain(`- ${path} — \\"shot.png\\", image/png, 16 bytes`);
+      // The path is the seed's only: never argv, never `--add-dir`.
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      for (const call of await stub.calls()) expect(call.argv.join(" ")).not.toContain(dir);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await despawnSession(await paneOf(outcome), { force: true });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await stub.reset();
+    }
+  });
+
   test("refuses before any worktree or pane: no codex block, no prompt, effort max", async () => {
     const before = await windowNames();
     const trees = await readdir(join(fixture.repoPath, ".claude", "worktrees")).catch(() => []);

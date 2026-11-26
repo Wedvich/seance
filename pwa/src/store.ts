@@ -113,6 +113,7 @@ import {
   derivePinProblem,
   deriveReportedAvailability,
   deriveTaskTagsAvailability,
+  deriveCodexAttachmentsAvailability,
   deriveCodexAvailability,
   deriveCodexCheckpointAvailability,
   deriveCodexProblem,
@@ -124,6 +125,7 @@ import {
   refTagsOf,
   settlesOnReport,
   TASK_TAGS_UNAVAILABLE,
+  CODEX_ATTACHMENTS_UNAVAILABLE,
   CODEX_CHECKPOINT_UNAVAILABLE,
   CODEX_UNAVAILABLE,
   TRAITS_UNAVAILABLE,
@@ -1748,7 +1750,7 @@ export class Store {
     if (reported && form.prompt.trim() === "") {
       return refused("A task that settles on its done report needs a prompt: the session is told in it to report.");
     }
-    // Before the attachments' own check: a Codex pick refuses files outright, which no leader update changes.
+    // Before the attachments' own check, which speaks for files while the leader is unverified or takes none.
     const codex = deriveCodexProblem(this.#state);
     if (codex !== null) return refused(`${codex.text}.`);
     const attaching = this.#state.attachments.length > 0;
@@ -2198,6 +2200,14 @@ export class Store {
     // The leader may have changed since the first try: files go only to a verified leader that takes them.
     if (retry.spec.attachments !== undefined && !deriveAttachmentsAvailability(this.#state.relay)) {
       this.#showVerdict({ ...verdict, message: `${attachmentsRefusal(this.#state.relay)}.` });
+      return;
+    }
+    if (
+      retry.spec.attachments !== undefined &&
+      retry.spec.agent !== undefined &&
+      !deriveCodexAttachmentsAvailability(this.#state.relay)
+    ) {
+      this.#showVerdict({ ...verdict, message: `${CODEX_ATTACHMENTS_UNAVAILABLE}.` });
       return;
     }
     await this.#enqueue(retry, verdict.runNow === true);
