@@ -9,6 +9,7 @@ import {
   codexRefusalText,
   CODEX_MODELS,
   isRecord,
+  depsBasis,
   promptBasis,
   QUEUE_MAX_TASKS,
   SUCCESSOR_RECORD_MAX,
@@ -4217,9 +4218,10 @@ describe("amend_task", () => {
   const waiting = task({ id: "t-1", state: "queued", spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" } });
   const codexWaiting = task({ ...waiting, spec: { ...waiting.spec, agent: "codex", autonomy: "auto" } });
 
-  function amendMachines(leader = true): Machine[] {
+  function amendMachines(leader = true, deps = true): Machine[] {
     const [first, ...rest] = autoMachines();
-    return [machine({ ...first, ...(leader ? { capabilities: [CAPABILITIES.amend] } : {}) }), ...rest];
+    const capabilities = leader ? [CAPABILITIES.amend, ...(deps ? [CAPABILITIES.amendDeps] : [])] : [];
+    return [machine({ ...first, capabilities }), ...rest];
   }
 
   async function callAmend(
@@ -4319,6 +4321,109 @@ describe("amend_task", () => {
         text: expect.stringContaining(said),
       });
       expect(result.fake.requests.map((r) => r.op)).not.toContain("amend");
+    }
+  });
+
+  test("add_after is applied to the list the store holds and sent at its basis; the answer counts edges, never names them", async () => {
+    const held = { ...waiting, spec: { ...waiting.spec, deps: [{ task: "t-0", after: "done" }] } } as const;
+    const { text, error, fake } = await callAmend(
+      { add_after: [{ task: "t-9", when: "merged" }] },
+      () => ({
+        task: {
+          ...held,
+          state: "blocked",
+          spec: {
+            ...held.spec,
+            deps: [
+              { task: "t-0", after: "done" },
+              { task: "t-9", after: "merged" },
+            ],
+          },
+        },
+      }),
+      { stored: held },
+    );
+    expect(error).toBe(false);
+    expect(text).toBe(
+      "task t-1: amended (deps), it now waits on 2 tasks; it is blocked and starts with the amended spec",
+    );
+    expect(fake.requests.find((r) => r.op === "amend")?.payload).toEqual({
+      taskId: "t-1",
+      deps: {
+        list: [
+          { task: "t-0", after: "done" },
+          { task: "t-9", after: "merged" },
+        ],
+        basis: await depsBasis(held.spec.deps),
+      },
+    });
+  });
+
+  test("replace_after [] clears the list; drop_after removes an edge", async () => {
+    const held = { ...waiting, spec: { ...waiting.spec, deps: [{ task: "t-0", after: "done" }] } } as const;
+    const cleared = await callAmend({ replace_after: [] }, () => ({ task: waiting }), { stored: held });
+    expect(cleared.text).toContain("it now waits on 0 tasks");
+    expect(cleared.fake.requests.find((r) => r.op === "amend")?.payload).toMatchObject({ deps: { list: [] } });
+    const dropped = await callAmend({ drop_after: ["t-0"] }, () => ({ task: waiting }), { stored: held });
+    expect(dropped.fake.requests.find((r) => r.op === "amend")?.payload).toMatchObject({ deps: { list: [] } });
+  });
+
+  test("a deps change is refused unsent: malformed, replace beside add, or a leader without amendDeps", async () => {
+    const cases = [
+      [{ replace_after: [], drop_after: ["t-0"] }, {}, "give replace_after alone"],
+      [{ add_after: [] }, {}, "the dependency change is malformed"],
+      [{ add_after: [{ task: "t-0", when: "done" }], drop_after: ["t-0"] }, {}, "the dependency change is malformed"],
+      [{ drop_after: ["t-0"] }, { machines: amendMachines(true, false) }, CAPABILITIES.amendDeps],
+    ] as const;
+    for (const [args, opts, said] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const result = await callAmend(args, () => new Error("must not be asked"), opts);
+      expect({ args, error: result.error, text: result.text }).toEqual({
+        args,
+        error: true,
+        text: expect.stringContaining(said),
+      });
+      expect(result.fake.requests.map((r) => r.op)).not.toContain("amend");
+    }
+    // The same leader still takes an amend that changes no edge.
+    const titled = await callAmend({ title: "t" }, () => ({ task: waiting }), { machines: amendMachines(true, false) });
+    expect(titled.error).toBe(false);
+  });
+
+  test("a leader older than amendDeps that took the lead after the gate is answered as nothing changed", async () => {
+    const result = await callAmend({ drop_after: ["t-0"] }, () => ({
+      ok: false,
+      code: "invalid_request",
+      message: "malformed amend request",
+    }));
+    expect(result.error).toBe(true);
+    expect(result.text).toContain("the scheduler's leader is older than this change");
+    expect(result.text).toContain("nothing changed");
+    expect(result.text).not.toContain("may have landed");
+    // The same answer to an amend without deps is not reworded.
+    const plain = await callAmend({ title: "t" }, () => ({
+      ok: false,
+      code: "invalid_request",
+      message: "malformed amend request",
+    }));
+    expect(plain.text).not.toContain("older than this change");
+  });
+
+  test("the leader's deps refusals are worded, and none says it may have landed", async () => {
+    for (const code of [
+      "dep_self",
+      "dep_unknown",
+      "dep_unreadable",
+      "dep_ended",
+      "dep_cycle",
+      "deps_successor",
+      "deps_changed",
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const result = await callAmend({ drop_after: ["t-0"] }, () => ({ ok: false, code, message: "x" }));
+      expect(result.error).toBe(true);
+      expect(result.text).toContain(`amend_task refused (${code})`);
+      expect(result.text).not.toContain("may have landed");
     }
   });
 

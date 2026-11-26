@@ -358,7 +358,8 @@ export interface QueueAudit {
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   /**
    * An `amend` answered with `task`: the fields it named and, beside the prompt, its mode and the
-   * prompt's length after — never a field's value, the prompt and the amendment least of all.
+   * prompt's length after, beside deps the new list's length (`edges`) — never a field's value, the prompt and the
+   * amendment least of all, nor an id but the amended task's.
    */
   readonly amended: (
     id: string,
@@ -419,8 +420,9 @@ export function queueAudit(sink: AuditSink): QueueAudit {
     amended: (id, task, request) => {
       const prompt =
         request.prompt === undefined ? "" : ` mode=${request.prompt.mode} chars=${task.spec.prompt?.length ?? 0}`;
+      const edges = request.deps === undefined ? "" : ` edges=${request.deps.list.length}`;
       return emit(
-        `op=amend id=${quote(id)} task=${quote(task.id)} fields=${amendedFields(request).join(",")}${prompt} ok`,
+        `op=amend id=${quote(id)} task=${quote(task.id)} fields=${amendedFields(request).join(",")}${prompt}${edges} ok`,
       );
     },
     held: (op, id, account) =>

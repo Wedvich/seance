@@ -1,5 +1,6 @@
 import {
   amendSpec,
+  depsBasis,
   CAPABILITIES,
   continuationUnderway,
   taskRef,
@@ -37,6 +38,7 @@ import {
   type SpillStamp,
   type SuccessorTrigger,
   type Target,
+  type TaskDep,
   closedAt,
   drainStart,
 } from "@seance/shared";
@@ -54,7 +56,7 @@ import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { chainOwnerTags } from "./chain-tags.ts";
 import { continuedChange } from "./continued.ts";
-import { admission } from "./deps.ts";
+import { admission, depsAmendRefusal, depsReleased, type DepsAmendRefusal } from "./deps.ts";
 import { resolveMessageTarget, type MessageRoute } from "./message-route.ts";
 import { branchChange, ended as settledEnd, prBound, prChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
@@ -201,18 +203,29 @@ export type RunNowResult =
  * `placed`: it left the waiting states; `dispatching`: it is `reserved`, or its spawn is still out.
  * `prompt_changed`: its prompt is not the one `basis` names. `prompt_too_long` and `append_only`:
  * `amendSpec`'s, or the store refused the record as too large; `agent_unsupported`: `amendSpec`'s, an effort the
- * task's agent refuses. `conflict`: it kept moving under the write.
+ * task's agent refuses. `deps_changed`: its deps are not the list `deps.basis` names; the rest (`DepsAmendRefusal`): an
+ * edge the leader will not write. `conflict`: it kept moving under the write.
  */
 export type AmendResult =
   | { readonly ok: true; readonly task: Task }
   | {
       readonly ok: false;
-      readonly code: "not_found" | "finished" | "dispatching" | "placed" | "prompt_changed" | AmendRefusal | "conflict";
+      readonly code:
+        | "not_found"
+        | "finished"
+        | "dispatching"
+        | "placed"
+        | "prompt_changed"
+        | "deps_changed"
+        | DepsAmendRefusal
+        | AmendRefusal
+        | "conflict";
     };
 
 type AmendFailure = Extract<AmendResult, { readonly ok: false }>;
 
 const PROMPT_CHANGED: AmendFailure = { ok: false, code: "prompt_changed" };
+const DEPS_CHANGED: AmendFailure = { ok: false, code: "deps_changed" };
 
 /** What `amend` takes: a task no reservation has been made for yet. */
 const AMENDABLE: ReadonlySet<Task["state"]> = new Set<Task["state"]>(["queued", "blocked", "ready"]);
@@ -491,6 +504,13 @@ export class Scheduler {
   readonly #leanFailed = new Set<string>();
   /** Task id → the tail of its writes (`#serial`). */
   readonly #chains = new Map<string, Promise<void>>();
+  /**
+   * The ids each deps amend still out names, from before its check until its write settles: a prune keeps them, since
+   * the held copy names them only once the write lands.
+   */
+  readonly #amendNames: (readonly string[])[] = [];
+  /** The tail of the deps amends, run one at a time (`amend`). */
+  #depsTurn: Promise<void> = Promise.resolve();
   /** Task id → its spawn, still out. No pass awaits one; `drain` does. */
   readonly #dispatches = new Map<string, Promise<void>>();
   /** deviceId → its `sessions` check, still out (`#checkOut`): one per machine. No pass awaits one; `drain` does. */
@@ -703,13 +723,17 @@ export class Scheduler {
    * seen here. The deletes go out together: each is its own CAS on its own
    * task's chain, so crossing `pruneAt` costs one round trip, not one per record.
    */
+  /** What pruning must keep: `unprunable` over the held copies, and every id a deps amend still out names. */
+  #unprunable(): ReadonlySet<string> {
+    return new Set([...unprunable(this.tasks()), ...this.#amendNames.flat()]);
+  }
+
   async prune(keep = this.#config.keepFinished): Promise<void> {
     await Promise.all(
       prunable(this.tasks(), keep).map((task) =>
         this.#serial(task.id, async () => {
           const held = this.#held.get(task.id);
-          if (held === undefined || !FINISHED.includes(held.task.state) || unprunable(this.tasks()).has(task.id))
-            return;
+          if (held === undefined || !FINISHED.includes(held.task.state) || this.#unprunable().has(task.id)) return;
           const write = await this.#store.delete(task.id, held.version);
           if (write.ok) {
             this.#held.delete(task.id);
@@ -1391,7 +1415,8 @@ export class Scheduler {
       request.title === undefined &&
       request.model === undefined &&
       request.effort === undefined &&
-      request.notBefore === undefined;
+      request.notBefore === undefined &&
+      request.deps === undefined;
     const task = this.task(taskId);
     const early = tagsOnly ? this.#missing(task) : this.#unamendable(task, taskId);
     if (early !== null) return early;
@@ -1399,15 +1424,81 @@ export class Scheduler {
     if (request.basis !== undefined && (await promptBasis(against)) !== request.basis) {
       return { ok: false, code: "prompt_changed" };
     }
+    const list = request.deps?.list;
+    if (list === undefined) return this.#amendWrite(request, tagsOnly, against, undefined);
+    const basis = request.deps?.basis;
+    if ((await depsBasis(task?.spec.deps)) !== basis) return DEPS_CHANGED;
+    const names = list.map((d) => d.task);
+    this.#amendNames.push(names);
+    // One deps amend at a time, leader-wide: two on different tasks, each checked before the other landed, could
+    // close a loop between them that admission would then fail both on.
+    const turn = this.#depsTurn.then(async (): Promise<AmendResult> => {
+      await this.#settleNames(names);
+      // The task again, since the reads above may have let a reservation, a cancel or another amend land first.
+      const now = this.task(taskId);
+      const late = this.#unamendable(now, taskId);
+      if (late !== null || now === undefined) return late ?? { ok: false, code: "not_found" };
+      if ((await depsBasis(now.spec.deps)) !== basis) return DEPS_CHANGED;
+      const refused = this.#depsRefusal(now, list);
+      if (refused !== null) return refused;
+      return this.#amendWrite(request, tagsOnly, against, now.spec.deps);
+    });
+    this.#depsTurn = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await turn;
+    } finally {
+      this.#amendNames.splice(this.#amendNames.indexOf(names), 1);
+    }
+  }
+
+  /**
+   * Each id a deps amend names, made current before its check: one not held (nor held unreadable) is read from the
+   * store once, so a task created seconds ago is found before its `store-changed` arrives; one held waits out any
+   * write queued on it first, so a prune's delete either landed (and the check reads it gone) or will see the name
+   * in `#amendNames` and keep it.
+   */
+  async #settleNames(names: readonly string[]): Promise<void> {
+    await Promise.all(
+      [...new Set(names)].map((id) =>
+        this.#held.has(id) || this.#unreadable.has(id) ? this.#serial(id, async () => undefined) : this.refresh(id),
+      ),
+    );
+  }
+
+  #depsRefusal(task: Task, list: readonly TaskDep[]): AmendFailure | null {
+    const code = depsAmendRefusal(task, list, this.tasks(), new Set(this.#unreadable.keys()));
+    return code === null ? null : { ok: false, code };
+  }
+
+  /**
+   * The amend's one write. Every check runs again against the copy held when its turn comes; with deps the task's
+   * state follows the new list in the same write: `ready` with an unmet edge goes back to `blocked`, `blocked` with
+   * every edge met goes on to `ready`, and `queued` stays for admission's first move.
+   */
+  async #amendWrite(
+    request: AmendRequest,
+    tagsOnly: boolean,
+    against: string | undefined,
+    depsAgainst: readonly TaskDep[] | undefined,
+  ): Promise<AmendResult> {
+    const { taskId } = request;
+    const list = request.deps?.list;
     let outcome: AmendResult = { ok: false, code: "conflict" };
     let tooLarge = false;
     const next = await this.#update(
       taskId,
       (current) => {
         const moved = request.basis !== undefined && current.spec.prompt !== against;
+        const depsMoved = list !== undefined && !isDeepStrictEqual(current.spec.deps, depsAgainst);
         const refused = tagsOnly
           ? this.#missing(current)
-          : (this.#unamendable(current, taskId) ?? (moved ? PROMPT_CHANGED : null));
+          : (this.#unamendable(current, taskId) ??
+            (moved ? PROMPT_CHANGED : null) ??
+            (depsMoved ? DEPS_CHANGED : null) ??
+            (list === undefined ? null : this.#depsRefusal(current, list)));
         if (refused !== null) {
           outcome = refused;
           return null;
@@ -1421,7 +1512,12 @@ export class Scheduler {
           outcome = { ok: true, task: current };
           return null;
         }
-        return { ...current, spec };
+        const amended = { ...current, spec };
+        if (list === undefined || current.state === "queued") return amended;
+        const met = depsReleased(list, this.tasks());
+        if (current.state === "ready" && !met) return advance(amended, "blocked");
+        if (current.state === "blocked" && met) return advance(amended, "ready");
+        return amended;
       },
       (code) => {
         tooLarge = code === "too_large";

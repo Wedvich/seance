@@ -3447,6 +3447,43 @@ describe("parseAmendRequest", () => {
     });
   });
 
+  test("deps: a whole list at its basis, alone or beside other fields, an empty list clearing it", () => {
+    const list = {
+      list: [
+        { task: "a", after: "done" },
+        { task: "b", after: "opened" },
+      ],
+      basis,
+    } as const;
+    expect(parseAmendRequest({ taskId: "t-1", deps: list })).toEqual({ taskId: "t-1", deps: list });
+    expect(parseAmendRequest({ ...append, title: "x", deps: list })).toEqual({ ...append, title: "x", deps: list });
+    expect(parseAmendRequest({ taskId: "t-1", deps: { list: [], basis } })).toEqual({
+      taskId: "t-1",
+      deps: { list: [], basis },
+    });
+    const full = Array.from({ length: TASK_SPEC_LIMITS.deps }, (_, i) => ({ task: `t${i}`, after: "done" }));
+    expect(parseAmendRequest({ taskId: "t-1", deps: { list: full, basis } })).not.toBeNull();
+  });
+
+  test("deps: refuses a sentinel, a 17th edge, a missing or malformed basis, and deps beside ownerTags", () => {
+    const edge = { task: "a", after: "done" } as const;
+    const full = Array.from({ length: TASK_SPEC_LIMITS.deps + 1 }, (_, i) => ({ task: `t${i}`, after: "done" }));
+    for (const bad of [
+      { list: [{ task: "", after: "agent" }], basis },
+      { list: [{ task: "", after: "merged" }], basis },
+      { list: [{ task: "a", after: "later" }], basis },
+      { list: full, basis },
+      { list: [edge] },
+      { list: [edge], basis: "nope" },
+      { basis },
+      { list: edge, basis },
+      [edge],
+    ]) {
+      expect(parseAmendRequest({ taskId: "t-1", deps: bad })).toBeNull();
+    }
+    expect(parseAmendRequest({ taskId: "t-1", deps: { list: [edge], basis }, ownerTags: { label: "x" } })).toBeNull();
+  });
+
   test("is built afresh", () => {
     const parsed = parseAmendRequest({ ...append });
     expect(parsed).toEqual(append);
@@ -3455,6 +3492,7 @@ describe("parseAmendRequest", () => {
 
   test("refuses a key it does not know, at the top or in the prompt, so a newer field never half-applies", () => {
     expect(parseAmendRequest({ ...append, deps: [] })).toBeNull();
+    expect(parseAmendRequest({ ...append, deps: { list: [], basis, extra: 1 } })).toBeNull();
     expect(parseAmendRequest({ ...append, state: "running" })).toBeNull();
     expect(parseAmendRequest({ ...append, prompt: { ...append.prompt, extra: 1 } })).toBeNull();
   });

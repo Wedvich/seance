@@ -6,6 +6,7 @@ import {
   SUCCESSOR_PROMPT_BYTES,
   TASK_REQUEST_LIMITS,
   type AmendRequest,
+  type TaskDep,
   type TaskSpec,
 } from "./types.ts";
 
@@ -18,8 +19,46 @@ const BASIS_PATTERN = /^[0-9a-f]{64}$/u;
 
 /** `AmendRequest.basis`: SHA-256 of the prompt as UTF-8, lowercase hex. An absent prompt hashes as `""`. */
 export async function promptBasis(prompt: string | undefined): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(prompt ?? "")));
+  return sha256Hex(prompt ?? "");
+}
+
+/**
+ * `AmendRequest.deps.basis`: SHA-256 of the canonical JSON `[{"task":…,"after":…}]` of the list, in order, lowercase
+ * hex; none hashes as `[]`. In order because order is meaning: the first `opened` edge picks the stack base.
+ */
+export async function depsBasis(deps: readonly TaskDep[] | undefined): Promise<string> {
+  return sha256Hex(JSON.stringify((deps ?? []).map((d) => ({ task: d.task, after: d.after }))));
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
   return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * A change to a task's deps as a client writes it (owner, 2026-11-26, Q1 (d)): `add` (an edge naming a task already
+ * in the list replaces that edge where it stands, which is how an edge's `after` changes; a new one goes last) with or
+ * without `drop` (task ids), or `replace`, a whole list, alone. Only the wire carries the whole list
+ * (`applyDepsChange`), so a client re-applies its change to a fresh read after `deps_changed`.
+ */
+export type DepsChange =
+  | { readonly add?: readonly TaskDep[]; readonly drop?: readonly string[] }
+  | { readonly replace: readonly TaskDep[] };
+
+/** The list `change` makes of `deps`. Dropping a task the list does not name changes nothing. */
+export function applyDepsChange(deps: readonly TaskDep[] | undefined, change: DepsChange): readonly TaskDep[] {
+  if ("replace" in change) return change.replace;
+  const dropped = new Set(change.drop ?? []);
+  const added = new Map((change.add ?? []).map((d) => [d.task, d]));
+  const kept = (deps ?? [])
+    .filter((d) => !dropped.has(d.task))
+    .map((d) => {
+      const swap = added.get(d.task);
+      if (swap === undefined) return d;
+      added.delete(d.task);
+      return swap;
+    });
+  return [...kept, ...added.values()];
 }
 
 export function isPromptBasis(value: unknown): value is string {
@@ -64,6 +103,8 @@ export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | Amend
   const model = amend.model === undefined ? spec.model : (amend.model ?? undefined);
   const effort = amend.effort === undefined ? spec.effort : (amend.effort ?? undefined);
   const notBefore = amend.notBefore === undefined ? spec.notBefore : (amend.notBefore ?? undefined);
+  // Only the real edges: the sealer re-adds every sentinel the other fields need.
+  const deps = amend.deps === undefined ? spec.deps : amend.deps.list;
   let tags = spec.tags;
   if (amend.ownerTags !== undefined) {
     const owner = writeTags("owner", amend.ownerTags, "task", ownerTagsOf(spec.tags));
@@ -78,11 +119,13 @@ export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | Amend
     effort: _effort,
     notBefore: _notBefore,
     tags: _tags,
+    deps: _deps,
     ...rest
   } = spec;
   return {
     ...rest,
     ...(tags === undefined ? {} : { tags }),
+    ...(deps === undefined || deps.length === 0 ? {} : { deps }),
     ...(prompt === undefined || prompt === "" ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined ? {} : { model }),
@@ -91,9 +134,13 @@ export function amendSpec(spec: TaskSpec, amend: AmendRequest): TaskSpec | Amend
   };
 }
 
+type AmendedField = "prompt" | "title" | "model" | "effort" | "notBefore" | "deps" | "ownerTags";
+
 /** The fields an amendment names, for an audit line: names only, never a value. */
-export function amendedFields(amend: AmendRequest): readonly string[] {
-  return (["prompt", "title", "model", "effort", "notBefore", "ownerTags"] as const).filter(
+export function amendedFields(
+  amend: { readonly taskId: string; readonly basis?: string } & Readonly<Partial<Record<AmendedField, unknown>>>,
+): readonly string[] {
+  return (["prompt", "title", "model", "effort", "notBefore", "deps", "ownerTags"] as const).filter(
     (f) => amend[f] !== undefined,
   );
 }

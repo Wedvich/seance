@@ -4,6 +4,7 @@ import {
   OP_TIMEOUT_MS,
   AGENT_DEP_SENTINEL,
   CAPABILITIES,
+  depsBasis,
   promptBasis,
   RequestFailure,
   STORE_LIST_TIMEOUT_MS,
@@ -16,6 +17,7 @@ import {
 } from "@seance/shared";
 import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
 import { pollUntil } from "../test/fixtures.ts";
+import { AMEND_DEPS_UNSUPPORTED } from "./auto.ts";
 import { createBroker, parseBrokerRequest, type Broker } from "./broker.ts";
 import {
   brokerDeadlineMs,
@@ -257,8 +259,17 @@ describe("parseBrokerRequest on scheduler frames", () => {
     const parsed = parsedRequest(frame({ schedulerOp: "amend", amend: { ...append } }));
     expect(parsed).toMatchObject({ schedulerOp: "amend" });
     expect(parsed["amend"]).toEqual(append);
-    // A field the leader would not know is refused here too, never dropped on the way.
+    // A deps change is a change, never a list: a malformed one is refused here, never dropped on the way.
     expect(refusedCode(frame({ schedulerOp: "amend", amend: { ...append, deps: [] } }))).toBe("invalid_request");
+    expect(refusedCode(frame({ schedulerOp: "amend", amend: { ...append, deps: { add: [], extra: 1 } } }))).toBe(
+      "invalid_request",
+    );
+    expect(refusedCode(frame({ schedulerOp: "amend", amend: { ...append, state: "running" } }))).toBe(
+      "invalid_request",
+    );
+    expect(
+      parsedRequest(frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, deps: { drop: ["t-0"] } } }))["amend"],
+    ).toEqual({ taskId: TASK_ID, deps: { drop: ["t-0"] } });
     // The owner's labels are the PWA's alone: a session's broker never carries them.
     expect(refusedCode(frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, ownerTags: { label: "x" } } }))).toBe(
       "invalid_request",
@@ -847,6 +858,40 @@ describe("the broker's scheduler actions", () => {
       expect(reply).toMatchObject({ code: "invalid_request" });
       expect(reply.message).toContain("cannot amend a queued task");
       expect(fakes[0]?.requests).toEqual([]);
+      broker.stop();
+    });
+
+    test("a deps change is applied to the list the broker's daemon read, sent at that list's basis, audited without an id", async () => {
+      const { broker, fakes, lines } = rig(() => ({ task: { id: TASK_ID } }), {
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.amend, CAPABILITIES.amendDeps],
+      });
+      await broker.handle(frame({ id: "warm", schedulerOp: "queue" }));
+      const fake = fakes[0];
+      if (fake === undefined) throw new Error("expected a relay");
+      const held = [{ task: "secret-pred", after: "done" }] as const;
+      fake.stored.set(TASK_ID, { ...stored("x"), spec: { ...stored("x").spec, deps: held } });
+      const reply = await broker.handle(amend({ deps: { add: [{ task: "secret-next", after: "merged" }] } }));
+      expect(reply).toMatchObject({ ok: true, data: { task: { id: TASK_ID } } });
+      expect(fake.requests.find((r) => r.op === "amend")?.payload).toEqual({
+        taskId: TASK_ID,
+        deps: { list: [...held, { task: "secret-next", after: "merged" }], basis: await depsBasis(held) },
+      });
+      expect(lines.some((line) => line.includes("secret"))).toBe(false);
+      broker.stop();
+    });
+
+    test("a deps change to a leader that takes amend but not amendDeps is refused naming the flag, nothing read or sent", async () => {
+      const { broker, fakes } = rig(() => ({ task: { id: TASK_ID } }), {
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.amend],
+      });
+      const reply = failed(await broker.handle(amend({ deps: { drop: ["t-0"] } })));
+      expect(reply).toMatchObject({ code: "invalid_request", message: AMEND_DEPS_UNSUPPORTED });
+      expect(reply.message).toContain("amendDeps");
+      expect(fakes[0]?.requests).toEqual([]);
+      // The same leader still takes an amend without one.
+      expect(await broker.handle(amend({ title: "t" }, { id: "a2" }))).toMatchObject({ ok: true });
       broker.stop();
     });
 

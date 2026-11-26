@@ -60,8 +60,9 @@ a **Status** line (built, spec, draft); trust it over memory.
   paths in the seed, `CAPABILITIES.codexAttachments`; DESIGN.md "Codex tasks"). Phase 4, the leader choosing
   the agent: policy A (Codex as overflow) decided, the ask deferred, nothing built. Read it, and docs/agents.md,
   before any Codex work.
-- **docs/orchestrator.md** — plan: tracker projects as task graphs, as milestones. 1–3 (amend deps; `find` and the
-  archive read; the dry run) are a spec the owner decided; 4–5 are draft, not to be built. Read before amending deps,
+- **docs/orchestrator.md** — plan: tracker projects as task graphs, as milestones. 1 (amend deps) is built
+  (DESIGN.md, "Amending a waiting task"); 2–3 (`find` and the archive read; the dry run) are a spec the owner decided;
+  4–5 are draft, not to be built. Read before amending deps,
   finding tasks by ref or batch, `archive-find`, anything that reads a tracker, or a non-task session.
 - **docs/tags.md** — tags and session identity; built, keeps open questions and spike evidence. Read
   DESIGN.md's "Tags and session identity" before adding a field that labels a session or task, or

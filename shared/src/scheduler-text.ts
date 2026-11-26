@@ -69,6 +69,17 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   prompt_changed: "the task's prompt changed since you read it; read it again and amend that",
   prompt_too_long: "the amended prompt would be too long for the task; nothing changed",
   append_only: "the task carries on a passed task, so its prompt can only be added to, not replaced",
+  deps_changed: "what the task waits on changed since it was read; read it again and amend that; nothing changed",
+  deps_successor:
+    "the task carries on a passed task and waits on that task alone, so its dependencies cannot change; nothing changed",
+  dep_self: "an edge names the task itself; nothing changed",
+  dep_unknown:
+    "an edge names a task the scheduler does not hold: a typo, or a task that finished and was pruned, which already released its dependents — leave its edge out; nothing changed",
+  dep_unreadable:
+    "an edge names a task whose record the scheduler cannot read, so it cannot check for a loop through it; nothing changed",
+  dep_ended:
+    "an edge names a task that failed or was cancelled, which would fail this one — leave it out or queue the work again; nothing changed",
+  dep_cycle: "the edges would make tasks wait on each other in a loop; nothing changed",
 };
 
 /** A refusal's line; a code this build does not know is named rather than guessed at. */

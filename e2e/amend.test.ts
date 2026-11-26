@@ -72,7 +72,7 @@ function recordingClient(): {
   };
 }
 
-/** The suite's daemon leads, verified, advertising `amend`, with its clones listed: the origin a task names. */
+/** The suite's daemon leads, verified, advertising `amend` and `amendDeps`, with its clones listed: the origin a task names. */
 async function readyOrigin(client: RelayClient): Promise<string> {
   let state: RelayState = client.getState();
   await pollUntil(
@@ -85,11 +85,12 @@ async function readyOrigin(client: RelayClient): Promise<string> {
           (m) =>
             m.deviceId === leader.deviceId &&
             m.capabilities?.includes(CAPABILITIES.amend) === true &&
+            m.capabilities.includes(CAPABILITIES.amendDeps) &&
             m.repos.some((r) => r.origin !== undefined),
         )
       );
     },
-    "the leader verified, advertising amend, with its repos listed",
+    "the leader verified, advertising amend and amendDeps, with its repos listed",
     20_000,
   );
   return state.machines.flatMap((m) => m.repos).find((r) => r.origin !== undefined)?.origin ?? "";
@@ -305,6 +306,83 @@ describe("amend: app ↔ relay ↔ leader ↔ the machine that runs the amended 
       await cancelTask(client, big);
       await cancelTask(client, small);
       await client.resume().catch(() => null);
+      client.stop();
+    }
+  }, 90_000);
+
+  // A stack of three: the third, blocked on the second, is given an edge to the first. It keeps its id, stays blocked
+  // once the second is done, and runs only once the first is too.
+  test("a blocked task gains an edge in place, and runs only after the task it now waits on", async () => {
+    const { client } = recordingClient();
+    const audit = spyOn(console, "log");
+    const [first, second, third] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    let window: string | null = null;
+    const stateOf = async (id: string): Promise<string | undefined> => {
+      const queue = await client.queue({ tasks: [id] });
+      return queue !== null && "tasks" in queue ? queue.tasks.find((t) => t.id === id)?.state : undefined;
+    };
+    try {
+      await stack.waitForLead("the suite's daemon to lead");
+      await stack.daemon.leader.settled();
+      const origin = await readyOrigin(client);
+      expect(await client.pause({ until: "resume" })).toMatchObject({ holds: [{ until: "resume" }] });
+      await create(client, first, { repo: origin, mode: "worktree", prompt: "the schema" });
+      await create(client, second, {
+        repo: origin,
+        mode: "worktree",
+        prompt: "the api",
+        deps: [{ task: first, after: "opened" }],
+      });
+      await create(client, third, {
+        repo: origin,
+        mode: "worktree",
+        prompt: "the ui",
+        title: "amend-deps-e2e",
+        deps: [{ task: second, after: "opened" }],
+      });
+      await pollUntil(async () => (await stateOf(third)) === "blocked", "the third to be admitted blocked");
+
+      const reply = await sendAmend(client, { taskId: third, deps: { add: [{ task: first, after: "done" }] } });
+      expect(reply).toMatchObject({ task: { id: third, state: "blocked" } });
+      expect(amended(reply).deps).toEqual([
+        { task: second, after: "opened" },
+        { task: first, after: "done" },
+      ]);
+      expect((await stack.queue().get(third))?.body?.spec.deps).toEqual([
+        { task: second, after: "opened" },
+        { task: first, after: "done" },
+      ]);
+
+      // Its old edge met, its new one not: still blocked.
+      expect(await client.markDone(second)).toMatchObject({ task: { id: second, state: "done" } });
+      await pollUntil(async () => (await stateOf(second)) === "done", "the leader to hold the second done");
+      // A non-event: a pass of admission to see the third stay blocked. The pause holds placement only, and keeps
+      // the first (ready, with no edges) from being dispatched under the mark-done below.
+      await Bun.sleep(500);
+      expect(await stateOf(third)).toBe("blocked");
+
+      expect(await client.markDone(first)).toMatchObject({ task: { id: first, state: "done" } });
+      await pollUntil(async () => (await stateOf(third)) === "ready", "the third to be ready once the first is done");
+      expect(await client.resume()).toMatchObject({ holds: [] });
+      await pollUntil(
+        async () => (await stack.queue().get(third))?.body?.state === "running",
+        "the third to run once the first is done",
+        20_000,
+        () => whyNotRunning(client, third),
+      );
+      window = (await stack.queue().get(third))?.body?.assignment?.window ?? null;
+
+      const lines = auditLines(audit).filter((l) => l.includes("op=amend") && l.includes(`task="${third}"`));
+      expect(lines).toContainEqual(expect.stringContaining("fields=deps edges=2 ok"));
+      // The audit names the amended task, never one it waits on.
+      expect(lines.some((l) => l.includes(first) || l.includes(second))).toBe(false);
+    } finally {
+      audit.mockRestore();
+      await cancelTask(client, third);
+      await cancelTask(client, second);
+      await cancelTask(client, first);
+      await client.resume().catch(() => null);
+      if (window !== null) await killWindow(window);
       client.stop();
     }
   }, 90_000);

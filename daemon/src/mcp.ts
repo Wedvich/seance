@@ -6,6 +6,7 @@ import {
   accountNameIn,
   agentVisibleTags,
   CAPABILITIES,
+  parseDepsChange,
   creatorTaskTags,
   refTags,
   taskTagEntries,
@@ -67,6 +68,7 @@ import {
   type SessionsResponse,
   type SpawnClient,
   type Task,
+  type DepAfter,
   type TaskDep,
   type TaskUntil,
   closedAt,
@@ -849,6 +851,12 @@ const AFTER_WHEN = z
     '"opened" (the default): the task has a PR and its branch is pushed. A worktree task\'s first "opened" entry is what it stacks on: its worktree starts from that task\'s pushed branch, not the default branch, so it builds on that work before it merges (from the default branch instead if that PR merged first, or if the task finished with nothing pushed). "merged": its branch merged, and the worktree starts from the default branch, which then holds the work: the choice for work that should not build on an unmerged branch. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
   );
 
+/** One edge of `amend_task`'s `add_after` and `replace_after`: a task id (no ref: the task already exists), and when. */
+const AMEND_EDGE = z.strictObject({
+  task: z.string().describe("A task id from get_queue"),
+  when: AFTER_WHEN,
+});
+
 const REF_DESCRIPTION =
   'What this task is for, as source:id — e.g. "linear:ENG-123" or "github:owner/repo#12" (a lowercase source of letters, digits and hyphens, then a colon, then an id of at most 64 letters, digits and ._#/-). Informational: the scheduler stores and shows it (get_queue lists it as tags["creator.ref"]), and reads nothing from the tracker. It replaces the retired `linear: { issue, url }` field: pass "linear:ENG-123" here and the URL as the ref URL';
 const REF_URL_DESCRIPTION = "The ref's https: URL, shown beside it in the app; only with the ref";
@@ -1380,7 +1388,7 @@ export function buildMcpServer(
     "amend_task",
     {
       title: "Amend a task still waiting in the scheduler's queue",
-      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. \`not_before\` (ISO 8601 with an offset) sets or moves the time before which it will not start, and null clears it; it needs no prompt basis. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
+      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. \`not_before\` (ISO 8601 with an offset) sets or moves the time before which it will not start, and null clears it; it needs no prompt basis. What it waits on: \`add_after\` adds edges (an edge to a task it already waits on replaces that edge, which is how its \`when\` changes), \`drop_after\` removes edges by task id, and the two together swap one; \`replace_after\` alone sets the whole list in order (\`[]\` clears it). The first \`opened\` edge decides which branch a stacked task starts from. A ready task given an edge not yet met goes back to blocked; a blocked one whose last unmet edge is dropped becomes ready. Refused, with nothing changed: an edge to the task itself (dep_self); to a task the scheduler does not hold (dep_unknown: a task that finished and was pruned already released its dependents; leave its edge out); to a record it cannot read (dep_unreadable); to a task that failed or was cancelled (dep_ended: leave it out, or queue that work again first); edges that would loop (dep_cycle); a successor's (deps_successor: it waits on the task it continues alone). A list changed by someone else meanwhile is re-read and the change applied again, up to three times (deps_changed after that: read get_queue and decide again). At most ${TASK_SPEC_LIMITS.deps} edges. Changing what a task waits on needs a leader advertising ${CAPABILITIES.amendDeps}. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
       inputSchema: z.strictObject({
         taskId: z.string().describe("The waiting task's id from get_queue"),
         append: z.string().optional().describe("Text to add at the end of the prompt, after a blank line"),
@@ -1392,14 +1400,41 @@ export function buildMcpServer(
           .union([z.string(), z.null()])
           .optional()
           .describe("Not before this time (ISO 8601 with an offset, in the future); null clears it"),
+        add_after: z
+          .array(AMEND_EDGE)
+          .optional()
+          .describe("Edges to add; one naming a task already in the list replaces that edge"),
+        drop_after: z.array(z.string()).optional().describe("Task ids whose edges to remove"),
+        replace_after: z
+          .array(AMEND_EDGE)
+          .optional()
+          .describe("The whole new list of edges, in order, alone; [] clears every edge"),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ taskId, append, replacePrompt, title, model, effort, not_before }) =>
+    async ({ taskId, append, replacePrompt, title, model, effort, not_before, add_after, drop_after, replace_after }) =>
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("amend_task"));
         if (append !== undefined && replacePrompt !== undefined) {
           return errorResult("amend_task refused: give append or replacePrompt, not both");
+        }
+        if (replace_after !== undefined && (add_after !== undefined || drop_after !== undefined)) {
+          return errorResult("amend_task refused: give replace_after alone, or add_after and drop_after");
+        }
+        const toDep = (edge: { task: string; when: DepAfter }): TaskDep => ({ task: edge.task, after: edge.when });
+        const deps =
+          replace_after !== undefined
+            ? { replace: replace_after.map(toDep) }
+            : add_after !== undefined || drop_after !== undefined
+              ? {
+                  ...(add_after === undefined ? {} : { add: add_after.map(toDep) }),
+                  ...(drop_after === undefined ? {} : { drop: drop_after }),
+                }
+              : undefined;
+        if (deps !== undefined && parseDepsChange(deps) === null) {
+          return errorResult(
+            `amend_task refused: the dependency change is malformed (task ids from get_queue, at most ${TASK_SPEC_LIMITS.deps} each, no task named twice or in both add_after and drop_after, at least one edge)`,
+          );
         }
         const deferred = not_before === undefined || not_before === null ? null : notBeforeInput(not_before);
         if (deferred !== null && "error" in deferred) return errorResult(`amend_task refused: ${deferred.error}`);
@@ -1418,6 +1453,7 @@ export function buildMcpServer(
             ...(model === undefined ? {} : { model }),
             ...(effort === undefined ? {} : { effort }),
             ...(not_before === null ? { notBefore: null } : deferred === null ? {} : { notBefore: deferred.at }),
+            ...(deps === undefined ? {} : { deps }),
           },
           "mcp",
         );

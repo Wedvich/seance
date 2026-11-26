@@ -258,7 +258,13 @@ export function brokerScheduler(
     amend: (draft) =>
       send({ schedulerOp: "amend", amend: draft }, (data) =>
         data === null ? null : (parseTaskReply(data) ?? undefined),
-      ),
+      ).catch((err: unknown) => {
+        // A daemon older than `amendDeps` refuses the unknown key in its strict parse, so nothing went on.
+        if (draft.deps !== undefined && err instanceof RequestFailure && err.message === MALFORMED_AMENDMENT) {
+          throw new RequestFailure("refused", OLDER_DAEMON_AMEND_DEPS, "daemon");
+        }
+        throw err;
+      }),
     accounts: async (options) => {
       // Labels never ask the broker: its `accounts` frame cannot say label from pin, so the daemon
       // reads it as a pin (no hold), and each call is a `local-broker` audit line (DESIGN.md "Fleet broker").
@@ -314,6 +320,10 @@ export const OLDER_DAEMON_TRAITS =
   "this machine's daemon is older than this seanced: restart or update it (seance update)";
 export const OLDER_DAEMON_CODEX =
   "this machine's daemon is older than this seanced and does not carry a Codex task's agent: restart or update it (seance update)";
+export const OLDER_DAEMON_AMEND_DEPS =
+  "this machine's daemon is older than this seanced and does not carry a change to what a task waits on, so nothing changed: restart or update it (seance update)";
+/** The broker's refusal of a draft `parseAmendDraft` refuses: what an older one answers for `deps`. */
+const MALFORMED_AMENDMENT = "malformed amendment";
 /** The broker's refusal of a spec its parser nulls (`parseSchedulerRequest`): what an older one answers for `AGENT_DEP_SENTINEL`. */
 const MALFORMED_SPEC = "malformed task spec";
 export const UNCONFIRMED_DAEMON_TRAITS =

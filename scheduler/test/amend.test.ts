@@ -1,5 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { CAPABILITIES, promptBasis, type AmendRequest } from "@seance/shared";
+import {
+  AGENT_DEP_SENTINEL,
+  ATTACHMENTS_DEP_SENTINEL,
+  CAPABILITIES,
+  depsBasis,
+  promptBasis,
+  REQUIRES_DEP_SENTINEL,
+  TAGS_DEP_SENTINEL,
+  taskRecordAtRest,
+  type AmendRequest,
+  type TaskDep,
+} from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -322,5 +333,267 @@ describe("amend against a reservation in flight", () => {
     await pass(scheduler);
     expect(scheduler.task("x")?.state).toBe("running");
     expect(fleet.spawns.map((s) => s.request.prompt)).toEqual(["amended"]);
+  });
+});
+
+/** A deps amendment of `task` to `list`, named against the list it holds now, as `sendAmend` builds it. */
+async function depsTo(
+  task: Task | undefined,
+  list: readonly TaskDep[],
+  rest: Partial<AmendRequest> = {},
+): Promise<AmendRequest> {
+  if (task === undefined) throw new Error("no such task");
+  return { taskId: task.id, deps: { list, basis: await depsBasis(task.spec.deps) }, ...rest };
+}
+
+/** Holds the first put of a record `holds` matches, until `release`. */
+class HeldStore extends MemoryQueueStore {
+  readonly #gate = Promise.withResolvers<void>();
+  reached = false;
+  /** Every id a put was made for, held or not. */
+  readonly ids: string[] = [];
+  constructor(readonly holds: (task: Task) => boolean) {
+    super();
+  }
+  release(): void {
+    this.#gate.resolve();
+  }
+  override async put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+    this.ids.push(id);
+    if (!this.reached && this.holds(body)) {
+      this.reached = true;
+      await this.#gate.promise;
+    }
+    return super.put(id, version, body);
+  }
+}
+
+describe("amend deps", () => {
+  test("a ready task given an unmet edge goes back to blocked in the same write; dropping it frees it", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const first = await enqueue(store, scheduler, spec());
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("ready");
+
+    const added = await scheduler.amend(await depsTo(scheduler.task(task.id), [{ task: first.id, after: "merged" }]));
+    expect(added).toMatchObject({ ok: true, task: { id: task.id, state: "blocked" } });
+    expect((await stored(store, task.id))?.body).toMatchObject({
+      state: "blocked",
+      spec: { deps: [{ task: first.id, after: "merged" }] },
+    });
+
+    const dropped = await scheduler.amend(await depsTo(scheduler.task(task.id), []));
+    expect(dropped).toMatchObject({ ok: true, task: { id: task.id, state: "ready" } });
+    expect((await stored(store, task.id))?.body.spec).not.toHaveProperty("deps");
+  });
+
+  test("an edge to a done task is met at once; one to a superseded task follows its successor", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const finished = await enqueue(store, scheduler, spec());
+    expect(await scheduler.markDone(finished.id)).toMatchObject({ ok: true });
+    await store.put("old", 0, { id: "old", spec: spec(), state: "superseded", createdAt: NOW, successor: "new" });
+    await scheduler.refresh("old");
+    await enqueue(store, scheduler, spec(), "new");
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+
+    const done = await scheduler.amend(await depsTo(scheduler.task(task.id), [{ task: finished.id, after: "merged" }]));
+    expect(done).toMatchObject({ ok: true, task: { state: "ready" } });
+    // `new` holds the work and has not finished, so the edge is unmet rather than failed.
+    const chained = await scheduler.amend(await depsTo(scheduler.task(task.id), [{ task: "old", after: "done" }]));
+    expect(chained).toMatchObject({ ok: true, task: { state: "blocked" } });
+  });
+
+  test("a queued task stays queued for admission, and the list keeps the order given", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const a = await enqueue(store, scheduler, spec());
+    const b = await enqueue(store, scheduler, spec());
+    const c = await enqueue(store, scheduler, spec());
+    const task = await enqueue(store, scheduler, spec());
+    const list: TaskDep[] = [
+      { task: c.id, after: "opened" },
+      { task: a.id, after: "done" },
+      { task: b.id, after: "merged" },
+    ];
+    const result = await scheduler.amend(await depsTo(task, list));
+    expect(result).toMatchObject({ ok: true, task: { state: "queued", spec: { deps: list } } });
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("blocked");
+  });
+
+  test("a blocked task whose every edge is met after the amend goes to ready", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const waiting = await enqueue(store, scheduler, spec());
+    const finished = await enqueue(store, scheduler, spec());
+    expect(await scheduler.markDone(finished.id)).toMatchObject({ ok: true });
+    const task = await enqueue(store, scheduler, spec({ deps: [{ task: waiting.id, after: "done" }] }));
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("blocked");
+    const swapped = await scheduler.amend(
+      await depsTo(scheduler.task(task.id), [{ task: finished.id, after: "done" }]),
+    );
+    expect(swapped).toMatchObject({ ok: true, task: { state: "ready" } });
+  });
+
+  test("it rides with a prompt append in one write, and every sentinel is back on the sealed record", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const first = await enqueue(store, scheduler, spec());
+    const task = await enqueue(
+      store,
+      scheduler,
+      spec({
+        attachments: [attachment(1)],
+        requires: ["atlas"],
+        tags: { "creator.ref": "linear:ENG-1" },
+        agent: "codex",
+        autonomy: "auto",
+      }),
+    );
+    const request = await depsTo(task, [{ task: first.id, after: "opened" }], {
+      prompt: { mode: "append", text: "it now waits on the schema" },
+      basis: await promptBasis(task.spec.prompt),
+    });
+    expect((await scheduler.amend(request)).ok).toBe(true);
+    const held = await stored(store, task.id);
+    if (held === undefined) throw new Error("no record");
+    expect(held.body.spec).toMatchObject({
+      prompt: "do it\n\nit now waits on the schema",
+      deps: [{ task: first.id, after: "opened" }],
+    });
+    expect(taskRecordAtRest({ version: held.version, task: held.body })).toMatchObject({
+      task: {
+        spec: {
+          deps: [
+            { task: first.id, after: "opened" },
+            ATTACHMENTS_DEP_SENTINEL,
+            REQUIRES_DEP_SENTINEL,
+            TAGS_DEP_SENTINEL,
+            AGENT_DEP_SENTINEL,
+          ],
+        },
+      },
+    });
+  });
+});
+
+describe("amend deps refuses, writing nothing", () => {
+  test("each refusal code, checked before the write", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const a = await enqueue(store, scheduler, spec());
+    const b = await enqueue(store, scheduler, spec({ deps: [{ task: a.id, after: "done" }] }));
+    const cancelled = await enqueue(store, scheduler, spec());
+    expect(await scheduler.cancel(cancelled.id)).toMatchObject({ ok: true });
+    store.plant("junk", "unopenable");
+    await scheduler.refresh("junk");
+    await store.put("succ", 0, {
+      id: "succ",
+      spec: spec({
+        succeeds: {
+          task: a.id,
+          account: "org:a",
+          at: { deviceId: "a", exclave: "main", clone: "app" },
+          trigger: "manual",
+        },
+      }),
+      state: "queued",
+      createdAt: NOW,
+    });
+    await scheduler.refresh("succ");
+
+    const before = await stored(store, a.id);
+    const stale = { taskId: a.id, deps: { list: [], basis: await depsBasis([{ task: b.id, after: "done" }]) } };
+    const cases: [AmendRequest, Extract<Awaited<ReturnType<Scheduler["amend"]>>, { ok: false }>["code"]][] = [
+      [stale, "deps_changed"],
+      [await depsTo(scheduler.task("succ"), [{ task: b.id, after: "done" }]), "deps_successor"],
+      [await depsTo(a, [{ task: a.id, after: "done" }]), "dep_self"],
+      [await depsTo(a, [{ task: "nobody", after: "done" }]), "dep_unknown"],
+      [await depsTo(a, [{ task: "junk", after: "done" }]), "dep_unreadable"],
+      [await depsTo(a, [{ task: cancelled.id, after: "done" }]), "dep_ended"],
+      [await depsTo(a, [{ task: b.id, after: "done" }]), "dep_cycle"],
+    ];
+    for (const [request, code] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one at a time keeps each answer readable
+      expect(await scheduler.amend(request)).toEqual({ ok: false, code });
+    }
+    expect(await stored(store, a.id)).toEqual(before);
+  });
+
+  test("a task in the store the leader has not seen yet is read once and taken (Q1b)", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const task = await enqueue(store, scheduler, spec());
+    await store.put("fresh", 0, { id: "fresh", spec: spec(), state: "queued", createdAt: NOW });
+    expect(scheduler.task("fresh")).toBeUndefined();
+    const result = await scheduler.amend(await depsTo(task, [{ task: "fresh", after: "opened" }]));
+    expect(result).toMatchObject({ ok: true, task: { spec: { deps: [{ task: "fresh", after: "opened" }] } } });
+  });
+
+  test("inside the write: a predecessor cancelled while the task's turn is held is dep_ended", async () => {
+    const store = new HeldStore((t) => t.spec.title === "held");
+    const { scheduler } = setup(store, offline());
+    const pred = await enqueue(store, scheduler, spec());
+    const task = await enqueue(store, scheduler, spec());
+    // A title amend's write holds the task's turn, so the deps amend checks first and writes after it.
+    const titled = scheduler.amend({ taskId: task.id, title: "held" });
+    await until(() => store.reached, "the title's write");
+    const amending = scheduler.amend(await depsTo(task, [{ task: pred.id, after: "done" }]));
+    // Time for its check before the turn to pass, so the cancel lands between that check and the write. Either
+    // order answers dep_ended: a slow machine only moves the refusal to the earlier check.
+    await Bun.sleep(30);
+    expect(await scheduler.cancel(pred.id)).toMatchObject({ ok: true });
+    store.release();
+    expect((await titled).ok).toBe(true);
+    expect(await amending).toEqual({ ok: false, code: "dep_ended" });
+    expect(scheduler.task(task.id)?.spec).not.toHaveProperty("deps");
+  });
+
+  test("two amends that would close a loop between them: one lands, the other is dep_cycle", async () => {
+    // b waits on c and d on a already; a → b and c → d close a → b → c → d → a. Neither amend names the
+    // task the other writes, so no per-task turn orders them: only the leader-wide one does.
+    const store = new HeldStore((t) => t.id === "a" && t.spec.deps !== undefined);
+    const { scheduler } = setup(store, offline());
+    const a = await enqueue(store, scheduler, spec(), "a");
+    const c = await enqueue(store, scheduler, spec(), "c");
+    await enqueue(store, scheduler, spec({ deps: [{ task: "c", after: "done" }] }), "b");
+    await enqueue(store, scheduler, spec({ deps: [{ task: "a", after: "done" }] }), "d");
+    const one = scheduler.amend(await depsTo(a, [{ task: "b", after: "done" }]));
+    await until(() => store.reached, "the first write");
+    const writes = store.ids.length;
+    const two = scheduler.amend(await depsTo(c, [{ task: "d", after: "done" }]));
+    // A sleep before a negative assertion: c's amend must not reach the store while a's write is out.
+    await Bun.sleep(30);
+    expect(store.ids.slice(writes)).toEqual([]);
+    store.release();
+    expect(await one).toMatchObject({ ok: true });
+    expect(await two).toEqual({ ok: false, code: "dep_cycle" });
+    expect(scheduler.task("c")?.spec).not.toHaveProperty("deps");
+  });
+
+  test("a finished predecessor an amend names survives a prune while its write is out", async () => {
+    const store = new HeldStore((t) => t.spec.deps !== undefined);
+    const { scheduler } = setup(store, offline());
+    const pred = await enqueue(store, scheduler, spec());
+    expect(await scheduler.markDone(pred.id)).toMatchObject({ ok: true });
+    const task = await enqueue(store, scheduler, spec());
+    const amending = scheduler.amend(await depsTo(task, [{ task: pred.id, after: "done" }]));
+    await until(() => store.reached, "the amend's write");
+    // No record names `pred` yet: only the amend in flight does.
+    await scheduler.prune(0);
+    expect(await stored(store, pred.id)).toBeDefined();
+    store.release();
+    expect(await amending).toMatchObject({ ok: true });
+  });
+
+  test("a prune that deleted the predecessor first leaves the amend dep_unknown, never a dangling edge", async () => {
+    const { store, scheduler } = setup(new MemoryQueueStore(), offline());
+    const pred = await enqueue(store, scheduler, spec());
+    expect(await scheduler.markDone(pred.id)).toMatchObject({ ok: true });
+    const task = await enqueue(store, scheduler, spec());
+    await scheduler.prune(0);
+    expect(await stored(store, pred.id)).toBeUndefined();
+    expect(await scheduler.amend(await depsTo(task, [{ task: pred.id, after: "done" }]))).toEqual({
+      ok: false,
+      code: "dep_unknown",
+    });
   });
 });

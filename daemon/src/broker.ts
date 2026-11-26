@@ -22,7 +22,7 @@ import {
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys, type AppRelay } from "./app-relay.ts";
 import { accountCaches } from "./account-cache.ts";
-import { advertises, continueGateError } from "./auto.ts";
+import { AMEND_DEPS_UNSUPPORTED, advertises, continueGateError } from "./auto.ts";
 import { brokerAudit, enqueueAudit, type AuditSink, type EnqueueOutcome } from "./audit.ts";
 import {
   BROKER_VERSION,
@@ -428,6 +428,15 @@ export function createBroker(opts: BrokerOpts): Broker {
             "invalid_request",
             `the scheduler's leader cannot ${pass ? "pass a task to a successor" : "amend a queued task"} yet — its daemon needs \`seance update\``,
           );
+        }
+        // An older leader would refuse the key anyway (`parseAmendRequest` is strict); unsent, the answer says why.
+        if (
+          request.schedulerOp === "amend" &&
+          request.amend.deps !== undefined &&
+          scheduler.kind === "ready" &&
+          !advertises(machines, scheduler, CAPABILITIES.amendDeps)
+        ) {
+          return await fail(id, "invalid_request", AMEND_DEPS_UNSUPPORTED);
         }
       }
       const data =

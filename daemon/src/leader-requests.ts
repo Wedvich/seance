@@ -267,6 +267,19 @@ const AMEND_REFUSALS: Record<Exclude<AmendResult, { readonly ok: true }>["code"]
   prompt_changed: schedulerError("prompt_changed", "the prompt changed since it was read; read it again"),
   prompt_too_long: schedulerError("prompt_too_long", "the amended prompt is past the task's bound; nothing changed"),
   append_only: schedulerError("append_only", "a successor's prompt is the leader's; it takes an append only"),
+  deps_changed: schedulerError("deps_changed", "the task's deps changed since they were read; read them again"),
+  deps_successor: schedulerError(
+    "deps_successor",
+    "a successor waits on its predecessor alone; its deps cannot change",
+  ),
+  dep_self: schedulerError("dep_self", "an edge names the task itself"),
+  dep_unknown: schedulerError(
+    "dep_unknown",
+    "an edge names a task the leader does not hold; a task that finished and was pruned already released its dependents, so leave its edge out",
+  ),
+  dep_unreadable: schedulerError("dep_unreadable", "an edge names a record the leader cannot read"),
+  dep_ended: schedulerError("dep_ended", "an edge names a task that failed or was cancelled"),
+  dep_cycle: schedulerError("dep_cycle", "the amended edges would loop"),
   tags_full: schedulerError("invalid_request", "the task's record has no room for another owner tag; clear one first"),
   // A code every build words, as `tags_full`'s: clients refuse it first, so only an older one or a bare relay client reads it.
   agent_unsupported: schedulerError("invalid_request", codexRefusalText("effort max")),

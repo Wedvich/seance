@@ -861,24 +861,36 @@ export async function passAuto(lease: SchedulerLease, taskId: string, surface: E
   );
 }
 
+/** The leader's refusal of an amend its parser refuses: what a leader older than `amendDeps` answers for `deps`. */
+const LEADER_MALFORMED_AMEND = "malformed amend request";
+
+const AMEND_DEPS_OLDER_LEADER = `the scheduler's leader is older than this change (it does not take ${CAPABILITIES.amendDeps}; another daemon may have taken the lead), so nothing changed — try again once an updated daemon leads`;
+
 /** What an amend's reply leaves to check when it was lost: it may have landed, and an append sent again would land twice. */
 const AMEND_CHECK: Readonly<Record<EnqueueSurface, string>> = {
   mcp: "check get_queue before amending again",
   cli: "check the app's queue before amending again",
 };
 
+/**
+ * A deps change offered to a verified leader that does not advertise `CAPABILITIES.amendDeps`: refused unsent, since
+ * an older leader refuses the key (`parseAmendRequest` is strict). The broker words its own refusal the same.
+ */
+export const AMEND_DEPS_UNSUPPORTED = `the scheduler's leader cannot change what a task waits on yet (it does not advertise ${CAPABILITIES.amendDeps}) — its daemon needs \`seance update\`; nothing was sent`;
+
 /** Why `draft` would be refused as malformed, in a caller's words, or null. The leader's parser is the authority. */
 export function amendDraftError(draft: AmendDraft): string | null {
   const limits = TASK_REQUEST_LIMITS;
-  const { prompt, title, model, effort, notBefore } = draft;
+  const { prompt, title, model, effort, notBefore, deps } = draft;
   if (
+    deps === undefined &&
     prompt === undefined &&
     title === undefined &&
     model === undefined &&
     effort === undefined &&
     notBefore === undefined
   ) {
-    return "nothing to amend: give a prompt, title, model, effort or not-before time";
+    return "nothing to amend: give a prompt, title, model, effort, not-before time or dependency change";
   }
   if (prompt !== undefined && prompt.text.length > limits.prompt) {
     return `the prompt text is past the ${limits.prompt}-character bound`;
@@ -925,6 +937,9 @@ export async function amendAuto(
       }`,
     );
   }
+  if (draft.deps !== undefined && !leaderAdvertises(lease, CAPABILITIES.amendDeps)) {
+    return failed(`${label} refused: ${AMEND_DEPS_UNSUPPORTED}`);
+  }
   const mayHave = `the amend may have landed anyway — ${AMEND_CHECK[surface]}`;
   let reply: Awaited<ReturnType<SchedulerLeg["amend"]>>;
   try {
@@ -944,6 +959,10 @@ export async function amendAuto(
   }
   if ("ok" in reply) {
     // Refused before any leader was asked: the store read failed, or the task's agent refuses the effort.
+    // A leader older than `amendDeps` that took over after the gate: its strict parse refused the key, writing nothing.
+    if (draft.deps !== undefined && reply.code === "invalid_request" && reply.message === LEADER_MALFORMED_AMEND) {
+      return failed(`${label} refused: ${AMEND_DEPS_OLDER_LEADER}`);
+    }
     const read = Object.entries(AMEND_CLIENT_REFUSALS).find(([code]) => code === reply.code)?.[1];
     const said = `${label} refused (${reply.code}): ${read ?? schedulerErrorText(reply.code)}`;
     return failed(isTransportError(reply.code) ? `${said} — ${mayHave}` : said);
@@ -956,9 +975,11 @@ export async function amendAuto(
       : draft.notBefore === null
         ? ", not-before time cleared"
         : `, not before ${formatNotBefore(draft.notBefore, undefined, { withOffset: true })}`;
-  return done(
-    `task ${taskId}: amended (${fields})${timing}; it is still ${reply.task.state} and starts with the amended spec`,
-  );
+  // The edge count, never an id: the reply's list is the leader's, so it is what the task now waits on.
+  const edges = reply.task.spec.deps?.length ?? 0;
+  const waits = draft.deps === undefined ? "" : `, it now waits on ${edges} ${edges === 1 ? "task" : "tasks"}`;
+  const state = draft.deps === undefined ? `it is still ${reply.task.state}` : `it is ${reply.task.state}`;
+  return done(`task ${taskId}: amended (${fields})${timing}${waits}; ${state} and starts with the amended spec`);
 }
 
 /** The reads between a `--start` spawn's create and its `run-now`, as the PWA's Start now waits for `ready`. */
