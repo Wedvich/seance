@@ -11,6 +11,11 @@ import {
   resolveNotBefore,
   withAutonomy,
   type AmendDraft,
+  DEP_AFTER,
+  parseDepsChange,
+  TASK_SPEC_LIMITS,
+  type DepsChange,
+  type TaskDep,
   type AutonomyLevel,
   type DespawnRequest,
   type RepoEntry,
@@ -540,7 +545,7 @@ export async function cmdOpen(argv: readonly string[]): Promise<void> {
   return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false, false, false);
 }
 
-const AMEND_USAGE = `${usageLine("amend")}  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default; --at, --in or --not-before none set, move or clear the time it starts)`;
+const AMEND_USAGE = `${usageLine("amend")}  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default; --at, --in or --not-before none set, move or clear the time it starts; --after <id>[:opened|merged|done] adds an edge or changes its when, --drop-after <id> removes one, --replace-after makes the --after list the whole list, none clearing it)`;
 
 /** Exported for tests. Bare words after the task id are the text, as `spawn`'s are its prompt. */
 export function parseAmendArgs(argv: readonly string[]): AmendDraft {
@@ -548,9 +553,14 @@ export function parseAmendArgs(argv: readonly string[]): AmendDraft {
   let replace = false;
   const textParts: string[] = [];
   const set: { title?: string | null; model?: string | null; effort?: string | null; notBefore?: number | null } = {};
-  let expect: "title" | "model" | "effort" | "at" | "in" | "not-before" | null = null;
+  let expect: "title" | "model" | "effort" | "at" | "in" | "not-before" | "after" | "drop-after" | null = null;
   const timing: { at?: string; in?: string; clear?: true } = {};
+  const added: TaskDep[] = [];
+  const dropped: string[] = [];
+  let replaceAfter = false;
   for (const arg of argv) {
+    if (expect === "after") added.push(parseAfterArg(arg));
+    else if (expect === "drop-after") dropped.push(arg);
     if (expect === "title") set.title = arg === "" ? null : arg;
     else if (expect === "model") set.model = arg === "default" ? null : arg;
     else if (expect === "effort") set.effort = arg === "default" ? null : arg;
@@ -566,6 +576,9 @@ export function parseAmendArgs(argv: readonly string[]): AmendDraft {
       continue;
     }
     if (arg === "--replace") replace = true;
+    else if (arg === "--after") expect = "after";
+    else if (arg === "--drop-after") expect = "drop-after";
+    else if (arg === "--replace-after") replaceAfter = true;
     else if (arg === "--title") expect = "title";
     else if (arg === "--model") expect = "model";
     else if (arg === "--effort") expect = "effort";
@@ -584,15 +597,41 @@ export function parseAmendArgs(argv: readonly string[]): AmendDraft {
     if (!resolved.ok) throw new Error(`${resolved.error}\n${AMEND_USAGE}`);
     set.notBefore = resolved.at;
   }
+  if (replaceAfter && dropped.length > 0) throw new Error(`--replace-after takes no --drop-after\n${AMEND_USAGE}`);
+  const change: DepsChange | undefined = replaceAfter
+    ? { replace: added }
+    : added.length + dropped.length === 0
+      ? undefined
+      : { ...(added.length === 0 ? {} : { add: added }), ...(dropped.length === 0 ? {} : { drop: dropped }) };
+  if (change !== undefined && parseDepsChange(change) === null) {
+    throw new Error(
+      `--after and --drop-after take task ids, at most ${TASK_SPEC_LIMITS.deps} each, no task named twice\n${AMEND_USAGE}`,
+    );
+  }
   const text = textParts.join(" ");
   // A replace with no words clears the prompt; an append of nothing is no amendment.
-  if (text === "" && !replace && Object.keys(set).length === 0) throw new Error(AMEND_USAGE);
+  if (text === "" && !replace && Object.keys(set).length === 0 && change === undefined) throw new Error(AMEND_USAGE);
   const prompt = replace
     ? { mode: "replace" as const, text }
     : text === ""
       ? undefined
       : { mode: "append" as const, text };
-  return { taskId, ...(prompt === undefined ? {} : { prompt }), ...set };
+  return {
+    taskId,
+    ...(prompt === undefined ? {} : { prompt }),
+    ...set,
+    ...(change === undefined ? {} : { deps: change }),
+  };
+}
+
+/** `--after <id>[:opened|merged|done]`: an edge, `opened` by default as a create's is. */
+function parseAfterArg(arg: string): TaskDep {
+  const at = arg.lastIndexOf(":");
+  const task = at === -1 ? arg : arg.slice(0, at);
+  const when = at === -1 ? "opened" : arg.slice(at + 1);
+  const after = DEP_AFTER.find((a) => a === when);
+  if (after === undefined || task === "") throw new Error(`--after takes <id>[:opened|merged|done]\n${AMEND_USAGE}`);
+  return { task, after };
 }
 
 /** Amends a task still waiting in the queue (`cli-auto.ts`), as MCP `amend_task` does. */

@@ -48,6 +48,7 @@ import {
   type WebPushSubscription,
   type RegistryView,
   parsePushAlert,
+  depsBasis,
   promptBasis,
   codexRefusalText,
   type SessionsResponse,
@@ -3619,6 +3620,50 @@ describe("amend", () => {
         expect.stringContaining(`op=amend id="${ids[name]}" task="${taskId}" refused code=${code}`),
       );
     }
+    expect(lines.some((line) => line.includes(SECRET))).toBe(false);
+  });
+
+  test("a deps amend lands in place, audited with the edge count and never an edge's id; a refusal names its code", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const spec = { repo: "github.com/acme/app", mode: "worktree", prompt: SECRET } as const;
+    await store.put("pred", 0, task("pred", { state: "queued", spec }));
+    await store.put("q1", 0, task("q1", { state: "queued", spec }));
+    const { leader, replies } = leaderOver(relay, store);
+    const ids: string[] = [];
+    const ask = async (payload: unknown): Promise<unknown> => {
+      const request = await appRequest("amend", payload);
+      ids.push((await open(key, request)).id);
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const basis = await depsBasis(undefined);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        expect(await ask({ taskId: "q1", deps: { list: [{ task: "pred", after: "merged" }], basis } })).toMatchObject({
+          task: { id: "q1", spec: { deps: [{ task: "pred", after: "merged" }] } },
+        });
+        expect(await ask({ taskId: "pred", deps: { list: [{ task: "q1", after: "done" }], basis } })).toMatchObject({
+          ok: false,
+          code: "dep_cycle",
+        });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect((await store.get("q1"))?.body?.spec.deps).toEqual([{ task: "pred", after: "merged" }]);
+    expect((await store.get("pred"))?.body?.spec.deps).toBeUndefined();
+    const audits = lines.filter((line) => line.includes("op=amend"));
+    expect(audits).toContainEqual(expect.stringContaining(`op=amend id="${ids[0]}" task="q1" fields=deps edges=1 ok`));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=amend id="${ids[1]}" task="pred" refused code=dep_cycle`),
+    );
+    // Each line names the amended task alone, never one it waits on.
+    expect(audits.filter((line) => line.includes('task="q1"')).some((line) => line.includes("pred"))).toBe(false);
+    expect(audits.filter((line) => line.includes('task="pred"')).some((line) => line.includes("q1"))).toBe(false);
     expect(lines.some((line) => line.includes(SECRET))).toBe(false);
   });
 

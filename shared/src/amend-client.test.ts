@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { promptBasis } from "./amend.ts";
+import { depsBasis, promptBasis } from "./amend.ts";
 import { codexRefusalText } from "./codex.ts";
 import {
   AMEND_CLIENT_REFUSALS,
@@ -9,7 +9,7 @@ import {
   type AmendSender,
 } from "./amend-client.ts";
 import type { StoreRefusal, TaskLookup } from "./app-client.ts";
-import type { AmendRequest, Task, TaskReply } from "./types.ts";
+import { TASK_SPEC_LIMITS, type AmendRequest, type Task, type TaskDep, type TaskReply } from "./types.ts";
 
 function task(prompt: string | undefined): Task {
   return {
@@ -44,7 +44,7 @@ function client(
 const found = (prompt: string | undefined): TaskLookup => ({ ok: true, task: { version: 1, task: task(prompt) } });
 const landed: TaskReply = { task: task("do it\n\nalso") };
 const changed: TaskReply = { ok: false, code: "prompt_changed", message: "moved" };
-const append: AmendDraft = { taskId: "t-1", prompt: { mode: "append", text: "also" } };
+const append = { taskId: "t-1", prompt: { mode: "append", text: "also" } } as const satisfies AmendDraft;
 
 describe("sendAmend", () => {
   test("a draft with no prompt is sent as it is, with no read", async () => {
@@ -147,7 +147,110 @@ describe("sendAmend", () => {
   });
 });
 
+describe("sendAmend, deps", () => {
+  const holding = (deps: readonly TaskDep[] | undefined, prompt = "do it"): TaskLookup => ({
+    ok: true,
+    task: {
+      version: 1,
+      task: { ...task(prompt), spec: { ...task(prompt).spec, ...(deps === undefined ? {} : { deps }) } },
+    },
+  });
+  const a = { task: "a", after: "done" } as const;
+  const b = { task: "b", after: "opened" } as const;
+  const depsMoved: TaskReply = { ok: false, code: "deps_changed", message: "moved" };
+
+  test("the change is applied to the list read, and sent with that list's basis", async () => {
+    const c = client([holding([a])], [landed]);
+    expect(await sendAmend(c, { taskId: "t-1", deps: { add: [b] } })).toEqual(landed);
+    expect(c.sent).toEqual([{ taskId: "t-1", deps: { list: [a, b], basis: await depsBasis([a]) } }]);
+
+    const dropped = client([holding([a, b])], [landed]);
+    await sendAmend(dropped, { taskId: "t-1", deps: { drop: ["a"] } });
+    expect(dropped.sent[0]?.deps).toEqual({ list: [b], basis: await depsBasis([a, b]) });
+
+    const replaced = client([holding(undefined)], [landed]);
+    await sendAmend(replaced, { taskId: "t-1", deps: { replace: [] } });
+    expect(replaced.sent[0]?.deps).toEqual({ list: [], basis: await depsBasis([]) });
+  });
+
+  test("deps_changed re-applies the change to the list read afresh, three times in all; a lost answer is never resent", async () => {
+    const c = client([holding([a]), holding([b]), holding([]), holding([a, b])], [depsMoved]);
+    expect(await sendAmend(c, { taskId: "t-1", deps: { drop: ["a"] } })).toEqual(depsMoved);
+    expect(c.sent.map((r) => r.deps)).toEqual([
+      { list: [], basis: await depsBasis([a]) },
+      { list: [b], basis: await depsBasis([b]) },
+      { list: [], basis: await depsBasis([]) },
+    ]);
+
+    const lost = client([holding([a])], [null]);
+    expect(await sendAmend(lost, { taskId: "t-1", deps: { drop: ["a"] } })).toBeNull();
+    expect(lost.sent).toHaveLength(1);
+  });
+
+  test("a prompt_changed answering a deps-only draft is not resent: nothing it read moved", async () => {
+    const c = client([holding([a])], [changed]);
+    expect(await sendAmend(c, { taskId: "t-1", deps: { add: [b] } })).toEqual(changed);
+    expect(c.sent).toHaveLength(1);
+  });
+
+  test("one read serves a prompt append and a deps change together", async () => {
+    const c = client([holding([a], "first")], [landed]);
+    await sendAmend(c, { ...append, deps: { add: [b] } });
+    expect(c.reads).toBe(1);
+    expect(c.sent).toEqual([
+      { ...append, basis: await promptBasis("first"), deps: { list: [a, b], basis: await depsBasis([a]) } },
+    ]);
+  });
+
+  test("a change that would leave more than the limit is refused unsent", async () => {
+    const full = Array.from({ length: TASK_SPEC_LIMITS.deps }, (_, i) => ({ task: `t${i}`, after: "done" }) as const);
+    const c = client([holding(full)], [landed]);
+    expect(await sendAmend(c, { taskId: "t-1", deps: { add: [b] } })).toEqual({
+      ok: false,
+      code: "deps_full",
+      message: AMEND_CLIENT_REFUSALS.deps_full,
+    });
+    expect(c.sent).toEqual([]);
+    const swapped = client([holding(full)], [landed]);
+    expect(await sendAmend(swapped, { taskId: "t-1", deps: { add: [b], drop: ["t0"] } })).toEqual(landed);
+  });
+
+  test("a read that fails sends nothing", async () => {
+    const c = client([null], [landed]);
+    expect(await sendAmend(c, { taskId: "t-1", deps: { drop: ["a"] } })).toMatchObject({ code: "unread" });
+    expect(c.sent).toEqual([]);
+  });
+});
+
 describe("parseAmendDraft", () => {
+  test("takes a deps change alone or beside other fields, built afresh", () => {
+    const add = { taskId: "t-1", deps: { add: [{ task: "a", after: "done" }] } } as const;
+    expect(parseAmendDraft(add)).toEqual(add);
+    expect(parseAmendDraft({ ...append, deps: { drop: ["a"] } })).toEqual({ ...append, deps: { drop: ["a"] } });
+    expect(parseAmendDraft({ taskId: "t-1", deps: { replace: [] } })).toEqual({ taskId: "t-1", deps: { replace: [] } });
+  });
+
+  test("refuses a malformed change", () => {
+    const edge = { task: "a", after: "done" } as const;
+    for (const deps of [
+      {},
+      { add: [] },
+      { drop: [] },
+      { replace: [], add: [edge] },
+      { replace: [], drop: ["a"] },
+      { add: [edge], drop: ["a"] },
+      { add: [edge, { ...edge, after: "opened" }] },
+      { drop: ["a", "a"] },
+      { add: [{ task: "", after: "agent" }] },
+      { add: [{ task: "a", after: "later" }] },
+      { add: [edge], extra: true },
+      { drop: [""] },
+      [edge],
+    ]) {
+      expect(parseAmendDraft({ taskId: "t-1", deps })).toBeNull();
+    }
+  });
+
   test("takes a prompt with or without a basis, and drops no field it carries", () => {
     expect(parseAmendDraft(append)).toEqual(append);
     const basis = "b".repeat(64);

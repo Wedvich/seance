@@ -2576,9 +2576,11 @@ const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set([
   "model",
   "effort",
   "notBefore",
+  "deps",
   "ownerTags",
 ]);
 const AMEND_PROMPT_KEYS: ReadonlySet<string> = new Set(["mode", "text"]);
+const AMEND_DEPS_KEYS: ReadonlySet<string> = new Set(["list", "basis"]);
 
 function onlyKeys(value: Record<string, unknown>, known: ReadonlySet<string>): boolean {
   return Object.keys(value).every((key) => known.has(key));
@@ -2599,7 +2601,9 @@ function amendField(value: unknown, max: number, empty: boolean): string | null 
  *
  * Unlike most parsers here, a key it does not know refuses the whole request rather than being
  * dropped: an amendment is a set of changes, and a leader that applied some and ignored a field a
- * newer client added (deps, planned) would answer `ok` for a change it never made.
+ * newer client added would answer `ok` for a change it never made. So a leader older than `amendDeps` refuses `deps`.
+ * `deps` is exactly `{ list, basis }`: `list` held to a create's rules (`parseDep`, so no sentinel-shaped edge, at most
+ * `TASK_SPEC_LIMITS.deps`; `[]` clears), `basis` a `depsBasis`.
  */
 export function parseAmendRequest(value: unknown): AmendRequest | null {
   if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
@@ -2625,7 +2629,11 @@ export function parseAmendRequest(value: unknown): AmendRequest | null {
   if (deferred !== undefined && deferred !== null && !isNotBefore(deferred)) return null;
   const owner = value["ownerTags"] === undefined ? undefined : parseOwnerTags(value["ownerTags"]);
   if (owner === null) return null;
+  const deps = value["deps"] === undefined ? undefined : parseAmendDeps(value["deps"]);
+  // The owner's labels change in any state, deps only while waiting: one request is one set of state rules (Q3).
+  if (deps === null || (deps !== undefined && owner !== undefined)) return null;
   if (
+    deps === undefined &&
     amended === undefined &&
     titled === undefined &&
     modelled === undefined &&
@@ -2642,8 +2650,21 @@ export function parseAmendRequest(value: unknown): AmendRequest | null {
     ...(modelled === undefined ? {} : { model: modelled }),
     ...(efforted === undefined ? {} : { effort: efforted }),
     ...(deferred === undefined ? {} : { notBefore: deferred }),
+    ...(deps === undefined ? {} : { deps }),
     ...(owner === undefined ? {} : { ownerTags: owner }),
   };
+}
+
+function parseAmendDeps(value: unknown): AmendRequest["deps"] | null {
+  if (!isRecord(value) || !onlyKeys(value, AMEND_DEPS_KEYS) || !isPromptBasis(value["basis"])) return null;
+  const list = parseDepList(value["list"]);
+  return list === null ? null : { list, basis: value["basis"] };
+}
+
+/** A client-written list of edges: each a create's (`parseDep`), at most `TASK_SPEC_LIMITS.deps`. */
+export function parseDepList(value: unknown): readonly TaskDep[] | null {
+  const list = parseList(value, parseDep);
+  return list === null || list.length > TASK_SPEC_LIMITS.deps ? null : list;
 }
 
 /** An amendment's `ownerTags`: non-empty and valid as `writeTags` takes owner suffixes, kept bare (`""` clears). */

@@ -298,6 +298,41 @@ describe("parseAmendArgs, not before", () => {
   });
 });
 
+describe("parseAmendArgs, deps", () => {
+  test("--after adds edges, opened by default; --drop-after removes; together, or beside other fields", () => {
+    expect(parseAmendArgs(["t-1", "--after", "t-0", "--after", "t-9:merged"])).toEqual({
+      taskId: "t-1",
+      deps: {
+        add: [
+          { task: "t-0", after: "opened" },
+          { task: "t-9", after: "merged" },
+        ],
+      },
+    });
+    expect(parseAmendArgs(["t-1", "--drop-after", "t-0", "--after", "t-9:done", "--title", "x"])).toEqual({
+      taskId: "t-1",
+      title: "x",
+      deps: { add: [{ task: "t-9", after: "done" }], drop: ["t-0"] },
+    });
+  });
+
+  test("--replace-after makes the --after list the whole list, none clearing it", () => {
+    expect(parseAmendArgs(["t-1", "--replace-after", "--after", "t-0:done"])).toEqual({
+      taskId: "t-1",
+      deps: { replace: [{ task: "t-0", after: "done" }] },
+    });
+    expect(parseAmendArgs(["t-1", "--replace-after"])).toEqual({ taskId: "t-1", deps: { replace: [] } });
+  });
+
+  test("a bad when, a missing id, replace beside drop, or a task named twice is refused", () => {
+    expect(() => parseAmendArgs(["t-1", "--after", "t-0:later"])).toThrow("--after takes");
+    expect(() => parseAmendArgs(["t-1", "--after", ":done"])).toThrow("--after takes");
+    expect(() => parseAmendArgs(["t-1", "--replace-after", "--drop-after", "t-0"])).toThrow("--replace-after takes no");
+    expect(() => parseAmendArgs(["t-1", "--after", "t-0", "--drop-after", "t-0"])).toThrow("no task named twice");
+    expect(() => parseAmendArgs(["t-1", "--after", "t-0", "--after", "t-0:done"])).toThrow("no task named twice");
+  });
+});
+
 describe("parseInstallArgs", () => {
   test("bare install stays user-scope", () => {
     expect(parseInstallArgs([])).toEqual({ system: false });

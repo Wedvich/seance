@@ -260,10 +260,18 @@ export const COMMAND_SPECS: Readonly<Record<CommandName, CommandSpec>> = {
     summary: "change a task still waiting in the queue",
     usage:
       "<task-id> [text…] [--replace] [--title <title>] [--model <model>] [--effort <effort>] " +
-      "[--at <HH:MM|ISO> | --in <duration> | --not-before none]",
+      "[--at <HH:MM|ISO> | --in <duration> | --not-before none] " +
+      "[--after <id>[:opened|merged|done]]… [--drop-after <id>]… [--replace-after]",
     details: ["the text is appended to its prompt", RELAY_NOTE],
     flags: [
       { flag: "--replace", help: "make the text the prompt" },
+      {
+        flag: "--after",
+        value: "id[:when]",
+        help: "add an edge, or change an edge's when (repeatable; opened by default)",
+      },
+      { flag: "--drop-after", value: "id", help: "remove an edge (repeatable)" },
+      { flag: "--replace-after", help: "the --after list replaces the whole list (none clears it)" },
       { flag: "--title", value: "title", help: "set its title (empty clears it)" },
       { flag: "--model", value: "model", help: "set its model (default: the default)" },
       {

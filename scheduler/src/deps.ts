@@ -4,6 +4,7 @@ import {
   SUCCESSOR_CHAIN_MAX,
   TASK_FAILURE_LIMITS,
   type DepAfter,
+  type TaskDep,
   type TaskFailureCode,
 } from "@seance/shared";
 import { FINISHED, type Task } from "./task.ts";
@@ -270,4 +271,50 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
 
   for (const task of tasks) if (!index.has(task.id)) visit(task.id);
   return out;
+}
+
+/** Why a deps amend is refused, short of its basis (DESIGN.md, Scheduler, "Amending a waiting task"). */
+export type DepsAmendRefusal =
+  | "deps_successor"
+  | "dep_self"
+  | "dep_unknown"
+  | "dep_unreadable"
+  | "dep_ended"
+  | "dep_cycle";
+
+/**
+ * Why `task` cannot wait on `list`, or null. Refuse, don't fail: every edge a create's admission would fail the task
+ * on is refused here, so no amend turns a waiting task into a failed one. A successor is judged on its predecessor
+ * alone, so an edge on it would never be read. An edge to a `superseded` task is judged at the end of its chain, as
+ * admission judges it; a chain that cannot be read to its end is waited on, as there. The loop check runs over every
+ * held task with `task`'s list replaced.
+ */
+export function depsAmendRefusal(
+  task: Task,
+  list: readonly TaskDep[],
+  tasks: readonly Task[],
+  unreadable: ReadonlySet<string>,
+): DepsAmendRefusal | null {
+  if (task.spec.succeeds !== undefined) return "deps_successor";
+  if (list.some((d) => d.task === task.id)) return "dep_self";
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  if (list.some((d) => !byId.has(d.task) && !unreadable.has(d.task))) return "dep_unknown";
+  if (list.some((d) => !byId.has(d.task))) return "dep_unreadable";
+  for (const dep of list) {
+    const direct = byId.get(dep.task);
+    const pred = direct === undefined ? null : holder(direct, byId);
+    if (pred?.state === "failed" || pred?.state === "cancelled") return "dep_ended";
+  }
+  const amended = tasks.map((t) => (t.id === task.id ? { ...t, spec: { ...t.spec, deps: list } } : t));
+  return cycles(amended).has(task.id) ? "dep_cycle" : null;
+}
+
+/** Whether every edge of `list` has released, each judged at the end of its chain as admission judges it. */
+export function depsReleased(list: readonly TaskDep[], tasks: readonly Task[]): boolean {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  return list.every((dep) => {
+    const direct = byId.get(dep.task);
+    const pred = direct === undefined ? null : holder(direct, byId);
+    return pred !== null && released(pred, dep.after);
+  });
 }

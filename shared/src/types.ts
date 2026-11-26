@@ -1264,6 +1264,9 @@ export interface MachineInfo {
  * `amend`: as a leader, answers `amend` (a waiting task's prompt, title, model or effort
  * changed in place) — what a client checks of the verified leader before offering it (an
  * older one refuses the op as unknown).
+ * `amendDeps`: as a leader, takes `AmendRequest.deps` (what a waiting task waits on, replaced in place against a
+ * basis; DESIGN.md, Scheduler, "Amending a waiting task"). A client sends `deps` only to a verified leader advertising
+ * it: an older one refuses the unknown key `invalid_request` (`parseAmendRequest` is strict) and writes nothing.
  * `close`: as a daemon, answers `availability`, sends `cl`, refuses a scheduler spawn
  * `machine_closed` while closed.
  * `drain`: as a leader, routes around `cl` and routes a `machine_closed` refusal again; a
@@ -1365,6 +1368,7 @@ export const CAPABILITIES = {
   successorSelf: "successorSelf",
   successorAuto: "successorAuto",
   amend: "amend",
+  amendDeps: "amendDeps",
   close: "close",
   drain: "drain",
   drainPass: "drainPass",
@@ -4386,6 +4390,20 @@ export const SCHEDULER_ERROR_CODES = [
   "prompt_too_long",
   /** `amend`: the task is a successor, whose prompt the leader built; it takes `append` only. */
   "append_only",
+  /** `amend`: the task's deps are no longer the list the amendment was made against (`AmendRequest.deps.basis`); re-read them. */
+  "deps_changed",
+  /** `amend`: the task is a successor: admission reads only its predecessor, so an edge on it would never be read. */
+  "deps_successor",
+  /** `amend`: an edge names the task itself. */
+  "dep_self",
+  /** `amend`: an edge names a task the leader does not hold (never created, or finished and pruned). */
+  "dep_unknown",
+  /** `amend`: an edge names a record the leader holds as unreadable, so it cannot check a loop through it. */
+  "dep_unreadable",
+  /** `amend`: an edge names a task that ended `failed` or `cancelled` (followed through `superseded`). */
+  "dep_ended",
+  /** `amend`: the amended edges would loop through tasks the leader holds. */
+  "dep_cycle",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
 
@@ -4543,6 +4561,13 @@ export interface AmendRequest {
   readonly effort?: string | null;
   /** Set or move the not-before time; `null` clears it; needs no `basis`. */
   readonly notBefore?: number | null;
+  /**
+   * The task's complete new deps, in order (`[]` clears every edge), and `depsBasis` of the list it was made against:
+   * a list changed since is `deps_changed`. Held to a create's rules (`parseDep`, at most `TASK_SPEC_LIMITS.deps`).
+   * Sent only to a verified leader advertising `CAPABILITIES.amendDeps`; an older one refuses the unknown key
+   * (`parseAmendRequest` is strict). DESIGN.md, Scheduler, "Amending a waiting task".
+   */
+  readonly deps?: { readonly list: readonly TaskDep[]; readonly basis: string };
   /**
    * The owner's labels: bare `owner.*` suffixes, `""` clears a key (`writeTags`). Alone it is taken in any task state,
    * finished included; beside another field it meets that field's state rules. Sent only by the PWA, to a verified leader advertising

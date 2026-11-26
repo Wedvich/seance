@@ -412,6 +412,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.successorSelf,
         CAPABILITIES.successorAuto,
         CAPABILITIES.amend,
+        // Unconditional, a leader's half only: any daemon may lead, and this build takes `AmendRequest.deps`.
+        CAPABILITIES.amendDeps,
         CAPABILITIES.limits,
         CAPABILITIES.close,
         CAPABILITIES.drain,

@@ -22,6 +22,7 @@ import {
   brokerFleet,
   DaemonFault,
   FleetUnreachable,
+  OLDER_DAEMON_AMEND_DEPS,
   OLDER_DAEMON_CODEX,
   selectFleet,
   UNCONFIRMED_DAEMON_TRAITS,
@@ -375,6 +376,36 @@ describe("brokerFleet", () => {
         });
       } finally {
         await double.stop();
+      }
+    });
+  });
+
+  describe("an amend, through the broker", () => {
+    test("carries the deps change as drafted; an older daemon's malformed answer reads as that daemon being older", async () => {
+      const drafts: unknown[] = [];
+      const current = await schedulerDaemon((id, raw) => {
+        drafts.push(raw["amend"]);
+        return brokerOk(id, { task: TASK });
+      });
+      try {
+        const scheduler = (await brokerFleet({ path: current.path }).open()).scheduler;
+        await scheduler?.amend({ taskId: TASK.id, deps: { drop: ["t-0"] } });
+        expect(drafts).toEqual([{ taskId: TASK.id, deps: { drop: ["t-0"] } }]);
+      } finally {
+        await current.stop();
+      }
+      const older = await schedulerDaemon((id) => brokerFail(id, "invalid_request", "malformed amendment"));
+      try {
+        const scheduler = (await brokerFleet({ path: older.path }).open()).scheduler;
+        expect(
+          await rejection(scheduler?.amend({ taskId: TASK.id, deps: { drop: ["t-0"] } }) ?? Promise.resolve()),
+        ).toMatchObject({ reason: "refused", message: OLDER_DAEMON_AMEND_DEPS });
+        // A draft without deps gets the same answer as it is: its daemon is not older for want of them.
+        expect(await rejection(scheduler?.amend({ taskId: TASK.id, title: "x" }) ?? Promise.resolve())).toMatchObject({
+          message: "malformed amendment",
+        });
+      } finally {
+        await older.stop();
       }
     });
   });

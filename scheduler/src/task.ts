@@ -41,7 +41,8 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
 export const TRANSITIONS = {
   queued: ["blocked", "ready", "done", "failed", "cancelled"],
   blocked: ["ready", "done", "failed", "cancelled"],
-  ready: ["reserved", "done", "failed", "cancelled"],
+  // `blocked`: a deps amend's alone, an unmet edge added while it waited (admission never judges `ready` again).
+  ready: ["reserved", "blocked", "done", "failed", "cancelled"],
   reserved: ["running", "needs-input", "awaiting-merge", "done", "ready", "lost", "failed", "cancelled"],
   running: ["needs-input", "awaiting-merge", "lost", "done", "failed", "cancelled", "superseded"],
   "needs-input": ["running", "awaiting-merge", "lost", "done", "failed", "cancelled", "superseded"],

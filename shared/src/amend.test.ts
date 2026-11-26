@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { amendedFields, amendedPromptFits, amendSpec, appendToPrompt, isPromptBasis, promptBasis } from "./amend.ts";
+import {
+  amendedFields,
+  amendedPromptFits,
+  amendSpec,
+  appendToPrompt,
+  applyDepsChange,
+  depsBasis,
+  isPromptBasis,
+  promptBasis,
+} from "./amend.ts";
 import { ATTACHMENT_LIMITS, SUCCESSOR_PROMPT_BYTES, TASK_REQUEST_LIMITS, type TaskSpec } from "./types.ts";
 
 const BASIS = "a".repeat(64);
@@ -216,5 +225,73 @@ describe("amendedFields", () => {
     expect(amendedFields({ taskId: "t", prompt: { mode: "append", text: "secret" }, basis: BASIS })).toEqual([
       "prompt",
     ]);
+  });
+
+  test("names deps, never an id", () => {
+    expect(amendedFields({ taskId: "t", deps: { list: [{ task: "secret", after: "done" }], basis: BASIS } })).toEqual([
+      "deps",
+    ]);
+  });
+});
+
+describe("depsBasis", () => {
+  test("hashes the list in order, task and after only; none hashes as the empty list", async () => {
+    const one = { task: "a", after: "done" } as const;
+    const two = { task: "b", after: "opened" } as const;
+    expect(await depsBasis(undefined)).toBe(await depsBasis([]));
+    expect(await depsBasis([one, two])).not.toBe(await depsBasis([two, one]));
+    expect(await depsBasis([one])).not.toBe(await depsBasis([{ ...one, after: "merged" }]));
+    expect(isPromptBasis(await depsBasis([one]))).toBe(true);
+  });
+});
+
+describe("applyDepsChange", () => {
+  const held = [
+    { task: "a", after: "done" },
+    { task: "b", after: "opened" },
+    { task: "c", after: "merged" },
+  ] as const;
+
+  test("drops the named edges, changes an added edge's when in place, and appends new ones last", () => {
+    expect(
+      applyDepsChange(held, {
+        add: [
+          { task: "d", after: "opened" },
+          { task: "b", after: "done" },
+        ],
+        drop: ["a"],
+      }),
+    ).toEqual([
+      { task: "b", after: "done" },
+      { task: "c", after: "merged" },
+      { task: "d", after: "opened" },
+    ]);
+    expect(applyDepsChange(undefined, { add: [{ task: "a", after: "done" }] })).toEqual([{ task: "a", after: "done" }]);
+    expect(applyDepsChange(held, { drop: ["nobody"] })).toEqual(held);
+  });
+
+  test("a replace is the whole list, whatever was held", () => {
+    expect(applyDepsChange(held, { replace: [] })).toEqual([]);
+    expect(applyDepsChange(undefined, { replace: [{ task: "z", after: "done" }] })).toEqual([
+      { task: "z", after: "done" },
+    ]);
+  });
+});
+
+describe("amendSpec, deps", () => {
+  test("sets the list, an empty one clearing the field; the rest of the spec is kept", () => {
+    const held = spec({ deps: [{ task: "a", after: "done" }], title: "t" });
+    expect(amendSpec(held, { taskId: "t", deps: { list: [{ task: "b", after: "opened" }], basis: BASIS } })).toEqual({
+      ...held,
+      deps: [{ task: "b", after: "opened" }],
+    });
+    const cleared = amendSpec(held, { taskId: "t", deps: { list: [], basis: BASIS } });
+    expect(cleared).toEqual(spec({ title: "t" }));
+    expect(cleared).not.toHaveProperty("deps");
+  });
+
+  test("an amendment without deps leaves them as they are", () => {
+    const held = spec({ deps: [{ task: "a", after: "done" }] });
+    expect(amendSpec(held, { taskId: "t", title: "x" })).toEqual({ ...held, title: "x" });
   });
 });

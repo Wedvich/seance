@@ -114,6 +114,14 @@ the branch push are github.md; the drain's own ask is drain.md.
   audit line.
 - Its `owner.*` tags change alone by the same write in any state (`ownerTags`, no `basis`, no forgotten
   decision), never from `amend_task` or the broker.
+- Its `deps` change by the same write, as the whole list at a `basis` of the list it replaces, never beside
+  `ownerTags`, and sent by a client only to a verified leader advertising `CAPABILITIES.amendDeps`. **Refuse, don't
+  fail:** an edge to the task itself, to a task not held after one store read, to an unreadable record or to one
+  ended `failed`/`cancelled`, a loop, and any edge on a successor are refused with nothing written, checked before
+  the write and again inside it; a deps amend never fails a task. State follows the list in that write (`ready` with
+  an unmet edge to `blocked`, the only path into `blocked` from `ready`; `blocked` with all met to `ready`), deps
+  amends run one at a time leader-wide (`#depsTurn`), the names one adds stay unprunable until its write settles, and
+  its audit line carries the edge count, never an edge's id.
 
 ## Limits and settings records
 

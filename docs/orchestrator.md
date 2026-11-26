@@ -1,8 +1,8 @@
 # Orchestrators and project queueing — plan
 
-**Status: milestones 1–3 are a spec, decided by the owner 2026-11-26 (Q1–Q9 and Q11; Q10, the dry run's project, is
-picked before the run). Milestones 4 and 5 are a draft, their questions (Q12–Q18) open for milestone 3's evidence.
-Nothing is built.** Drafted 2026-11-13 from the owner's voice memo of 2026-11-12; milestones 1–3 specced 2026-11-26
+**Status: milestone 1 is built (2026-11-26; DESIGN.md, "Amending a waiting task"). Milestones 2 and 3 are a spec,
+decided by the owner 2026-11-26 (Q5–Q9 and Q11; Q10, the dry run's project, is picked before the run). Milestones 4
+and 5 are a draft, their questions (Q12–Q18) open for milestone 3's evidence.** Drafted 2026-11-13 from the owner's voice memo of 2026-11-12; milestones 1–3 specced 2026-11-26
 from the owner's brief of that day and settled in an interview the same day. What the owner said and the decided
 questions are the owner's; the rest is the plan built on them. Milestones 1–3 may be built from; milestones 4 and 5
 may not. As a milestone lands, its decisions move into DESIGN.md as "Decided by the owner (date)" and its section here
@@ -58,7 +58,8 @@ In order. These are wants, not decisions on mechanism.
 
 ### The interview (2026-11-26)
 
-The owner's answers to Q1–Q9 and Q11, each with what it rejected, are under "Questions for the owner".
+The owner's answers to Q5–Q9 and Q11, each with what it rejected, are under "Questions for the owner"; Q1–Q4's moved
+to DESIGN.md with milestone 1.
 
 ## What exists
 
@@ -66,7 +67,7 @@ The owner's answers to Q1–Q9 and Q11, each with what it rejected, are under "Q
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Queue a graph                 | `queue_batch`, and `spawn_session` with `after` naming existing ids. A new task may depend on a waiting one, so a graph can grow at its edges    |
 | Change a waiting task         | `amend`: prompt, title, model, effort, not-before time (DESIGN.md, "Amending a waiting task")                                                    |
-| Change what a task waits on   | Not built: milestone 1. Decided in outline (docs/scheduler.md, M4, "Amending a waiting task"): whole list against a basis, cycles refused        |
+| Change what a task waits on   | `amend`'s `deps` (milestone 1, built): add, drop or replace edges in place, loops and ended edges refused (DESIGN.md, "Amending a waiting task") |
 | Find a project's tasks        | Not built: milestone 2. `get_queue` shows the 20 most relevant, unfinished first                                                                 |
 | Settle a task from outside    | `report_task_done` (the session), mark-done (a person), a merged PR (the leader's `gh`)                                                          |
 | A tracker link                | `creator.ref` and `creator.ref-url` (DESIGN.md, "Task tags"): `spawn_session`'s `ref` and `ref_url`. Display-only; the old `linear` still reads  |
@@ -126,7 +127,8 @@ the tracker changes the orchestrator's instructions and tools, and no Séance co
 
 What Séance owes that session is a queue surface complete enough to keep a graph true:
 
-- **Amend deps**, the decided follow-up, and the one missing op: milestone 1.
+- **Amend deps**, the decided follow-up and the one missing op: milestone 1, built (MCP `amend_task`'s `add_after`,
+  `drop_after` and `replace_after`; `seance amend --after`).
 - **An opaque external ref on a task** (`ref: { source, id, url? }`), display-only like an alias:
   never used to route, bind or settle. It replaces the spec's `linear` as the general form;
   `linear` stays readable on the wire. Built as `creator.ref` and `creator.ref-url` (DESIGN.md,
@@ -143,7 +145,7 @@ exactly DESIGN.md, "Adapters" once an orchestrator is an addressable target (Q14
 
 Withdrawn by the owner on 2026-11-26 (Q9), before any of it was built: #18 (key in `settings:main`, relations at
 admission, `doneBy: "linear"`). An orchestrator covers each part from outside: it writes `after` edges
-from the tracker's relations, keeps them current with amend deps (which #18 could not: it read
+from the tracker's relations, keeps them current with amend deps (built with milestone 1; #18 could not: it read
 relations once), and marks a task done when its issue closes. The leader then holds no tracker
 key, and `SettingsRecord.linearKey` stays the unused slot it is.
 
@@ -180,7 +182,7 @@ evidence:
 
 | Milestone | What                         | Status                                                  |
 | --------- | ---------------------------- | ------------------------------------------------------- |
-| 1         | Amend deps                   | Spec, decided; one PR                                   |
+| 1         | Amend deps                   | Built 2026-11-26                                        |
 | 2         | Find a project's tasks       | Spec, decided; two PRs: `find`, then the archive read   |
 | 3         | The orchestrator by hand     | Spec, docs only, beside milestone 1; project open (Q10) |
 | 4         | The role proper (§3)         | Draft; decided from milestone 3's evidence (Q12–Q18)    |
@@ -193,110 +195,21 @@ gated on what the peer advertises or refused by an older one, and no older peer 
 
 ### Milestone 1: amend deps
 
-**What a session can do after it.** Change what a waiting task waits on, under its own id: add an edge when step 3
-turns up a prerequisite for step 6, drop one that no longer holds, swap one, or move one edge from `opened` to
-`merged`. Today the only way is cancel and requeue, which mints a new id and fails every dependent `dependency_failed`.
+Built 2026-11-26. The record is DESIGN.md, "Amending a waiting task", "Amending `deps`", with the owner's answers to
+Q1–Q4; this section is an index.
 
-**Wire** (`shared/`). `AmendRequest.deps?: { list: readonly TaskDep[]; basis: string }`: the complete new list, in
-order, and `depsBasis` of the list it was made against (SHA-256 of the canonical JSON `[{task, after}]` in order, `[]`
-for none, lowercase hex like `promptBasis`). `list` is held to a create's rules (`parseDep`, at most
-`TASK_SPEC_LIMITS.deps`), and `[]` clears every edge. It may ride with any other amend field but `ownerTags` (Q3).
-Every field and both bases are checked before anything is written. New `SCHEDULER_ERROR_CODES`, each answered with
-nothing written:
-
-| Code             | When                                                                                                    |
-| ---------------- | ------------------------------------------------------------------------------------------------------- |
-| `deps_changed`   | the held list hashes otherwise than `basis`                                                             |
-| `deps_successor` | the task carries `succeeds`: admission reads only its predecessor, so an edge on it would never be read |
-| `dep_self`       | an edge names the task itself                                                                           |
-| `dep_unknown`    | an edge names a task the leader does not hold, after one store read of that key                         |
-| `dep_unreadable` | an edge names a record the leader holds as unreadable, so it cannot check a loop through it             |
-| `dep_ended`      | an edge names a task that ended `failed` or `cancelled` (through `superseded` too), as a create does    |
-| `dep_cycle`      | the amended graph loops through held tasks (`cycles` over the held set, with this task's list replaced) |
-
-**Leader** (`scheduler/`, `daemon/`).
-
-- `Scheduler.amend` runs those checks before the write and again inside it, against the copy held when its turn comes,
-  as it already does for state. The write replaces `spec.deps` (`amendSpec` gains the field), and the sealer re-adds
-  every sentinel the other fields need.
-- In the same write the task's state follows the new list: a `ready` task with an unmet edge goes back to `blocked`, a
-  `blocked` one whose every edge is met goes to `ready`, and a `queued` one stays `queued`, since admission makes its
-  first move (the expiry check and the chain-tag copy with it). The decision is forgotten and the leader ticks, as now.
-- An edge to a `done` task is met at once; one to a `superseded` task follows its chain (`holder`), as admission does.
-- The miss path's one store read covers a task an orchestrator created seconds earlier, whose `store-changed` has not
-  reached the leader yet.
-- A prune must not delete a task that an in-flight deps amend names. `unprunable` reads the held copy, which is the
-  old one until the write lands, so the names a deps amend adds are held unprunable from its check until its write
-  settles.
-
-**Clients** (`shared/`, `daemon/`), through `sendAmend`, which already reads the record for a prompt basis:
-
-- A draft carries a deps _change_, not a list: `add` (edges; one naming a task already in the list replaces that edge,
-  which is how an edge's `when` changes) with or without `drop` (task ids), or `replace` (a whole list) alone. A task
-  in both `add` and `drop` is refused. `sendAmend` reads the record, applies the change to the list it read, sends
-  that list with its basis, and on `deps_changed` reads again and re-applies, at most three times, as it re-sends an
-  append. A lost answer is never re-sent. With a prompt change beside it, one read serves both bases, and a refusal of
-  either re-applies both.
-- **MCP** `amend_task` gains `add_after` (`[{task, when}]`), `drop_after` (`[taskId]`) and `replace_after`
-  (`[{task, when}]`; `[]` clears). `add_after` and `drop_after` combine, which is a swap; `replace_after` stands alone.
-  Offered only to a verified leader advertising `CAPABILITIES.amendDeps`, and refused otherwise with a message naming
-  the flag. The description says what each refusal means and what to do; for `dep_unknown`: "a task that finished and
-  was pruned already released its dependents; leave its edge out".
-- **CLI** `seance amend <task-id> --after <id>[:opened|merged|done]` (repeatable, adds), `--drop-after <id>`
-  (repeatable), and `--replace-after`, which makes the `--after` list replace the whole list (with no `--after`, it
-  clears it). The success line names the edge count and the state, never an id.
-- **Broker.** `parseAmendDraft` carries the deps change through `parseAmendRequest`'s strict parse, and the broker's
-  daemon runs `sendAmend` as it does now. No new broker action.
-
-**Capability.** `CAPABILITIES.amendDeps`, advertised by a leader on this build. `OP_TIMEOUT_MS.amend` stays 10 s.
-
-**Never logged.** The leader's `audit queue op=amend` line gains `deps` in `fields` and `edges=<n>` (the new list's
-length): no task id but the amended task's, no basis. A refusal is audited with its code. The broker logs the op and
-the task id only, as now.
-
-**Threat-model note** (recorded in DESIGN.md, "Amending a waiting task", with the build). Amend's acts widen from what
-a waiting task does to what it waits on. A PSK holder, or a keyless broker peer, can now hold a waiting task back
-behind any task, or release it early by dropping an edge. Acceptable on V1's ground: it is what that holder can already
-do by cancelling and requeuing with other deps, the write is the leader's own under the term fence, and the leader's
-checks mean no amend can fail a task (a loop, an unknown edge or an ended one is refused instead). No record changes
-shape: an amended record is an ordinary one, so an older leader that takes the term reads it as written.
-
-**Records updated.**
-
-- DESIGN.md: "Amending a waiting task" (_Planned: amending `deps`_ becomes the built text, with the owner's answers to
-  Q1–Q4 as "Decided by the owner (date)"), "MCP server" (`amend_task`), "Fleet broker" (the draft).
-- docs/scheduler.md, M4, "Amending a waiting task" (_Next: amending deps_ marked done). Its Linear row was marked
-  withdrawn with this plan (2026-11-26).
-- `.claude/rules/scheduler.md`, "Amend": what amend may change grows by deps, with the refuse-don't-fail rule.
-- README's `seance amend` usage, if it lists the flags.
-- This file: the "What exists" row, §1's first bullet, §2, and this section shrunk to an index.
-
-**Tests**, each admitted per docs/development.md, "Admitting a test":
-
-- `scheduler/test/amend.test.ts`: each refusal code, both before the write and inside it (a predecessor that fails, or
-  a loop another amend closes, between the check and the turn); `ready → blocked` on an unmet edge, `blocked → ready`
-  on dropping the last, `queued` untouched; order kept; every sentinel back on the sealed record (attachments,
-  requires, tags, agent); a successor refused; the prune race (a finished predecessor a deps amend names survives a
-  prune while the write is out, driven by a held store write, never a sleep).
-- `shared/src/amend.test.ts`, `amend-client.test.ts` and `parse.test.ts`: `depsBasis`; the strict parse (a
-  sentinel-shaped edge refused, a 17th edge refused); `add`, `drop` and `replace` applied to a read list; re-applied on
-  `deps_changed`; never re-sent on a lost answer.
-- `daemon/test/leader.test.ts`: the op through the leader; the audit line's fields and count, with no other id.
-- `daemon/src/mcp.test.ts`, `cli.test.ts` and `broker.test.ts`: the gate (a verified leader without `amendDeps` is
-  refused unsent, naming the flag) and **the old-peer paths**: a leader advertising `amend` but not `amendDeps`,
-  reached anyway (a takeover between the gate and the send), answers `invalid_request` from V1's strict parser, and
-  the surface says nothing changed; an older broker daemon refuses the draft `invalid_request`, and the surface says to
-  update this machine's daemon.
-- `e2e/amend.test.ts`: a stack of three where the third, while `blocked`, gains an edge to the first, runs only after
-  it, and keeps its id. Every queued task ends through `cancelTask`.
-
-**Rollout.** No relay change and no deploy. Daemons update in any order. A leader advertises `amendDeps` once it runs
-this build, and clients send deps only to a verified leader advertising it. A takeover by an older leader mid-update
-refuses the field (strict parser) and reads every amended record as written. The PWA is untouched and shows an amended
-list through its usual re-read.
-
-**Measure.** `audit queue op=amend` lines with `deps` in `fields`, by outcome, against cancels of `blocked` tasks
-followed by an enqueue from the same client: whether amending deps replaced cancel and requeue.
+- **Wire and parse:** `AmendRequest.deps`, `depsBasis` and `applyDepsChange` (`shared/src/amend.ts`), `parseDepList`
+  and the strict `parseAmendRequest` (`shared/src/parse.ts`), the seven codes in `SCHEDULER_ERROR_CODES`,
+  `CAPABILITIES.amendDeps`.
+- **Leader:** `Scheduler.amend` (`#depsTurn`, `#settleNames`, `#amendNames`, `#amendWrite`), `depsAmendRefusal` and
+  `depsReleased` (`scheduler/src/deps.ts`), `ready → blocked` in `TRANSITIONS`, the audit's `edges=<n>`.
+- **Clients:** `sendAmend` and `parseDepsChange` (`shared/src/amend-client.ts`), MCP `amend_task`'s `add_after`,
+  `drop_after` and `replace_after`, `seance amend --after`/`--drop-after`/`--replace-after`, the broker's gate and
+  the older-peer wording in `daemon/src/auto.ts` and `daemon/src/fleet.ts`.
+- **Tests:** `scheduler/test/amend.test.ts` ("amend deps"), `shared/src/amend.test.ts`, `amend-client.test.ts`,
+  `parse.test.ts`, `daemon/test/leader.test.ts`, `daemon/src/{mcp,cli,broker,fleet}.test.ts`, `e2e/amend.test.ts`.
+- **Measure.** `audit queue op=amend` lines with `deps` in `fields`, by outcome, against cancels of `blocked` tasks
+  followed by an enqueue from the same client: whether amending deps replaced cancel and requeue.
 
 ### Milestone 2: find a project's tasks
 
@@ -446,7 +359,7 @@ nothing this file decides:
 
 - the project and repo, picked when the brief is ready (Q10);
 - a paste-ready brief for an orchestrator session: one Linear project; `queue_batch` and `spawn_session` with `after`
-  and `ref: "linear:<ID>"`; amend (and amend deps once milestone 1 lands) as issues change; never implements; keeps
+  and `ref: "linear:<ID>"`; amend, deps included (milestone 1), as issues change; never implements; keeps
   its state in Linear and the queue, so it can be cleared and restarted from the brief. A task settles on its PR's
   merge; one that must settle otherwise (an issue closed with no PR) is the owner's mark-done in the PWA, since no MCP
   tool settles another task, and the log counts each such ask;
@@ -527,34 +440,9 @@ pointer.
 
 ### Milestones 1–3: decided by the owner (2026-11-26)
 
-**Q1. Amend deps: the decided shape.** Confirmed as recorded (DESIGN.md, "Amending a waiting task", _Planned_): whole
-list against a basis; unknown ids, self-edges and cycles refused before writing; `ready`/`blocked` re-evaluated in the
-same write; sentinels left to the sealer; its own capability. All four refinements taken:
-
-- (a) The basis hashes the list _in order_, because order is meaning (the first `opened` edge picks the stack base).
-  Rejected: an order-free hash, which lets a reorder through.
-- (b) A miss reads the key from the store once before refusing `dep_unknown`, so an orchestrator can add an edge to a
-  task it created seconds ago. Rejected: refusing at once, which every orchestrator would have to know to retry.
-- (c) An edge to a pruned task is refused `dep_unknown`, worded "already released; leave it out". Rejected: an unknown
-  id read as met, which also accepts a typo.
-- (d) The surfaces send changes (`add`, `drop`, `replace`), re-applied on a fresh read after `deps_changed` as an
-  append is; only the wire carries the whole list. Rejected: whole lists from the session, which rewrite up to 16
-  edges to add one and leave the race to the model.
-
-**Q2. Which states take a deps amend.** V1's three: `queued`, `blocked`, and `ready` with no spawn out. `blocked` is the
-main case. `ready` stays in because a late finding is most urgent just before the task is placed, and an unmet edge
-puts it back to `blocked` in the same write. Rejected: `blocked` only, which refuses that case.
-
-**Q3. With a prompt amend.** One op, one write, all or nothing: "task 7 now also waits on X, and here is why" lands
-whole or not at all. Title, model, effort and not-before may ride along, as now. Rejected: deps alone, which can land
-the edge while the append is refused `prompt_changed`, leaving the task waiting on X without being told why.
-
-**Q4. `until` and each edge's `when`.** An edge's `when` (`opened`, `merged`, `done`: when it releases) changes as part
-of the list, by adding the edge again (`add` replaces an edge to the same task). The task's `until` (`merged`,
-`reported`: when it settles) stays out of milestone 1: `reported` works because the client appends the report
-instruction at create (`withReportedPrompt`), and amending `until` alone would leave a session never told to report.
-Rejected for now: amending `until` with the client rewriting the instruction in the same write, reopened only if
-milestone 3 shows the need.
+**Q1–Q4** (amend deps: its shape, the states that take it, riding with a prompt amend, `until` and each edge's
+`when`) were built with milestone 1, and moved with their reasons and rejections to DESIGN.md, "Amending a waiting
+task", "Amending `deps`", "Decided by the owner (2026-11-26)".
 
 **Q5. Finding tasks.** A new leader op, `find`, surfaced as MCP `find_tasks` and `seance tasks`, with a cursor the
 clients follow within one call. A filter on `queue` fails open on two older peers: `parseQueueRequest` drops keys it

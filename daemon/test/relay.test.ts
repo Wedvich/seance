@@ -890,6 +890,7 @@ describe("daemon ↔ relay integration", () => {
         "successorSelf",
         "successorAuto",
         "amend",
+        "amendDeps",
         "limits",
         "close",
         "drain",
