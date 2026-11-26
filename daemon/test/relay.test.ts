@@ -1254,8 +1254,15 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url, { pingIntervalMs: 50, pongTimeoutMs: 50 });
     try {
       await registerWithRepo(relay, "myrepo");
-      // no pongs → deadline fires → close → backoff → new connection registers again
-      await relay.registers.next(3_000);
+      const first = relay.registerConnections[0];
+      // no pongs → deadline fires → close → backoff → new connection registers again. A re-register on the first
+      // connection (a repo scan landing) is not the redial: wait for one from another.
+      let redialed = false;
+      while (!redialed) {
+        // oxlint-disable-next-line no-await-in-loop -- registers arrive in order
+        await relay.registers.next(3_000);
+        redialed = relay.registerConnections.some((connection) => connection !== first);
+      }
       expect(relay.connectionCount()).toBeGreaterThanOrEqual(2);
     } finally {
       await daemon.stop();
