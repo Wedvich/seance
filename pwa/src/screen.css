@@ -3336,9 +3336,14 @@
   text-decoration: none;
 }
 
-/* A session row's "Not a task": the body face, so it reads as a word about the row, not a reading of it. */
+/* A session row's "Not a task": the body face, so it reads as a word about the row, not a reading of it.
+   Inline in the meta line, so an inline-block that never breaks inside: it moves to the next line whole,
+   with its own box so its border clears the line above. */
 .queue-kind {
+  display: inline-block;
+  margin-left: 6px;
   font-family: var(--sans);
+  white-space: nowrap;
 }
 
 /* A session's joined tags, folded under its card (the per-namespace view, kept from the Machines card). */
